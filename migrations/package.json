@@ -1,0 +1,17 @@
+{
+  "name": "@meowbox/migrations",
+  "version": "0.0.0",
+  "private": true,
+  "main": "dist/runner.js",
+  "scripts": {
+    "build": "tsc",
+    "migrate": "node dist/runner.js"
+  },
+  "dependencies": {
+    "@prisma/client": "*"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "^5.4.0"
+  }
+}

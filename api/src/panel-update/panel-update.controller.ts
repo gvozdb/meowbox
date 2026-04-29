@@ -1,0 +1,36 @@
+import { Body, Controller, Get, Post, Query } from '@nestjs/common';
+
+import { CurrentUser } from '../common/decorators/current-user.decorator';
+import { Roles } from '../common/decorators/roles.decorator';
+import { UserRole } from '../common/enums';
+
+import { PanelUpdateService } from './panel-update.service';
+
+interface AuthCtx {
+  id: string;
+  role: string;
+}
+
+@Controller('admin/update')
+export class PanelUpdateController {
+  constructor(private readonly service: PanelUpdateService) {}
+
+  /** GET /api/admin/update/status?refresh=1 — состояние + история + опц. чек latest. */
+  @Get('status')
+  @Roles(UserRole.ADMIN)
+  async status(@Query('refresh') refresh?: string) {
+    const data = await this.service.getStatus(refresh === '1' || refresh === 'true');
+    return { success: true, data };
+  }
+
+  /** POST /api/admin/update — запускает tools/update.sh в фоне. body: { version?: 'v1.4.2' | null }. */
+  @Post()
+  @Roles(UserRole.ADMIN)
+  async trigger(
+    @Body() body: { version?: string | null },
+    @CurrentUser() user: AuthCtx,
+  ) {
+    const data = await this.service.triggerUpdate(body?.version ?? null, user.id, user.role);
+    return { success: true, data };
+  }
+}

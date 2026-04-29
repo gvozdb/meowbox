@@ -1,0 +1,52 @@
+# --- Зависимости и билд-артефакты ---
+node_modules/
+dist/
+.nuxt/
+.output/
+*.tsbuildinfo
+.turbo/
+coverage/
+
+# Compiled JS внутри src/ (shared собирает в src/, его дист не должен лезть в git)
+shared/src/*.js
+shared/src/*.d.ts
+shared/src/*.js.map
+
+# Prisma client — генерится из schema, в git не нужен
+api/node_modules/.prisma/
+api/prisma/migrations/dev.db*
+api/prisma/meowbox.db
+
+# Migrations runner build output
+migrations/dist/
+
+# --- Persistent state (живёт в state/ или legacy data/) ---
+data/
+state/
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+
+# --- Секреты и логи ---
+.env
+*.log
+# state/logs/ для runtime — он покрыт state/ выше; не используем bare `logs/`
+# чтобы не поймать каталоги исходников типа agent/src/logs/
+
+# --- Releases (создаются update.sh) ---
+releases/
+current
+
+# --- Локальные доки/скиллы Claude (не должны попадать в git) ---
+.claude/
+SOUL.md
+CHANGELOG.md
+ISSUES.md
+BACKLOG.md
+
+# --- Прочее ---
+*.tgz
+.DS_Store
+.vscode/
+.idea/

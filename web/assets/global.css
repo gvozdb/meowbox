@@ -1,0 +1,166 @@
+/* ========== Theme Variables ========== */
+:root {
+  /* Background */
+  --bg-body: #0a0a0f;
+  --bg-surface: rgba(255, 255, 255, 0.02);
+  --bg-surface-hover: rgba(255, 255, 255, 0.04);
+  --bg-elevated: rgba(255, 255, 255, 0.03);
+  --bg-sidebar: linear-gradient(180deg, rgba(18, 18, 24, 0.98) 0%, rgba(12, 12, 16, 0.99) 100%);
+  --bg-header: rgba(12, 12, 16, 0.95);
+  --bg-input: rgba(255, 255, 255, 0.03);
+  --bg-overlay: rgba(0, 0, 0, 0.6);
+  --bg-modal: #16161e;
+  --bg-modal-gradient: linear-gradient(165deg, rgba(23, 23, 30, 0.98), rgba(15, 15, 20, 0.99));
+  --bg-code: rgba(255, 255, 255, 0.01);
+  --bg-login-card: linear-gradient(165deg, rgba(23, 23, 30, 0.95) 0%, rgba(15, 15, 20, 0.98) 100%);
+  --bg-user: rgba(255, 255, 255, 0.01);
+
+  /* Text */
+  --text-primary: rgba(255, 255, 255, 0.85);
+  --text-heading: rgba(255, 255, 255, 0.9);
+  --text-secondary: rgba(255, 255, 255, 0.7);
+  --text-tertiary: rgba(255, 255, 255, 0.45);
+  --text-muted: rgba(255, 255, 255, 0.3);
+  --text-faint: rgba(255, 255, 255, 0.2);
+  --text-placeholder: rgba(255, 255, 255, 0.15);
+
+  /* Borders */
+  --border: rgba(255, 255, 255, 0.04);
+  --border-secondary: rgba(255, 255, 255, 0.06);
+  --border-strong: rgba(255, 255, 255, 0.08);
+
+  /* Primary (amber/orange) */
+  --primary: #f59e0b;
+  --primary-light: #fbbf24;
+  --primary-dark: #d97706;
+  --primary-text: #fbbf24;
+  --primary-text-on: #0a0a0f;
+  --primary-bg: rgba(245, 158, 11, 0.08);
+  --primary-bg-hover: rgba(245, 158, 11, 0.12);
+  --primary-border: rgba(245, 158, 11, 0.15);
+
+  /* Status colors (mostly same in both themes) */
+  --success: #22c55e;
+  --success-light: #4ade80;
+  --success-bg: rgba(34, 197, 94, 0.08);
+  --success-border: rgba(34, 197, 94, 0.15);
+  --danger: #ef4444;
+  --danger-light: #f87171;
+  --danger-bg: rgba(239, 68, 68, 0.08);
+  --danger-border: rgba(239, 68, 68, 0.15);
+
+  /* Other */
+  --spinner-track: rgba(255, 255, 255, 0.06);
+  --select-bg: #1a1a24;
+  --shadow-card: 0 8px 24px -8px rgba(0, 0, 0, 0.3);
+  --shadow-button: 0 2px 8px rgba(245, 158, 11, 0.2);
+  --shadow-button-hover: 0 4px 16px rgba(245, 158, 11, 0.3);
+  --shadow-modal: 0 24px 80px -12px rgba(0, 0, 0, 0.6);
+  --shadow-login: 0 0 0 1px rgba(255, 255, 255, 0.03), 0 24px 80px -12px rgba(0, 0, 0, 0.6), 0 0 120px -40px rgba(245, 158, 11, 0.08);
+  --bar-bg: rgba(255, 255, 255, 0.04);
+  --focus-ring: 0 0 0 3px rgba(245, 158, 11, 0.06);
+}
+
+html.theme-light {
+  /* Background */
+  --bg-body: #f5f6f8;
+  --bg-surface: rgba(255, 255, 255, 0.85);
+  --bg-surface-hover: rgba(255, 255, 255, 1);
+  --bg-elevated: #ffffff;
+  --bg-sidebar: linear-gradient(180deg, #ffffff 0%, #f8f9fb 100%);
+  --bg-header: rgba(255, 255, 255, 0.95);
+  --bg-input: rgba(0, 0, 0, 0.025);
+  --bg-overlay: rgba(0, 0, 0, 0.35);
+  --bg-modal: #ffffff;
+  --bg-modal-gradient: linear-gradient(165deg, #ffffff, #f9fafb);
+  --bg-code: rgba(0, 0, 0, 0.02);
+  --bg-login-card: linear-gradient(165deg, rgba(255, 255, 255, 0.98) 0%, rgba(248, 249, 250, 0.99) 100%);
+  --bg-user: rgba(0, 0, 0, 0.02);
+
+  /* Text */
+  --text-primary: rgba(0, 0, 0, 0.8);
+  --text-heading: rgba(0, 0, 0, 0.88);
+  --text-secondary: rgba(0, 0, 0, 0.6);
+  --text-tertiary: rgba(0, 0, 0, 0.45);
+  --text-muted: rgba(0, 0, 0, 0.3);
+  --text-faint: rgba(0, 0, 0, 0.18);
+  --text-placeholder: rgba(0, 0, 0, 0.25);
+
+  /* Borders */
+  --border: rgba(0, 0, 0, 0.07);
+  --border-secondary: rgba(0, 0, 0, 0.1);
+  --border-strong: rgba(0, 0, 0, 0.13);
+
+  /* Primary overrides */
+  --primary-text: #b45309;
+  --primary-text-on: #ffffff;
+  --primary-bg: rgba(245, 158, 11, 0.06);
+  --primary-bg-hover: rgba(245, 158, 11, 0.1);
+  --primary-border: rgba(245, 158, 11, 0.2);
+
+  /* Status */
+  --success-bg: rgba(34, 197, 94, 0.06);
+  --success-border: rgba(34, 197, 94, 0.2);
+  --danger-bg: rgba(239, 68, 68, 0.06);
+  --danger-border: rgba(239, 68, 68, 0.2);
+
+  /* Other */
+  --spinner-track: rgba(0, 0, 0, 0.08);
+  --select-bg: #ffffff;
+  --shadow-card: 0 2px 8px -2px rgba(0, 0, 0, 0.06), 0 1px 2px rgba(0, 0, 0, 0.04);
+  --shadow-button: 0 1px 4px rgba(245, 158, 11, 0.12);
+  --shadow-button-hover: 0 4px 12px rgba(245, 158, 11, 0.18);
+  --shadow-modal: 0 16px 48px -8px rgba(0, 0, 0, 0.15);
+  --shadow-login: 0 1px 2px rgba(0, 0, 0, 0.04), 0 16px 48px -8px rgba(0, 0, 0, 0.08);
+  --bar-bg: rgba(0, 0, 0, 0.06);
+  --focus-ring: 0 0 0 3px rgba(245, 158, 11, 0.12);
+}
+
+/* ========== Global Resets ========== */
+*, *::before, *::after {
+  box-sizing: border-box;
+}
+
+html, body {
+  margin: 0;
+  padding: 0;
+  overflow-x: hidden;
+  width: 100%;
+  max-width: 100vw;
+  -webkit-text-size-adjust: 100%;
+}
+
+/* Подсказка браузеру о текущей теме — чтобы нативные элементы (чекбоксы,
+   radio, scrollbar, date-picker) рендерились в соответствующей палитре.
+   Без этого на светлой теме чекбоксы выглядят как будто из тёмной. */
+html { color-scheme: dark; }
+html.theme-light { color-scheme: light; }
+
+/* Prevent iOS zoom on input focus */
+input, select, textarea {
+  font-size: 16px;
+}
+
+@media (min-width: 769px) {
+  input, select, textarea {
+    font-size: inherit;
+  }
+}
+
+/* Smooth scrolling */
+html {
+  scroll-behavior: smooth;
+}
+
+/* Prevent touch callout on iOS */
+body {
+  -webkit-tap-highlight-color: transparent;
+}
+
+/* Theme transition */
+html.theme-transitioning,
+html.theme-transitioning *,
+html.theme-transitioning *::before,
+html.theme-transitioning *::after {
+  transition: background-color 0.3s ease, color 0.2s ease, border-color 0.3s ease, box-shadow 0.3s ease !important;
+}

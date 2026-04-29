@@ -1,0 +1,735 @@
+generator client {
+  provider        = "prisma-client-js"
+  previewFeatures = ["omitApi"]
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+// =============================================================================
+// Примечания по миграции с PostgreSQL на SQLite:
+// - enum → String (значения валидируются в коде, см. src/common/enums.ts)
+// - String[] → String (хранится как JSON-массив строк; парсится через
+//   parseStringArray() в src/common/json-array.ts)
+// - @db.Uuid / @db.VarChar(N) убраны — SQLite их не поддерживает
+// - Json / BigInt / DateTime остаются нативными типами Prisma для SQLite
+// =============================================================================
+
+// -----------------------------------------------------------------------------
+// Models
+// -----------------------------------------------------------------------------
+
+model User {
+  id           String   @id @default(uuid())
+  username     String   @unique
+  email        String   @unique
+  passwordHash String   @map("password_hash")
+  role         String   @default("ADMIN") // UserRole
+  totpEnabled  Boolean  @default(false) @map("totp_enabled")
+  totpSecret   String?  @map("totp_secret")
+  createdAt    DateTime @default(now()) @map("created_at")
+  updatedAt    DateTime @updatedAt @map("updated_at")
+
+  sites                Site[]
+  notificationSettings NotificationSetting[]
+  auditLogs            AuditLog[]
+  aiSessions           AiSession[]
+  backupExports        BackupExport[]
+
+  @@map("users")
+}
+
+model Site {
+  id               String   @id @default(uuid())
+  // `name` — системное имя (= имя Linux-юзера, имя БД, имя БД-юзера). Уникально.
+  // Должно начинаться с буквы, [a-z0-9_-], max 32 символов.
+  name             String   @unique
+  // `displayName` — человекочитаемое название для списка сайтов.
+  // Необязательное: если null/пусто — UI показывает `name`.
+  displayName      String?  @map("display_name")
+  domain           String   @unique
+  aliases          String   @default("[]") // JSON string[]
+  type             String // SiteType
+  status           String   @default("STOPPED") // SiteStatus
+  // Последнее сообщение об ошибке (для статуса ERROR). Пишется при провале
+  // провижининга/деплоя, показывается в UI; очищается при успешном запуске.
+  errorMessage     String?  @map("error_message")
+  phpVersion       String?  @map("php_version")
+  gitRepository    String?  @map("git_repository")
+  deployBranch     String?  @map("deploy_branch")
+  appPort          Int?     @map("app_port")
+  envVars          String   @default("{}") @map("env_vars") // JSON object
+  rootPath         String   @map("root_path")
+  nginxConfigPath  String   @map("nginx_config_path")
+  systemUser       String?  @map("site_user")
+  sshPassword      String?  @map("ssh_password")
+  cmsAdminUser     String?  @map("cms_admin_user")
+  cmsAdminPassword String?  @map("cms_admin_password")
+  managerPath      String?  @map("manager_path")
+  connectorsPath   String?  @map("connectors_path")
+  // Версия установленной CMS (для MODX: "2.8.8-pl", "3.1.2-pl" и т.п.).
+  modxVersion      String?  @map("modx_version")
+  // Кастомный фрагмент php-fpm пула — дописывается в конец pool-конфига при
+  // генерации на агенте. Переживает смену phpVersion (переносится в новый пул).
+  // null/пусто — никаких кастомных overrides.
+  phpPoolCustom    String?  @map("php_pool_custom")
+  // Модули CUSTOM-сайта (для MODX всегда true). PHP включён по наличию phpVersion.
+  dbEnabled        Boolean  @default(false) @map("db_enabled")
+  httpsRedirect    Boolean  @default(true) @map("https_redirect")
+  // Относительный путь до web-root внутри rootPath (обычно "www", но можно "public_html" и т.п.).
+  filesRelPath     String   @default("www") @map("files_rel_path")
+  // -----------------------------------------------------------------------
+  // Layered nginx settings — параметризуют шаблоны в meowbox/{siteName}/*.conf.
+  // Перегенерируются при PUT /sites/:id/nginx/settings. null/0 → дефолты из
+  // shared/nginx-defaults.ts.
+  // -----------------------------------------------------------------------
+  /// max body размер (значение в формате nginx: "32M", "100M", "1G"). Default "32M".
+  nginxClientMaxBodySize String? @map("nginx_client_max_body_size")
+  /// fastcgi_read_timeout (сек). Default 60.
+  nginxFastcgiReadTimeout    Int? @map("nginx_fastcgi_read_timeout")
+  /// fastcgi_send_timeout (сек). Default 60.
+  nginxFastcgiSendTimeout    Int? @map("nginx_fastcgi_send_timeout")
+  /// fastcgi_connect_timeout (сек). Default 60.
+  nginxFastcgiConnectTimeout Int? @map("nginx_fastcgi_connect_timeout")
+  /// fastcgi_buffer_size (KB). Default 32.
+  nginxFastcgiBufferSizeKb   Int? @map("nginx_fastcgi_buffer_size_kb")
+  /// fastcgi_buffers count (штук, размер каждого = nginxFastcgiBufferSizeKb / 2). Default 16.
+  nginxFastcgiBufferCount    Int? @map("nginx_fastcgi_buffer_count")
+  /// HTTP/2 включён (только при SSL). Default true.
+  nginxHttp2     Boolean @default(true) @map("nginx_http2")
+  /// Strict-Transport-Security header (max-age=63072000; includeSubDomains). Default false.
+  nginxHsts      Boolean @default(false) @map("nginx_hsts")
+  /// gzip компрессия. Default true.
+  nginxGzip      Boolean @default(true) @map("nginx_gzip")
+  /// Кастомный конфиг — содержимое 95-custom.conf, инклюдится В ТЕЛО основного server-блока.
+  /// Юзер редактирует через UI. Панель НЕ перезаписывает этот блок при операциях.
+  /// При установке CMS (MODX) сюда автоматически дописываются её правила (try_files и т.п.) —
+  /// пользователь дальше может править их под себя.
+  nginxCustomConfig String? @map("nginx_custom_config")
+  // Per-site дефолтные excludes для бэкапов (JSON string[]). Пустой массив или
+  // null — fallback на глобальные дефолты из panel_settings.backup-defaults.
+  backupExcludes        String?  @map("backup_excludes")
+  // Per-site список таблиц БД, которые дампятся БЕЗ данных (только структура).
+  // JSON string[]. null/[] — fallback на глобальные.
+  backupExcludeTables   String?  @map("backup_exclude_tables")
+  userId           String   @map("user_id")
+  createdAt        DateTime @default(now()) @map("created_at")
+  updatedAt        DateTime @updatedAt @map("updated_at")
+
+  user           User               @relation(fields: [userId], references: [id], onDelete: Cascade)
+  databases      Database[]
+  sslCertificate SslCertificate?
+  deployLogs     DeployLog[]
+  backupConfigs  BackupConfig[]
+  backups        Backup[]
+  cronJobs       CronJob[]
+  diskSnapshots  SiteDiskSnapshot[]
+  healthPings    HealthCheckPing[]
+  dnsZones       DnsZone[]
+  services       SiteService[]
+
+  @@index([userId])
+  @@index([status])
+  @@index([type])
+  @@map("sites")
+}
+
+// =============================================================================
+// Сервисы (Manticore Search и др.) — внешние демоны, которыми сайты могут
+// пользоваться. Двухуровневая модель:
+//   - ServerService — установлен ли сервис на сервере (apt-пакет, systemd unit-template).
+//   - SiteService   — активирован ли сервис для конкретного сайта (per-site instance).
+// Per-site инстансы изолированы: свой data_dir, свой socket в /var/www/{site}/tmp/,
+// systemd template `{service}@{siteName}.service`.
+// =============================================================================
+
+/// Серверный уровень сервиса: версия, статус установки на хост.
+/// Один сервис = одна запись (`serviceKey` UNIQUE).
+model ServerService {
+  id          String    @id @default(uuid())
+  serviceKey  String    @unique @map("service_key") // 'manticore', 'redis', ...
+  installed   Boolean   @default(false)
+  version     String?
+  installedAt DateTime? @map("installed_at")
+  lastError   String?   @map("last_error")
+  config      String    @default("{}") // JSON, серверный конфиг сервиса
+  createdAt   DateTime  @default(now()) @map("created_at")
+  updatedAt   DateTime  @updatedAt @map("updated_at")
+
+  @@map("server_services")
+}
+
+/// Активация сервиса для конкретного сайта.
+/// `status`: STOPPED — активирован но демон выключен; RUNNING — активен;
+/// ERROR — последняя операция упала; STARTING — переходное состояние.
+/// `config` хранит per-site overrides (например, memoryMaxMb) — пусто = дефолт.
+model SiteService {
+  id          String    @id @default(uuid())
+  siteId      String    @map("site_id")
+  serviceKey  String    @map("service_key")
+  status      String    @default("STOPPED") // STARTING | RUNNING | STOPPED | ERROR
+  config      String    @default("{}") // JSON: per-site overrides
+  lastError   String?   @map("last_error")
+  installedAt DateTime  @default(now()) @map("installed_at")
+  updatedAt   DateTime  @updatedAt @map("updated_at")
+
+  site Site @relation(fields: [siteId], references: [id], onDelete: Cascade)
+
+  @@unique([siteId, serviceKey])
+  @@index([siteId])
+  @@index([serviceKey])
+  @@map("site_services")
+}
+
+model Database {
+  id             String   @id @default(uuid())
+  name           String   @unique
+  type           String // DatabaseType
+  dbUser         String   @map("db_user")
+  dbPasswordHash String   @map("db_password_hash")
+  // Симметрично-зашифрованный плейн-пароль (AES-256-GCM, base64).
+  // Нужен, чтобы открывать БД во встроенном Adminer без ресета. Argon2-хэш —
+  // односторонний, поэтому хранить плейн отдельно неизбежно. Шифровка через
+  // тот же master-key, что и DNS-credentials (`credentials-cipher.ts`).
+  // NULL для legacy-записей, созданных до этой колонки — у них Adminer
+  // потребует ресет пароля.
+  dbPasswordEnc  String?  @map("db_password_enc")
+  siteId         String?  @map("site_id")
+  sizeBytes      BigInt   @default(0) @map("size_bytes")
+  createdAt      DateTime @default(now()) @map("created_at")
+  updatedAt      DateTime @updatedAt @map("updated_at")
+
+  site Site? @relation(fields: [siteId], references: [id], onDelete: SetNull)
+
+  @@index([siteId])
+  @@map("databases")
+}
+
+// Именованное хранилище для бэкапов. Переиспользуется разными сайтами и
+// обоими движками (TAR / RESTIC). `config` — JSON с настройками доступа
+// (accessKey/bucket/endpoint/oauthToken/username/password и т.п., зависит
+// от `type`). `resticPassword` — пароль репы Restic на этом хранилище;
+// генерируется при создании, показывается юзеру один раз.
+model StorageLocation {
+  id              String   @id @default(uuid())
+  name            String   @unique
+  type            String   // BackupStorageType: LOCAL | S3 | YANDEX_DISK | CLOUD_MAIL_RU
+  config          String   @default("{}") // JSON object (креды + опции)
+  resticPassword  String?  @map("restic_password")
+  // Поддерживает ли это хранилище Restic-движок (LOCAL и S3 — да; Y.Disk/Mail.ru — нет)
+  resticEnabled   Boolean  @default(false) @map("restic_enabled")
+  createdAt       DateTime @default(now()) @map("created_at")
+  updatedAt       DateTime @updatedAt @map("updated_at")
+
+  backups       Backup[]
+  backupConfigs BackupConfig[]
+  resticChecks  ResticCheck[]
+
+  @@map("storage_locations")
+}
+
+// История запусков `restic check` — проверка целостности Restic-репозитория.
+// Репа = (siteName, storageLocation) — поэтому одна пара хранит свою историю.
+// Пишется при ручном запуске из UI и при плановом запуске (scheduler).
+model ResticCheck {
+  id                String   @id @default(uuid())
+  storageLocationId String   @map("storage_location_id")
+  // Денормализованное имя сайта (репа именуется по нему).
+  // Не FK на Site, чтобы история выжила, если сайт удалят.
+  siteName          String   @map("site_name")
+  siteId            String?  @map("site_id") // опциональная связь для быстрого join'а
+  success           Boolean  @default(false)
+  errorMessage      String?  @map("error_message")
+  output            String?  // stdout restic'а, первые ~4KB
+  readData          Boolean  @default(false) @map("read_data")
+  readDataSubset    String?  @map("read_data_subset")
+  durationMs        Int?     @map("duration_ms")
+  // Причина запуска: manual | scheduled
+  source            String   @default("manual")
+  startedAt         DateTime @default(now()) @map("started_at")
+  completedAt       DateTime? @map("completed_at")
+
+  storageLocation StorageLocation @relation(fields: [storageLocationId], references: [id], onDelete: Cascade)
+
+  @@index([storageLocationId, siteName])
+  @@index([startedAt])
+  @@map("restic_checks")
+}
+
+model BackupConfig {
+  id                 String   @id @default(uuid())
+  siteId             String   @map("site_id")
+  type               String // BackupType
+  // Движок: TAR (старый) / RESTIC (новый, по умолчанию для новых конфигов)
+  engine             String   @default("TAR") // BackupEngine
+  // Новая схема: список StorageLocation.id (JSON-массив). При автобэкапе
+  // архив отправляется в каждое из хранилищ. Для ручного бэкапа выбирается одно.
+  storageLocationIds String   @default("[]") @map("storage_location_ids") // JSON string[]
+  // Legacy: storageType/storageConfig оставлены nullable для обратной совместимости
+  // со старыми записями (мигрируются в StorageLocation при первом редактировании).
+  storageType        String?  @map("storage_type") // BackupStorageType
+  storageConfig      String?  @map("storage_config") // JSON object
+  schedule           String?
+  retention          Int      @default(7) // TAR: кол-во бэкапов. Для Restic используются keep*
+  // Retention для Restic (`restic forget --keep-*`)
+  keepDaily          Int      @default(7) @map("keep_daily")
+  keepWeekly         Int      @default(4) @map("keep_weekly")
+  keepMonthly        Int      @default(6) @map("keep_monthly")
+  keepYearly         Int      @default(1) @map("keep_yearly")
+  excludePaths       String   @default("[]") @map("exclude_paths") // JSON string[]
+  excludeTableData   String   @default("[]") @map("exclude_table_data") // JSON string[]
+  keepLocalCopy      Boolean  @default(false) @map("keep_local_copy")
+  enabled            Boolean  @default(true)
+  createdAt          DateTime @default(now()) @map("created_at")
+  updatedAt          DateTime @updatedAt @map("updated_at")
+
+  site             Site              @relation(fields: [siteId], references: [id], onDelete: Cascade)
+  backups          Backup[]
+  storageLocations StorageLocation[]
+
+  @@index([siteId])
+  @@map("backup_configs")
+}
+
+model Backup {
+  id                String    @id @default(uuid())
+  siteId            String    @map("site_id")
+  configId          String?   @map("config_id")
+  type              String // BackupType
+  status            String    @default("PENDING") // BackupStatus
+  // Движок, которым сделан этот бэкап
+  engine            String    @default("TAR") // BackupEngine
+  // Для новых записей: привязка к StorageLocation (id)
+  storageLocationId String?   @map("storage_location_id")
+  // Для Restic: id снапшота в репе. Null для TAR.
+  resticSnapshotId  String?   @map("restic_snapshot_id")
+  // Legacy: для TAR это путь к архиву. Для Restic не используется.
+  storageType       String?   @map("storage_type") // BackupStorageType (legacy, nullable)
+  filePath          String    @default("") @map("file_path")
+  sizeBytes         BigInt?   @map("size_bytes")
+  progress          Int       @default(0)
+  errorMessage      String?   @map("error_message")
+  startedAt         DateTime? @map("started_at")
+  completedAt       DateTime? @map("completed_at")
+  baseBackupId      String?   @map("base_backup_id")
+  createdAt         DateTime  @default(now()) @map("created_at")
+
+  site            Site             @relation(fields: [siteId], references: [id], onDelete: Cascade)
+  config          BackupConfig?    @relation(fields: [configId], references: [id], onDelete: SetNull)
+  storageLocation StorageLocation? @relation(fields: [storageLocationId], references: [id], onDelete: SetNull)
+  baseBackup      Backup?          @relation("DiffBase", fields: [baseBackupId], references: [id], onDelete: SetNull)
+  differentials   Backup[]         @relation("DiffBase")
+  exports         BackupExport[]
+
+  @@index([siteId])
+  @@index([status])
+  @@map("backups")
+}
+
+// Экспорт бэкапа в виде скачиваемого архива.
+// Два режима:
+//   STREAM        — API спавнит restic dump --archive tar и стримит stdout прямо
+//                   в HTTP response. Без диска, без сокетов. Single-host only.
+//   S3_PRESIGNED  — агент делает restic dump → загружает tar в тот же bucket
+//                   под exports/<id>.tar → API возвращает pre-signed URL.
+//                   Подходит для S3-хранилищ; trafic качается напрямую из S3.
+// expiresAt — время истечения. Cron каждый час смотрит истекшие, удаляет
+// S3-объект и помечает запись EXPIRED. Для STREAM — просто чистится запись.
+model BackupExport {
+  id            String    @id @default(uuid())
+  backupId      String    @map("backup_id")
+  mode          String    @default("STREAM") // BackupExportMode: STREAM | S3_PRESIGNED
+  status        String    @default("PENDING") // BackupExportStatus: PENDING | PROCESSING | READY | FAILED | EXPIRED
+  // Для S3_PRESIGNED: ключ объекта в bucket (`exports/<uuid>.tar`).
+  s3Key         String?   @map("s3_key")
+  // URL для скачивания: либо API-роут (STREAM), либо pre-signed URL (S3).
+  downloadUrl   String?   @map("download_url")
+  // Когда истекает экспорт. Cron-cleaner смотрит на это поле.
+  expiresAt     DateTime  @map("expires_at")
+  sizeBytes     BigInt?   @map("size_bytes")
+  errorMessage  String?   @map("error_message")
+  // Юзер, инициировавший экспорт (для аудита и проверки прав на скачивание).
+  createdByUserId String  @map("created_by_user_id")
+  createdAt     DateTime  @default(now()) @map("created_at")
+  updatedAt     DateTime  @updatedAt @map("updated_at")
+
+  backup        Backup    @relation(fields: [backupId], references: [id], onDelete: Cascade)
+  createdByUser User      @relation(fields: [createdByUserId], references: [id], onDelete: Cascade)
+
+  @@index([backupId])
+  @@index([status])
+  @@index([expiresAt])
+  @@map("backup_exports")
+}
+
+model SslCertificate {
+  id            String    @id @default(uuid())
+  siteId        String    @unique @map("site_id")
+  domains       String    @default("[]") // JSON string[]
+  status        String    @default("NONE") // SslStatus
+  issuer        String    @default("")
+  isWildcard    Boolean   @default(false) @map("is_wildcard")
+  issuedAt      DateTime? @map("issued_at")
+  expiresAt     DateTime? @map("expires_at")
+  daysRemaining Int?      @map("days_remaining")
+  certPath      String?   @map("cert_path")
+  keyPath       String?   @map("key_path")
+  createdAt     DateTime  @default(now()) @map("created_at")
+  updatedAt     DateTime  @updatedAt @map("updated_at")
+
+  site Site @relation(fields: [siteId], references: [id], onDelete: Cascade)
+
+  @@map("ssl_certificates")
+}
+
+model DeployLog {
+  id            String    @id @default(uuid())
+  siteId        String    @map("site_id")
+  status        String    @default("PENDING") // DeployStatus
+  commitSha     String?   @map("commit_sha")
+  commitMessage String?   @map("commit_message")
+  branch        String
+  output        String    @default("")
+  triggeredBy   String?   @map("triggered_by")
+  durationMs    Int?      @map("duration_ms")
+  startedAt     DateTime  @default(now()) @map("started_at")
+  completedAt   DateTime? @map("completed_at")
+  createdAt     DateTime  @default(now()) @map("created_at")
+
+  site Site @relation(fields: [siteId], references: [id], onDelete: Cascade)
+
+  @@index([siteId])
+  @@index([status])
+  @@map("deploy_logs")
+}
+
+model CronJob {
+  id           String    @id @default(uuid())
+  siteId       String    @map("site_id")
+  name         String
+  schedule     String
+  command      String
+  status       String    @default("ACTIVE") // CronJobStatus
+  lastOutput   String?   @map("last_output")
+  lastRunAt    DateTime? @map("last_run_at")
+  lastExitCode Int?      @map("last_exit_code")
+  createdAt    DateTime  @default(now()) @map("created_at")
+  updatedAt    DateTime  @updatedAt @map("updated_at")
+
+  site Site @relation(fields: [siteId], references: [id], onDelete: Cascade)
+
+  @@index([siteId])
+  @@map("cron_jobs")
+}
+
+model NotificationSetting {
+  id        String   @id @default(uuid())
+  userId    String   @map("user_id")
+  channel   String // NotificationChannel
+  events    String   @default("[]") // JSON string[]
+  enabled   Boolean  @default(true)
+  config    String   @default("{}") // JSON object
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, channel])
+  @@map("notification_settings")
+}
+
+model FirewallRule {
+  id        String   @id @default(uuid())
+  action    String // FirewallRuleAction
+  protocol  String // FirewallProtocol
+  port      String?
+  sourceIp  String?  @map("source_ip")
+  comment   String?
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@map("firewall_rules")
+}
+
+model SiteDiskSnapshot {
+  id        String   @id @default(uuid())
+  siteId    String   @map("site_id")
+  wwwBytes  BigInt   @default(0) @map("www_bytes")
+  logsBytes BigInt   @default(0) @map("logs_bytes")
+  tmpBytes  BigInt   @default(0) @map("tmp_bytes")
+  dbBytes   BigInt   @default(0) @map("db_bytes")
+  createdAt DateTime @default(now()) @map("created_at")
+
+  site Site @relation(fields: [siteId], references: [id], onDelete: Cascade)
+
+  @@index([siteId, createdAt])
+  @@map("site_disk_snapshots")
+}
+
+model MetricsSnapshot {
+  id            String   @id @default(uuid())
+  timestamp     DateTime @default(now())
+  cpuPercent    Float    @map("cpu_percent")
+  memoryPercent Float    @map("memory_percent")
+  memoryUsed    BigInt   @map("memory_used")
+  memoryTotal   BigInt   @map("memory_total")
+  diskPercent   Float    @map("disk_percent")
+  diskUsed      BigInt   @map("disk_used")
+  diskTotal     BigInt   @map("disk_total")
+  networkRx     BigInt   @map("network_rx")
+  networkTx     BigInt   @map("network_tx")
+
+  @@index([timestamp])
+  @@map("metrics_snapshots")
+}
+
+model AuditLog {
+  id        String   @id @default(uuid())
+  userId    String   @map("user_id")
+  action    String // AuditAction
+  entity    String
+  entityId  String?  @map("entity_id")
+  details   String? // JSON object
+  ipAddress String   @map("ip_address")
+  userAgent String?  @map("user_agent")
+  createdAt DateTime @default(now()) @map("created_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([action])
+  @@index([createdAt])
+  @@map("audit_logs")
+}
+
+model HealthCheckPing {
+  id             String   @id @default(uuid())
+  siteId         String   @map("site_id")
+  reachable      Boolean
+  statusCode     Int?     @map("status_code")
+  responseTimeMs Int      @default(0) @map("response_time_ms")
+  createdAt      DateTime @default(now()) @map("created_at")
+
+  site Site @relation(fields: [siteId], references: [id], onDelete: Cascade)
+
+  @@index([siteId, createdAt])
+  @@map("health_check_pings")
+}
+
+model AiSession {
+  id              String   @id @default(uuid())
+  userId          String   @map("user_id")
+  claudeSessionId String   @unique @map("claude_session_id")
+  title           String?
+  cwd             String   @default("/")
+  messages        String   @default("[]") // JSON array
+  createdAt       DateTime @default(now()) @map("created_at")
+  updatedAt       DateTime @updatedAt @map("updated_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, updatedAt])
+  @@map("ai_sessions")
+}
+
+// =============================================================================
+// Auth (бывший Redis — теперь SQLite)
+// =============================================================================
+
+/// Blacklist refresh-токенов (замена Redis `bl:{jti}`).
+/// `expiresAt` — момент, после которого запись можно удалять (cron-чистка).
+model TokenBlacklist {
+  jti       String   @id
+  expiresAt DateTime @map("expires_at")
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@index([expiresAt])
+  @@map("token_blacklist")
+}
+
+/// Счётчик неудачных попыток логина по IP (замена Redis `login_attempts:{ip}`).
+/// TTL 15 минут: при `expiresAt < now()` запись считается устаревшей.
+model LoginAttempt {
+  ip        String   @id
+  count     Int      @default(0)
+  expiresAt DateTime @map("expires_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@index([expiresAt])
+  @@map("login_attempts")
+}
+
+/// Метаданные активных refresh-токенов для IP-binding и отзыва (замена Redis `rt:{jti}` + `sessions:{userId}`).
+model Session {
+  jti       String   @id
+  userId    String   @map("user_id")
+  ip        String
+  userAgent String?  @map("user_agent")
+  expiresAt DateTime @map("expires_at")
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@index([userId])
+  @@index([expiresAt])
+  @@map("sessions")
+}
+
+/// Универсальный KV-стор для настроек панели (General tab в /settings).
+/// Значение — JSON-строка, парсится на чтении.
+model PanelSetting {
+  key       String   @id
+  value     String
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@map("panel_settings")
+}
+
+/// Сингл-стоп конфиг Basic Auth (защита входа в панель через HTTP Basic).
+/// В таблице всегда не более одной записи (id = '_').
+model BasicAuthConfig {
+  id           String   @id @default("_")
+  enabled      Boolean  @default(false)
+  username     String   @default("")
+  passwordHash String   @default("") @map("password_hash")
+  updatedAt    DateTime @updatedAt @map("updated_at")
+
+  @@map("basic_auth_config")
+}
+
+// =============================================================================
+// DNS — управление DNS-записями через API внешних провайдеров.
+// Креды провайдеров шифруются AES-256-GCM (master key из ENV DNS_CREDENTIAL_KEY).
+// =============================================================================
+
+/// Подключённый аккаунт DNS-провайдера (Cloudflare / Yandex Cloud / VK Cloud / Yandex 360).
+/// `credentialsEnc` — base64(iv|tag|ciphertext) JSON-объекта со специфичными
+/// для провайдера секретами (apiToken / serviceAccountKey / appCredential / oauthToken...).
+model DnsProviderAccount {
+  id             String    @id @default(uuid())
+  type           String // CLOUDFLARE | YANDEX_CLOUD | VK_CLOUD | YANDEX_360
+  label          String
+  credentialsEnc String    @map("credentials_enc")
+  // Yandex folderId / VK projectId / CF account-scope (опционально). Хранится
+  // отдельно от credentialsEnc, чтобы UI мог показывать его без дешифровки.
+  scopeId        String?   @map("scope_id")
+  // Override базового URL DNS API (нужно для VK Cloud: их URL может меняться).
+  apiBaseUrl     String?   @map("api_base_url")
+  status         String    @default("ACTIVE") // ACTIVE | ERROR | UNAUTHORIZED
+  lastError      String?   @map("last_error")
+  lastSyncAt     DateTime? @map("last_sync_at")
+  zonesCount     Int       @default(0) @map("zones_count")
+  createdAt      DateTime  @default(now()) @map("created_at")
+  updatedAt      DateTime  @updatedAt @map("updated_at")
+
+  zones DnsZone[]
+
+  @@map("dns_provider_accounts")
+}
+
+/// DNS-зона (домен) у внешнего провайдера. Зеркало стороннего ресурса:
+/// `externalId` — id зоны у провайдера. Уникальна в рамках одного аккаунта.
+model DnsZone {
+  id              String    @id @default(uuid())
+  accountId       String    @map("account_id")
+  externalId      String    @map("external_id")
+  domain          String // example.com (apex, без trailing dot)
+  status          String    @default("ACTIVE")
+  nameservers     String? // JSON array of NS hosts
+  recordsCount    Int       @default(0) @map("records_count")
+  recordsCachedAt DateTime? @map("records_cached_at")
+  // Опциональная связь с сайтом панельки. SetNull при удалении сайта, чтобы
+  // зону не потерять (она всё ещё существует у провайдера).
+  linkedSiteId    String?   @map("linked_site_id")
+  createdAt       DateTime  @default(now()) @map("created_at")
+  updatedAt       DateTime  @updatedAt @map("updated_at")
+
+  account    DnsProviderAccount @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  linkedSite Site?              @relation(fields: [linkedSiteId], references: [id], onDelete: SetNull)
+  records    DnsRecord[]
+
+  @@unique([accountId, externalId])
+  @@index([domain])
+  @@map("dns_zones")
+}
+
+/// Кеш DNS-записей зоны. Истина — у провайдера; cache обновляется при refresh
+/// и при mutation. Никогда не служит источником при несоответствии — UI всегда
+/// может вызвать refresh, чтобы перезалить из upstream.
+model DnsRecord {
+  id         String   @id @default(uuid())
+  zoneId     String   @map("zone_id")
+  externalId String   @map("external_id")
+  type       String // A | AAAA | CNAME | MX | TXT | NS | SRV | CAA
+  // Относительное имя ("@" для apex, "www" и т.п.). Без trailing dot.
+  name       String
+  // Значение. Для multi-value (например VK/Yandex recordset) — JSON-массив.
+  content    String
+  ttl        Int
+  priority   Int?
+  // Cloudflare-only: orange-cloud (proxy через CF). null для остальных провайдеров.
+  proxied    Boolean?
+  comment    String?
+  createdAt  DateTime @default(now()) @map("created_at")
+  updatedAt  DateTime @updatedAt @map("updated_at")
+
+  zone DnsZone @relation(fields: [zoneId], references: [id], onDelete: Cascade)
+
+  @@unique([zoneId, externalId])
+  @@index([zoneId, type, name])
+  @@map("dns_records")
+}
+
+// -----------------------------------------------------------------------------
+// System migrations
+// -----------------------------------------------------------------------------
+
+/// Журнал применённых системных миграций.
+/// Применяется runner'ом `node current/migrations/runner.js up` после `prisma migrate deploy`
+/// при выполнении `make update`. Каждый файл в `migrations/system/<id>.{ts,js}` исполняется
+/// один раз, дубль регистрируется по уникальному `id`. `checksum` — sha256 файла на момент
+/// применения; если задним числом изменили — runner покажет warning.
+model SystemMigration {
+  id         String   @id // 2026-04-29-001-rename-public-to-www
+  appliedAt  DateTime @default(now()) @map("applied_at")
+  durationMs Int      @map("duration_ms")
+  checksum   String // sha256 содержимого файла миграции
+  ok         Boolean  @default(true)
+  errorLog   String?  @map("error_log")
+
+  @@map("system_migrations")
+}
+
+/// Текущее состояние процесса обновления панели (`make update` / UI button).
+/// Один синглтон-ряд (id="current"). Используется как advisory lock —
+/// если status=running и pid жив, второй запуск отклоняется.
+/// История прошлых обновлений — в `panel_update_history`.
+model PanelUpdateState {
+  id            String    @id @default("current") // всегда "current"
+  status        String    @default("idle") // idle | running | succeeded | failed | rolled_back
+  fromVersion   String?   @map("from_version")
+  toVersion     String?   @map("to_version")
+  startedAt     DateTime? @map("started_at")
+  finishedAt    DateTime? @map("finished_at")
+  pid           Int? // pid running update.sh — для проверки живости
+  currentStage  String?   @map("current_stage") // preflight|snapshot|download|verify|migrate|build|switch|reload|healthcheck
+  errorMessage  String?   @map("error_message")
+  logTail       String?   @map("log_tail") // последние 16 KB stdout/stderr
+
+  @@map("panel_update_state")
+}
+
+model PanelUpdateHistory {
+  id           String   @id @default(uuid())
+  fromVersion  String?  @map("from_version")
+  toVersion    String   @map("to_version")
+  status       String // succeeded | failed | rolled_back
+  startedAt    DateTime @map("started_at")
+  finishedAt   DateTime @map("finished_at")
+  durationMs   Int      @map("duration_ms")
+  triggeredBy  String?  @map("triggered_by") // userId | "cli" | "cron"
+  errorMessage String?  @map("error_message")
+
+  @@index([startedAt])
+  @@map("panel_update_history")
+}

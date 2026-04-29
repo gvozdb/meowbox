@@ -1,0 +1,158 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to build (для ручного запуска)'
+        required: true
+
+permissions:
+  contents: write       # создание GitHub Release
+  id-token: write       # OIDC токен для attestations
+  attestations: write   # подпись артефактов
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: |
+            shared/package-lock.json
+            api/package-lock.json
+            agent/package-lock.json
+            web/package-lock.json
+
+      - name: Compute version
+        id: ver
+        run: |
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            VERSION="${{ github.event.inputs.tag }}"
+          else
+            VERSION="${GITHUB_REF#refs/tags/}"
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Building meowbox $VERSION"
+
+      # ----- Install + build всех пакетов -----
+      - name: Install shared
+        working-directory: shared
+        run: npm ci && npm run build
+
+      - name: Install + build agent
+        working-directory: agent
+        run: npm ci && npm run build
+
+      - name: Install + build api
+        working-directory: api
+        run: |
+          npm ci
+          npx prisma generate
+          npm run build
+
+      - name: Install + build web
+        working-directory: web
+        run: npm ci && npx nuxt build
+
+      - name: Install + build migrations
+        working-directory: migrations
+        # migrations — крошечный пакет. tsc + @types/node ставим через npm install
+        # (зависимости из package.json убираем — они через симлинки на соседние
+        # пакеты). Симлинки создаём ПОСЛЕ npm install, иначе он их удалит как
+        # extraneous (их нет в package.json).
+        # Глубина от migrations/node_modules/@meowbox/<name> до repo root — 3 уровня.
+        run: |
+          npm install --no-save --no-audit --no-fund typescript@5 @types/node@22
+          mkdir -p node_modules/@meowbox node_modules/@prisma
+          ln -sfn ../../../shared node_modules/@meowbox/shared
+          ln -sfn ../../../api/node_modules/@prisma/client node_modules/@prisma/client
+          ls -la node_modules/@meowbox/ node_modules/@prisma/
+          test -f node_modules/@meowbox/shared/dist/index.js || (echo "shared/dist not found"; exit 1)
+          test -f node_modules/@prisma/client/index.js || (echo "prisma client not found"; exit 1)
+          npx tsc
+
+      # ----- Сборка tarball -----
+      - name: Pack release tarball
+        run: |
+          STAGE="$(mktemp -d)/meowbox"
+          mkdir -p "$STAGE"
+
+          # Версия — кладём в файл, чтобы панель могла прочитать на проде
+          echo "${{ steps.ver.outputs.version }}" > "$STAGE/VERSION"
+          cp CHANGELOG.md "$STAGE/" 2>/dev/null || true
+          cp Makefile "$STAGE/"
+          cp ecosystem.config.js "$STAGE/"
+          cp .env.example "$STAGE/" 2>/dev/null || true
+          cp install.sh "$STAGE/"
+          cp bootstrap.sh "$STAGE/"
+          cp -r tools "$STAGE/"
+
+          # api: prisma + dist + node_modules production
+          mkdir -p "$STAGE/api"
+          cp api/package.json api/package-lock.json "$STAGE/api/"
+          cp -r api/dist "$STAGE/api/"
+          cp -r api/prisma "$STAGE/api/"
+
+          # agent
+          mkdir -p "$STAGE/agent"
+          cp agent/package.json agent/package-lock.json "$STAGE/agent/"
+          cp -r agent/dist "$STAGE/agent/"
+
+          # web (nuxt nitro output)
+          mkdir -p "$STAGE/web"
+          cp web/package.json "$STAGE/web/"
+          cp -r web/.output "$STAGE/web/"
+
+          # shared (compiled)
+          mkdir -p "$STAGE/shared"
+          cp shared/package.json "$STAGE/shared/"
+          cp -r shared/dist "$STAGE/shared/"
+
+          # migrations (compiled)
+          mkdir -p "$STAGE/migrations"
+          cp migrations/package.json "$STAGE/migrations/"
+          cp -r migrations/dist "$STAGE/migrations/"
+          cp -r migrations/system "$STAGE/migrations/" 2>/dev/null || true
+
+          # Архив
+          mkdir -p dist
+          tar -czf "dist/meowbox-${{ steps.ver.outputs.version }}.tar.gz" -C "$(dirname "$STAGE")" meowbox
+          (cd dist && sha256sum "meowbox-${{ steps.ver.outputs.version }}.tar.gz" > SHA256SUMS)
+
+          ls -la dist/
+
+      # ----- Attestation -----
+      # `continue-on-error: true` — attestations доступны только для public repos
+      # или organization-owned private. Для user-owned private шаг провалится с
+      # "Feature not available". Это ок: tools/update.sh не требует attestation
+      # (только проверяет SHA256SUMS). Когда репо станет публичным — attestation
+      # автоматически заработает, и update.sh подхватит проверку через `gh attestation verify`.
+      - name: Generate attestation
+        uses: actions/attest-build-provenance@v1
+        continue-on-error: true
+        with:
+          subject-path: dist/meowbox-${{ steps.ver.outputs.version }}.tar.gz
+
+      # ----- Публикация в Releases -----
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.ver.outputs.version }}
+          name: ${{ steps.ver.outputs.version }}
+          generate_release_notes: true
+          files: |
+            dist/meowbox-${{ steps.ver.outputs.version }}.tar.gz
+            dist/SHA256SUMS
