@@ -32,6 +32,11 @@
 # =============================================================================
 set -euo pipefail
 
+# Полностью неинтерактивный режим apt (без debconf-диалогов про kernel и т.п.)
+export DEBIAN_FRONTEND=noninteractive
+export NEEDRESTART_MODE=a
+export NEEDRESTART_SUSPEND=1
+
 MEOWBOX_DIR="${MEOWBOX_DIR:-/opt/meowbox}"
 GITHUB_REPO="${GITHUB_REPO:-gvozdb/meowbox}"
 TARGET="${MEOWBOX_VERSION:-}"
@@ -55,7 +60,10 @@ fi
 # ----- Базовые deps для скачивания tarball -----
 log "Устанавливаю минимальные зависимости (curl, tar, jq, ca-certificates)..."
 apt-get update -qq
-apt-get install -y -qq curl ca-certificates tar jq coreutils >/dev/null
+apt-get install -y -qq \
+  -o Dpkg::Options::=--force-confdef \
+  -o Dpkg::Options::=--force-confold \
+  curl ca-certificates tar jq coreutils >/dev/null
 
 # ----- Создаём layout -----
 log "Готовлю каталоги в $MEOWBOX_DIR..."

@@ -8,6 +8,13 @@
 # =============================================================================
 set -euo pipefail
 
+# Полностью неинтерактивный режим: никаких debconf-диалогов про kernel upgrade,
+# конфиги старого пакета сохраняем, новый устанавливаем без вопросов.
+export DEBIAN_FRONTEND=noninteractive
+export NEEDRESTART_MODE=a
+export NEEDRESTART_SUSPEND=1
+APT_OPTS=(-y -qq -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold)
+
 MEOWBOX_DIR="${MEOWBOX_DIR:-/opt/meowbox}"
 NODE_VERSION="22"
 LOG_FILE="${LOG_FILE:-/var/log/meowbox-install.log}"
@@ -108,7 +115,7 @@ touch "$LOG_FILE"
 
 log "Updating system packages..."
 apt-get update -qq >> "$LOG_FILE" 2>&1
-apt-get upgrade -y -qq >> "$LOG_FILE" 2>&1
+apt-get "${APT_OPTS[@]}" upgrade >> "$LOG_FILE" 2>&1
 
 log "Installing dependencies..."
 # passwd            — useradd/usermod/userdel/groupadd/gpasswd для per-site юзеров
@@ -127,7 +134,7 @@ log "Installing dependencies..."
 #                     (Ubuntu 22.04 → pg14, Debian 12 → pg15, Ubuntu 24.04 → pg16).
 #                     Peer auth для юзера `postgres` → агент подключается через `sudo -u postgres psql`.
 # postgresql-client — pg_dump / psql на хосте.
-apt-get install -y -qq \
+apt-get "${APT_OPTS[@]}" install \
   curl wget git unzip software-properties-common \
   gnupg2 ca-certificates lsb-release \
   nginx certbot python3-certbot-nginx \
@@ -151,7 +158,7 @@ systemctl enable --now postgresql  >> "$LOG_FILE" 2>&1 || true
 # php8.2, Ubuntu 24.04 → php8.3). Adminer'у достаточно openssl, mysqli,
 # pdo-pgsql, mbstring, json (json в core начиная с 8.0).
 log "Installing PHP-FPM for Adminer..."
-apt-get install -y -qq \
+apt-get "${APT_OPTS[@]}" install \
   php-cli php-fpm php-mysql php-pgsql php-sqlite3 \
   php-mbstring php-curl php-zip >> "$LOG_FILE" 2>&1
 
@@ -198,7 +205,7 @@ fi
 if ! command -v node &>/dev/null || [[ "$(node -v | cut -d'.' -f1 | tr -d 'v')" -lt "$NODE_VERSION" ]]; then
   log "Installing Node.js ${NODE_VERSION}..."
   curl -fsSL https://deb.nodesource.com/setup_${NODE_VERSION}.x | bash - >> "$LOG_FILE" 2>&1
-  apt-get install -y -qq nodejs >> "$LOG_FILE" 2>&1
+  apt-get "${APT_OPTS[@]}" install nodejs >> "$LOG_FILE" 2>&1
 else
   log "Node.js $(node -v) already installed"
 fi
