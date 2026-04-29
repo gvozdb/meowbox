@@ -193,9 +193,12 @@ ln -sfn "$STATE_DIR/data" "$RELEASE_DIR/data" 2>/dev/null || true
 ln -sfn "$STATE_DIR/.env" "$RELEASE_DIR/.env" 2>/dev/null || true
 
 # ----- 5. Install prod deps -----
+# shared/ и migrations/ — собранные артефакты без runtime-deps (зависимости
+# резолвятся через симлинки), поэтому npm ci там не нужен и упадёт без
+# package-lock.json в тарболле.
 stage install "Установка production-зависимостей"
-for pkg in shared agent api web migrations; do
-  if [[ -f "$RELEASE_DIR/$pkg/package.json" ]]; then
+for pkg in agent api web; do
+  if [[ -f "$RELEASE_DIR/$pkg/package-lock.json" ]]; then
     (cd "$RELEASE_DIR/$pkg" && npm ci --omit=dev --no-audit --no-fund) \
       || abort "npm ci провалился в $pkg"
   fi
@@ -203,12 +206,10 @@ done
 
 # @meowbox/shared не объявлен в dependencies — линкуем вручную после npm ci.
 for pkg in api agent web migrations; do
-  if [[ -d "$RELEASE_DIR/$pkg/node_modules" ]]; then
-    mkdir -p "$RELEASE_DIR/$pkg/node_modules/@meowbox"
-    ln -sfn "../../../shared" "$RELEASE_DIR/$pkg/node_modules/@meowbox/shared"
-  fi
+  mkdir -p "$RELEASE_DIR/$pkg/node_modules/@meowbox"
+  ln -sfn "../../../shared" "$RELEASE_DIR/$pkg/node_modules/@meowbox/shared"
 done
-if [[ -d "$RELEASE_DIR/migrations/node_modules" ]] && [[ -d "$RELEASE_DIR/api/node_modules/@prisma/client" ]]; then
+if [[ -d "$RELEASE_DIR/api/node_modules/@prisma/client" ]]; then
   mkdir -p "$RELEASE_DIR/migrations/node_modules/@prisma"
   ln -sfn "../../../api/node_modules/@prisma/client" "$RELEASE_DIR/migrations/node_modules/@prisma/client"
 fi

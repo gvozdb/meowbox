@@ -323,10 +323,14 @@ chmod 700 "${STATE_DIR}/data"
 cd "${CODE_DIR}"
 
 if [[ "$RELEASE_MODE" == "release" ]]; then
-  # Тарболл уже содержит dist/. Ставим только production-зависимости.
+  # Тарболл уже содержит dist/. Ставим production-зависимости только в тех
+  # пакетах, у которых есть package-lock.json и реальные runtime-deps.
+  # shared/ и migrations/ — это собранные артефакты без runtime-зависимостей
+  # (зависимости резолвятся через симлинки), поэтому npm ci там не нужен и
+  # упадёт из-за отсутствия package-lock.json в тарболле.
   log "Installing production dependencies (npm ci --omit=dev)..."
-  for pkg in shared agent api web migrations; do
-    if [[ -f "${CODE_DIR}/${pkg}/package.json" ]]; then
+  for pkg in agent api web; do
+    if [[ -f "${CODE_DIR}/${pkg}/package-lock.json" ]]; then
       (cd "${CODE_DIR}/${pkg}" && npm ci --omit=dev --no-audit --no-fund >> "$LOG_FILE" 2>&1) \
         || error "npm ci провалился в ${pkg}"
     fi
@@ -336,14 +340,12 @@ if [[ "$RELEASE_MODE" == "release" ]]; then
   # Глубина: <pkg>/node_modules/@meowbox/shared → ../../../shared
   log "Создаю symlink-и @meowbox/shared в node_modules пакетов..."
   for pkg in api agent web migrations; do
-    if [[ -d "${CODE_DIR}/${pkg}/node_modules" ]]; then
-      mkdir -p "${CODE_DIR}/${pkg}/node_modules/@meowbox"
-      ln -sfn "../../../shared" "${CODE_DIR}/${pkg}/node_modules/@meowbox/shared"
-    fi
+    mkdir -p "${CODE_DIR}/${pkg}/node_modules/@meowbox"
+    ln -sfn "../../../shared" "${CODE_DIR}/${pkg}/node_modules/@meowbox/shared"
   done
 
   # migrations/runner.ts использует @prisma/client — линкуем из api/.
-  if [[ -d "${CODE_DIR}/migrations/node_modules" ]] && [[ -d "${CODE_DIR}/api/node_modules/@prisma/client" ]]; then
+  if [[ -d "${CODE_DIR}/api/node_modules/@prisma/client" ]]; then
     mkdir -p "${CODE_DIR}/migrations/node_modules/@prisma"
     ln -sfn "../../../api/node_modules/@prisma/client" "${CODE_DIR}/migrations/node_modules/@prisma/client"
   fi
