@@ -94,12 +94,24 @@ export class SiteInstaller {
     const version = params.modxVersion || DEFAULT_MODX3_VERSION;
     const composerPackage = `modx/revolution=${version}`;
 
-    // Проверяем composer: если нет — сразу fallback на ZIP-инсталлер.
+    // Pre-check: php-бинарь нужной версии существует. Если нет — это ОШИБКА,
+    // не fallback. Иначе пользователь увидит "сайт создан" + пустую БД +
+    // вечный 502 от nginx. cli-install.php спавнит php напрямую — `which`
+    // быстрее и надёжнее, чем падение через ENOENT посередине composer'а.
+    const phpBinForComposer = `php${params.phpVersion || DEFAULT_PHP_VERSION}`;
+    const phpCheck = await this.executor.execute('which', [phpBinForComposer]);
+    if (phpCheck.exitCode !== 0) {
+      const msg = `${phpBinForComposer} не установлен на сервере. Установи "apt install ${phpBinForComposer}-cli ${phpBinForComposer}-fpm" (на Ubuntu/Debian подключи ondrej/php PPA или sury.org), либо выбери другую версию PHP при создании сайта.`;
+      log(`[install] ✗ ${msg}`);
+      return { success: false, error: msg };
+    }
+
+    // Проверяем composer: если нет — fallback на ZIP-инсталлер (это легитимный
+    // путь, ZIP-архив самодостаточен и работает без composer).
     // ВАЖНО: composer запускаем через тот же PHP-бинарь, что и сайт (php-fpm),
     // иначе vendor/composer/platform_check.php сгенерируется под системный `php`
     // (обычно самый свежий), и runtime сайта будет падать с
     // "Your Composer dependencies require a PHP version >= 8.4.0".
-    const phpBinForComposer = `php${params.phpVersion || DEFAULT_PHP_VERSION}`;
     const composerPath = await this.resolveComposerPath();
     if (!composerPath) {
       log('[install] composer не найден на сервере — fallback на ZIP-архив');
@@ -179,6 +191,10 @@ export class SiteInstaller {
       }
 
       // Запускаем CLI-setup MODX 3 через cli-install.php (flat args).
+      // Если cli-install и setup/index.php оба упали — это ОШИБКА установки,
+      // а не успех. Раньше функция тихо писала config.inc.php вручную и возвращала
+      // success=true, после чего сайт получал статус RUNNING с пустой БД.
+      // Теперь честно бросаем ошибку, чтобы UI показал red ERROR.
       if (params.dbName) {
         log('[install] Running MODX 3 cli-install.php...');
         const setupResult = await this.runModx3CliInstall(wwwDir, params, log);
@@ -188,8 +204,13 @@ export class SiteInstaller {
           const fallback = await this.runModxSetup(wwwDir, params, log);
           if (!fallback.success) {
             log(`[install] setup/index.php also failed: ${fallback.error}`);
-            log('[install] Пишу config.inc.php вручную — завершите установку через браузер');
+            // Пишем config.inc.php — он позволит юзеру завершить через
+            // /setup/ в браузере, но сайт всё равно ОШИБКА для UI.
             await this.writeModxConfig(wwwDir, params);
+            return {
+              success: false,
+              error: `MODX setup упал: cli-install: ${setupResult.error}; setup/index.php: ${fallback.error}. Файлы установлены, БД не наполнена. Завершите установку через /setup/ в браузере, либо удалите сайт и пересоздайте после установки нужной версии PHP.`,
+            };
           }
         }
       } else {
@@ -504,7 +525,12 @@ export class SiteInstaller {
         }
       }
 
-      // Step 4: MODX CLI setup. Для MODX 3 сначала пробуем cli-install.php.
+      // Step 4: MODX CLI setup. Для MODX 3 сначала пробуем cli-install.php,
+      // потом setup/index.php. Для MODX Revo — только setup/index.php.
+      // Если ВСЕ методы упали — это ОШИБКА установки: сайт не должен числиться
+      // как RUNNING с пустой БД. Раньше тут писался config.inc.php вручную и
+      // success возвращался — теперь честно падаем.
+      let setupFailed: string | null = null;
       if (params.dbName) {
         if (label === '3') {
           log('[install] Running MODX 3 cli-install.php...');
@@ -515,8 +541,8 @@ export class SiteInstaller {
             const setupResult = await this.runModxSetup(wwwDir, params, log);
             if (!setupResult.success) {
               log(`[install] Setup failed: ${setupResult.error}`);
-              log('[install] Writing config manually — you can run setup via browser');
               await this.writeModxConfig(wwwDir, params);
+              setupFailed = `cli-install: ${cliRes.error}; setup/index.php: ${setupResult.error}`;
             }
           }
         } else {
@@ -524,12 +550,28 @@ export class SiteInstaller {
           const setupResult = await this.runModxSetup(wwwDir, params, log);
           if (!setupResult.success) {
             log(`[install] CLI setup failed: ${setupResult.error}`);
-            log('[install] Writing config manually — you can run setup via browser');
             await this.writeModxConfig(wwwDir, params);
+            setupFailed = setupResult.error || 'unknown setup error';
           }
         }
       } else {
         log('[install] No database configured, skipping setup');
+      }
+
+      if (setupFailed) {
+        // Финальные пермишены и cleanup всё равно делаем (иначе setup/ юзера
+        // в браузере не сможет писать в core/cache).
+        await this.finalizeModxPermissions(params.rootPath, wwwDir, params.systemUser, log);
+        if (params.systemUser) {
+          const userTmp = path.join(params.rootPath, 'tmp');
+          await this.executor.execute('mkdir', ['-p', userTmp]);
+          await this.executor.execute('chown', [owner, userTmp]);
+          await this.executor.execute('chmod', ['750', userTmp]);
+        }
+        return {
+          success: false,
+          error: `MODX setup упал: ${setupFailed}. Файлы установлены, БД не наполнена. Завершите установку через /setup/ в браузере или удалите сайт.`,
+        };
       }
 
       // Финальная нормализация: чистим владельца и режимы рекурсивно

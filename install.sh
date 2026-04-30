@@ -152,23 +152,73 @@ systemctl enable --now mariadb     >> "$LOG_FILE" 2>&1 || \
 systemctl enable --now postgresql  >> "$LOG_FILE" 2>&1 || true
 
 # -----------------------------------------------------------------------------
-# PHP-FPM для встроенного Adminer
+# PHP-FPM: дистровский PHP + ondrej/php PPA для нескольких версий
 # -----------------------------------------------------------------------------
-# Ставим стандартную дистровскую версию (Ubuntu 22.04 → php8.1, Debian 12 →
-# php8.2, Ubuntu 24.04 → php8.3). Adminer'у достаточно openssl, mysqli,
-# pdo-pgsql, mbstring, json (json в core начиная с 8.0).
-log "Installing PHP-FPM for Adminer..."
+# Сайты в панели создаются с выбором phpVersion (8.1 / 8.2 / 8.3 / 8.4).
+# Если на сервере есть только дефолтная дистровская версия — провижининг
+# падает с "spawn php8.X ENOENT" посередине установки CMS. Чтобы у юзера
+# всегда был полный спектр, подключаем ondrej/php PPA и ставим 8.1+8.2+8.3.
+# На Debian используем sury.org как эквивалент.
+log "Adding PHP repository (ondrej/php on Ubuntu, sury.org on Debian)..."
+
+# Определяем дистрибутив.
+DISTRO_ID=$(. /etc/os-release && echo "${ID:-unknown}")
+DISTRO_CODENAME=$(lsb_release -cs 2>/dev/null || echo "")
+
+if [[ "$DISTRO_ID" == "ubuntu" ]]; then
+  if ! grep -rq "ondrej/php" /etc/apt/sources.list.d/ 2>/dev/null; then
+    add-apt-repository -y ppa:ondrej/php >> "$LOG_FILE" 2>&1 || \
+      warn "Не удалось добавить ondrej/php — будет только дистровская версия PHP"
+    apt-get update -qq >> "$LOG_FILE" 2>&1
+  fi
+elif [[ "$DISTRO_ID" == "debian" ]] && [[ -n "$DISTRO_CODENAME" ]]; then
+  if [[ ! -f /etc/apt/sources.list.d/sury-php.list ]]; then
+    install -m 0755 -d /etc/apt/keyrings
+    curl -fsSL https://packages.sury.org/php/apt.gpg \
+      -o /etc/apt/keyrings/sury-php.gpg 2>>"$LOG_FILE" && \
+      chmod a+r /etc/apt/keyrings/sury-php.gpg && \
+      echo "deb [signed-by=/etc/apt/keyrings/sury-php.gpg] https://packages.sury.org/php/ ${DISTRO_CODENAME} main" \
+        > /etc/apt/sources.list.d/sury-php.list && \
+      apt-get update -qq >> "$LOG_FILE" 2>&1 || \
+      warn "Не удалось добавить sury.org — будет только дистровская версия PHP"
+  fi
+fi
+
+# Какие версии ставим: 8.1, 8.2, 8.3 (и 8.4 если есть в репо). Дистровская
+# версия всё равно устанавливается отдельно — её используют системные пакеты
+# (Adminer и т.п.).
+log "Installing PHP-FPM versions (8.1 + 8.2 + 8.3 + system default)..."
+
+# Базовый набор: дистровский PHP (для Adminer и системных нужд).
 apt-get "${APT_OPTS[@]}" install \
   php-cli php-fpm php-mysql php-pgsql php-sqlite3 \
   php-mbstring php-curl php-zip >> "$LOG_FILE" 2>&1
 
-# Определяем актуальный мажор.минор для путей конфигов /etc/php/X.Y/fpm/...
-# Берём первую установленную версию (если их несколько — distro обычно одна).
+# Дополнительные версии для пользовательских сайтов. Каждую обернём в `|| true`,
+# чтобы недоступная версия (например, 8.4 на старом репо) не валила установку.
+for V in 8.1 8.2 8.3 8.4; do
+  if apt-cache show "php${V}-cli" >/dev/null 2>&1; then
+    log "  → installing PHP ${V}..."
+    apt-get "${APT_OPTS[@]}" install \
+      "php${V}-cli" "php${V}-fpm" \
+      "php${V}-mysql" "php${V}-pgsql" "php${V}-sqlite3" \
+      "php${V}-mbstring" "php${V}-curl" "php${V}-zip" \
+      "php${V}-xml" "php${V}-gd" "php${V}-bcmath" "php${V}-intl" \
+      >> "$LOG_FILE" 2>&1 || warn "    PHP ${V} install partial — некоторые модули не доступны"
+  else
+    log "  → PHP ${V} в репо не найден, пропускаю"
+  fi
+done
+
+# Определяем дефолтную дистровскую версию для путей /etc/php/X.Y/fpm/...
+# (используется секцией Adminer ниже). Берём САМУЮ ВЫСОКУЮ установленную,
+# а не первую попавшуюся — это совпадает с системным `php` симлинком.
 PHP_VERSION=$(ls /etc/php 2>/dev/null | grep -E '^[0-9]+\.[0-9]+$' | sort -rV | head -n1)
 if [[ -z "$PHP_VERSION" ]]; then
   error "PHP не установился — проверь $LOG_FILE"
 fi
-log "Using PHP ${PHP_VERSION}"
+log "Default PHP version (для Adminer): ${PHP_VERSION}"
+log "Установленные PHP версии: $(ls /etc/php 2>/dev/null | grep -E '^[0-9]+\.[0-9]+$' | sort -V | tr '\n' ' ')"
 
 # -----------------------------------------------------------------------------
 # Composer — нужен агенту для composer-based установок (MODX 3, Laravel и т.п.).

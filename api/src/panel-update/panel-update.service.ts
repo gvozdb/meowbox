@@ -13,6 +13,7 @@
 
 import { spawn } from 'node:child_process';
 import * as fs from 'node:fs';
+import * as fsp from 'node:fs/promises';
 import * as path from 'node:path';
 
 import {
@@ -21,6 +22,7 @@ import {
   Injectable,
   InternalServerErrorException,
   Logger,
+  OnModuleInit,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 
@@ -72,7 +74,7 @@ export interface UpdateStatusResponse {
 }
 
 @Injectable()
-export class PanelUpdateService {
+export class PanelUpdateService implements OnModuleInit {
   private readonly logger = new Logger(PanelUpdateService.name);
   private latestCache: { tag: string | null; checkedAt: number } | null = null;
 
@@ -80,6 +82,54 @@ export class PanelUpdateService {
     private readonly prisma: PrismaService,
     private readonly config: ConfigService,
   ) {}
+
+  /**
+   * При старте API: если в БД висит status=running с живым pid — это значит
+   * мы только что рестартанулись посередине апдейта (pm2 reload во время
+   * стадии reload). Подцепляем watcher на лог-файл, чтобы продолжить
+   * обновлять state и финализировать запись в History.
+   */
+  async onModuleInit(): Promise<void> {
+    try {
+      const state = await this.prisma.panelUpdateState.findUnique({ where: { id: 'current' } });
+      if (!state || state.status !== 'running' || !state.pid) return;
+      if (!this.isProcessAlive(state.pid)) {
+        // Процесс уже мёртв — финализируем сразу как failed (или succeeded
+        // если в логе видим финальную строку OK).
+        const panelDir = this.getPanelDir();
+        const stateDir = process.env.MEOWBOX_STATE_DIR || path.join(panelDir, 'state');
+        const logFilePath = path.join(stateDir, 'logs', 'panel-update.log');
+        let logTail = '';
+        try { logTail = await fsp.readFile(logFilePath, 'utf8'); } catch { /* */ }
+        const ok = /\[update\] ✓ Update OK:/.test(logTail);
+        await this.prisma.panelUpdateState.update({
+          where: { id: 'current' },
+          data: {
+            status: ok ? 'succeeded' : 'failed',
+            finishedAt: new Date(),
+            errorMessage: ok ? null : this.extractErrorFromLog(logTail) || 'update.sh died',
+            logTail: logTail.slice(-16 * 1024),
+          },
+        });
+        this.logger.log(`Resumed update state: ${ok ? 'succeeded' : 'failed'} (pid was dead)`);
+        return;
+      }
+      // Pid жив — переподцепляем watcher.
+      this.logger.log(`Resuming watcher for live update (pid=${state.pid})`);
+      const panelDir = this.getPanelDir();
+      const stateDir = process.env.MEOWBOX_STATE_DIR || path.join(panelDir, 'state');
+      const logFilePath = path.join(stateDir, 'logs', 'panel-update.log');
+      this.attachLogWatcher(
+        logFilePath,
+        state.fromVersion ?? 'unknown',
+        state.toVersion ?? 'unknown',
+        state.pid ? `resumed:pid=${state.pid}` : 'resumed',
+        state.pid,
+      );
+    } catch (e) {
+      this.logger.warn(`onModuleInit: ${(e as Error).message}`);
+    }
+  }
 
   // ---------------------------------------------------------------------------
   // STATUS
@@ -217,16 +267,44 @@ export class PanelUpdateService {
       },
     });
 
+    // Логи update.sh пишем в файл (НЕ в pipe), потому что update.sh сам делает
+    // pm2 reload meowbox-api → текущий API-процесс умирает → pipe рвётся → SIGPIPE
+    // убивает update.sh посередине стадии reload. Файл переживает reload.
+    // Новый API-инстанс после рестарта читает state из БД и tail-ит лог-файл.
+    const stateDir = process.env.MEOWBOX_STATE_DIR || path.join(panelDir, 'state');
+    const logsDir = path.join(stateDir, 'logs');
+    await fsp.mkdir(logsDir, { recursive: true }).catch(() => {});
+    const logFilePath = path.join(logsDir, 'panel-update.log');
+    // Очищаем предыдущий лог: один лог = один update.
+    await fsp.writeFile(logFilePath, '', 'utf8').catch(() => {});
+
+    await this.prisma.panelUpdateState.update({
+      where: { id: 'current' },
+      data: { logTail: '' },
+    });
+
+    const logFd = fs.openSync(logFilePath, 'a');
+
     const args: string[] = [updateScript];
     if (targetVersion) args.push(targetVersion);
     args.push(`--triggered-by=user:${userId}`);
 
     const child = spawn('bash', args, {
       cwd: panelDir,
-      env: { ...process.env, MEOWBOX_TRIGGERED_BY: `user:${userId}` },
-      stdio: ['ignore', 'pipe', 'pipe'],
+      env: {
+        ...process.env,
+        MEOWBOX_TRIGGERED_BY: `user:${userId}`,
+        MEOWBOX_UPDATE_LOG: logFilePath,
+      },
+      // КРИТИЧНО: stdin=ignore, stdout/stderr → файл (не pipe).
+      // Когда API рестартанётся в стадии reload, child уже отвязан от pipes
+      // и продолжит писать в файл. Без этого — SIGPIPE → exit посередине.
+      stdio: ['ignore', logFd, logFd],
       detached: true,
     });
+
+    // fd закрываем в parent — child сохранил свою копию.
+    fs.closeSync(logFd);
 
     if (!child.pid) {
       throw new InternalServerErrorException('spawn failed');
@@ -237,9 +315,12 @@ export class PanelUpdateService {
       data: { pid: child.pid },
     });
 
-    this.attachStreams(child, fromVersion, toVersion, userId);
+    // Watcher логов: файл-based, поэтому переживает reload API.
+    // Новый API-инстанс при getStatus() видит state.status=running и
+    // продолжает читать тот же файл с offset=0 (хвост уже в БД через flushDb).
+    this.attachLogWatcher(logFilePath, fromVersion, toVersion, userId, child.pid);
 
-    // detached + unref → процесс выживает рестарт API (если в ходе update случится pm2 reload).
+    // detached + unref → процесс полностью отвязан от родителя.
     child.unref();
 
     this.logger.log(`Update started: pid=${child.pid}, ${fromVersion} → ${toVersion}, by user ${userId}`);
@@ -250,57 +331,72 @@ export class PanelUpdateService {
   // INTERNALS
   // ---------------------------------------------------------------------------
 
-  private attachStreams(
-    child: ReturnType<typeof spawn>,
+  /**
+   * Файл-based watcher логов update.sh.
+   *
+   * Через polling каждые 500ms читает хвост файла, обновляет logTail и
+   * currentStage в БД. Когда update.sh завершается (по pid-проверке),
+   * пишет финальный статус и запись в History.
+   *
+   * Преимущество перед pipe-watcher: переживает pm2 reload meowbox-api,
+   * потому что файл существует независимо от процессов API.
+   */
+  private attachLogWatcher(
+    logFilePath: string,
     fromVersion: string,
     toVersion: string,
     userId: string,
+    pid: number,
   ): void {
     const startedAt = new Date();
     let logTail = '';
     let currentStage: string | null = 'preflight';
+    let offset = 0;
+    let finished = false;
 
-    const flushDb = (() => {
-      let pending: NodeJS.Timeout | null = null;
-      let dirty = false;
-      return () => {
-        dirty = true;
-        if (pending) return;
-        pending = setTimeout(async () => {
-          pending = null;
-          if (!dirty) return;
-          dirty = false;
-          try {
-            await this.prisma.panelUpdateState.update({
-              where: { id: 'current' },
-              data: { logTail: logTail.slice(-16 * 1024), currentStage },
-            });
-          } catch (e) {
-            this.logger.warn(`flushDb: ${(e as Error).message}`);
-          }
-        }, 500);
-      };
-    })();
-
-    const onChunk = (buf: Buffer) => {
-      const text = buf.toString('utf8');
-      logTail += text;
-      // Парсим [stage:NAME] из любой строки чанка
-      for (const line of text.split('\n')) {
-        const m = line.match(/^\[stage:([a-z_-]+)\]/);
-        if (m) currentStage = m[1];
+    const flushDb = async () => {
+      try {
+        await this.prisma.panelUpdateState.update({
+          where: { id: 'current' },
+          data: { logTail: logTail.slice(-16 * 1024), currentStage },
+        });
+      } catch (e) {
+        this.logger.warn(`flushDb: ${(e as Error).message}`);
       }
-      flushDb();
     };
 
-    child.stdout?.on('data', onChunk);
-    child.stderr?.on('data', onChunk);
+    const readNew = async (): Promise<void> => {
+      try {
+        const stat = await fsp.stat(logFilePath);
+        if (stat.size <= offset) return;
+        const fd = await fsp.open(logFilePath, 'r');
+        try {
+          const len = stat.size - offset;
+          const buf = Buffer.alloc(len);
+          await fd.read(buf, 0, len, offset);
+          offset = stat.size;
+          const text = buf.toString('utf8');
+          logTail += text;
+          for (const line of text.split('\n')) {
+            const m = line.match(/^\[stage:([a-z_-]+)\]/);
+            if (m) currentStage = m[1];
+          }
+        } finally {
+          await fd.close();
+        }
+      } catch {
+        /* файл может быть ещё не создан — следующий тик подхватит */
+      }
+    };
 
-    child.on('exit', async (code) => {
+    const finalize = async (status: 'succeeded' | 'failed') => {
+      if (finished) return;
+      finished = true;
       const finishedAt = new Date();
-      const status = code === 0 ? 'succeeded' : 'failed';
       const durationMs = finishedAt.getTime() - startedAt.getTime();
-
+      // Дочитываем хвост — pm2 reload может оставить последние строки
+      // не вычитанными (interval ещё не сработал).
+      await readNew();
       try {
         await this.prisma.panelUpdateState.update({
           where: { id: 'current' },
@@ -308,7 +404,7 @@ export class PanelUpdateService {
             status,
             finishedAt,
             currentStage: status === 'succeeded' ? null : currentStage,
-            errorMessage: status === 'failed' ? `Exit code ${code}` : null,
+            errorMessage: status === 'failed' ? this.extractErrorFromLog(logTail) : null,
             logTail: logTail.slice(-16 * 1024),
           },
         });
@@ -322,14 +418,62 @@ export class PanelUpdateService {
             finishedAt,
             durationMs,
             triggeredBy: `user:${userId}`,
-            errorMessage: status === 'failed' ? `Exit code ${code}` : null,
+            errorMessage: status === 'failed' ? this.extractErrorFromLog(logTail) : null,
           },
         });
       } catch (e) {
-        this.logger.error(`exit handler: ${(e as Error).message}`);
+        this.logger.error(`finalize: ${(e as Error).message}`);
       }
-      this.logger.log(`Update finished: ${status} (code=${code}, ${durationMs}ms)`);
-    });
+      this.logger.log(`Update finished: ${status} (${durationMs}ms)`);
+    };
+
+    const tick = async () => {
+      if (finished) return;
+      await readNew();
+      const alive = this.isProcessAlive(pid);
+      if (!alive) {
+        // Процесс умер. Определяем успех по хвосту лога:
+        //   - финальная строка update.sh: "[update] ✓ Update OK: vX → vY"
+        //   - или sentinel-файл (см. ниже)
+        const ok = /\[update\] ✓ Update OK:/.test(logTail);
+        await flushDb();
+        await finalize(ok ? 'succeeded' : 'failed');
+        return;
+      }
+      await flushDb();
+    };
+
+    // Первый тик быстро (через 500ms), дальше каждые 1500ms.
+    setTimeout(() => {
+      tick();
+      const interval = setInterval(async () => {
+        if (finished) {
+          clearInterval(interval);
+          return;
+        }
+        await tick();
+      }, 1500);
+      // Hard timeout: 30 минут. После — считаем зависшим.
+      setTimeout(async () => {
+        if (!finished) {
+          clearInterval(interval);
+          this.logger.warn(`Update watcher timeout (pid=${pid}) — finalize as failed`);
+          currentStage = currentStage || 'unknown';
+          await finalize('failed');
+        }
+      }, 30 * 60 * 1000).unref();
+    }, 500).unref();
+  }
+
+  /**
+   * Из последних строк лога update.sh достаём первую "✗"-строку (err) или
+   * последние ~500 символов как fallback.
+   */
+  private extractErrorFromLog(logTail: string): string {
+    const lines = logTail.split('\n').filter(Boolean);
+    const errLine = [...lines].reverse().find((l) => /^\[update\] ✗/.test(l));
+    if (errLine) return errLine.replace(/^\[update\] ✗\s*/, '').slice(0, 500);
+    return logTail.slice(-500);
   }
 
   private isProcessAlive(pid: number): boolean {

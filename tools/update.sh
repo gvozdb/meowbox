@@ -150,29 +150,56 @@ trap 'rm -rf "$TMP_DIR"; rm -f "$LOCK_FILE"' EXIT
 TARBALL="$TMP_DIR/meowbox-$TARGET.tar.gz"
 SUMS="$TMP_DIR/SHA256SUMS"
 
-# Для приватных репо используем `gh release download` (он умеет авторизоваться через GITHUB_TOKEN/gh auth).
-# Для публичных fall-back на curl.
-if command -v gh >/dev/null 2>&1; then
+# Стратегия:
+#   1) Сначала пытаемся curl — для публичных релизов это всегда работает,
+#      не требует gh auth и не зависит от ключа в state.
+#   2) Если curl упал (приватный репо / 404 / network) — пробуем gh, но только
+#      если он установлен И аутентифицирован (`gh auth status` = 0). Иначе
+#      проброс понятной ошибки, без бесполезного "gh release download упал".
+download_release_via_curl() {
+  local auth_hdr=()
+  [[ -n "${GITHUB_TOKEN:-}" ]] && auth_hdr=(-H "Authorization: Bearer $GITHUB_TOKEN")
+  # NB: НЕ слать Accept: application/octet-stream сюда — GitHub отвечает 415.
+  local http_code
+  http_code="$(curl -sIL -o /dev/null -w '%{http_code}' "${auth_hdr[@]}" \
+    -H "Accept: application/vnd.github+json" \
+    "https://api.github.com/repos/$GITHUB_REPO/releases/tags/$TARGET" 2>/dev/null || echo 000)"
+  if [[ "$http_code" != "200" ]]; then
+    return 1
+  fi
+  curl -sfL "${auth_hdr[@]}" \
+    "https://github.com/$GITHUB_REPO/releases/download/$TARGET/meowbox-$TARGET.tar.gz" \
+    -o "$TARBALL" 2>/dev/null || return 2
+  curl -sfL "${auth_hdr[@]}" \
+    "https://github.com/$GITHUB_REPO/releases/download/$TARGET/SHA256SUMS" \
+    -o "$SUMS" 2>/dev/null || return 3
+  return 0
+}
+
+download_release_via_gh() {
+  command -v gh >/dev/null 2>&1 || return 10
+  gh auth status >/dev/null 2>&1 || return 11
   (cd "$TMP_DIR" && gh release download "$TARGET" --repo "$GITHUB_REPO" \
     --pattern "meowbox-$TARGET.tar.gz" --pattern "SHA256SUMS" --skip-existing) \
-    || abort "gh release download $TARGET упал"
+    >/dev/null 2>&1 || return 12
+  return 0
+}
+
+if download_release_via_curl; then
+  say "✓ tarball скачан через curl"
+elif download_release_via_gh; then
+  say "✓ tarball скачан через gh CLI"
 else
-  AUTH_HDR=()
-  [[ -n "${GITHUB_TOKEN:-}" ]] && AUTH_HDR=(-H "Authorization: Bearer $GITHUB_TOKEN")
-  # Existence-probe: HEAD на metadata-эндпоинт с правильным Accept.
-  # NB: НЕ слать Accept: application/octet-stream сюда — GitHub отвечает 415.
-  http_code="$(curl -sIL -o /dev/null -w '%{http_code}' "${AUTH_HDR[@]}" \
-    -H "Accept: application/vnd.github+json" \
-    "https://api.github.com/repos/$GITHUB_REPO/releases/tags/$TARGET" || echo 000)"
-  if [[ "$http_code" != "200" ]]; then
-    abort "Релиз $TARGET не найден на GitHub (HTTP $http_code, repo=$GITHUB_REPO)"
+  rc_curl=$?
+  # Подробная диагностика: что именно не сработало.
+  msg="Не удалось скачать релиз $TARGET (repo=$GITHUB_REPO)."
+  if ! command -v gh >/dev/null 2>&1; then
+    msg="$msg gh CLI не установлен."
+  elif ! gh auth status >/dev/null 2>&1; then
+    msg="$msg gh CLI установлен, но не аутентифицирован (gh auth login)."
   fi
-  curl -sfL "${AUTH_HDR[@]}" \
-    "https://github.com/$GITHUB_REPO/releases/download/$TARGET/meowbox-$TARGET.tar.gz" \
-    -o "$TARBALL" || abort "Не удалось скачать tarball (для приватных репо нужен gh CLI или GITHUB_TOKEN)"
-  curl -sfL "${AUTH_HDR[@]}" \
-    "https://github.com/$GITHUB_REPO/releases/download/$TARGET/SHA256SUMS" \
-    -o "$SUMS" || abort "Не удалось скачать SHA256SUMS"
+  msg="$msg Если репо приватный — экспортируй GITHUB_TOKEN или авторизуй gh."
+  abort "$msg"
 fi
 
 # ----- 3. Verify -----

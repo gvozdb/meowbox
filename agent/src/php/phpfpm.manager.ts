@@ -200,12 +200,22 @@ export class PhpFpmManager {
 
       if (result.exitCode !== 0) {
         const errMsg = result.stderr || '';
-        // If php-fpm service doesn't exist — pool config is saved, skip restart
-        if (errMsg.includes('not found') || errMsg.includes('No such file') || errMsg.includes('could not be found')) {
-          return { success: true };
-        }
-        // Rollback
+        // Rollback poolFile — нельзя оставлять дохлый конфиг.
         await fs.unlink(poolFile).catch(() => {});
+        // Особый случай: сервис php{V}-fpm не установлен на системе. Раньше
+        // здесь silently возвращался success — это приводило к "успешному"
+        // созданию сайта с несуществующим upstream (запросы 502 forever).
+        // Теперь явная ошибка с подсказкой.
+        if (
+          errMsg.includes('not found') ||
+          errMsg.includes('No such file') ||
+          errMsg.includes('could not be found')
+        ) {
+          return {
+            success: false,
+            error: `php${phpVersion}-fpm не установлен на сервере. Установи: apt install php${phpVersion}-fpm php${phpVersion}-cli (на Ubuntu/Debian подключи ondrej/php PPA или sury.org), либо выбери другую версию PHP при создании сайта.`,
+          };
+        }
         return { success: false, error: errMsg };
       }
 
