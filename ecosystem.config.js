@@ -19,7 +19,25 @@ const fs = require('fs');
 const path = require('path');
 
 // --- 1) Резолвим источник кода: current/ или legacy /opt/meowbox/ ---
-const PANEL_DIR = __dirname;
+//
+// Файл может загружаться из двух мест:
+//  (a) /opt/meowbox/ecosystem.config.js (legacy или симлинк → current/...)
+//      → __dirname после Node-резолва симлинков становится
+//        /opt/meowbox/releases/<v>/, что НЕ panel root.
+//  (b) /opt/meowbox/ecosystem.config.js напрямую как файл (legacy git-checkout)
+//      → __dirname = /opt/meowbox/.
+//
+// Эвристика: если __dirname лежит внутри releases/<v>/, walk up на 2 уровня
+// и получаем настоящий panel root (там должны быть releases/ и state/).
+function resolvePanelDir() {
+  const dir = __dirname;
+  const parent = path.dirname(dir);
+  if (path.basename(parent) === 'releases') {
+    return path.dirname(parent);
+  }
+  return dir;
+}
+const PANEL_DIR = process.env.MEOWBOX_PANEL_DIR_OVERRIDE || resolvePanelDir();
 const CURRENT_LINK = path.join(PANEL_DIR, 'current');
 const HAS_CURRENT = (() => {
   try {

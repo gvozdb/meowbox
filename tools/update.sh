@@ -84,8 +84,12 @@ if [[ ! -L "$PANEL_DIR/current" ]] && \
    [[ -f "$PANEL_DIR/VERSION" ]]; then
   stage migrate-legacy "Detected legacy layout — конвертирую в release"
   bash "$SCRIPT_DIR/migrate-legacy-to-release.sh" || abort "migrate-legacy-to-release.sh упал"
-  # После миграции SCRIPT_DIR может стать симлинком — пересчитаем.
-  SCRIPT_DIR="$(cd "$PANEL_DIR/tools" && pwd -P)"
+  # После миграции $PANEL_DIR/tools стал симлинком → current/tools. Дальше
+  # все подскрипты вызываются через $SCRIPT_DIR, который остаётся логическим
+  # путём ($PANEL_DIR/tools). НЕ резолвим pwd -P — иначе snapshot.sh и прочие
+  # пойдут от physical-пути releases/<v>/, а не от /opt/meowbox/, и сложат
+  # данные в /opt/meowbox/releases/<v>/state/, что бесполезно.
+  SCRIPT_DIR="$PANEL_DIR/tools"
   RELEASES_DIR="$PANEL_DIR/releases"
 fi
 
@@ -190,8 +194,25 @@ if [[ -d "$RELEASE_DIR" ]]; then
   rm -rf "$RELEASE_DIR"
 fi
 mkdir -p "$RELEASE_DIR"
-tar -xzf "$TARBALL" -C "$RELEASES_DIR" --strip-components=1 -C "$RELEASE_DIR" 2>/dev/null \
-  || tar -xzf "$TARBALL" -C "$TMP_DIR" && cp -r "$TMP_DIR/meowbox/." "$RELEASE_DIR/"
+# Тарболл собирается в CI как `meowbox/...` на верхнем уровне (см. release.yml).
+# Разворачиваем напрямую в RELEASE_DIR со --strip-components=1, чтобы убрать
+# верхний `meowbox/`. Если по какой-то причине формат другой — fallback через
+# временный каталог + cp.
+if ! tar -xzf "$TARBALL" -C "$RELEASE_DIR" --strip-components=1; then
+  err "tar --strip-components=1 не сработал, пробую fallback через TMP_DIR"
+  rm -rf "$RELEASE_DIR"
+  mkdir -p "$RELEASE_DIR"
+  tar -xzf "$TARBALL" -C "$TMP_DIR" || abort "Не удалось распаковать tarball"
+  if [[ -d "$TMP_DIR/meowbox" ]]; then
+    cp -a "$TMP_DIR/meowbox/." "$RELEASE_DIR/"
+  else
+    abort "В tarball нет ожидаемой папки meowbox/ — релиз повреждён"
+  fi
+fi
+# Sanity check: должны быть основные пакеты после распаковки.
+for required in api/dist/main.js shared/dist/index.js VERSION; do
+  [[ -e "$RELEASE_DIR/$required" ]] || abort "После распаковки нет $required — релиз повреждён"
+done
 
 # Симлинки на shared state
 ln -sfn "$STATE_DIR/data" "$RELEASE_DIR/data" 2>/dev/null || true
