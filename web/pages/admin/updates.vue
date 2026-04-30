@@ -93,10 +93,22 @@
           }"
         >
           <span class="stage__icon">
-            <span v-if="isStageDone(stage)">✓</span>
-            <span v-else-if="isStageFailed(stage)">✗</span>
+            <!-- done: галочка в кружке -->
+            <svg v-if="isStageDone(stage)" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <circle cx="12" cy="12" r="10" />
+              <path d="M8 12.5l2.5 2.5L16 9.5" />
+            </svg>
+            <!-- failed: крестик в кружке -->
+            <svg v-else-if="isStageFailed(stage)" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <circle cx="12" cy="12" r="10" />
+              <path d="M9 9l6 6M15 9l-6 6" />
+            </svg>
+            <!-- current: спиннер -->
             <span v-else-if="isStageCurrent(stage)" class="spinner spinner--sm" />
-            <span v-else>·</span>
+            <!-- pending: пустой кружок -->
+            <svg v-else width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+              <circle cx="12" cy="12" r="9" stroke-dasharray="2 3" opacity="0.55" />
+            </svg>
           </span>
           <span class="stage__name">{{ stageLabel(stage) }}</span>
         </div>
@@ -505,8 +517,9 @@ onBeforeUnmount(() => stopPolling());
   justify-content: center;
   width: 18px;
   height: 18px;
-  font-size: 0.85rem;
+  flex-shrink: 0;
 }
+.stage__icon > svg { display: block; }
 
 /* ─── History ─── */
 .panel-updates__history {

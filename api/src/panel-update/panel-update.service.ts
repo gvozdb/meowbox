@@ -94,14 +94,19 @@ export class PanelUpdateService implements OnModuleInit {
       const state = await this.prisma.panelUpdateState.findUnique({ where: { id: 'current' } });
       if (!state || state.status !== 'running' || !state.pid) return;
       if (!this.isProcessAlive(state.pid)) {
-        // Процесс уже мёртв — финализируем сразу как failed (или succeeded
-        // если в логе видим финальную строку OK).
+        // Процесс уже мёртв — финализируем сразу. Успех определяем
+        // по наличию sentinel-файла state/.update-success (его пишет
+        // update.sh строкой после "Update OK"). Это надёжнее regex по
+        // логу, потому что лог может быть обрывистый (pm2 reload race).
         const panelDir = this.getPanelDir();
         const stateDir = process.env.MEOWBOX_STATE_DIR || path.join(panelDir, 'state');
         const logFilePath = path.join(stateDir, 'logs', 'panel-update.log');
+        const sentinelPath = path.join(stateDir, '.update-success');
         let logTail = '';
         try { logTail = await fsp.readFile(logFilePath, 'utf8'); } catch { /* */ }
-        const ok = /\[update\] ✓ Update OK:/.test(logTail);
+        const okBySentinel = await this.fileExists(sentinelPath);
+        const okByLog = /\[update\] ✓ Update OK:/.test(logTail);
+        const ok = okBySentinel || okByLog;
         await this.prisma.panelUpdateState.update({
           where: { id: 'current' },
           data: {
@@ -111,7 +116,10 @@ export class PanelUpdateService implements OnModuleInit {
             logTail: logTail.slice(-16 * 1024),
           },
         });
-        this.logger.log(`Resumed update state: ${ok ? 'succeeded' : 'failed'} (pid was dead)`);
+        if (ok) {
+          await fsp.unlink(sentinelPath).catch(() => {});
+        }
+        this.logger.log(`Resumed update state: ${ok ? 'succeeded' : 'failed'} (pid was dead, sentinel=${okBySentinel})`);
         return;
       }
       // Pid жив — переподцепляем watcher.
@@ -277,6 +285,9 @@ export class PanelUpdateService implements OnModuleInit {
     const logFilePath = path.join(logsDir, 'panel-update.log');
     // Очищаем предыдущий лог: один лог = один update.
     await fsp.writeFile(logFilePath, '', 'utf8').catch(() => {});
+    // И sentinel-файл от прошлого успешного апдейта — чтобы новый запуск
+    // не финализировался ложным "succeeded" из-за старого .update-success.
+    await fsp.unlink(path.join(stateDir, '.update-success')).catch(() => {});
 
     await this.prisma.panelUpdateState.update({
       where: { id: 'current' },
@@ -427,17 +438,26 @@ export class PanelUpdateService implements OnModuleInit {
       this.logger.log(`Update finished: ${status} (${durationMs}ms)`);
     };
 
+    const panelDir = this.getPanelDir();
+    const stateDir = process.env.MEOWBOX_STATE_DIR || path.join(panelDir, 'state');
+    const sentinelPath = path.join(stateDir, '.update-success');
+
     const tick = async () => {
       if (finished) return;
       await readNew();
       const alive = this.isProcessAlive(pid);
       if (!alive) {
-        // Процесс умер. Определяем успех по хвосту лога:
-        //   - финальная строка update.sh: "[update] ✓ Update OK: vX → vY"
-        //   - или sentinel-файл (см. ниже)
-        const ok = /\[update\] ✓ Update OK:/.test(logTail);
+        // Процесс умер. Успех определяем по sentinel-файлу
+        // (update.sh пишет его строкой после "Update OK") — fallback
+        // на regex по логу, на случай старых релизов без sentinel'а.
+        const okBySentinel = await this.fileExists(sentinelPath);
+        const okByLog = /\[update\] ✓ Update OK:/.test(logTail);
+        const ok = okBySentinel || okByLog;
         await flushDb();
         await finalize(ok ? 'succeeded' : 'failed');
+        if (ok) {
+          await fsp.unlink(sentinelPath).catch(() => {});
+        }
         return;
       }
       await flushDb();
@@ -479,6 +499,15 @@ export class PanelUpdateService implements OnModuleInit {
   private isProcessAlive(pid: number): boolean {
     try {
       process.kill(pid, 0);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  private async fileExists(p: string): Promise<boolean> {
+    try {
+      await fsp.access(p);
       return true;
     } catch {
       return false;

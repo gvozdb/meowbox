@@ -337,7 +337,29 @@ ln -sfn "$RELEASE_DIR" "$PANEL_DIR/current"
 
 # ----- 8. Reload PM2 -----
 stage reload "PM2 reload"
-pm2 reload "$PANEL_DIR/ecosystem.config.js" --update-env
+# pm2 reload иногда возвращает non-zero (race с graceful shutdown, симлинк current
+# обновился — старый CWD исчез), при этом фактически процессы уже online. С
+# `set -e` это убивало update.sh ровно перед healthcheck'ом → API resume видел
+# обрывистый лог без "Update OK" и помечал успешный апдейт как failed.
+# Решение: pm2 reload через `|| true`, потом верифицируем `pm2 jlist`.
+pm2 reload "$PANEL_DIR/ecosystem.config.js" --update-env || say "pm2 reload вернул non-zero (проверим jlist)"
+sleep 2
+
+# Верификация: все три процесса должны быть online. Если нет — abort.
+PM2_JSON="$(pm2 jlist 2>/dev/null || echo '[]')"
+RELOAD_FAIL=0
+for P in meowbox-api meowbox-agent meowbox-web; do
+  ST="$(echo "$PM2_JSON" | python3 -c "import sys,json; d=json.load(sys.stdin); print(next((p['pm2_env']['status'] for p in d if p['name']=='$P'), 'missing'))" 2>/dev/null || echo "?")"
+  if [[ "$ST" != "online" ]]; then
+    err "PM2 reload: $P в статусе '$ST' (ожидался 'online')"
+    RELOAD_FAIL=1
+  else
+    say "  $P online"
+  fi
+done
+if [[ $RELOAD_FAIL -eq 1 ]]; then
+  abort "PM2 reload failed — один или несколько процессов не online"
+fi
 
 # ----- 9. Healthcheck -----
 stage healthcheck "Проверка работоспособности"
@@ -345,7 +367,7 @@ if ! bash "$SCRIPT_DIR/healthcheck.sh"; then
   err "Healthcheck failed — откатываюсь"
   if [[ -n "$PREV_TARGET" ]]; then
     ln -sfn "$PREV_TARGET" "$PANEL_DIR/current"
-    pm2 reload "$PANEL_DIR/ecosystem.config.js" --update-env
+    pm2 reload "$PANEL_DIR/ecosystem.config.js" --update-env || true
     sleep 5
     bash "$SCRIPT_DIR/healthcheck.sh" || err "Откат тоже не помог!"
     abort "Update FAILED, откат на $(basename "$PREV_TARGET")"
@@ -361,4 +383,8 @@ ls -1t "$RELEASES_DIR" 2>/dev/null | tail -n +$((KEEP_RELEASES + 1)) | while rea
   say "  removed: $old"
 done
 
+# Sentinel-файл успеха: API resume опирается на его наличие, а не на regex
+# по логу. Лог может оборваться (pm2 reload пришиб stdout buffer) — а файл
+# атомарный и переживает любой race.
 say "✓ Update OK: $CURRENT_VERSION → $TARGET"
+echo "$TARGET" > "$STATE_DIR/.update-success" 2>/dev/null || true

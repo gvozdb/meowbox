@@ -625,6 +625,25 @@ const dbEngineOptions = computed<DbEngineOption[]>(() => {
   return installed;
 });
 
+// Авто-выбор первого доступного движка, когда:
+//   а) пользователь включает галочку «база данных»;
+//   б) список движков обновился (загрузились /services или сменился form.type).
+// Юзеру было неудобно: галочка стоит, а селект «не выбран» — приходится
+// вручную тыкать единственный пункт. Если выбранный движок исчез из
+// доступных — тоже сбрасываем на первый из списка.
+watch(
+  () => [form.dbEnabled, dbEngineOptions.value] as const,
+  ([enabled, opts]) => {
+    if (!enabled) return;
+    if (opts.length === 0) return;
+    const validValues = opts.map((o) => o.value);
+    if (!form.dbType || !validValues.includes(form.dbType as 'MARIADB' | 'POSTGRESQL')) {
+      form.dbType = opts[0].value;
+    }
+  },
+  { immediate: true, deep: false },
+);
+
 /**
  * Можно ли отправить форму. Бэкенд тоже валидирует, но лучше дать
  * пользователю понятный заранее блок, чтобы не создавать сайт-инвалид.
