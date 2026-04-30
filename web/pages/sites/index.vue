@@ -318,7 +318,10 @@ onMounted(async () => {
 }
 
 .sites-page__empty-text {
-  color: var(--bg-elevated);
+  /* Раньше тут стоял --bg-elevated — это переменная фона, а не текста.
+     На светлой теме фон белый → текст белый на белом, на тёмной фон тёмный →
+     текст тёмный на тёмном. Используем --text-muted, она инвертируется правильно. */
+  color: var(--text-muted);
   font-size: 0.9rem;
   margin-top: 1rem;
 }
