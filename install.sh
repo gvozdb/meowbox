@@ -262,19 +262,22 @@ fi
 
 if [[ ! -f "${ENV_FILE}" ]]; then
   log "Creating configuration at ${ENV_FILE}..."
-  # Путь к SQLite-файлу зависит от раскладки:
-  #   release: state/data/meowbox.db (cwd api → ../.env → DATABASE_URL=file:../../state/data/...)
-  #   legacy:  data/meowbox.db
+  # КРИТИЧНО: DATABASE_URL должен быть АБСОЛЮТНЫМ.
+  # Prisma резолвит относительный путь от schema.prisma (api/prisma/), а в
+  # release-раскладке api/prisma/ живёт внутри releases/<v>/, и относительный
+  # `../../state/data/...` уезжает в releases/<v>/state/data/ вместо общего
+  # /opt/meowbox/state/data/. Это ломает persistence между релизами.
   if [[ "$RELEASE_MODE" == "release" ]]; then
-    DB_URL="file:../../state/data/meowbox.db"
+    DB_URL="file:${STATE_DIR}/data/meowbox.db"
   else
-    DB_URL="file:../../data/meowbox.db"
+    DB_URL="file:${MEOWBOX_DIR}/data/meowbox.db"
   fi
   cat > "${ENV_FILE}" << ENV
 # Meowbox Environment — Auto-generated
-# SQLite — единственная БД панели.
-# В release-раскладке файл лежит в state/data/, в legacy — в data/.
-# Путь относительный от api/prisma/.
+# SQLite — единственная БД панели. Путь АБСОЛЮТНЫЙ:
+#   release: /opt/meowbox/state/data/meowbox.db (общий для всех релизов)
+#   legacy:  /opt/meowbox/data/meowbox.db
+# Не делать относительным — Prisma резолвит от api/prisma/ и уедет внутрь release-каталога.
 DATABASE_URL="${DB_URL}"
 
 JWT_ACCESS_SECRET="${JWT_ACCESS_SECRET}"
@@ -335,7 +338,43 @@ else
       echo "PROXY_TOKEN=\"${PROXY_TOKEN}\""
     } >> "${ENV_FILE}"
   fi
+  # Чиним relative DATABASE_URL → absolute (баг до v0.3.8: путь резолвился
+  # внутрь releases/<v>/state/data/ из-за file:../../state/data/...).
+  if grep -qE '^DATABASE_URL="file:\.\.' "${ENV_FILE}"; then
+    if [[ "$RELEASE_MODE" == "release" ]]; then
+      NEW_DB_URL="file:${STATE_DIR}/data/meowbox.db"
+    else
+      NEW_DB_URL="file:${MEOWBOX_DIR}/data/meowbox.db"
+    fi
+    log "DATABASE_URL был относительным — переписываю в абсолютный (${NEW_DB_URL})"
+    sed -i "s|^DATABASE_URL=.*|DATABASE_URL=\"${NEW_DB_URL}\"|" "${ENV_FILE}"
+  fi
   chmod 600 "${ENV_FILE}"
+fi
+
+# Перенос БД, если она оказалась внутри release-каталога (баг до v0.3.8).
+# Сценарий: install.sh положил БД в releases/<v>/state/data/meowbox.db из-за
+# относительного DATABASE_URL. Переносим в общий /opt/meowbox/state/data/.
+if [[ "$RELEASE_MODE" == "release" ]]; then
+  ORPHAN_DB="${CODE_DIR}/state/data/meowbox.db"
+  TARGET_DB="${STATE_DIR}/data/meowbox.db"
+  if [[ -f "$ORPHAN_DB" ]] && [[ ! -f "$TARGET_DB" ]]; then
+    log "БД найдена внутри release (${ORPHAN_DB}) — переношу в ${TARGET_DB}"
+    mv "$ORPHAN_DB" "$TARGET_DB"
+    # Также журнал/wal если есть
+    [[ -f "${ORPHAN_DB}-journal" ]] && mv "${ORPHAN_DB}-journal" "${TARGET_DB}-journal"
+    [[ -f "${ORPHAN_DB}-wal" ]] && mv "${ORPHAN_DB}-wal" "${TARGET_DB}-wal"
+    [[ -f "${ORPHAN_DB}-shm" ]] && mv "${ORPHAN_DB}-shm" "${TARGET_DB}-shm"
+    chmod 600 "$TARGET_DB"
+  elif [[ -f "$ORPHAN_DB" ]] && [[ -f "$TARGET_DB" ]]; then
+    warn "Конфликт: БД и в ${ORPHAN_DB}, и в ${TARGET_DB}. Оставляю ${TARGET_DB} как канон, удаляю orphan."
+    rm -f "$ORPHAN_DB" "${ORPHAN_DB}-journal" "${ORPHAN_DB}-wal" "${ORPHAN_DB}-shm"
+  fi
+  # Удаляем мусорный releases/<v>/state/ (если пустой после переноса)
+  if [[ -d "${CODE_DIR}/state" ]]; then
+    rmdir "${CODE_DIR}/state/data" 2>/dev/null || true
+    rmdir "${CODE_DIR}/state" 2>/dev/null || true
+  fi
 fi
 
 # В release-режиме .env живёт в state/.env, а api ожидает его рядом с собой
@@ -344,8 +383,8 @@ if [[ "$RELEASE_MODE" == "release" ]]; then
   if [[ ! -L "${CODE_DIR}/.env" ]] || [[ "$(readlink "${CODE_DIR}/.env")" != "${ENV_FILE}" ]]; then
     ln -sfn "${ENV_FILE}" "${CODE_DIR}/.env"
   fi
-  # data/ → state/data/ симлинк (api/prisma DATABASE_URL=file:../../state/data/...
-  # формально не требует симлинка, но он удобен для дампов и ad-hoc sqlite3 запросов)
+  # data/ → state/data/ симлинк (DATABASE_URL уже абсолютный, симлинк только
+  # для удобства дампов и ad-hoc sqlite3 запросов из release-каталога).
   if [[ ! -e "${CODE_DIR}/data" ]]; then
     ln -sfn "${STATE_DIR}/data" "${CODE_DIR}/data"
   fi

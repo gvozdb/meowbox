@@ -19,7 +19,7 @@
 #   9. Корневые симлинки: ecosystem.config.js, Makefile, tools, VERSION → current/...
 #  10. Чистит legacy-каталоги в корне (api/, agent/, web/, shared/, migrations/).
 #  11. pm2 reload ecosystem.config.js (через симлинк → current/...).
-#  12. Обновляет DATABASE_URL в state/.env (file:../../state/data/meowbox.db).
+#  12. Обновляет DATABASE_URL в state/.env на абсолютный file:/opt/meowbox/state/data/meowbox.db.
 #
 # Идемпотентность: проверяет каждый шаг через `if [[ -e ... ]]`, безопасно к
 # повторному запуску после падения.
@@ -84,11 +84,14 @@ if [[ -f "$PANEL_DIR/.env" ]] && [[ ! -L "$PANEL_DIR/.env" ]]; then
   fi
 fi
 
-# Обновляем DATABASE_URL в state/.env (legacy: ../../data/, release: ../../state/data/)
+# Обновляем DATABASE_URL в state/.env на АБСОЛЮТНЫЙ путь.
+# Старые установки могли иметь file:../../data/... (legacy) или
+# file:../../state/data/... (release v0.3.7 и раньше — резолвится внутрь
+# releases/<v>/state/, ломает persistence). Оба варианта чиним на абсолют.
 if [[ -f "$STATE_DIR/.env" ]]; then
-  if grep -q '^DATABASE_URL="file:\.\./\.\./data/' "$STATE_DIR/.env"; then
-    log "Обновляю DATABASE_URL → state/data/meowbox.db"
-    sed -i 's#^DATABASE_URL="file:\.\./\.\./data/#DATABASE_URL="file:../../state/data/#' "$STATE_DIR/.env"
+  if grep -qE '^DATABASE_URL="file:\.\.' "$STATE_DIR/.env"; then
+    log "Обновляю DATABASE_URL → file:$STATE_DIR/data/meowbox.db (абсолютный путь)"
+    sed -i "s#^DATABASE_URL=.*#DATABASE_URL=\"file:$STATE_DIR/data/meowbox.db\"#" "$STATE_DIR/.env"
   fi
 fi
 

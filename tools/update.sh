@@ -222,6 +222,37 @@ done
 ln -sfn "$STATE_DIR/data" "$RELEASE_DIR/data" 2>/dev/null || true
 ln -sfn "$STATE_DIR/.env" "$RELEASE_DIR/.env" 2>/dev/null || true
 
+# ----- Heal: relative DATABASE_URL → absolute (баг до v0.3.8) -----
+# До v0.3.8 install.sh писал DATABASE_URL=file:../../state/data/meowbox.db,
+# что Prisma резолвила относительно schema.prisma (api/prisma/), и БД создавалась
+# в releases/<v>/state/data/, а не в общем state/. Чиним и переносим.
+if [[ -f "$STATE_DIR/.env" ]] && grep -qE '^DATABASE_URL="file:\.\.' "$STATE_DIR/.env"; then
+  ABS_DB="file:$STATE_DIR/data/meowbox.db"
+  say "DATABASE_URL был относительным — переписываю на $ABS_DB"
+  sed -i "s|^DATABASE_URL=.*|DATABASE_URL=\"$ABS_DB\"|" "$STATE_DIR/.env"
+fi
+# Перенос orphan БД из releases/*/state/data/ в state/data/, если основной нет.
+if [[ ! -f "$STATE_DIR/data/meowbox.db" ]]; then
+  for orphan_dir in "$RELEASES_DIR"/*/state/data; do
+    if [[ -f "$orphan_dir/meowbox.db" ]]; then
+      say "Найдена orphan БД в $orphan_dir — переношу в $STATE_DIR/data/"
+      mv "$orphan_dir/meowbox.db" "$STATE_DIR/data/meowbox.db"
+      [[ -f "$orphan_dir/meowbox.db-journal" ]] && mv "$orphan_dir/meowbox.db-journal" "$STATE_DIR/data/" || true
+      [[ -f "$orphan_dir/meowbox.db-wal" ]] && mv "$orphan_dir/meowbox.db-wal" "$STATE_DIR/data/" || true
+      [[ -f "$orphan_dir/meowbox.db-shm" ]] && mv "$orphan_dir/meowbox.db-shm" "$STATE_DIR/data/" || true
+      chmod 600 "$STATE_DIR/data/meowbox.db" || true
+      break
+    fi
+  done
+fi
+# Удаляем мусорные releases/*/state/ (если пустые после переноса).
+for orphan_state in "$RELEASES_DIR"/*/state; do
+  if [[ -d "$orphan_state" ]]; then
+    rmdir "$orphan_state/data" 2>/dev/null || true
+    rmdir "$orphan_state" 2>/dev/null || true
+  fi
+done
+
 # ----- 5. Install prod deps -----
 # shared/ и migrations/ — собранные артефакты без runtime-deps (зависимости
 # резолвятся через симлинки), поэтому npm ci там не нужен и упадёт без
