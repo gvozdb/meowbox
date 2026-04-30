@@ -1,26 +1,37 @@
 <template>
   <div class="panel-updates">
-    <header class="panel-updates__header">
-      <div>
+    <!-- Hero block -->
+    <section class="panel-updates__hero" :class="{ 'panel-updates__hero--update': canUpdate, 'panel-updates__hero--ok': status?.latest && status.current === status.latest }">
+      <div class="panel-updates__hero-icon">
+        <svg width="44" height="44" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+          <polyline points="23 4 23 10 17 10" />
+          <polyline points="1 20 1 14 7 14" />
+          <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15" />
+        </svg>
+      </div>
+      <div class="panel-updates__hero-text">
         <h1 class="panel-updates__title">Обновления панели</h1>
         <p class="panel-updates__subtitle">
-          Скачивает релиз с GitHub Releases (<code>{{ githubRepo }}</code>),
-          проверяет SHA256 + attestation, разворачивает в <code>releases/&lt;v&gt;/</code>,
-          применяет миграции, переключает <code>current</code>, делает <code>pm2 reload</code>.
-          При неудаче — автоматический откат на предыдущий релиз.
+          Скачивает релиз с GitHub (<code>{{ githubRepo }}</code>), проверяет SHA256,
+          разворачивает в <code>releases/&lt;v&gt;/</code>, применяет миграции, переключает
+          <code>current</code>, делает <code>pm2 reload</code>. При сбое — автооткат.
         </p>
       </div>
-    </header>
+    </section>
 
     <!-- Версии и кнопка Update -->
     <section class="panel-updates__versions">
       <div class="version-card">
         <span class="version-card__label">Текущая версия</span>
         <span class="version-card__value">{{ status?.current ?? '...' }}</span>
+        <span class="version-card__hint">установлено локально</span>
       </div>
-      <div class="version-card">
+      <div class="version-card" :class="{ 'version-card--has-update': canUpdate }">
         <span class="version-card__label">Доступная версия</span>
-        <span class="version-card__value">{{ status?.latest ?? '—' }}</span>
+        <span class="version-card__value">
+          {{ status?.latest ?? '—' }}
+          <span v-if="canUpdate" class="version-card__pulse" />
+        </span>
         <span v-if="status?.latestCheckedAt" class="version-card__hint">
           проверено: {{ humanTime(status.latestCheckedAt) }}
         </span>
@@ -32,22 +43,34 @@
           @click="onCheckLatest"
         >
           <span v-if="checkingLatest" class="spinner" />
-          {{ checkingLatest ? 'Проверка...' : 'Проверить обновления' }}
+          <svg v-else width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+            <polyline points="23,4 23,10 17,10" /><path d="M20.49,15a9,9,0,1,1-2.12-9.36L23,10" />
+          </svg>
+          {{ checkingLatest ? 'Проверка...' : 'Проверить' }}
         </button>
         <button
           v-if="canUpdate"
-          class="btn btn--primary"
+          class="btn btn--primary btn--accent"
           :disabled="running"
           @click="onTriggerUpdate"
         >
+          <svg v-if="!running" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+            <polyline points="7,10 12,15 17,10" />
+            <line x1="12" y1="15" x2="12" y2="3" />
+          </svg>
+          <span v-else class="spinner" />
           {{ running ? 'Идёт обновление...' : `Обновить до ${status?.latest}` }}
         </button>
         <button
           v-else-if="status?.latest && status.current === status.latest"
-          class="btn btn--ghost"
+          class="btn btn--ok"
           disabled
         >
-          Установлена последняя версия
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+            <polyline points="20,6 9,17 4,12" />
+          </svg>
+          Установлена последняя
         </button>
       </div>
     </section>
@@ -306,12 +329,61 @@ onBeforeUnmount(() => stopPolling());
   gap: 1.5rem;
 }
 
-.panel-updates__header { display: flex; flex-direction: column; gap: 0.5rem; }
+/* ─── Hero ─── */
+.panel-updates__hero {
+  display: flex;
+  align-items: flex-start;
+  gap: 1.1rem;
+  padding: 1.4rem 1.6rem;
+  border-radius: 16px;
+  background:
+    radial-gradient(circle at 0% 0%, rgba(245, 158, 11, 0.08), transparent 50%),
+    var(--bg-surface);
+  border: 1px solid var(--border-secondary);
+  position: relative;
+  overflow: hidden;
+}
+.panel-updates__hero::after {
+  content: '';
+  position: absolute;
+  right: -60px;
+  top: -60px;
+  width: 200px;
+  height: 200px;
+  background: radial-gradient(circle, rgba(245, 158, 11, 0.07), transparent 70%);
+  pointer-events: none;
+}
+.panel-updates__hero--update {
+  background:
+    radial-gradient(circle at 0% 0%, rgba(245, 158, 11, 0.18), transparent 55%),
+    var(--bg-surface);
+  border-color: rgba(245, 158, 11, 0.35);
+  box-shadow: 0 4px 20px -8px rgba(245, 158, 11, 0.25);
+}
+.panel-updates__hero--ok {
+  background:
+    radial-gradient(circle at 0% 0%, rgba(34, 197, 94, 0.07), transparent 55%),
+    var(--bg-surface);
+}
+.panel-updates__hero-icon {
+  flex-shrink: 0;
+  width: 56px;
+  height: 56px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 14px;
+  background: rgba(245, 158, 11, 0.1);
+  color: var(--primary, #f59e0b);
+  border: 1px solid rgba(245, 158, 11, 0.25);
+}
+.panel-updates__hero-text { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 0.4rem; }
 .panel-updates__title {
-  font-size: 1.4rem;
+  font-size: 1.45rem;
   font-weight: 700;
   color: var(--text-heading);
   margin: 0;
+  letter-spacing: -0.01em;
 }
 .panel-updates__subtitle {
   font-size: 0.82rem;
@@ -330,10 +402,35 @@ onBeforeUnmount(() => stopPolling());
   display: flex;
   flex-direction: column;
   gap: 0.3rem;
-  padding: 0.95rem 1rem;
+  padding: 1rem 1.1rem;
   background: var(--bg-surface);
   border: 1px solid var(--border-secondary);
-  border-radius: 12px;
+  border-radius: 14px;
+  transition: all 0.2s;
+  position: relative;
+}
+.version-card:hover { border-color: var(--border-strong); }
+.version-card--has-update {
+  border-color: rgba(245, 158, 11, 0.45);
+  background:
+    linear-gradient(135deg, rgba(245, 158, 11, 0.08), transparent 60%),
+    var(--bg-surface);
+  box-shadow: 0 4px 14px -6px rgba(245, 158, 11, 0.3);
+}
+.version-card__pulse {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  margin-left: 0.4rem;
+  border-radius: 50%;
+  background: var(--primary, #f59e0b);
+  vertical-align: middle;
+  box-shadow: 0 0 0 0 rgba(245, 158, 11, 0.5);
+  animation: version-pulse 1.6s ease-in-out infinite;
+}
+@keyframes version-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(245, 158, 11, 0.5); }
+  50% { box-shadow: 0 0 0 8px rgba(245, 158, 11, 0); }
 }
 .version-card__label {
   font-size: 0.7rem;
@@ -516,6 +613,19 @@ onBeforeUnmount(() => stopPolling());
   color: var(--text-inverse, #1c1917);
 }
 .btn--primary:hover:not(:disabled) { background: var(--primary-strong, #fbbf24); }
+.btn--accent {
+  background: linear-gradient(135deg, var(--primary, #f59e0b), var(--primary-strong, #fbbf24));
+  box-shadow: 0 4px 14px -4px rgba(245, 158, 11, 0.5);
+}
+.btn--accent:hover:not(:disabled) {
+  transform: translateY(-1px);
+  box-shadow: 0 6px 20px -4px rgba(245, 158, 11, 0.6);
+}
+.btn--ok {
+  background: rgba(34, 197, 94, 0.1);
+  border-color: rgba(34, 197, 94, 0.3);
+  color: #4ade80;
+}
 .btn--ghost {
   border-color: var(--border-secondary);
   color: var(--text-secondary);

@@ -195,7 +195,13 @@ location ~* \\.(?:js|css|png|jpg|jpeg|gif|ico|svg|webp|avif|woff|woff2|ttf|eot|o
 }
 
 /** 50-security.conf — deny dotfiles + security headers + rate limit. */
-function chunk50Security(): string {
+function chunk50Security(p: NginxLayeredParams, settings: ReturnType<typeof resolveNginxSettings>): string {
+  // Per-site rate limit. Зона объявлена в /etc/nginx/conf.d/meowbox-zones.conf
+  // (агент пишет файл на основе настроек всех сайтов из БД).
+  const zoneName = `site_${p.siteName}`;
+  const rateLimitLine = settings.rateLimitEnabled
+    ? `limit_req zone=${zoneName} burst=${settings.rateLimitBurst} nodelay;`
+    : `# Rate limiting отключён в настройках сайта.`;
   return `# === 50-security.conf — security (управляется Meowbox) ===
 add_header X-Frame-Options "SAMEORIGIN" always;
 add_header X-Content-Type-Options "nosniff" always;
@@ -203,8 +209,8 @@ add_header X-XSS-Protection "1; mode=block" always;
 add_header Referrer-Policy "strict-origin-when-cross-origin" always;
 add_header Permissions-Policy "camera=(), microphone=(), geolocation=()" always;
 
-# Rate limiting (zone определена в /etc/nginx/nginx.conf глобально).
-limit_req zone=site_limit burst=60 nodelay;
+# Rate limiting (zone объявлена в /etc/nginx/conf.d/meowbox-zones.conf глобально).
+${rateLimitLine}
 
 # Deny hidden files (.git, .env, .htaccess) и опасные расширения.
 location ~ /\\. { deny all; }
@@ -342,7 +348,7 @@ export function renderNginxBundle(p: NginxLayeredParams): RenderedNginxBundle {
   // (проксируется только корень, php-файлы матчатся раньше регекспом).
   if (!!p.phpEnabled && !!p.phpVersion) chunks['20-php.conf'] = chunk20Php(p, settings);
   chunks['40-static.conf'] = chunk40Static(settings);
-  chunks['50-security.conf'] = chunk50Security();
+  chunks['50-security.conf'] = chunk50Security(p, settings);
 
   const serverBlocks: string[] = [];
   if (doHttpRedirect) serverBlocks.push(httpRedirectServer(p, webRoot, serverAliases));

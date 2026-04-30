@@ -507,10 +507,11 @@ systemctl enable cron  >> "$LOG_FILE" 2>&1 || true
 # Файл попадает в /etc/nginx/conf.d/, который inсluded из http{} в дистровском
 # nginx.conf. Без этой зоны генерируемые конфиги сайтов падают на nginx -t с
 # "zero size shared memory zone site_limit".
-log "Configuring Nginx global zones..."
+log "Configuring Nginx global zones (placeholder, агент перезапишет per-site)..."
 cat > /etc/nginx/conf.d/meowbox-zones.conf <<'NGINX_ZONES'
-# === Meowbox global shared zones (управляется install.sh) ===
-# Rate limit: 30 req/sec на IP, burst настраивается в конфиге сайта.
+# === Meowbox global rate-limit zones (placeholder из install.sh) ===
+# Файл будет полностью перезаписан агентом при создании первого сайта
+# (per-site limit_req_zone + legacy site_limit для backwards-compat).
 limit_req_zone $binary_remote_addr zone=site_limit:10m rate=30r/s;
 NGINX_ZONES
 

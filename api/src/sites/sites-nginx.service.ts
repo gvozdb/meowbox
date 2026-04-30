@@ -110,6 +110,13 @@ export class SitesNginxService {
     if (dto.http2 !== undefined) data.nginxHttp2 = !!dto.http2;
     if (dto.hsts !== undefined) data.nginxHsts = !!dto.hsts;
     if (dto.gzip !== undefined) data.nginxGzip = !!dto.gzip;
+    if (dto.rateLimitEnabled !== undefined) data.nginxRateLimitEnabled = !!dto.rateLimitEnabled;
+    if (dto.rateLimitRps !== undefined) {
+      data.nginxRateLimitRps = this.intOrNull(dto.rateLimitRps, 1, 100000, 'rateLimitRps');
+    }
+    if (dto.rateLimitBurst !== undefined) {
+      data.nginxRateLimitBurst = this.intOrNull(dto.rateLimitBurst, 1, 10000, 'rateLimitBurst');
+    }
 
     if (Object.keys(data).length === 0) {
       // Ничего не меняем, просто отдаём текущие значения.
@@ -118,10 +125,59 @@ export class SitesNginxService {
 
     const updated = await this.prisma.site.update({ where: { id: siteId }, data });
 
-    // Регенерация чанков на агенте.
+    // Если изменились rate-limit поля — обновляем глобальный zones-файл
+    // (он содержит limit_req_zone для всех сайтов одной строкой каждый).
+    const rateLimitChanged =
+      dto.rateLimitEnabled !== undefined ||
+      dto.rateLimitRps !== undefined ||
+      dto.rateLimitBurst !== undefined;
+    if (rateLimitChanged) {
+      await this.regenerateGlobalZones();
+    }
+
+    // Регенерация чанков сайта на агенте (chunk50Security возьмёт обновлённые
+    // настройки и выдаст limit_req директиву под новый zone).
     await this.regenerateConfigOnAgent(updated.id);
 
     return this.getSettings(siteId, userId, role);
+  }
+
+  // ---------------------------------------------------------------------------
+  // GLOBAL ZONES (limit_req_zone)
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Перегенерирует `/etc/nginx/conf.d/meowbox-zones.conf` из БД: один
+   * `limit_req_zone` на каждый сайт + legacy zone `site_limit` для совместимости
+   * с не-регенерированными конфигами. Вызывается при изменении rate-limit
+   * настроек и при создании/удалении сайта.
+   *
+   * Безопасно к параллельному вызову — последний выигрывает.
+   */
+  async regenerateGlobalZones(): Promise<void> {
+    if (!this.agentRelay.isAgentConnected()) {
+      this.logger.warn('Agent not connected — global zones not regenerated');
+      return;
+    }
+    const sites = await this.prisma.site.findMany({
+      select: {
+        name: true,
+        nginxRateLimitEnabled: true,
+        nginxRateLimitRps: true,
+      },
+    });
+    const zones = sites.map((s) => {
+      const overrides: SiteNginxOverrides = {
+        rateLimitEnabled: s.nginxRateLimitEnabled,
+        rateLimitRps: s.nginxRateLimitRps,
+      };
+      const eff = resolveNginxSettings(overrides);
+      return { siteName: s.name, rps: eff.rateLimitRps, enabled: eff.rateLimitEnabled };
+    });
+    const r = await this.agentRelay.emitToAgent<unknown>('nginx:write-global-zones', { zones });
+    if (!r.success) {
+      this.logger.error(`write-global-zones failed: ${r.error ?? 'unknown'}`);
+    }
   }
 
   // ---------------------------------------------------------------------------

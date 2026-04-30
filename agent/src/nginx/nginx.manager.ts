@@ -259,6 +259,61 @@ export class NginxManager {
   }
 
   // ---------------------------------------------------------------------------
+  // GLOBAL ZONES (rate-limit zones для всех сайтов в одном файле)
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Перезаписывает `/etc/nginx/conf.d/meowbox-zones.conf` — глобальные
+   * `limit_req_zone` директивы. По одной на каждый сайт + legacy-зона `site_limit`
+   * (для старых конфигов сайтов, которые ещё не пере-генерены под per-site зоны).
+   *
+   * Атомарно с откатом: при `nginx -t` fail восстанавливаем бэкап.
+   */
+  async writeGlobalZones(zones: Array<{ siteName: string; rps: number; enabled: boolean }>): Promise<{ success: boolean; error?: string }> {
+    const zonesPath = '/etc/nginx/conf.d/meowbox-zones.conf';
+    const backupPath = `${zonesPath}.bak`;
+    const lines: string[] = [
+      '# === Meowbox global rate-limit zones (управляется агентом) ===',
+      '# Файл регенерируется при создании/удалении сайта и при изменении rate-limit настроек.',
+      '# Не редактируй вручную — изменения будут затёрты.',
+      '',
+      '# Legacy fallback zone (для конфигов сайтов, которые ещё не пере-генерены под per-site zone).',
+      'limit_req_zone $binary_remote_addr zone=site_limit:10m rate=30r/s;',
+      '',
+    ];
+    for (const z of zones) {
+      const safe = String(z.siteName).replace(/[^a-zA-Z0-9_-]/g, '_');
+      if (!safe) continue;
+      const rate = z.rps && z.rps > 0 ? z.rps : 30;
+      // Зона создаётся даже если rate-limit отключён — чтобы конфиг сайта
+      // (если его не успели регенерить) не падал при ссылке на site_<name>.
+      lines.push(`limit_req_zone $binary_remote_addr zone=site_${safe}:1m rate=${rate}r/s;`);
+    }
+    const content = lines.join('\n') + '\n';
+
+    // Бэкап существующего файла на случай отката.
+    try { await fs.copyFile(zonesPath, backupPath); } catch { /* nothing yet */ }
+
+    try {
+      await fs.mkdir(path.dirname(zonesPath), { recursive: true });
+      await fs.writeFile(zonesPath, content, 'utf8');
+      await fs.chmod(zonesPath, 0o644).catch(() => {});
+
+      const test = await this.testConfig();
+      if (!test.success) {
+        try { await fs.copyFile(backupPath, zonesPath); }
+        catch { await fs.unlink(zonesPath).catch(() => {}); }
+        return { success: false, error: `nginx -t failed: ${test.error}` };
+      }
+      await this.reload();
+      await fs.unlink(backupPath).catch(() => {});
+      return { success: true };
+    } catch (err) {
+      return { success: false, error: (err as Error).message };
+    }
+  }
+
+  // ---------------------------------------------------------------------------
   // GLOBAL
   // ---------------------------------------------------------------------------
 

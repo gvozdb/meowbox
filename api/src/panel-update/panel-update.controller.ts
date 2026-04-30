@@ -23,6 +23,18 @@ export class PanelUpdateController {
     return { success: true, data };
   }
 
+  /**
+   * GET /api/admin/update/version — лёгкий эндпоинт для сайдбара.
+   * Возвращает только текущую и последнюю версию (без истории / state),
+   * доступен любому залогиненному юзеру (ADMIN/USER).
+   * `refresh=1` форсит запрос к GitHub API.
+   */
+  @Get('version')
+  async version(@Query('refresh') refresh?: string) {
+    const data = await this.service.getVersionSummary(refresh === '1' || refresh === 'true');
+    return { success: true, data };
+  }
+
   /** POST /api/admin/update — запускает tools/update.sh в фоне. body: { version?: 'v1.4.2' | null }. */
   @Post()
   @Roles(UserRole.ADMIN)

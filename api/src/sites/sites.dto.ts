@@ -470,6 +470,22 @@ export class UpdateSiteNginxSettingsDto {
   @IsOptional()
   @IsBoolean()
   gzip?: boolean;
+
+  @IsOptional()
+  @IsBoolean()
+  rateLimitEnabled?: boolean;
+
+  @IsOptional()
+  @IsInt()
+  @Min(0)
+  @Max(100000)
+  rateLimitRps?: number | null;
+
+  @IsOptional()
+  @IsInt()
+  @Min(0)
+  @Max(10000)
+  rateLimitBurst?: number | null;
 }
 
 /**

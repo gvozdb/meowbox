@@ -115,27 +115,6 @@
       </template>
     </div>
 
-    <!-- Meowbox Self-Update -->
-    <div class="selfupdate-section">
-      <div class="selfupdate-card">
-        <div class="selfupdate-card__info">
-          <h2 class="section-title">Meowbox Panel</h2>
-          <p class="selfupdate-card__desc">Pull latest changes, rebuild all packages, and restart services.</p>
-        </div>
-        <button
-          class="updates-page__btn updates-page__btn--selfupdate"
-          :disabled="selfUpdating"
-          @click="selfUpdate"
-        >
-          <span v-if="selfUpdating" class="updates-page__spinner" />
-          <svg v-else width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
-            <polyline points="16,16 12,12 8,16" /><line x1="12" y1="12" x2="12" y2="21" /><path d="M20.39 18.39A5 5 0 0 0 18 9h-1.26A8 8 0 1 0 3 16.3" />
-          </svg>
-          {{ selfUpdating ? 'Updating...' : 'Self-Update' }}
-        </button>
-      </div>
-    </div>
-
     <!-- Install output -->
     <div v-if="installOutput" class="output-section">
       <div class="output-section__header">
@@ -161,7 +140,6 @@ const api = useApi();
 
 const checking = ref(false);
 const installing = ref(false);
-const selfUpdating = ref(false);
 const loadingVersions = ref(true);
 const updates = ref<UpdatablePackage[]>([]);
 const versions = ref<Record<string, string>>({});
@@ -269,20 +247,6 @@ async function upgradeAll() {
     // Upgrade failed
   } finally {
     installing.value = false;
-  }
-}
-
-async function selfUpdate() {
-  if (selfUpdating.value) return;
-  selfUpdating.value = true;
-  try {
-    const data = await api.post<{ output: string }>('/system/self-update');
-    installOutput.value = data.output || 'Self-update completed';
-  } catch {
-    installOutput.value = 'Self-update failed';
-  } finally {
-    selfUpdating.value = false;
-    await loadVersions();
   }
 }
 
@@ -654,40 +618,6 @@ onMounted(() => {
 .update-item__btn:disabled {
   opacity: 0.35;
   cursor: not-allowed;
-}
-
-/* Self-update section */
-.selfupdate-section {
-  margin-bottom: 2rem;
-}
-
-.selfupdate-card {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 1.5rem;
-  padding: 1.15rem;
-  background: var(--bg-surface);
-  border: 1px solid var(--border-secondary);
-  border-radius: 14px;
-}
-
-.selfupdate-card__desc {
-  font-size: 0.78rem;
-  color: var(--text-muted);
-  margin: 0.25rem 0 0;
-}
-
-.updates-page__btn--selfupdate {
-  background: rgba(139, 92, 246, 0.06);
-  border-color: rgba(139, 92, 246, 0.2);
-  color: #a78bfa;
-  flex-shrink: 0;
-}
-
-.updates-page__btn--selfupdate:hover:not(:disabled) {
-  background: rgba(139, 92, 246, 0.12);
-  border-color: rgba(139, 92, 246, 0.3);
 }
 
 /* Output section */

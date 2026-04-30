@@ -33,6 +33,13 @@ export const NGINX_DEFAULTS = Object.freeze({
 
   /** Gzip включён. */
   gzip: true,
+
+  /** Rate limiting включён по умолчанию. */
+  rateLimitEnabled: true,
+  /** Запросов в секунду на IP (limit_req_zone rate). */
+  rateLimitRps: 30,
+  /** Burst (`limit_req ... burst=`). */
+  rateLimitBurst: 60,
 } as const);
 
 export type NginxDefaults = typeof NGINX_DEFAULTS;
@@ -51,6 +58,9 @@ export interface SiteNginxOverrides {
   http2?: boolean | null;
   hsts?: boolean | null;
   gzip?: boolean | null;
+  rateLimitEnabled?: boolean | null;
+  rateLimitRps?: number | null;
+  rateLimitBurst?: number | null;
 }
 
 export interface ResolvedNginxSettings {
@@ -63,6 +73,9 @@ export interface ResolvedNginxSettings {
   http2: boolean;
   hsts: boolean;
   gzip: boolean;
+  rateLimitEnabled: boolean;
+  rateLimitRps: number;
+  rateLimitBurst: number;
 }
 
 export function resolveNginxSettings(overrides: SiteNginxOverrides): ResolvedNginxSettings {
@@ -94,6 +107,18 @@ export function resolveNginxSettings(overrides: SiteNginxOverrides): ResolvedNgi
     http2: typeof overrides.http2 === 'boolean' ? overrides.http2 : NGINX_DEFAULTS.http2,
     hsts: typeof overrides.hsts === 'boolean' ? overrides.hsts : NGINX_DEFAULTS.hsts,
     gzip: typeof overrides.gzip === 'boolean' ? overrides.gzip : NGINX_DEFAULTS.gzip,
+    rateLimitEnabled:
+      typeof overrides.rateLimitEnabled === 'boolean'
+        ? overrides.rateLimitEnabled
+        : NGINX_DEFAULTS.rateLimitEnabled,
+    rateLimitRps:
+      typeof overrides.rateLimitRps === 'number' && overrides.rateLimitRps > 0
+        ? overrides.rateLimitRps
+        : NGINX_DEFAULTS.rateLimitRps,
+    rateLimitBurst:
+      typeof overrides.rateLimitBurst === 'number' && overrides.rateLimitBurst > 0
+        ? overrides.rateLimitBurst
+        : NGINX_DEFAULTS.rateLimitBurst,
   };
 }
 
@@ -112,6 +137,9 @@ export interface SiteNginxColumns {
   nginxHttp2?: boolean | null;
   nginxHsts?: boolean | null;
   nginxGzip?: boolean | null;
+  nginxRateLimitEnabled?: boolean | null;
+  nginxRateLimitRps?: number | null;
+  nginxRateLimitBurst?: number | null;
 }
 
 export function siteNginxOverrides(site: SiteNginxColumns): SiteNginxOverrides {
@@ -125,6 +153,9 @@ export function siteNginxOverrides(site: SiteNginxColumns): SiteNginxOverrides {
     http2: site.nginxHttp2 ?? null,
     hsts: site.nginxHsts ?? null,
     gzip: site.nginxGzip ?? null,
+    rateLimitEnabled: site.nginxRateLimitEnabled ?? null,
+    rateLimitRps: site.nginxRateLimitRps ?? null,
+    rateLimitBurst: site.nginxRateLimitBurst ?? null,
   };
 }
 

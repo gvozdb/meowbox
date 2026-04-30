@@ -134,6 +134,43 @@
           </label>
         </div>
 
+        <!-- Rate limiting -->
+        <div class="site-nginx__rate-limit">
+          <div class="site-nginx__rate-limit-head">
+            <label class="toggle toggle--strong">
+              <input v-model="form.rateLimitEnabled" type="checkbox" />
+              <span>Rate limit</span>
+              <small>nginx <code>limit_req_zone</code> + <code>limit_req</code> на IP</small>
+            </label>
+          </div>
+          <div v-if="form.rateLimitEnabled" class="site-nginx__rate-limit-grid">
+            <div class="form-group">
+              <label class="form-label">Запросов в секунду (на IP)</label>
+              <input
+                v-model.number="form.rateLimitRps"
+                :placeholder="String(defaults?.rateLimitRps ?? 30)"
+                type="number"
+                min="1"
+                max="100000"
+                class="form-input"
+              />
+              <span class="form-hint"><code>rate=Xr/s</code> в zone-объявлении</span>
+            </div>
+            <div class="form-group">
+              <label class="form-label">Burst</label>
+              <input
+                v-model.number="form.rateLimitBurst"
+                :placeholder="String(defaults?.rateLimitBurst ?? 60)"
+                type="number"
+                min="1"
+                max="10000"
+                class="form-input"
+              />
+              <span class="form-hint">сколько лишних запросов можно «занять» поверх rate</span>
+            </div>
+          </div>
+        </div>
+
         <div class="site-nginx__settings-actions">
           <button class="btn btn--ghost btn--sm" :disabled="settingsSaving || !settingsDirty" @click="resetSettings">
             Сбросить изменения
@@ -199,6 +236,9 @@ interface ResolvedNginxSettings {
   http2: boolean;
   hsts: boolean;
   gzip: boolean;
+  rateLimitEnabled: boolean;
+  rateLimitRps: number;
+  rateLimitBurst: number;
 }
 
 interface SiteNginxOverrides {
@@ -211,6 +251,9 @@ interface SiteNginxOverrides {
   http2?: boolean | null;
   hsts?: boolean | null;
   gzip?: boolean | null;
+  rateLimitEnabled?: boolean | null;
+  rateLimitRps?: number | null;
+  rateLimitBurst?: number | null;
 }
 
 interface NginxSettingsResponse {
@@ -245,6 +288,9 @@ interface FormShape {
   http2: boolean;
   hsts: boolean;
   gzip: boolean;
+  rateLimitEnabled: boolean;
+  rateLimitRps: number | null;
+  rateLimitBurst: number | null;
 }
 
 const form = ref<FormShape>(blankForm());
@@ -267,6 +313,9 @@ function blankForm(): FormShape {
     http2: true,
     hsts: false,
     gzip: true,
+    rateLimitEnabled: true,
+    rateLimitRps: null,
+    rateLimitBurst: null,
   };
 }
 
@@ -298,6 +347,9 @@ async function loadAll() {
       http2: settings.raw.http2 ?? settings.defaults.http2,
       hsts: settings.raw.hsts ?? settings.defaults.hsts,
       gzip: settings.raw.gzip ?? settings.defaults.gzip,
+      rateLimitEnabled: settings.raw.rateLimitEnabled ?? settings.defaults.rateLimitEnabled,
+      rateLimitRps: settings.raw.rateLimitRps ?? null,
+      rateLimitBurst: settings.raw.rateLimitBurst ?? null,
     };
     form.value = f;
     formOriginal.value = JSON.parse(JSON.stringify(f));
@@ -323,6 +375,9 @@ function buildSettingsPayload() {
     http2: f.http2,
     hsts: f.hsts,
     gzip: f.gzip,
+    rateLimitEnabled: f.rateLimitEnabled,
+    rateLimitRps: f.rateLimitRps || null,
+    rateLimitBurst: f.rateLimitBurst || null,
   };
 }
 
@@ -498,6 +553,23 @@ onMounted(() => loadAll());
 .toggle small {
   color: var(--text-muted);
   font-size: 0.72rem;
+}
+.toggle--strong { font-weight: 600; color: var(--text-heading); }
+
+.site-nginx__rate-limit {
+  display: flex;
+  flex-direction: column;
+  gap: 0.65rem;
+  padding: 0.85rem 0.95rem;
+  border: 1px dashed var(--border-secondary);
+  border-radius: 10px;
+  background: rgba(245, 158, 11, 0.04);
+}
+.site-nginx__rate-limit-head { }
+.site-nginx__rate-limit-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 0.75rem;
 }
 
 .site-nginx__settings-actions,

@@ -32,7 +32,19 @@
         <CatMascot :size="36" mood="happy" />
         <div class="sidebar__brand-text">
           <span class="sidebar__brand-name">Meowbox</span>
-          <span class="sidebar__brand-version">v0.1.0</span>
+          <NuxtLink
+            v-if="versionInfo?.hasUpdate"
+            to="/admin/updates"
+            class="sidebar__brand-version sidebar__brand-version--update"
+            :title="`Доступно обновление: ${versionInfo.latest}`"
+          >
+            <span>{{ versionInfo.current }}</span>
+            <span class="sidebar__update-dot" />
+            <span class="sidebar__update-arrow">→ {{ versionInfo.latest }}</span>
+          </NuxtLink>
+          <span v-else class="sidebar__brand-version">
+            {{ versionInfo?.current ?? '...' }}
+          </span>
         </div>
       </div>
 
@@ -134,6 +146,22 @@ const serverStore = useServerStore();
 const sidebarOpen = ref(false);
 const { connect: connectSocket, disconnect: disconnectSocket } = useSocket();
 const { isDark, toggle: themeToggle, init: themeInit } = useTheme();
+const api = useApi();
+
+interface VersionInfo {
+  current: string;
+  latest: string | null;
+  hasUpdate: boolean;
+  checkedAt: string | null;
+}
+const versionInfo = ref<VersionInfo | null>(null);
+let versionTimer: ReturnType<typeof setInterval> | null = null;
+
+async function loadVersion(refresh = false) {
+  try {
+    versionInfo.value = await api.get<VersionInfo>(`/admin/update/version${refresh ? '?refresh=1' : ''}`);
+  } catch { /* silent */ }
+}
 
 function onServerChange(e: Event) {
   const id = (e.target as HTMLSelectElement).value;
@@ -150,11 +178,17 @@ onMounted(() => {
     authStore.fetchProfile().catch(() => {});
     serverStore.loadServers().catch(() => {});
     connectSocket();
+    // Грузим текущую версию сразу (быстро, из кеша/файла), без ходокa в GitHub.
+    loadVersion(false);
+    // Раз в 6 часов форсим refresh latest через GitHub, чтобы badge появлялся.
+    loadVersion(true);
+    versionTimer = setInterval(() => loadVersion(true), 6 * 60 * 60 * 1000);
   }
 });
 
 onUnmounted(() => {
   disconnectSocket();
+  if (versionTimer) clearInterval(versionTimer);
 });
 </script>
 
@@ -275,6 +309,34 @@ onUnmounted(() => {
   color: var(--text-faint);
   font-family: 'JetBrains Mono', monospace;
   letter-spacing: 0.02em;
+}
+.sidebar__brand-version--update {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  text-decoration: none;
+  color: var(--primary, #f59e0b);
+  font-weight: 600;
+  cursor: pointer;
+}
+.sidebar__brand-version--update:hover { filter: brightness(1.15); }
+.sidebar__update-dot {
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--primary, #f59e0b);
+  box-shadow: 0 0 0 0 rgba(245, 158, 11, 0.6);
+  animation: sidebar-pulse 2s ease-in-out infinite;
+}
+.sidebar__update-arrow {
+  font-size: 0.6rem;
+  color: var(--primary, #f59e0b);
+  opacity: 0.85;
+}
+@keyframes sidebar-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(245, 158, 11, 0.55); }
+  50% { box-shadow: 0 0 0 6px rgba(245, 158, 11, 0); }
 }
 
 /* Server selector */

@@ -1334,6 +1334,7 @@ export class SitesService implements OnModuleInit {
         data: { status: SiteStatus.RUNNING, errorMessage: null },
       });
       log('info', `✓ Сайт "${ctx.newName}" успешно дублирован`);
+      this.regenerateGlobalZones().catch(() => {});
       this.gateway.emitSiteProvisionDone(siteId, 'RUNNING');
     } catch (err) {
       const msg = (err as Error).message || 'unknown error';
@@ -1691,6 +1692,8 @@ export class SitesService implements OnModuleInit {
       });
 
       log('info', `✓ Сайт "${dto.name}" создан успешно`);
+      // Регенерация глобальных rate-limit zones (limit_req_zone на каждый сайт).
+      this.regenerateGlobalZones().catch(() => {});
       this.gateway.emitSiteProvisionDone(siteId, 'RUNNING');
     } catch (err) {
       const msg = (err as Error).message || 'unknown error';
@@ -2206,6 +2209,36 @@ export class SitesService implements OnModuleInit {
     }
 
     await this.prisma.site.delete({ where: { id } });
+
+    // После удаления сайта — пересобираем zones-файл (без его записи).
+    await this.regenerateGlobalZones().catch(() => {});
+  }
+
+  /**
+   * Регенерирует глобальный `/etc/nginx/conf.d/meowbox-zones.conf` на агенте:
+   * один `limit_req_zone` на сайт + legacy zone `site_limit` для backwards-compat.
+   * Безопасно вызывать после create/delete/update сайта или при изменении
+   * rate-limit настроек.
+   */
+  private async regenerateGlobalZones(): Promise<void> {
+    if (!this.agentRelay.isAgentConnected()) return;
+    try {
+      const sites = await this.prisma.site.findMany({
+        select: {
+          name: true,
+          nginxRateLimitEnabled: true,
+          nginxRateLimitRps: true,
+        },
+      });
+      const zones = sites.map((s) => ({
+        siteName: s.name,
+        rps: s.nginxRateLimitRps && s.nginxRateLimitRps > 0 ? s.nginxRateLimitRps : 30,
+        enabled: s.nginxRateLimitEnabled !== false,
+      }));
+      await this.agentRelay.emitToAgent('nginx:write-global-zones', { zones });
+    } catch (err) {
+      this.logger.warn(`regenerateGlobalZones: ${(err as Error).message}`);
+    }
   }
 
   /**

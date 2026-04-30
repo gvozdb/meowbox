@@ -85,6 +85,23 @@ export class PanelUpdateService {
   // STATUS
   // ---------------------------------------------------------------------------
 
+  /**
+   * Лёгкий summary для сайдбара: текущая + latest + флаг hasUpdate.
+   * latest кешируется (см. `latestCache`); refreshLatest=true форсит GitHub-запрос.
+   */
+  async getVersionSummary(refreshLatest = false): Promise<{
+    current: string;
+    latest: string | null;
+    hasUpdate: boolean;
+    checkedAt: string | null;
+  }> {
+    const current = this.readCurrentVersion();
+    const latest = refreshLatest ? await this.fetchLatestTag() : (this.latestCache?.tag ?? null);
+    const hasUpdate = !!(latest && current && current !== 'unknown' && latest !== current);
+    const checkedAt = this.latestCache?.checkedAt ? new Date(this.latestCache.checkedAt).toISOString() : null;
+    return { current, latest, hasUpdate, checkedAt };
+  }
+
   async getStatus(refreshLatest = false): Promise<UpdateStatusResponse> {
     const current = this.readCurrentVersion();
     const latest = refreshLatest ? await this.fetchLatestTag() : (this.latestCache?.tag ?? null);

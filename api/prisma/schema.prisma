@@ -103,6 +103,12 @@ model Site {
   nginxHsts      Boolean @default(false) @map("nginx_hsts")
   /// gzip компрессия. Default true.
   nginxGzip      Boolean @default(true) @map("nginx_gzip")
+  /// Per-site rate limiting (nginx limit_req). Если null/false — директива не пишется.
+  nginxRateLimitEnabled Boolean @default(true) @map("nginx_rate_limit_enabled")
+  /// requests-per-second в zone-объявлении (limit_req_zone ... rate=Xr/s). Default 30.
+  nginxRateLimitRps     Int?    @map("nginx_rate_limit_rps")
+  /// burst для limit_req. Default 60.
+  nginxRateLimitBurst   Int?    @map("nginx_rate_limit_burst")
   /// Кастомный конфиг — содержимое 95-custom.conf, инклюдится В ТЕЛО основного server-блока.
   /// Юзер редактирует через UI. Панель НЕ перезаписывает этот блок при операциях.
   /// При установке CMS (MODX) сюда автоматически дописываются её правила (try_files и т.п.) —

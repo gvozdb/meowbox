@@ -327,6 +327,13 @@ export class AgentService {
       cb(await this.nginx.writeGlobalConfig(params.content));
     });
 
+    this.safeOn(s, 'nginx:write-global-zones', async (
+      params: { zones: Array<{ siteName: string; rps: number; enabled: boolean }> },
+      cb: Callback,
+    ) => {
+      cb(await this.nginx.writeGlobalZones(params?.zones || []));
+    });
+
     this.safeOn(s, 'nginx:create-dir', async (params: { path: string; systemUser?: string }, cb: Callback) => {
       try {
         const owner = params.systemUser ? `${params.systemUser}:${params.systemUser}` : 'www-data:www-data';
