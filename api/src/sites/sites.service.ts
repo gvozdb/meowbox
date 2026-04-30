@@ -1179,6 +1179,9 @@ export class SitesService implements OnModuleInit {
 
       // 2) Nginx — собираем payload из source (для nginx-настроек) + override-ов
       // переименования (siteName/domain/rootPath/etc).
+      // Перед созданием конфига регенерим meowbox-zones.conf — в нём должна
+      // появиться зона `site_<newName>`, иначе nginx -t упадёт.
+      await this.regenerateGlobalZones();
       step(`Nginx-конфиг для ${ctx.newDomain}`);
       const baseDup = buildNginxCreateConfigPayload(
         { ...source, aliases: '[]' } as unknown as Parameters<typeof buildNginxCreateConfigPayload>[0],
@@ -1416,6 +1419,11 @@ export class SitesService implements OnModuleInit {
       // 1. Nginx-конфиг — первая установка сайта.
       // customConfig инициализируется CMS-стартовым шаблоном (initialCustomConfigFor):
       // дальше юзер редактирует 95-custom.conf через UI; панель его не перетирает.
+      // ВАЖНО: сперва регенерим meowbox-zones.conf, чтобы в нём была объявлена
+      // shared-зона `site_<safeName>` для нового сайта. Иначе nginx -t упадёт
+      // при первом включении конфига сайта с ошибкой
+      // "zero size shared memory zone site_<safeName>".
+      await this.regenerateGlobalZones();
       step(`Nginx: конфиг для ${dto.domain}`);
       const nginxResult = await this.agentRelay.emitToAgent('nginx:create-config', {
         siteName: safeName,

@@ -113,10 +113,12 @@ export class ProxyService implements OnModuleInit {
       throw new BadRequestException(`Server "${data.name}" already exists`);
     }
 
-    // Runtime-проверка URL: блокируем 127.0.0.1/AWS IMDS/private-net.
-    // DTO уже ограничил https:// на уровне формата, но это допол. слой:
-    // proxy-фичу легко превратить в SSRF-гаджет (forward-any-request).
-    await assertPublicHttpUrl(data.url, { protocols: ['https:'] });
+    // Runtime-проверка URL: блокируем 127.0.0.1 / AWS IMDS / private-net.
+    // proxy-фичу легко превратить в SSRF-гаджет (forward-any-request),
+    // поэтому DNS-lookup + RFC1918-фильтр обязательны. Сам протокол —
+    // http или https: PROXY_TOKEN (HMAC) обеспечивает аутентификацию,
+    // TLS — рекомендация, но не requirement (slave может стоять на raw IP).
+    await assertPublicHttpUrl(data.url, { protocols: ['http:', 'https:'] });
 
     const server: ServerConfig = {
       id: data.id || randomUUID().slice(0, 8),

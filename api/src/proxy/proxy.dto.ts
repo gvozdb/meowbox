@@ -15,11 +15,14 @@ import {
 } from 'class-validator';
 
 /**
- * URL ведомого сервера: только HTTPS, FQDN. Запрет http://127.0.0.1 и т.п.
- * Дополнительная runtime-проверка `assertPublicHttpUrl` в сервисе (DNS-lookup).
+ * URL ведомого сервера: HTTP или HTTPS, FQDN/IP-литерал.
+ * Аутентификация — PROXY_TOKEN (HMAC server-to-server), а не TLS:
+ * пользователь имеет право добавить slave по raw IP без сертификата.
+ * Запрет 127.0.0.1 / private-net / AWS IMDS — на уровне runtime-проверки
+ * `assertPublicHttpUrl` в сервисе (DNS-lookup + RFC1918-фильтр).
  */
 const REMOTE_URL_RULES = {
-  protocols: ['https'] as string[],
+  protocols: ['http', 'https'] as string[],
   require_tld: false,
   require_protocol: true,
 };
@@ -35,7 +38,7 @@ export class AddServerDto {
   @IsString()
   @IsNotEmpty()
   @MaxLength(256)
-  @IsUrl(REMOTE_URL_RULES, { message: 'URL must be https:// and a valid host' })
+  @IsUrl(REMOTE_URL_RULES, { message: 'URL must be http(s):// and a valid host' })
   url!: string;
 
   // PROXY_TOKEN удалённого сервера — hex-строка openssl rand -hex 32 = 64 символа.
@@ -60,7 +63,7 @@ export class UpdateServerDto {
   @IsOptional()
   @IsString()
   @MaxLength(256)
-  @IsUrl(REMOTE_URL_RULES, { message: 'URL must be https:// and a valid host' })
+  @IsUrl(REMOTE_URL_RULES, { message: 'URL must be http(s):// and a valid host' })
   url?: string;
 
   @IsOptional()
