@@ -758,6 +758,17 @@ if [[ "$RELEASE_MODE" == "release" ]]; then
 fi
 
 cd "${MEOWBOX_DIR}"
+
+# Жёстко чистим старые процессы перед стартом. Сценарий: оператор сделал
+# `rm -rf /opt/meowbox` при живых pm2-процессах — у них остались deleted
+# file-descriptor'ы (старая БД, старый node_modules), pm2 reload не помогает,
+# приложение падает с SQLITE_READONLY_DBMOVED / Cannot find module.
+# `pm2 delete` форсит kill + забывает процесс, следующий `pm2 start` создаёт
+# процессы с нуля и нормальными файлами.
+for proc in meowbox-api meowbox-web meowbox-agent; do
+  pm2 delete "$proc" >> "$LOG_FILE" 2>&1 || true
+done
+
 pm2 start ecosystem.config.js >> "$LOG_FILE" 2>&1 || pm2 restart ecosystem.config.js >> "$LOG_FILE" 2>&1
 pm2 save >> "$LOG_FILE" 2>&1
 pm2 startup systemd -u root --hp /root >> "$LOG_FILE" 2>&1 || true
