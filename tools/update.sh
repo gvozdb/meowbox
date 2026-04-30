@@ -25,10 +25,14 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PANEL_DIR="$(dirname "$SCRIPT_DIR")"
 RELEASES_DIR="$PANEL_DIR/releases"
-STATE_DIR="${MEOWBOX_STATE_DIR:-$PANEL_DIR/state}"
+# STATE_DIR строго привязан к PANEL_DIR/state. НЕ берём из env, потому что
+# старый PM2-процесс (который и спавнит update.sh через UI-trigger) выставляет
+# MEOWBOX_STATE_DIR на release dir предыдущей версии (releases/<old_v>/state),
+# и эта дрянь наследуется в update.sh → миграции пишут в неправильный путь.
+STATE_DIR="$PANEL_DIR/state"
 LOCK_FILE="${MEOWBOX_UPDATE_LOCK:-/var/run/meowbox-update.lock}"
 GITHUB_REPO="${GITHUB_REPO:-gvozdb/meowbox}"
-KEEP_RELEASES="${MEOWBOX_KEEP_RELEASES:-5}"
+KEEP_RELEASES="${MEOWBOX_KEEP_RELEASES:-3}"
 
 # CLI
 TARGET=""
@@ -246,10 +250,17 @@ if [[ -f "$RELEASE_DIR/api/prisma/schema.prisma" ]]; then
 fi
 
 # ----- 6. Migrations -----
-stage migrate "Применение миграций (Prisma + system)"
-if [[ -d "$RELEASE_DIR/api/prisma/migrations" ]]; then
-  (cd "$RELEASE_DIR/api" && DATABASE_URL="file:$STATE_DIR/data/meowbox.db" npx prisma migrate deploy) \
-    || abort "Prisma migrate deploy провалилась"
+# Prisma: используем `db push` (а не `migrate deploy`), потому что install.sh
+# создаёт DB через `db push` без миграционного tracking (нет _prisma_migrations
+# таблицы). `migrate deploy` упал бы с P3005 на любом legacy-инстансе.
+# Для self-hosted панели единый источник истины — schema.prisma; ветвление
+# миграций не нужно. --skip-generate (клиент уже сгенерирован выше),
+# --accept-data-loss безопасен пока мы не дропаем колонки в апдейте.
+stage migrate "Применение миграций (Prisma db push + system)"
+if [[ -f "$RELEASE_DIR/api/prisma/schema.prisma" ]]; then
+  (cd "$RELEASE_DIR/api" && DATABASE_URL="file:$STATE_DIR/data/meowbox.db" \
+    npx prisma db push --skip-generate --accept-data-loss) \
+    || abort "Prisma db push провалилась"
 fi
 if [[ -f "$RELEASE_DIR/migrations/dist/runner.js" ]]; then
   MEOWBOX_STATE_DIR="$STATE_DIR" \
