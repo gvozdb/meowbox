@@ -25,7 +25,9 @@ export const useServerStore = defineStore('server', {
   getters: {
     isLocal: (state) => !state.currentServerId || state.currentServerId === 'main',
     currentServer: (state) => state.servers.find((s) => s.id === state.currentServerId),
-    hasMultipleServers: (state) => state.servers.length > 1,
+    // В массиве всегда есть виртуальный main; селект показываем,
+    // только когда добавлен хотя бы один slave (length >= 2).
+    hasMultipleServers: (state) => state.servers.length >= 2,
   },
 
   actions: {
@@ -47,13 +49,27 @@ export const useServerStore = defineStore('server', {
       try {
         const api = useApi();
         const data = await api.get<ServerInfo[]>('/servers');
-        this.servers = data || [];
-        // If current server no longer exists in config, reset to main
-        if (this.servers.length > 0 && !this.servers.find((s) => s.id === this.currentServerId)) {
-          this.selectServer(this.servers[0].id);
+        const slaves = data || [];
+        // Виртуальный main всегда первым, чтобы у юзера в селекте был
+        // явный пункт «вернуться на локальный сервер». Сам бэк его не
+        // отдаёт (это сама панель), но в UI он нужен наравне со slaves.
+        const main: ServerInfo = {
+          id: 'main',
+          name: 'Этот сервер',
+          url: '',
+          token: '',
+          online: true,
+        };
+        this.servers = [main, ...slaves];
+        // Если выбранный сервер пропал из конфига — откатываемся на main.
+        if (!this.servers.find((s) => s.id === this.currentServerId)) {
+          this.selectServer('main');
         }
       } catch {
-        this.servers = [];
+        // Даже при ошибке оставляем main, чтобы UI не разваливался.
+        this.servers = [
+          { id: 'main', name: 'Этот сервер', url: '', token: '', online: true },
+        ];
       } finally {
         this.loading = false;
       }
