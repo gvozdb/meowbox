@@ -1614,10 +1614,15 @@ export class SitesService implements OnModuleInit {
         }, 1_200_000); // 20 минут: composer create-project + cli-install.php + setup
 
         if (!installResult.success) {
-          log('warn', `! Установка файлов: ${installResult.error}`);
-        } else {
-          log('info', `✓ Файлы сайта установлены`);
+          // Для MODX (и любого другого CMS-типа в будущем) пустые файлы +
+          // незаполненная БД = ERROR, не RUNNING. Раньше тут логировали
+          // warn и шли дальше через SSL → status RUNNING — пользователь
+          // видел "Сайт создан успешно" с пустым корнем сайта.
+          // Для CUSTOM (просто скелет публичной директории) install не
+          // должен падать в принципе — но если упал, тоже считаем ошибкой.
+          throw new Error(`Установка файлов: ${installResult.error || 'неизвестная ошибка'}`);
         }
+        log('info', `✓ Файлы сайта установлены`);
 
         // Сохраняем версию MODX (агент возвращает её через data.version).
         if (MODX_TYPES.includes(dto.type)) {

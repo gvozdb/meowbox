@@ -72,6 +72,7 @@ export class CommandExecutor {
     'rsync',
     'restic',
     'diff',
+    'which',
   ]);
 
   // Accept versioned binaries like php8.2, php8.3, composer2
