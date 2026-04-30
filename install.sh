@@ -199,6 +199,26 @@ else
 fi
 
 # =============================================================================
+# GitHub CLI (gh) — нужен tools/update.sh для надёжного скачивания релизов.
+# Без него работает curl-fallback, но gh проще для приватных репо и проверки
+# attestation. Ставим из официального apt-репозитория cli.github.com.
+# =============================================================================
+if ! command -v gh &>/dev/null; then
+  log "Installing GitHub CLI (gh)..."
+  install -m 0755 -d /etc/apt/keyrings
+  curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
+    -o /etc/apt/keyrings/githubcli-archive-keyring.gpg
+  chmod a+r /etc/apt/keyrings/githubcli-archive-keyring.gpg
+  echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
+    > /etc/apt/sources.list.d/github-cli.list
+  apt-get update -qq >> "$LOG_FILE" 2>&1
+  apt-get "${APT_OPTS[@]}" install gh >> "$LOG_FILE" 2>&1
+  log "gh installed: $(gh --version 2>/dev/null | head -n1)"
+else
+  log "gh already installed: $(gh --version 2>/dev/null | head -n1)"
+fi
+
+# =============================================================================
 # Node.js 22 LTS
 # =============================================================================
 
