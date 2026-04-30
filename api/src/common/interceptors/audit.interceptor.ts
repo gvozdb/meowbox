@@ -37,14 +37,30 @@ export class AuditInterceptor implements NestInterceptor {
       const entityId = req.params?.id || null;
 
       // Proxy server-to-server вызовы имеют синтетического юзера (sub='proxy'),
-      // у которого НЕТ записи в users. Если попытаться писать в auditLog
-      // с FK userId='proxy' — Prisma бросит, .catch проглотит, и аудита
-      // не будет вообще. Для proxy-операций пишем в logger как минимум
-      // (структурированный warn) — это попадёт в pm2 logs / journalctl.
+      // у которого НЕТ записи в users. Пишем такие операции в отдельную таблицу
+      // proxy_audit_logs с direction=IN (slave-сторона видит этот трафик
+      // как входящий от чужой панели). Так есть полноценный журнал в БД,
+      // а не warn в stdout.
       if (user.sub === 'proxy') {
-        this.logger.warn(
-          `[proxy-audit] action=${action} entity=${entity} entityId=${entityId || '-'} ip=${this.extractIp(req)} status=${status} method=${req.method} path=${req.path}`,
-        );
+        this.prisma.proxyAuditLog
+          .create({
+            data: {
+              direction: 'IN',
+              userId: null,
+              serverId: null,
+              serverName: null,
+              method: req.method,
+              path: req.path,
+              statusCode: status === 'SUCCESS' ? 200 : (extra.status as number | undefined) ?? 500,
+              durationMs: Date.now() - startTime,
+              ipAddress: this.extractIp(req),
+              userAgent: (req.headers['user-agent'] || '').slice(0, 512),
+              errorMsg: status === 'FAILED' ? String(extra.error ?? '').slice(0, 1000) : null,
+            },
+          })
+          .catch((err: unknown) => {
+            this.logger.warn(`proxy-audit IN write failed: ${(err as Error).message}`);
+          });
         return;
       }
 

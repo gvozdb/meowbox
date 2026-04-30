@@ -7,6 +7,12 @@ interface ServerInfo {
   token: string;
   online: boolean;
   version?: string;
+  /** Latest release tag, как видит сам удалённый сервер. */
+  latestVersion?: string | null;
+  /** Доступно ли обновление панели на удалённом сервере. */
+  hasUpdate?: boolean;
+  lastCheckedAt?: string;
+  lastError?: string;
 }
 
 export const useServerStore = defineStore('server', {

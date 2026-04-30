@@ -39,14 +39,15 @@
         <button
           v-if="serverStore.servers.length > 0"
           class="servers-page__btn servers-page__btn--update"
-          :disabled="updating"
-          @click="updateAll"
+          :disabled="updating || selectedIds.size === 0"
+          :title="selectedIds.size === 0 ? 'Выбери серверы галкой на карточке' : `Обновить ${selectedIds.size} серверов`"
+          @click="openBulkUpdateModal"
         >
           <svg v-if="!updating" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
             <polyline points="16,16 12,12 8,16" /><line x1="12" y1="12" x2="12" y2="21" /><path d="M20.39 18.39A5 5 0 0 0 18 9h-1.26A8 8 0 1 0 3 16.3" />
           </svg>
           <span v-if="updating" class="servers-page__spinner" />
-          {{ updating ? 'Обновление...' : 'Обновить все' }}
+          {{ updating ? 'Обновление...' : `Обновить выбранные${selectedIds.size > 0 ? ` (${selectedIds.size})` : ''}` }}
         </button>
       </div>
     </div>
@@ -72,17 +73,38 @@
       <h2 class="servers-page__section-title">
         Подключённые серверы
         <span class="servers-page__badge">{{ serverStore.servers.length }}</span>
+        <span v-if="selectedIds.size > 0" class="servers-page__selection">
+          выбрано: {{ selectedIds.size }}
+          <button class="servers-page__selection-clear" @click="clearSelection">сбросить</button>
+        </span>
       </h2>
       <div class="servers-grid">
         <div
           v-for="server in serverStore.servers"
           :key="server.id"
           class="server-card"
-          :class="{ 'server-card--selected': server.id === serverStore.currentServerId }"
+          :class="{
+            'server-card--selected': server.id === serverStore.currentServerId,
+            'server-card--checked': selectedIds.has(server.id),
+            'server-card--has-update': server.hasUpdate,
+          }"
         >
           <div class="server-card__header">
+            <label class="server-card__checkbox" :title="server.online ? 'Выбрать для массового обновления' : 'Сервер офлайн'">
+              <input
+                type="checkbox"
+                :checked="selectedIds.has(server.id)"
+                :disabled="!server.online"
+                @change="toggleSelected(server.id)"
+              />
+              <span class="server-card__checkbox-mark" />
+            </label>
             <div class="server-card__status" :class="server.online ? 'server-card__status--online' : 'server-card__status--offline'" />
             <span class="server-card__name">{{ server.name }}</span>
+            <span v-if="server.hasUpdate" class="server-card__update-badge" :title="`Доступна ${server.latestVersion}`">
+              <span class="server-card__update-dot" />
+              update
+            </span>
             <div class="server-card__actions">
               <button class="server-card__action" title="Edit" @click="openEditModal(server)">
                 <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
@@ -109,7 +131,14 @@
             </div>
             <div v-if="server.version" class="server-card__row">
               <span class="server-card__label">Версия</span>
-              <span class="server-card__value server-card__value--mono">{{ server.version }}</span>
+              <span class="server-card__value server-card__value--mono">
+                {{ server.version }}
+                <span v-if="server.hasUpdate && server.latestVersion" class="server-card__version-arrow">→ {{ server.latestVersion }}</span>
+              </span>
+            </div>
+            <div v-if="!server.online && server.lastError" class="server-card__row">
+              <span class="server-card__label">Ошибка</span>
+              <span class="server-card__value server-card__value--error" :title="server.lastError">{{ truncate(server.lastError, 40) }}</span>
             </div>
           </div>
           <button
@@ -339,6 +368,83 @@
       </Transition>
     </Teleport>
 
+    <!-- Bulk Update Modal -->
+    <Teleport to="body">
+      <Transition name="modal">
+        <div v-if="showBulkUpdateModal" class="modal-overlay" @mousedown.self="!updating && closeBulkUpdateModal()">
+          <div class="modal modal--lg">
+            <div class="modal__header">
+              <h3 class="modal__title">Массовое обновление панели</h3>
+              <button v-if="!updating" class="modal__close" @click="closeBulkUpdateModal">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+                  <line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" />
+                </svg>
+              </button>
+            </div>
+            <div class="modal__body">
+              <p class="modal__desc">
+                Будет обновлено <strong>{{ selectedServers.length }}</strong> серверов.
+                Целевая версия должна быть строго выше максимальной текущей —
+                downgrade запрещён, чтобы не сломать БД-миграции.
+              </p>
+
+              <div class="bulk-targets">
+                <div
+                  v-for="srv in selectedServers"
+                  :key="srv.id"
+                  class="bulk-targets__item"
+                  :class="{ 'bulk-targets__item--offline': !srv.online }"
+                >
+                  <span class="bulk-targets__indicator" :class="srv.online ? 'bulk-targets__indicator--online' : 'bulk-targets__indicator--offline'" />
+                  <span class="bulk-targets__name">{{ srv.name }}</span>
+                  <span class="bulk-targets__current">{{ srv.version || '?' }}</span>
+                </div>
+              </div>
+
+              <div v-if="maxCurrentVersion" class="bulk-info">
+                Максимальная текущая версия среди выбранных: <strong>{{ maxCurrentVersion }}</strong>
+              </div>
+
+              <div class="modal__field">
+                <label class="modal__label">Целевая версия</label>
+                <select v-model="bulkTargetVersion" class="modal__input modal__input--mono" :disabled="updating">
+                  <option value="" disabled>— выбери из списка релизов —</option>
+                  <option
+                    v-for="t in availableTags"
+                    :key="t.tag"
+                    :value="t.tag"
+                    :disabled="!isVersionAllowed(t.tag)"
+                  >
+                    {{ t.tag }}{{ t.prerelease ? ' (prerelease)' : '' }}{{ !isVersionAllowed(t.tag) ? ' — недоступно (≤ текущей)' : '' }}
+                  </option>
+                </select>
+                <span class="modal__hint">
+                  Список релизов взят с GitHub.
+                  <button type="button" class="modal__inline-btn" :disabled="loadingTags" @click="loadTags(true)">
+                    {{ loadingTags ? 'обновление...' : 'обновить' }}
+                  </button>
+                </span>
+              </div>
+
+              <div v-if="bulkUpdateError" class="modal__error">{{ bulkUpdateError }}</div>
+
+              <div class="modal__actions">
+                <button class="modal__btn modal__btn--cancel" :disabled="updating" @click="closeBulkUpdateModal">Отмена</button>
+                <button
+                  class="modal__btn modal__btn--submit"
+                  :disabled="updating || !bulkTargetVersion || !isVersionAllowed(bulkTargetVersion)"
+                  @click="executeBulkUpdate"
+                >
+                  <span v-if="updating" class="servers-page__spinner" />
+                  {{ updating ? 'Запуск обновления...' : `Обновить ${selectedServers.length} сервер(ов) до ${bulkTargetVersion || '?'}` }}
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </Transition>
+    </Teleport>
+
   </div>
 </template>
 
@@ -352,6 +458,10 @@ interface ServerInfo {
   token: string;
   online: boolean;
   version?: string;
+  latestVersion?: string | null;
+  hasUpdate?: boolean;
+  lastCheckedAt?: string;
+  lastError?: string;
 }
 
 interface UpdateResult {
@@ -361,12 +471,136 @@ interface UpdateResult {
   error?: string;
 }
 
+interface ReleaseTag {
+  tag: string;
+  publishedAt: string | null;
+  prerelease: boolean;
+}
+
+function compareSemver(a: string, b: string): number {
+  const norm = (v: string) => v.replace(/^v/i, '').split(/[.-]/);
+  const aa = norm(a);
+  const bb = norm(b);
+  for (let i = 0; i < Math.max(aa.length, bb.length); i++) {
+    const ai = aa[i] ?? '0';
+    const bi = bb[i] ?? '0';
+    const an = Number(ai);
+    const bn = Number(bi);
+    if (!Number.isNaN(an) && !Number.isNaN(bn)) {
+      if (an !== bn) return an < bn ? -1 : 1;
+    } else {
+      if (ai !== bi) return ai < bi ? -1 : 1;
+    }
+  }
+  return 0;
+}
+
+function truncate(s: string, n: number): string {
+  return s.length > n ? s.slice(0, n - 1) + '…' : s;
+}
+
 const api = useApi();
 const serverStore = useServerStore();
 
 const refreshing = ref(false);
 const updating = ref(false);
 const updateResults = ref<UpdateResult[]>([]);
+
+// ── Selection (для массового обновления) ──
+const selectedIds = ref<Set<string>>(new Set());
+
+function toggleSelected(id: string) {
+  // Хитрость с Set: чтобы Vue реактивно перерисовывал — пересоздаём Set.
+  const next = new Set(selectedIds.value);
+  if (next.has(id)) next.delete(id);
+  else next.add(id);
+  selectedIds.value = next;
+}
+
+function clearSelection() {
+  selectedIds.value = new Set();
+}
+
+const selectedServers = computed(() =>
+  serverStore.servers.filter((s: ServerInfo) => selectedIds.value.has(s.id)),
+);
+
+const maxCurrentVersion = computed(() => {
+  const versions = selectedServers.value
+    .map((s) => s.version)
+    .filter((v): v is string => !!v && v !== 'unknown');
+  if (versions.length === 0) return null;
+  return versions.reduce((a, b) => (compareSemver(a, b) >= 0 ? a : b));
+});
+
+function isVersionAllowed(tag: string): boolean {
+  if (!maxCurrentVersion.value) return true;
+  return compareSemver(tag, maxCurrentVersion.value) > 0;
+}
+
+// ── Bulk update modal ──
+const showBulkUpdateModal = ref(false);
+const bulkTargetVersion = ref('');
+const bulkUpdateError = ref('');
+const availableTags = ref<ReleaseTag[]>([]);
+const loadingTags = ref(false);
+
+async function loadTags(refresh = false) {
+  loadingTags.value = true;
+  try {
+    const tags = await api.get<ReleaseTag[]>(`/admin/update/tags${refresh ? '?refresh=1' : ''}`);
+    availableTags.value = tags || [];
+  } catch (err) {
+    console.warn('loadTags failed:', err);
+  } finally {
+    loadingTags.value = false;
+  }
+}
+
+async function openBulkUpdateModal() {
+  bulkTargetVersion.value = '';
+  bulkUpdateError.value = '';
+  showBulkUpdateModal.value = true;
+  // Подгружаем теги при открытии (если кеш пустой).
+  if (availableTags.value.length === 0) {
+    await loadTags(false);
+  }
+  // Авто-выбор первого подходящего тега.
+  const firstAllowed = availableTags.value.find((t) => !t.prerelease && isVersionAllowed(t.tag));
+  if (firstAllowed) bulkTargetVersion.value = firstAllowed.tag;
+}
+
+function closeBulkUpdateModal() {
+  if (updating.value) return;
+  showBulkUpdateModal.value = false;
+}
+
+async function executeBulkUpdate() {
+  if (!bulkTargetVersion.value) return;
+  if (!isVersionAllowed(bulkTargetVersion.value)) {
+    bulkUpdateError.value = `Версия ${bulkTargetVersion.value} не выше максимальной текущей (${maxCurrentVersion.value}).`;
+    return;
+  }
+  updating.value = true;
+  bulkUpdateError.value = '';
+  updateResults.value = [];
+  try {
+    const data = await api.post<{ version: string; results: UpdateResult[] }>('/servers/update-bulk', {
+      serverIds: Array.from(selectedIds.value),
+      version: bulkTargetVersion.value,
+    });
+    updateResults.value = data?.results || [];
+    showStatus(`Обновление запущено на ${updateResults.value.filter((r) => r.success).length}/${updateResults.value.length} серверов`);
+    closeBulkUpdateModal();
+    clearSelection();
+    // Подождём чуть и обновим статусы — slave запустит update.sh в фоне.
+    setTimeout(() => serverStore.loadServers(), 5000);
+  } catch (err: unknown) {
+    bulkUpdateError.value = (err as Error).message || 'Ошибка массового обновления';
+  } finally {
+    updating.value = false;
+  }
+}
 
 // Status toast
 const mbToast = useMbToast();
@@ -531,24 +765,12 @@ async function startProvision() {
 async function refresh() {
   refreshing.value = true;
   try {
+    // Триггерим явный refresh на бэке (пинг + обновление statusCache),
+    // потом перечитываем список. Так UI получает свежие данные сразу.
+    await api.post('/servers/refresh');
     await serverStore.loadServers();
   } finally {
     refreshing.value = false;
-  }
-}
-
-async function updateAll() {
-  if (updating.value) return;
-  updating.value = true;
-  updateResults.value = [];
-  try {
-    const data = await api.post<UpdateResult[]>('/servers/update-all');
-    updateResults.value = data || [];
-    await serverStore.loadServers();
-  } catch {
-    updateResults.value = [{ id: '-', name: 'Все серверы', success: false, error: 'Ошибка запроса' }];
-  } finally {
-    updating.value = false;
   }
 }
 
@@ -1369,5 +1591,204 @@ onMounted(() => {
   .modal__field--port {
     width: 100%;
   }
+}
+
+/* ── Selection / checkbox / update badge ── */
+.servers-page__selection {
+  margin-left: 0.5rem;
+  font-size: 0.8rem;
+  color: var(--text-muted);
+  font-weight: 500;
+}
+
+.servers-page__selection-clear {
+  margin-left: 0.4rem;
+  background: transparent;
+  border: none;
+  font-size: 0.78rem;
+  color: var(--primary);
+  cursor: pointer;
+  text-decoration: underline;
+  padding: 0;
+  font-family: inherit;
+}
+
+.server-card__checkbox {
+  display: inline-flex;
+  align-items: center;
+  cursor: pointer;
+  margin-right: 0.5rem;
+  flex-shrink: 0;
+}
+
+.server-card__checkbox input {
+  position: absolute;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.server-card__checkbox-mark {
+  display: inline-block;
+  width: 16px;
+  height: 16px;
+  border: 1.5px solid var(--border-strong);
+  border-radius: 4px;
+  background: var(--surface-elevated);
+  position: relative;
+  transition: all 0.15s;
+}
+
+.server-card__checkbox input:checked + .server-card__checkbox-mark {
+  background: var(--primary);
+  border-color: var(--primary);
+}
+
+.server-card__checkbox input:checked + .server-card__checkbox-mark::after {
+  content: '';
+  position: absolute;
+  left: 4px;
+  top: 1px;
+  width: 4px;
+  height: 8px;
+  border: solid white;
+  border-width: 0 2px 2px 0;
+  transform: rotate(45deg);
+}
+
+.server-card__checkbox input:disabled + .server-card__checkbox-mark {
+  opacity: 0.35;
+  cursor: not-allowed;
+}
+
+.server-card--checked {
+  border-color: var(--primary);
+  box-shadow: 0 0 0 1px var(--primary);
+}
+
+.server-card--has-update {
+  border-color: rgba(245, 158, 11, 0.4);
+}
+
+.server-card__update-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  margin-left: auto;
+  margin-right: 0.5rem;
+  padding: 0.15rem 0.45rem;
+  font-size: 0.7rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  background: rgba(245, 158, 11, 0.12);
+  border: 1px solid rgba(245, 158, 11, 0.3);
+  border-radius: 6px;
+  color: #f59e0b;
+}
+
+.server-card__update-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #f59e0b;
+  animation: pulse-update 2s ease-in-out infinite;
+}
+
+@keyframes pulse-update {
+  0%, 100% { opacity: 0.5; transform: scale(1); }
+  50% { opacity: 1; transform: scale(1.3); box-shadow: 0 0 8px rgba(245, 158, 11, 0.6); }
+}
+
+.server-card__version-arrow {
+  margin-left: 0.4rem;
+  color: #f59e0b;
+  font-size: 0.78rem;
+  font-weight: 600;
+}
+
+.server-card__value--error {
+  color: var(--danger, #ef4444);
+  font-size: 0.78rem;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* ── Bulk update modal ── */
+.bulk-targets {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+  max-height: 200px;
+  overflow-y: auto;
+  padding: 0.5rem;
+  background: var(--surface-elevated);
+  border-radius: 8px;
+  margin-bottom: 1rem;
+}
+
+.bulk-targets__item {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  padding: 0.4rem 0.6rem;
+  background: var(--surface);
+  border-radius: 6px;
+  font-size: 0.85rem;
+}
+
+.bulk-targets__item--offline {
+  opacity: 0.5;
+}
+
+.bulk-targets__indicator {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+}
+
+.bulk-targets__indicator--online { background: #10b981; }
+.bulk-targets__indicator--offline { background: #6b7280; }
+
+.bulk-targets__name {
+  flex: 1;
+  font-weight: 500;
+}
+
+.bulk-targets__current {
+  font-family: ui-monospace, SFMono-Regular, monospace;
+  font-size: 0.78rem;
+  color: var(--text-muted);
+}
+
+.bulk-info {
+  padding: 0.55rem 0.75rem;
+  background: rgba(99, 102, 241, 0.06);
+  border: 1px solid rgba(99, 102, 241, 0.15);
+  border-radius: 8px;
+  font-size: 0.8rem;
+  color: var(--text-muted);
+  margin-bottom: 1rem;
+}
+
+.bulk-info strong {
+  color: var(--text-heading);
+  font-family: ui-monospace, SFMono-Regular, monospace;
+}
+
+.modal__inline-btn {
+  background: transparent;
+  border: none;
+  color: var(--primary);
+  cursor: pointer;
+  text-decoration: underline;
+  font-family: inherit;
+  font-size: inherit;
+  padding: 0;
+}
+
+.modal__inline-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
 }
 </style>

@@ -151,9 +151,14 @@ if command -v gh >/dev/null 2>&1; then
 else
   AUTH_HDR=()
   [[ -n "${GITHUB_TOKEN:-}" ]] && AUTH_HDR=(-H "Authorization: Bearer $GITHUB_TOKEN")
-  curl -sfL "${AUTH_HDR[@]}" -H "Accept: application/octet-stream" \
-    "https://api.github.com/repos/$GITHUB_REPO/releases/tags/$TARGET" \
-    -o "$TMP_DIR/release.json" || abort "Не удалось получить инфо о релизе $TARGET"
+  # Existence-probe: HEAD на metadata-эндпоинт с правильным Accept.
+  # NB: НЕ слать Accept: application/octet-stream сюда — GitHub отвечает 415.
+  http_code="$(curl -sIL -o /dev/null -w '%{http_code}' "${AUTH_HDR[@]}" \
+    -H "Accept: application/vnd.github+json" \
+    "https://api.github.com/repos/$GITHUB_REPO/releases/tags/$TARGET" || echo 000)"
+  if [[ "$http_code" != "200" ]]; then
+    abort "Релиз $TARGET не найден на GitHub (HTTP $http_code, repo=$GITHUB_REPO)"
+  fi
   curl -sfL "${AUTH_HDR[@]}" \
     "https://github.com/$GITHUB_REPO/releases/download/$TARGET/meowbox-$TARGET.tar.gz" \
     -o "$TARBALL" || abort "Не удалось скачать tarball (для приватных репо нужен gh CLI или GITHUB_TOKEN)"

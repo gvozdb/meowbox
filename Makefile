@@ -1,5 +1,5 @@
 .PHONY: start stop restart logs logs-api logs-web logs-agent status install build deploy seed \
-        migrate migrate-prisma migrate-system migrate-status \
+        migrate migrate-prisma migrate-system migrate-status new-migration link-shared \
         snapshot rollback update update-check healthcheck
 
 # =============================================================================
@@ -7,30 +7,43 @@
 # SQLite-only — никаких внешних сервисов (PostgreSQL и Redis выпилены).
 # =============================================================================
 
-# --- Install ---
+# --- Symlinks (внутренний пакет @meowbox/shared не объявлен в dependencies) ---
+# tsc и runtime ищут его в node_modules/@meowbox/shared, поэтому линкуем вручную.
+# Идемпотентно: ln -sfn перезаписывает старые ссылки.
+link-shared:
+	@for pkg in api agent web migrations; do \
+		mkdir -p $$pkg/node_modules/@meowbox; \
+		ln -sfn ../../../shared $$pkg/node_modules/@meowbox/shared; \
+	done
+	@mkdir -p migrations/node_modules/@prisma
+	@if [ -d api/node_modules/@prisma/client ]; then \
+		ln -sfn ../../../api/node_modules/@prisma/client migrations/node_modules/@prisma/client; \
+	fi
+
+# --- Install (для dev / первой настройки) ---
 install:
-	cd shared && npm install && npm run build
+	cd shared && npm install
 	cd api && npm install && npx prisma generate
-	cd agent && npm install && npm run build
-	cd web && npm install && npm run build
-	cd migrations && npm install && npm run build
-	@echo "Meowbox dependencies installed. Run 'make migrate' to apply pending migrations."
+	cd agent && npm install
+	cd web && npm install
+	cd migrations && npm install
+	@$(MAKE) link-shared
+	@$(MAKE) build
+	@echo "Meowbox installed. Run 'make migrate' to apply pending migrations."
 
 # --- Migrations ---
-# Применяет pending Prisma + system миграции. Используется в make update и при первом install.
+# Применяет pending Prisma + system миграции. Используется в make deploy и при первом install.
 migrate: migrate-prisma migrate-system
 
 migrate-prisma:
 	cd api && npx prisma migrate deploy
 
 migrate-system:
-	@if [ -f migrations/dist/runner.js ]; then \
-		node migrations/dist/runner.js up; \
-	else \
+	@if [ ! -f migrations/dist/runner.js ]; then \
 		echo "[migrate-system] runner not built — building..."; \
 		cd migrations && npm run build; \
-		cd .. && node migrations/dist/runner.js up; \
 	fi
+	@node migrations/dist/runner.js up
 
 migrate-status:
 	@cd api && npx prisma migrate status || true
@@ -44,26 +57,23 @@ new-migration:
 seed:
 	cd api && npx ts-node prisma/seed.ts
 
-# --- Build ---
-build:
-	cd shared && npm run build
-	cd api && npm run build
-	cd agent && npm run build
-	cd web && npm run build
-	cd migrations && npm run build
-
-# --- Deploy (build + restart + verify) ---
-deploy:
+# --- Build (все пакеты) ---
+# link-shared первым шагом, чтобы tsc нашёл @meowbox/shared.
+build: link-shared
 	@echo "▸ Building shared..."
-	cd shared && npm run build
+	@cd shared && npm run build
 	@echo "▸ Building agent..."
-	cd agent && npm run build
+	@cd agent && npm run build
 	@echo "▸ Building API..."
-	cd api && npm run build
+	@cd api && npm run build
 	@echo "▸ Building web..."
-	cd web && npm run build
+	@cd web && npm run build
 	@echo "▸ Building migrations runner..."
-	cd migrations && npm run build
+	@cd migrations && npm run build
+
+# --- Deploy (build + migrate + restart + verify) ---
+# Главная команда после правок кода / схемы. Применяет всё за один заход.
+deploy: build migrate
 	@echo "▸ Restarting PM2..."
 	@pm2 restart ecosystem.config.js --silent
 	@sleep 5

@@ -30,6 +30,7 @@ state/
 
 # --- Секреты и логи ---
 .env
+.env.bak.*
 *.log
 # state/logs/ для runtime — он покрыт state/ выше; не используем bare `logs/`
 # чтобы не поймать каталоги исходников типа agent/src/logs/

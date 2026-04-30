@@ -9,6 +9,9 @@ import {
   MinLength,
   Matches,
   IsUrl,
+  IsArray,
+  ArrayMinSize,
+  ArrayMaxSize,
 } from 'class-validator';
 
 /**
@@ -101,4 +104,26 @@ export class ProvisionServerDto {
   @IsNotEmpty()
   @MaxLength(256)
   password!: string;
+}
+
+/**
+ * Массовое обновление выбранных серверов до целевой версии.
+ * Версия должна быть строго выше максимальной текущей среди выбранных
+ * (downgrade запрещён — может сломать БД-миграции).
+ */
+export class UpdateBulkDto {
+  @IsArray()
+  @ArrayMinSize(1)
+  @ArrayMaxSize(50)
+  @IsString({ each: true })
+  serverIds!: string[];
+
+  // Тег релиза, например "v0.4.0". Формат vN.N.N или semver-совместимый.
+  @IsString()
+  @IsNotEmpty()
+  @MaxLength(64)
+  @Matches(/^v?\d+\.\d+\.\d+(-[A-Za-z0-9.-]+)?$/, {
+    message: 'version должен быть semver (например v0.4.0 или 0.4.0-beta.1)',
+  })
+  version!: string;
 }

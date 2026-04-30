@@ -228,6 +228,13 @@ WEBHOOK_SECRET=$(openssl rand -hex 32)
 # Adminer SSO master-key: 32 байта в base64 (AES-256-GCM).
 # Тот же ключ читает PHP в /opt/meowbox/tools/adminer/lib/sso.php.
 ADMINER_SSO_KEY=$(openssl rand -base64 32)
+# PROXY_TOKEN: server-to-server bearer для master→slave проксирования.
+# Если оператор не передал --proxy-token — генерируем сами, чтобы slave-сервер
+# был сразу готов принимать прокси-запросы из мастер-панели после установки.
+# Достаточно зайти в state/.env и скопировать PROXY_TOKEN в форму "Добавить сервер".
+if [[ -z "$PROXY_TOKEN" ]]; then
+  PROXY_TOKEN=$(openssl rand -hex 32)
+fi
 
 # =============================================================================
 # Create .env (только если его ещё нет — не затираем существующий)
@@ -278,14 +285,14 @@ SITES_BASE_PATH="/var/www"
 # Adminer SSO — общий секрет между Node API и PHP Adminer для шифрования
 # одноразовых ticket'ов и сессионных кук (AES-256-GCM, 32 байта в base64).
 ADMINER_SSO_KEY="${ADMINER_SSO_KEY}"
+
+# PROXY_TOKEN: server-to-server токен для master→slave прокси.
+# Сгенерирован автоматически — скопируй его в форму "Добавить сервер"
+# на master-панели чтобы подключить этот сервер.
+PROXY_TOKEN="${PROXY_TOKEN}"
 ENV
 
-  # Add PROXY_TOKEN if provided (for remote server provisioning)
-  if [[ -n "$PROXY_TOKEN" ]]; then
-    echo "" >> "${ENV_FILE}"
-    echo "PROXY_TOKEN=\"${PROXY_TOKEN}\"" >> "${ENV_FILE}"
-    log "PROXY_TOKEN configured for remote server mode"
-  fi
+  log "PROXY_TOKEN сгенерирован — см. state/.env (нужен для подключения сервера к master-панели)"
 
   chmod 600 "${ENV_FILE}"
 else
@@ -298,6 +305,17 @@ else
       echo "ADMINER_SSO_KEY=\"${ADMINER_SSO_KEY}\""
     } >> "${ENV_FILE}"
   fi
+  # PROXY_TOKEN: дописываем если не задан (старые установки до 0.4.x не имели его).
+  # Закомментированная строка PROXY_TOKEN=CHANGE_ME... тоже считается "не задан".
+  if ! grep -qE '^PROXY_TOKEN="[^"]+"' "${ENV_FILE}"; then
+    log "Adding PROXY_TOKEN to existing .env (auto-generated)"
+    {
+      echo ""
+      echo "# PROXY_TOKEN: server-to-server токен для master→slave прокси (auto-added)"
+      echo "PROXY_TOKEN=\"${PROXY_TOKEN}\""
+    } >> "${ENV_FILE}"
+  fi
+  chmod 600 "${ENV_FILE}"
 fi
 
 # В release-режиме .env живёт в state/.env, а api ожидает его рядом с собой

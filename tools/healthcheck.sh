@@ -33,17 +33,20 @@ for p in "${need[@]}"; do
   fi
 done
 
-# 2. API отвечает
+# 2. API отвечает (любой HTTP-код = жив; connection refused = мёртв)
+# /api/health требует auth → 401 для безымянного запроса; нам важен сам факт ответа.
 deadline=$(( $(date +%s) + TIMEOUT ))
-api_ok=false
+api_code=000
 while [[ $(date +%s) -lt $deadline ]]; do
-  if curl -sf "http://127.0.0.1:${API_PORT}/api/health" -o /dev/null 2>/dev/null; then
-    api_ok=true
-    break
-  fi
+  api_code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 3 "http://127.0.0.1:${API_PORT}/api/health" 2>/dev/null || echo 000)"
+  if [[ "$api_code" =~ ^[1-5][0-9][0-9]$ ]]; then break; fi
   sleep 1
 done
-if $api_ok; then say "✓ API /api/health 200"; else err "API не отвечает на :${API_PORT}/api/health за ${TIMEOUT}s"; fi
+if [[ "$api_code" =~ ^[1-5][0-9][0-9]$ ]]; then
+  say "✓ API :${API_PORT} отвечает (HTTP ${api_code})"
+else
+  err "API не отвечает на :${API_PORT} за ${TIMEOUT}s"
+fi
 
 # 3. Web отвечает
 web_ok=false

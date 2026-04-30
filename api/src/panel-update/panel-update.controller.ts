@@ -35,6 +35,17 @@ export class PanelUpdateController {
     return { success: true, data };
   }
 
+  /**
+   * GET /api/admin/update/tags — список последних релизов с GitHub.
+   * Используется на /admin/updates и в массовом обновлении серверов.
+   */
+  @Get('tags')
+  @Roles(UserRole.ADMIN)
+  async tags(@Query('refresh') refresh?: string) {
+    const data = await this.service.listReleaseTags(refresh === '1' || refresh === 'true');
+    return { success: true, data };
+  }
+
   /** POST /api/admin/update — запускает tools/update.sh в фоне. body: { version?: 'v1.4.2' | null }. */
   @Post()
   @Roles(UserRole.ADMIN)

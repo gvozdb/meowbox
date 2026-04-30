@@ -510,6 +510,34 @@ model AuditLog {
   @@map("audit_logs")
 }
 
+// Audit-лог проксирующих запросов: master→slave (direction=OUT) и
+// slave-сторона (direction=IN, прилетевший от чужой панели запрос).
+// Отдельная таблица потому что:
+//   - userId опциональный (на slave userId=null, действует proxy-bot)
+//   - serverId/serverName — snapshot, чтобы при удалении сервера лог не терялся
+//   - быстрый отбор по серверу (в /servers покажем history последних действий)
+model ProxyAuditLog {
+  id          String   @id @default(uuid())
+  direction   String // "OUT" | "IN"
+  userId      String?  @map("user_id") // master-side: кто инициировал; slave-side: null
+  serverId    String?  @map("server_id") // master-side: цель; slave-side: null
+  serverName  String?  @map("server_name") // snapshot имени на момент действия
+  method      String // HTTP метод (GET/POST/...)
+  path        String // path без префикса /api (e.g. "/sites/123")
+  statusCode  Int?     @map("status_code") // HTTP-код ответа slave (или null если запрос упал на сети)
+  durationMs  Int      @default(0) @map("duration_ms")
+  ipAddress   String   @map("ip_address") // IP клиента (master-side) / IP master (slave-side)
+  userAgent   String?  @map("user_agent")
+  errorMsg    String?  @map("error_msg") // сообщение об ошибке если запрос упал
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  @@index([direction])
+  @@index([serverId])
+  @@index([userId])
+  @@index([createdAt])
+  @@map("proxy_audit_logs")
+}
+
 model HealthCheckPing {
   id             String   @id @default(uuid())
   siteId         String   @map("site_id")

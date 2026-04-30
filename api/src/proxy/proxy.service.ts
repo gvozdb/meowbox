@@ -7,7 +7,7 @@ import {
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { randomUUID } from 'crypto';
-import { readFile, writeFile, rename, mkdir } from 'fs/promises';
+import { readFile, writeFile, rename, mkdir, chmod } from 'fs/promises';
 import { existsSync } from 'fs';
 import { join } from 'path';
 import { assertPublicHttpUrl } from '../common/validators/safe-url';
@@ -21,7 +21,16 @@ export interface ServerConfig {
 
 export interface ServerInfo extends ServerConfig {
   online: boolean;
+  /** Текущая версия панели на удалённом сервере (например `v0.3.0`). */
   version?: string;
+  /** Latest release с GitHub, как видит сам удалённый сервер (может быть null если приватный repo и нет токена). */
+  latestVersion?: string | null;
+  /** Доступно ли обновление (latest > current на удалённом). */
+  hasUpdate?: boolean;
+  /** Последняя успешная проверка статуса (ISO). */
+  lastCheckedAt?: string;
+  /** Если последняя проверка упала — причина. */
+  lastError?: string;
 }
 
 const DATA_DIR = join(process.cwd(), '..', 'data');
@@ -80,9 +89,12 @@ export class ProxyService implements OnModuleInit {
   }
 
   private async saveServers() {
-    // Atomic write: tmp file → rename
+    // Atomic write: tmp file → rename. chmod 600 ОБЯЗАТЕЛЬНО — файл содержит
+    // PROXY_TOKEN'ы всех slave-серверов в plaintext. Любой локальный юзер не
+    // должен мочь их прочитать.
     const tmp = SERVERS_FILE + '.tmp';
     await writeFile(tmp, JSON.stringify(this.servers, null, 2), 'utf-8');
+    await chmod(tmp, 0o600);
     await rename(tmp, SERVERS_FILE);
   }
 
@@ -141,6 +153,8 @@ export class ProxyService implements OnModuleInit {
     if (data.token !== undefined) this.servers[idx].token = data.token;
 
     await this.saveServers();
+    // URL/токен поменялись — статус мог стать невалидным. Инвалидируем кеш.
+    this.statusCache.delete(id);
     this.logger.log(`Updated server "${this.servers[idx].name}" (${id})`);
     return this.servers[idx];
   }
@@ -154,11 +168,35 @@ export class ProxyService implements OnModuleInit {
     const name = this.servers[idx].name;
     this.servers.splice(idx, 1);
     await this.saveServers();
+    this.statusCache.delete(id);
     this.logger.log(`Removed server "${name}" (${id})`);
   }
 
   /**
+   * Endpoint-классы с увеличенным таймаутом — длинные операции, которые
+   * не дотянут за 30 секунд. Совпадение по startsWith.
+   */
+  private static readonly LONG_RUNNING_PATHS = [
+    '/backups/',           // start/restore — могут идти минуты
+    '/migration/',         // импорт/экспорт сайтов
+    '/sites/clone',
+    '/admin/update',       // panel-update (запускает spawn в фоне, но всё-таки)
+    '/system/updates/install',
+    '/system/updates/upgrade-all',
+    '/system/self-update',
+    '/database/import',
+    '/database/dump',
+  ];
+
+  /** Таймаут в мс на основе path (smart-timeout). */
+  private getTimeoutMs(path: string): number {
+    const isLong = ProxyService.LONG_RUNNING_PATHS.some((p) => path.startsWith(p));
+    return isLong ? 600_000 : 30_000;
+  }
+
+  /**
    * Proxy an HTTP request to a remote server.
+   * @param timeoutOverride — явный таймаут в мс (если не задан, выбирается smart по path)
    */
   async proxyRequest(
     server: ServerConfig,
@@ -166,6 +204,7 @@ export class ProxyService implements OnModuleInit {
     path: string,
     body?: unknown,
     headers?: Record<string, string>,
+    timeoutOverride?: number,
   ): Promise<{ status: number; data: unknown }> {
     const url = `${server.url}/api${path}`;
 
@@ -179,10 +218,12 @@ export class ProxyService implements OnModuleInit {
     delete reqHeaders['authorization'];
     delete reqHeaders['Authorization'];
 
+    const timeoutMs = timeoutOverride ?? this.getTimeoutMs(path);
+
     const fetchOptions: RequestInit = {
       method,
       headers: reqHeaders,
-      signal: AbortSignal.timeout(30_000),
+      signal: AbortSignal.timeout(timeoutMs),
     };
 
     if (body && method !== 'GET' && method !== 'HEAD') {
@@ -197,44 +238,114 @@ export class ProxyService implements OnModuleInit {
 
   /**
    * Ping a server to check if it's online + get version.
+   * Использует /admin/update/version — лёгкий endpoint, который возвращает
+   * current/latest/hasUpdate (читает VERSION файл и кешированный latest).
    */
   async pingServer(
     server: ServerConfig,
-  ): Promise<{ online: boolean; version?: string }> {
+  ): Promise<{
+    online: boolean;
+    version?: string;
+    latestVersion?: string | null;
+    hasUpdate?: boolean;
+    lastError?: string;
+  }> {
     try {
       const { status, data } = await this.proxyRequest(
         server,
         'GET',
-        '/system/versions',
+        '/admin/update/version',
+        undefined,
+        undefined,
+        5_000, // ping должен быть быстрым
       );
       if (status === 200 && data) {
-        const d = (data as { data?: Record<string, unknown> }).data;
+        const payload = (data as { data?: { current?: string; latest?: string | null; hasUpdate?: boolean } }).data;
         return {
           online: true,
-          version: d?.meowbox as string | undefined,
+          version: payload?.current,
+          latestVersion: payload?.latest ?? null,
+          hasUpdate: !!payload?.hasUpdate,
         };
       }
-      return { online: false };
-    } catch {
-      return { online: false };
+      return { online: false, lastError: `HTTP ${status}` };
+    } catch (err) {
+      return { online: false, lastError: (err as Error).message };
     }
   }
 
   /**
-   * Get all servers with online status.
+   * In-memory кеш статуса серверов. Обновляется фоновым healthcheck'ом
+   * (см. ProxyHealthcheckService) и при ручных кликах "Обновить".
+   * Карта по serverId.
    */
-  async getServersWithStatus(): Promise<ServerInfo[]> {
+  private statusCache = new Map<string, Omit<ServerInfo, keyof ServerConfig>>();
+
+  /**
+   * Прокладка для healthcheck/ручного refresh.
+   * Пингует все серверы параллельно, обновляет statusCache, возвращает результат.
+   */
+  async refreshStatuses(): Promise<ServerInfo[]> {
     const results = await Promise.allSettled(
       this.servers.map(async (s) => {
-        const { online, version } = await this.pingServer(s);
-        return { ...s, online, version, token: '***' } as ServerInfo;
+        const ping = await this.pingServer(s);
+        const status = {
+          online: ping.online,
+          version: ping.version,
+          latestVersion: ping.latestVersion,
+          hasUpdate: ping.hasUpdate,
+          lastError: ping.lastError,
+          lastCheckedAt: new Date().toISOString(),
+        };
+        this.statusCache.set(s.id, status);
+        return { ...s, ...status, token: '***' } as ServerInfo;
       }),
     );
 
-    return results.map((r, i) =>
-      r.status === 'fulfilled'
-        ? r.value
-        : { ...this.servers[i], online: false, token: '***' },
-    );
+    return results.map((r, i) => {
+      if (r.status === 'fulfilled') return r.value;
+      const fallback = {
+        online: false,
+        lastError: (r.reason as Error)?.message ?? 'unknown',
+        lastCheckedAt: new Date().toISOString(),
+      };
+      this.statusCache.set(this.servers[i].id, fallback);
+      return { ...this.servers[i], ...fallback, token: '***' } as ServerInfo;
+    });
+  }
+
+  /**
+   * Возвращает текущий снапшот серверов из кеша. Если кеш пуст для какого-то
+   * сервера — пингует его. Используется в /api/servers (быстрый ответ).
+   */
+  async getServersWithStatus(): Promise<ServerInfo[]> {
+    const missing = this.servers.filter((s) => !this.statusCache.has(s.id));
+    if (missing.length > 0) {
+      // Пингуем только те, что отсутствуют в кеше — фоновая задача наполнит
+      // остальные. Это снимает load с /api/servers при добавлении нового сервера.
+      await Promise.allSettled(
+        missing.map(async (s) => {
+          const ping = await this.pingServer(s);
+          this.statusCache.set(s.id, {
+            online: ping.online,
+            version: ping.version,
+            latestVersion: ping.latestVersion,
+            hasUpdate: ping.hasUpdate,
+            lastError: ping.lastError,
+            lastCheckedAt: new Date().toISOString(),
+          });
+        }),
+      );
+    }
+
+    return this.servers.map((s) => {
+      const status = this.statusCache.get(s.id) ?? { online: false };
+      return { ...s, ...status, token: '***' } as ServerInfo;
+    });
+  }
+
+  /** Очищает кеш статуса конкретного сервера (после edit/remove). */
+  invalidateStatus(serverId: string): void {
+    this.statusCache.delete(serverId);
   }
 }

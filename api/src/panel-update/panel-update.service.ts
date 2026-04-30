@@ -359,6 +359,54 @@ export class PanelUpdateService {
     return 'unknown';
   }
 
+  /**
+   * Список последних релизов из GitHub. Используется в /admin/updates и
+   * в массовом обновлении серверов (выбор целевой версии).
+   * Кешируется на 5 минут чтобы не упираться в GitHub rate-limit.
+   */
+  private tagsCache: { tags: Array<{ tag: string; publishedAt: string | null; prerelease: boolean }>; cachedAt: number } | null = null;
+
+  async listReleaseTags(refresh = false): Promise<Array<{ tag: string; publishedAt: string | null; prerelease: boolean }>> {
+    const TTL = 5 * 60 * 1000;
+    if (!refresh && this.tagsCache && Date.now() - this.tagsCache.cachedAt < TTL) {
+      return this.tagsCache.tags;
+    }
+
+    const repo = this.config.get<string>('GITHUB_REPO') || 'gvozdb/meowbox';
+    const token = this.config.get<string>('GITHUB_TOKEN') || process.env.GITHUB_TOKEN;
+    const headers: Record<string, string> = {
+      Accept: 'application/vnd.github+json',
+      'User-Agent': 'meowbox-panel',
+    };
+    if (token) headers['Authorization'] = `Bearer ${token}`;
+
+    try {
+      const r = await fetch(`https://api.github.com/repos/${repo}/releases?per_page=30`, { headers });
+      if (!r.ok) {
+        this.logger.warn(`GitHub releases API ${r.status}`);
+        return this.tagsCache?.tags ?? [];
+      }
+      const arr = (await r.json()) as Array<{
+        tag_name?: string;
+        published_at?: string;
+        draft?: boolean;
+        prerelease?: boolean;
+      }>;
+      const tags = arr
+        .filter((x) => !x.draft && x.tag_name)
+        .map((x) => ({
+          tag: x.tag_name as string,
+          publishedAt: x.published_at ?? null,
+          prerelease: !!x.prerelease,
+        }));
+      this.tagsCache = { tags, cachedAt: Date.now() };
+      return tags;
+    } catch (e) {
+      this.logger.warn(`listReleaseTags: ${(e as Error).message}`);
+      return this.tagsCache?.tags ?? [];
+    }
+  }
+
   private async fetchLatestTag(): Promise<string | null> {
     const repo = this.config.get<string>('GITHUB_REPO') || 'gvozdb/meowbox';
     const token = this.config.get<string>('GITHUB_TOKEN') || process.env.GITHUB_TOKEN;
