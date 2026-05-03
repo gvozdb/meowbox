@@ -195,6 +195,20 @@ async function bootstrap() {
   const port = parseInt(process.env.API_PORT || process.env.PANEL_PORT || '11860', 10);
   const host = process.env.API_HOST || (process.env.PROXY_TOKEN ? '0.0.0.0' : '127.0.0.1');
   await app.listen(port, host);
+
+  // Сигнал PM2 о готовности процесса.
+  //
+  // В ecosystem.config.js для meowbox-api стоит `wait_ready: true` +
+  // `listen_timeout: 10000` — без этого сигнала pm2 reload зависает на 10
+  // секунд, считает реплику не поднявшейся и валит rolling-restart. Из-за
+  // этого update.sh стабильно ловил "PM2 reload failed" на стадии reload,
+  // хотя сам апдейт уже был накачен. Один process.send('ready') решает.
+  //
+  // wait_ready нам нужен, чтобы pm2 не убивал старый воркер пока новый
+  // не открыл порт — это защищает от 502 во время graceful reload.
+  if (typeof process.send === 'function') {
+    try { process.send('ready'); } catch { /* IPC может быть закрыт — pm2 fallback на listen_timeout */ }
+  }
 }
 
 bootstrap();
