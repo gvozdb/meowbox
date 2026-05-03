@@ -53,6 +53,15 @@ async function bootstrap() {
     bodyParser: false,
   });
 
+  // Включаем NestJS shutdown hooks — без этого pm2 reload не мог остановить
+  // старый воркер: SIGINT/SIGTERM не вызывали app.close(), активные таймеры
+  // (setInterval в panel-update watcher, sessions GC) держали event loop,
+  // и Node висел до SIGKILL по kill_timeout (5s). После SIGKILL pm2 спавнил
+  // новый воркер, но из-за этого reload занимал 5+ секунд и часто валил
+  // graceful gate. Теперь NestJS получает сигнал → вызывает onModuleDestroy
+  // на всех модулях → закрывает HTTP сервер → процесс выходит сразу.
+  app.enableShutdownHooks();
+
   // --- Security: HTTP headers ---
   app.use(
     helmet({

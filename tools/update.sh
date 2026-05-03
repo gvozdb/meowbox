@@ -407,6 +407,24 @@ ls -1t "$RELEASES_DIR" 2>/dev/null | tail -n +$((KEEP_RELEASES + 1)) | while rea
   say "  removed: $old"
 done
 
+# Обновляем "оболочку" panel root: tools/, Makefile, install.sh, bootstrap.sh.
+# Делаем это В САМОМ КОНЦЕ после "Update OK" — чтобы bash, который сейчас
+# выполняет этот update.sh, гарантированно прочитал все свои строки в память
+# ДО того как мы перезапишем сам файл (bash читает скрипт построчно по мере
+# выполнения и может сглючить, если перезаписать в середине).
+#
+# Без этой синхронизации /opt/meowbox/tools/update.sh оставался от первой
+# установки навечно — фиксы скрипта не доезжали никогда. То же самое для
+# Makefile (используется юзером через `make update`) и install.sh.
+if [[ -d "$RELEASE_DIR/tools" ]]; then
+  cp -rf "$RELEASE_DIR/tools/." "$PANEL_DIR/tools/"
+fi
+for f in Makefile install.sh bootstrap.sh; do
+  if [[ -f "$RELEASE_DIR/$f" ]]; then
+    cp -f "$RELEASE_DIR/$f" "$PANEL_DIR/$f"
+  fi
+done
+
 # Sentinel-файл успеха: API resume опирается на его наличие, а не на regex
 # по логу. Лог может оборваться (pm2 reload пришиб stdout buffer) — а файл
 # атомарный и переживает любой race.
