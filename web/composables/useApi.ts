@@ -365,6 +365,12 @@ export function useApi() {
       request<T>(endpoint, { method: 'PUT', body, noProxy: opts?.noProxy }),
     del: <T>(endpoint: string, body?: unknown) =>
       request<T>(endpoint, { method: 'DELETE', body }),
+    // alias `delete` для DRY: исторически было только `del` (зарезервированное
+    // слово в JS как имя method-call было нормально, но кто-то по привычке
+    // пишет `api.delete(...)` — раньше это давало "p.delete is not a function".
+    // Поддерживаем оба имени, чтобы новые коллеги/места не ловили этот баг.
+    delete: <T>(endpoint: string, body?: unknown) =>
+      request<T>(endpoint, { method: 'DELETE', body }),
     patch: <T>(endpoint: string, body?: unknown) =>
       request<T>(endpoint, { method: 'PATCH', body }),
     publicPost: <T>(endpoint: string, body?: unknown) =>

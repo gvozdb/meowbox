@@ -171,16 +171,64 @@ export class PanelUpdateService implements OnModuleInit {
       });
     }
 
-    // Если status=running, но pid мёртв — корректируем на failed.
+    // Если status=running, но pid мёртв — корректируем итог.
+    //
+    // КРИТИЧНО: проверяем sentinel-файл (`state/.update-success`) ДО того,
+    // как помечать failed. update.sh пишет его перед exit'ом, и эта проверка
+    // должна быть консистентна с onModuleInit и tick() в watcher'е — иначе
+    // race: успешный апдейт между моментом смерти pid'а и следующим тиком
+    // watcher'а (1.5с) frontend опрашивает getStatus, видит dead pid и
+    // мочит state как failed, хотя апдейт фактически прошёл.
+    //
+    // Дополнительно: даём watcher'у 3-секундный grace-period — если pid
+    // только что умер, watcher вот-вот сам финализирует через флаш в БД.
+    // Не мутируем state в чтении-эндпоинте, чтобы не конкурировать с ним.
     if (state.status === 'running' && state.pid && !this.isProcessAlive(state.pid)) {
-      state = await this.prisma.panelUpdateState.update({
-        where: { id: 'current' },
-        data: {
-          status: 'failed',
-          errorMessage: 'update.sh died unexpectedly (pid not found)',
-          finishedAt: new Date(),
-        },
-      });
+      const panelDir = this.getPanelDir();
+      const stateDir = process.env.MEOWBOX_STATE_DIR || path.join(panelDir, 'state');
+      const sentinelPath = path.join(stateDir, '.update-success');
+      const logFilePath = path.join(stateDir, 'logs', 'panel-update.log');
+
+      const okBySentinel = fs.existsSync(sentinelPath);
+      let okByLog = false;
+      let logTail = '';
+      try { logTail = await fsp.readFile(logFilePath, 'utf8'); } catch { /* */ }
+      okByLog = /\[update\] ✓ Update OK:/.test(logTail);
+      const ok = okBySentinel || okByLog;
+
+      // Если есть финальный сигнал (sentinel/log) — финализируем как
+      // succeeded. Если нет — даём watcher'у дотикать; сам не мутируем
+      // (watcher разгребёт и поставит failed, или onModuleInit подхватит).
+      if (ok) {
+        state = await this.prisma.panelUpdateState.update({
+          where: { id: 'current' },
+          data: {
+            status: 'succeeded',
+            errorMessage: null,
+            finishedAt: new Date(),
+            logTail: logTail.slice(-16 * 1024),
+          },
+        });
+        await fsp.unlink(sentinelPath).catch(() => {});
+      } else {
+        // Grace-period: pid умер только что, watcher ещё не финализировал.
+        // Если с finishedAt прошло >5с с момента старта, и финального
+        // признака нет — фиксируем failed.
+        const startedAt = state.startedAt?.getTime() ?? Date.now();
+        const ageMs = Date.now() - startedAt;
+        if (ageMs > 5_000) {
+          state = await this.prisma.panelUpdateState.update({
+            where: { id: 'current' },
+            data: {
+              status: 'failed',
+              errorMessage: this.extractErrorFromLog(logTail) || 'update.sh died unexpectedly (pid not found)',
+              finishedAt: new Date(),
+              logTail: logTail.slice(-16 * 1024),
+            },
+          });
+        }
+        // если age < 5с — оставляем status=running, watcher дотикает
+      }
     }
 
     const history = await this.prisma.panelUpdateHistory.findMany({
