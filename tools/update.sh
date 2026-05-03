@@ -66,7 +66,19 @@ acquire_lock() {
     rm -f "$LOCK_FILE"
   fi
   echo $$ > "$LOCK_FILE"
-  trap 'rm -f "$LOCK_FILE"' EXIT
+  trap 'cleanup_old_releases; rm -f "$LOCK_FILE"' EXIT
+}
+
+# Чистка старых релизов — должна работать ВСЕГДА (через trap EXIT), а не
+# только на happy-path после healthcheck. Раньше при любом сбое (zависший
+# pm2 reload, healthcheck timeout, abort на середине) релизы копились в
+# releases/ и забивали диск.
+cleanup_old_releases() {
+  if [[ ! -d "$RELEASES_DIR" ]]; then return 0; fi
+  ls -1t "$RELEASES_DIR" 2>/dev/null | tail -n +$((KEEP_RELEASES + 1)) | while read -r old; do
+    rm -rf "$RELEASES_DIR/$old" 2>/dev/null || true
+    echo "[cleanup] removed: $old"
+  done
 }
 
 # ----- 0. Preflight -----
@@ -359,12 +371,43 @@ ECO_BAK="$STATE_DIR/.ecosystem.bak"
 cp -f "$ECOSYSTEM_FILE" "$ECO_BAK"
 sed -i '/^[[:space:]]*wait_ready:[[:space:]]*true,*$/d; /^[[:space:]]*listen_timeout:[[:space:]]*[0-9]\+,*$/d' "$ECOSYSTEM_FILE"
 
-pm2 reload "$ECOSYSTEM_FILE" --update-env || say "pm2 reload вернул non-zero (проверим jlist)"
-sleep 2
+# КРИТИЧНО: api рестартим ПОСЛЕДНИМ + отдельной командой + с timeout.
+# Контекст: update.sh запущен из старого api-процесса. Любой `pm2 reload`
+# процесса api в fork-mode шлёт ему SIGINT и ждёт graceful shutdown до
+# kill_timeout (5s). Если в коде старого api нет enableShutdownHooks
+# (pre-v0.5.2 — а это все версии у заказчиков) — он висит в event loop'е,
+# pm2 в итоге SIGKILL'ит, потом стартует новый воркер. Сценарий долгий,
+# и в редких случаях pm2-daemon уходит в гонку перезапусков.
+#
+# Раньше использовали `pm2 reload ecosystem.config.js` — это рестарт ВСЕХ
+# трёх (api+agent+web) одной командой. Если api зависал, agent и web даже
+# не стартовали, а update.sh висел на CLI вызове часами. Теперь:
+# 1) Перезапускаем agent и web по одному с timeout 30s
+# 2) api — последним, тоже с timeout, fallback на `pm2 delete + start`
+# Каждый шаг ограничен — update.sh ВСЕГДА доходит до cleanup.
+
+pm2_safe_restart() {
+  local name="$1"
+  say "  → restart $name"
+  if ! timeout 30 pm2 restart "$name" --update-env >/dev/null 2>&1; then
+    say "    timeout — fallback: delete + start --only $name"
+    timeout 10 pm2 delete "$name" >/dev/null 2>&1 || true
+    timeout 30 pm2 start "$ECOSYSTEM_FILE" --only "$name" --update-env >/dev/null 2>&1 || \
+      say "    delete+start тоже не сработал — pm2 daemon в плохом состоянии"
+  fi
+}
+
+pm2_safe_restart meowbox-agent
+pm2_safe_restart meowbox-web
+# api — В САМОМ КОНЦЕ. После этого вызова update.sh продолжает работать
+# (он detached от api), но дочерние api-процесс'ы (старый+новый) сменятся.
+pm2_safe_restart meowbox-api
+sleep 3
 
 # Восстанавливаем canonical ecosystem.config.js. Следующий reload (через
-# панель или CLI) будет уже graceful: новый код шлёт ready signal, pm2 не ждёт
-# впустую — zero-downtime достигнут.
+# панель или CLI) будет уже graceful: новый код шлёт ready signal +
+# enableShutdownHooks → старый воркер выходит за <100ms, новый стартует
+# за ~1с — zero-downtime.
 if [[ -f "$ECO_BAK" ]]; then
   mv -f "$ECO_BAK" "$ECOSYSTEM_FILE"
 fi
@@ -401,11 +444,9 @@ if ! bash "$SCRIPT_DIR/healthcheck.sh"; then
 fi
 
 # ----- 10. Cleanup -----
-stage cleanup "Чистка старых релизов (оставляем $KEEP_RELEASES)"
-ls -1t "$RELEASES_DIR" 2>/dev/null | tail -n +$((KEEP_RELEASES + 1)) | while read -r old; do
-  rm -rf "$RELEASES_DIR/$old"
-  say "  removed: $old"
-done
+# Cleanup релизов вынесен в `cleanup_old_releases()` через trap EXIT —
+# работает при любом исходе update.sh (success/abort/kill).
+stage cleanup "Чистка старых релизов будет в trap EXIT"
 
 # Обновляем "оболочку" panel root: tools/, Makefile, install.sh, bootstrap.sh.
 # Делаем это В САМОМ КОНЦЕ после "Update OK" — чтобы bash, который сейчас

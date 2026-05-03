@@ -356,8 +356,11 @@ export class PanelUpdateService implements OnModuleInit {
         MEOWBOX_UPDATE_LOG: logFilePath,
       },
       // КРИТИЧНО: stdin=ignore, stdout/stderr → файл (не pipe).
-      // Когда API рестартанётся в стадии reload, child уже отвязан от pipes
-      // и продолжит писать в файл. Без этого — SIGPIPE → exit посередине.
+      // detached:true заставляет Node вызвать setsid() в child — bash уходит в
+      // отдельную session/process group и переживает kill api. Pipe рвётся
+      // при kill api → нельзя использовать (SIGPIPE убьёт update.sh).
+      // Реальная защита от зависания pm2 reload — в самом update.sh:
+      // там каждый pm2-вызов под `timeout 30s`, api рестартим последним.
       stdio: ['ignore', logFd, logFd],
       detached: true,
     });
