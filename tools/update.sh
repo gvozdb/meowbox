@@ -457,13 +457,34 @@ stage cleanup "Чистка старых релизов будет в trap EXIT"
 # Без этой синхронизации /opt/meowbox/tools/update.sh оставался от первой
 # установки навечно — фиксы скрипта не доезжали никогда. То же самое для
 # Makefile (используется юзером через `make update`) и install.sh.
-if [[ -d "$RELEASE_DIR/tools" ]]; then
-  cp -rf "$RELEASE_DIR/tools/." "$PANEL_DIR/tools/"
-fi
-for f in Makefile install.sh bootstrap.sh; do
-  if [[ -f "$RELEASE_DIR/$f" ]]; then
-    cp -f "$RELEASE_DIR/$f" "$PANEL_DIR/$f"
+#
+# КРИТИЧНО: проверяем inode перед копированием. На release-layout установках
+# /opt/meowbox/tools и Makefile/install.sh могут быть симлинками на current/*
+# (т.е. на $RELEASE_DIR через current symlink). Тогда `cp -rf src dst` где
+# src и dst — один и тот же inode валится с "are the same file" → set -e
+# роняет update.sh → trap EXIT всё равно cleanup'ит, но юзер видит ошибку.
+# Если inode совпадают — копирование не нужно (файлы уже актуальные через
+# current symlink).
+sync_panel_file() {
+  local src="$1" dst="$2"
+  if [[ ! -e "$src" ]]; then return 0; fi
+  # Сравниваем canonical-пути (включая разрешение всех симлинков).
+  local src_real dst_real
+  src_real="$(readlink -f "$src" 2>/dev/null || echo "$src")"
+  dst_real="$(readlink -f "$dst" 2>/dev/null || echo "$dst")"
+  if [[ "$src_real" == "$dst_real" ]]; then
+    return 0  # same file/dir — release-layout с current symlink, копировать не надо
   fi
+  if [[ -d "$src" ]]; then
+    cp -rf "$src/." "$dst/" 2>/dev/null || true
+  else
+    cp -f "$src" "$dst" 2>/dev/null || true
+  fi
+}
+
+sync_panel_file "$RELEASE_DIR/tools" "$PANEL_DIR/tools"
+for f in Makefile install.sh bootstrap.sh; do
+  sync_panel_file "$RELEASE_DIR/$f" "$PANEL_DIR/$f"
 done
 
 # Sentinel-файл успеха: API resume опирается на его наличие, а не на regex
