@@ -122,6 +122,9 @@ log "Installing dependencies..."
 #                     (на минималках типа debian-slim может отсутствовать).
 # openssl           — SHA-512 хэш паролей в SystemUserManager + генерация ticket'ов SSO.
 # rsync             — копирование файлов сайтов при duplicate / deploy.
+# sshpass           — password-auth ssh/rsync для Migrate Hostpanel (агент-сторона
+#                     читает source-сервер по паролю; ключи на legacy-хостингах
+#                     обычно недоступны).
 # acl               — setfacl, могут понадобиться для тонких прав на каталоги сайтов.
 # cron              — systemd-юнит должен быть, иначе CronJob-фича панели не работает.
 # restic            — backup-движок (репозитории сайтов, дампы БД, restic snapshot).
@@ -140,7 +143,7 @@ apt-get "${APT_OPTS[@]}" install \
   nginx certbot python3-certbot-nginx \
   sqlite3 build-essential \
   ufw \
-  passwd openssl rsync acl cron restic \
+  passwd openssl rsync sshpass acl cron restic \
   mariadb-server mariadb-client \
   postgresql postgresql-client >> "$LOG_FILE" 2>&1
 
