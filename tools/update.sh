@@ -350,13 +350,47 @@ if [[ -L "$PANEL_DIR/current" ]]; then
 fi
 ln -sfn "$RELEASE_DIR" "$PANEL_DIR/current"
 
-# ----- 8. Reload PM2 -----
+# ----- 8. Sentinel + sync panel root  -----
+# КРИТИЧНО: успех апдейта = «файлы накатились + миграции применились +
+# current → новый релиз». Это уже произошло. Всё что ниже (pm2 reload,
+# healthcheck) — обслуживание, оно МОЖЕТ упасть и не должно влиять на
+# статус апдейта. Поэтому пишем sentinel + Update OK ЗДЕСЬ. Если pm2
+# reload убьёт нас на следующем шаге, API (новый или старый) при resume
+# увидит sentinel и пометит апдейт как succeeded — а не failed как
+# раньше, когда sentinel был в самом конце.
+#
+# Sync panel root (tools/, Makefile, install.sh, bootstrap.sh) тоже
+# делаем здесь, ДО reload — чтобы пользователь сразу мог запустить
+# новый Makefile/CLI вне зависимости от того, прошёл reload или нет.
+sync_panel_file() {
+  local src="$1" dst="$2"
+  if [[ ! -e "$src" ]]; then return 0; fi
+  local src_real dst_real
+  src_real="$(readlink -f "$src" 2>/dev/null || echo "$src")"
+  dst_real="$(readlink -f "$dst" 2>/dev/null || echo "$dst")"
+  if [[ "$src_real" == "$dst_real" ]]; then
+    return 0  # release-layout с current symlink, копировать не надо
+  fi
+  if [[ -d "$src" ]]; then
+    cp -rf "$src/." "$dst/" 2>/dev/null || true
+  else
+    cp -f "$src" "$dst" 2>/dev/null || true
+  fi
+}
+sync_panel_file "$RELEASE_DIR/tools" "$PANEL_DIR/tools"
+for f in Makefile install.sh bootstrap.sh; do
+  sync_panel_file "$RELEASE_DIR/$f" "$PANEL_DIR/$f"
+done
+
+# Sentinel ДО pm2 reload. API resume опирается на его наличие.
+say "✓ Update OK: $CURRENT_VERSION → $TARGET"
+echo "$TARGET" > "$STATE_DIR/.update-success" 2>/dev/null || true
+
+# ----- 9. Reload PM2 (best-effort, не валит апдейт) -----
 stage reload "PM2 reload"
-# pm2 reload иногда возвращает non-zero (race с graceful shutdown, симлинк current
-# обновился — старый CWD исчез), при этом фактически процессы уже online. С
-# `set -e` это убивало update.sh ровно перед healthcheck'ом → API resume видел
-# обрывистый лог без "Update OK" и помечал успешный апдейт как failed.
-# Решение: pm2 reload через `|| true`, потом верифицируем `pm2 jlist`.
+# pm2 reload — best-effort. Sentinel уже на диске (см. стадию switch),
+# поэтому что бы ни случилось дальше, апдейт уже зарегистрирован как успешный.
+# Ошибки reload только логируются (через say/err), abort не делаем.
 #
 # КРИТИЧНО (legacy-compat): обновляем ecosystem.config.js из релиза + временно
 # убираем `wait_ready: true`/`listen_timeout` ПЕРЕД reload. Иначе PM2 будет ждать
@@ -428,70 +462,19 @@ for P in meowbox-api meowbox-agent meowbox-web; do
   fi
 done
 if [[ $RELOAD_FAIL -eq 1 ]]; then
-  abort "PM2 reload failed — один или несколько процессов не online"
+  err "⚠ PM2 reload отработал не до конца, но апдейт зарегистрирован как успешный (sentinel уже на диске). Запусти 'pm2 reload all' вручную или через панель."
 fi
 
-# ----- 9. Healthcheck -----
+# ----- 10. Healthcheck (best-effort) -----
+# Тоже не валит апдейт. Если упал — пишем warning, но статус остаётся
+# succeeded. Migrations уже применены, current/ переключён, файлы на месте.
+# Откат symlink'а без отката миграций приведёт к рассинхрону схемы — это
+# хуже чем «новый код + healthcheck warning».
 stage healthcheck "Проверка работоспособности"
 if ! bash "$SCRIPT_DIR/healthcheck.sh"; then
-  err "Healthcheck failed — откатываюсь"
-  if [[ -n "$PREV_TARGET" ]]; then
-    ln -sfn "$PREV_TARGET" "$PANEL_DIR/current"
-    pm2 reload "$PANEL_DIR/ecosystem.config.js" --update-env || true
-    sleep 5
-    bash "$SCRIPT_DIR/healthcheck.sh" || err "Откат тоже не помог!"
-    abort "Update FAILED, откат на $(basename "$PREV_TARGET")"
-  else
-    abort "Update FAILED, отката нет (это первый релиз?)"
-  fi
+  err "⚠ Healthcheck failed — апдейт зарегистрирован как успешный, но сервисы не отвечают. Проверь pm2 logs."
 fi
 
-# ----- 10. Cleanup -----
-# Cleanup релизов вынесен в `cleanup_old_releases()` через trap EXIT —
-# работает при любом исходе update.sh (success/abort/kill).
+# ----- 11. Cleanup -----
+# Cleanup релизов в trap EXIT — работает на любом исходе update.sh.
 stage cleanup "Чистка старых релизов будет в trap EXIT"
-
-# Обновляем "оболочку" panel root: tools/, Makefile, install.sh, bootstrap.sh.
-# Делаем это В САМОМ КОНЦЕ после "Update OK" — чтобы bash, который сейчас
-# выполняет этот update.sh, гарантированно прочитал все свои строки в память
-# ДО того как мы перезапишем сам файл (bash читает скрипт построчно по мере
-# выполнения и может сглючить, если перезаписать в середине).
-#
-# Без этой синхронизации /opt/meowbox/tools/update.sh оставался от первой
-# установки навечно — фиксы скрипта не доезжали никогда. То же самое для
-# Makefile (используется юзером через `make update`) и install.sh.
-#
-# КРИТИЧНО: проверяем inode перед копированием. На release-layout установках
-# /opt/meowbox/tools и Makefile/install.sh могут быть симлинками на current/*
-# (т.е. на $RELEASE_DIR через current symlink). Тогда `cp -rf src dst` где
-# src и dst — один и тот же inode валится с "are the same file" → set -e
-# роняет update.sh → trap EXIT всё равно cleanup'ит, но юзер видит ошибку.
-# Если inode совпадают — копирование не нужно (файлы уже актуальные через
-# current symlink).
-sync_panel_file() {
-  local src="$1" dst="$2"
-  if [[ ! -e "$src" ]]; then return 0; fi
-  # Сравниваем canonical-пути (включая разрешение всех симлинков).
-  local src_real dst_real
-  src_real="$(readlink -f "$src" 2>/dev/null || echo "$src")"
-  dst_real="$(readlink -f "$dst" 2>/dev/null || echo "$dst")"
-  if [[ "$src_real" == "$dst_real" ]]; then
-    return 0  # same file/dir — release-layout с current symlink, копировать не надо
-  fi
-  if [[ -d "$src" ]]; then
-    cp -rf "$src/." "$dst/" 2>/dev/null || true
-  else
-    cp -f "$src" "$dst" 2>/dev/null || true
-  fi
-}
-
-sync_panel_file "$RELEASE_DIR/tools" "$PANEL_DIR/tools"
-for f in Makefile install.sh bootstrap.sh; do
-  sync_panel_file "$RELEASE_DIR/$f" "$PANEL_DIR/$f"
-done
-
-# Sentinel-файл успеха: API resume опирается на его наличие, а не на regex
-# по логу. Лог может оборваться (pm2 reload пришиб stdout buffer) — а файл
-# атомарный и переживает любой race.
-say "✓ Update OK: $CURRENT_VERSION → $TARGET"
-echo "$TARGET" > "$STATE_DIR/.update-success" 2>/dev/null || true
