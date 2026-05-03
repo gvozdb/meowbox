@@ -342,8 +342,32 @@ stage reload "PM2 reload"
 # `set -e` это убивало update.sh ровно перед healthcheck'ом → API resume видел
 # обрывистый лог без "Update OK" и помечал успешный апдейт как failed.
 # Решение: pm2 reload через `|| true`, потом верифицируем `pm2 jlist`.
-pm2 reload "$PANEL_DIR/ecosystem.config.js" --update-env || say "pm2 reload вернул non-zero (проверим jlist)"
+#
+# КРИТИЧНО (legacy-compat): обновляем ecosystem.config.js из релиза + временно
+# убираем `wait_ready: true`/`listen_timeout` ПЕРЕД reload. Иначе PM2 будет ждать
+# сигнал `process.send('ready')` от нового воркера до listen_timeout (10s) и
+# часто валит graceful reload — особенно при апгрейде с pre-0.5.0 версий, где
+# в коде api ready-сигнал ещё не шлётся. После reload восстанавливаем canonical
+# ecosystem.config.js из release (там wait_ready: true, и новый код шлёт ready).
+ECOSYSTEM_FILE="$PANEL_DIR/ecosystem.config.js"
+if [[ -f "$RELEASE_DIR/ecosystem.config.js" ]]; then
+  cp -f "$RELEASE_DIR/ecosystem.config.js" "$ECOSYSTEM_FILE"
+  say "  ecosystem.config.js обновлён из релиза"
+fi
+# Бэкап + патч: убираем wait_ready/listen_timeout на время reload.
+ECO_BAK="$STATE_DIR/.ecosystem.bak"
+cp -f "$ECOSYSTEM_FILE" "$ECO_BAK"
+sed -i '/^[[:space:]]*wait_ready:[[:space:]]*true,*$/d; /^[[:space:]]*listen_timeout:[[:space:]]*[0-9]\+,*$/d' "$ECOSYSTEM_FILE"
+
+pm2 reload "$ECOSYSTEM_FILE" --update-env || say "pm2 reload вернул non-zero (проверим jlist)"
 sleep 2
+
+# Восстанавливаем canonical ecosystem.config.js. Следующий reload (через
+# панель или CLI) будет уже graceful: новый код шлёт ready signal, pm2 не ждёт
+# впустую — zero-downtime достигнут.
+if [[ -f "$ECO_BAK" ]]; then
+  mv -f "$ECO_BAK" "$ECOSYSTEM_FILE"
+fi
 
 # Верификация: все три процесса должны быть online. Если нет — abort.
 PM2_JSON="$(pm2 jlist 2>/dev/null || echo '[]')"
