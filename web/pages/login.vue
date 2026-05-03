@@ -180,7 +180,7 @@ async function handleLogin() {
 /* ---- Card ---- */
 .login-card {
   background: var(--bg-login-card);
-  border: 1px solid rgba(245, 158, 11, 0.08);
+  border: 1px solid rgba(var(--primary-rgb), 0.08);
   border-radius: 24px;
   padding: 2.5rem 2rem 2rem;
   backdrop-filter: blur(20px);
@@ -207,7 +207,7 @@ async function handleLogin() {
   font-size: 1.75rem;
   font-weight: 700;
   letter-spacing: -0.02em;
-  background: linear-gradient(135deg, #fbbf24 0%, #f59e0b 40%, #d97706 100%);
+  background: linear-gradient(135deg, var(--primary-light) 0%, var(--primary) 40%, var(--primary-dark) 100%);
   -webkit-background-clip: text;
   -webkit-text-fill-color: transparent;
   background-clip: text;
@@ -236,11 +236,11 @@ async function handleLogin() {
 .login-card__divider-line {
   flex: 1;
   height: 1px;
-  background: linear-gradient(90deg, transparent, rgba(245, 158, 11, 0.15), transparent);
+  background: linear-gradient(90deg, transparent, rgba(var(--primary-rgb), 0.15), transparent);
 }
 
 .login-card__divider-icon {
-  color: rgba(245, 158, 11, 0.2);
+  color: rgba(var(--primary-rgb), 0.2);
 }
 
 /* ---- Form ---- */
@@ -279,8 +279,8 @@ async function handleLogin() {
 }
 
 .login-form__input-wrap--focus {
-  border-color: rgba(245, 158, 11, 0.3);
-  background: rgba(245, 158, 11, 0.03);
+  border-color: rgba(var(--primary-rgb), 0.3);
+  background: rgba(var(--primary-rgb), 0.03);
   box-shadow: var(--focus-ring);
 }
 
@@ -291,7 +291,7 @@ async function handleLogin() {
 }
 
 .login-form__input-wrap--focus .login-form__input-icon {
-  color: rgba(245, 158, 11, 0.6);
+  color: rgba(var(--primary-rgb), 0.6);
 }
 
 .login-form__input {
@@ -351,9 +351,9 @@ async function handleLogin() {
   letter-spacing: 0.01em;
   cursor: pointer;
   color: var(--primary-text-on);
-  background: linear-gradient(135deg, #fbbf24 0%, #f59e0b 50%, #d97706 100%);
+  background: linear-gradient(135deg, var(--primary-light) 0%, var(--primary) 50%, var(--primary-dark) 100%);
   box-shadow:
-    0 2px 12px rgba(245, 158, 11, 0.2),
+    0 2px 12px rgba(var(--primary-rgb), 0.2),
     inset 0 1px 0 rgba(255, 255, 255, 0.15);
   transition: all 0.3s cubic-bezier(0.16, 1, 0.3, 1);
   animation: field-appear 0.6s cubic-bezier(0.16, 1, 0.3, 1) 0.65s both;
@@ -372,7 +372,7 @@ async function handleLogin() {
 .login-form__submit:hover:not(:disabled) {
   transform: translateY(-1px);
   box-shadow:
-    0 4px 20px rgba(245, 158, 11, 0.3),
+    0 4px 20px rgba(var(--primary-rgb), 0.3),
     inset 0 1px 0 rgba(255, 255, 255, 0.2);
 }
 

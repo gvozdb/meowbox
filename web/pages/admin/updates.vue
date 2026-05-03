@@ -349,7 +349,7 @@ onBeforeUnmount(() => stopPolling());
   padding: 1.4rem 1.6rem;
   border-radius: 16px;
   background:
-    radial-gradient(circle at 0% 0%, rgba(245, 158, 11, 0.08), transparent 50%),
+    radial-gradient(circle at 0% 0%, rgba(var(--primary-rgb), 0.08), transparent 50%),
     var(--bg-surface);
   border: 1px solid var(--border-secondary);
   position: relative;
@@ -362,15 +362,15 @@ onBeforeUnmount(() => stopPolling());
   top: -60px;
   width: 200px;
   height: 200px;
-  background: radial-gradient(circle, rgba(245, 158, 11, 0.07), transparent 70%);
+  background: radial-gradient(circle, rgba(var(--primary-rgb), 0.07), transparent 70%);
   pointer-events: none;
 }
 .panel-updates__hero--update {
   background:
-    radial-gradient(circle at 0% 0%, rgba(245, 158, 11, 0.18), transparent 55%),
+    radial-gradient(circle at 0% 0%, rgba(var(--primary-rgb), 0.18), transparent 55%),
     var(--bg-surface);
-  border-color: rgba(245, 158, 11, 0.35);
-  box-shadow: 0 4px 20px -8px rgba(245, 158, 11, 0.25);
+  border-color: rgba(var(--primary-rgb), 0.35);
+  box-shadow: 0 4px 20px -8px rgba(var(--primary-rgb), 0.25);
 }
 .panel-updates__hero--ok {
   background:
@@ -385,9 +385,9 @@ onBeforeUnmount(() => stopPolling());
   align-items: center;
   justify-content: center;
   border-radius: 14px;
-  background: rgba(245, 158, 11, 0.1);
-  color: var(--primary, #f59e0b);
-  border: 1px solid rgba(245, 158, 11, 0.25);
+  background: rgba(var(--primary-rgb), 0.1);
+  color: var(--primary, var(--primary));
+  border: 1px solid rgba(var(--primary-rgb), 0.25);
 }
 .panel-updates__hero-text { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 0.4rem; }
 .panel-updates__title {
@@ -423,11 +423,11 @@ onBeforeUnmount(() => stopPolling());
 }
 .version-card:hover { border-color: var(--border-strong); }
 .version-card--has-update {
-  border-color: rgba(245, 158, 11, 0.45);
+  border-color: rgba(var(--primary-rgb), 0.45);
   background:
-    linear-gradient(135deg, rgba(245, 158, 11, 0.08), transparent 60%),
+    linear-gradient(135deg, rgba(var(--primary-rgb), 0.08), transparent 60%),
     var(--bg-surface);
-  box-shadow: 0 4px 14px -6px rgba(245, 158, 11, 0.3);
+  box-shadow: 0 4px 14px -6px rgba(var(--primary-rgb), 0.3);
 }
 .version-card__pulse {
   display: inline-block;
@@ -435,14 +435,14 @@ onBeforeUnmount(() => stopPolling());
   height: 8px;
   margin-left: 0.4rem;
   border-radius: 50%;
-  background: var(--primary, #f59e0b);
+  background: var(--primary, var(--primary));
   vertical-align: middle;
-  box-shadow: 0 0 0 0 rgba(245, 158, 11, 0.5);
+  box-shadow: 0 0 0 0 rgba(var(--primary-rgb), 0.5);
   animation: version-pulse 1.6s ease-in-out infinite;
 }
 @keyframes version-pulse {
-  0%, 100% { box-shadow: 0 0 0 0 rgba(245, 158, 11, 0.5); }
-  50% { box-shadow: 0 0 0 8px rgba(245, 158, 11, 0); }
+  0%, 100% { box-shadow: 0 0 0 0 rgba(var(--primary-rgb), 0.5); }
+  50% { box-shadow: 0 0 0 8px rgba(var(--primary-rgb), 0); }
 }
 .version-card__label {
   font-size: 0.7rem;
@@ -502,8 +502,8 @@ onBeforeUnmount(() => stopPolling());
   color: #4ade80;
 }
 .stage--current {
-  border-color: rgba(245, 158, 11, 0.45);
-  background: rgba(245, 158, 11, 0.08);
+  border-color: rgba(var(--primary-rgb), 0.45);
+  background: rgba(var(--primary-rgb), 0.08);
   color: var(--text-heading);
 }
 .stage--failed {
@@ -622,17 +622,17 @@ onBeforeUnmount(() => stopPolling());
 .btn:disabled { opacity: 0.5; cursor: not-allowed; }
 .btn--sm { padding: 0.4rem 0.75rem; font-size: 0.75rem; border-radius: 8px; }
 .btn--primary {
-  background: var(--primary, #f59e0b);
+  background: var(--primary, var(--primary));
   color: var(--text-inverse, #1c1917);
 }
-.btn--primary:hover:not(:disabled) { background: var(--primary-strong, #fbbf24); }
+.btn--primary:hover:not(:disabled) { background: var(--primary-strong, var(--primary-light)); }
 .btn--accent {
-  background: linear-gradient(135deg, var(--primary, #f59e0b), var(--primary-strong, #fbbf24));
-  box-shadow: 0 4px 14px -4px rgba(245, 158, 11, 0.5);
+  background: linear-gradient(135deg, var(--primary, var(--primary)), var(--primary-strong, var(--primary-light)));
+  box-shadow: 0 4px 14px -4px rgba(var(--primary-rgb), 0.5);
 }
 .btn--accent:hover:not(:disabled) {
   transform: translateY(-1px);
-  box-shadow: 0 6px 20px -4px rgba(245, 158, 11, 0.6);
+  box-shadow: 0 6px 20px -4px rgba(var(--primary-rgb), 0.6);
 }
 .btn--ok {
   background: rgba(34, 197, 94, 0.1);
@@ -653,7 +653,7 @@ onBeforeUnmount(() => stopPolling());
   width: 14px;
   height: 14px;
   border: 2px solid var(--border-strong);
-  border-top-color: var(--primary, #f59e0b);
+  border-top-color: var(--primary, var(--primary));
   border-radius: 50%;
   animation: pu-spin 0.8s linear infinite;
 }

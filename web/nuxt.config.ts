@@ -12,7 +12,12 @@ export default defineNuxtConfig({
       ],
       script: [
         {
-          innerHTML: `(function(){try{var t=localStorage.getItem('meowbox-theme');if(t==='light')document.documentElement.classList.add('theme-light')}catch(e){}})()`,
+          // Синхронно применяем тему (light/dark) И палитру (amber/violet) до парсинга
+          // CSS — иначе на reload мигает дефолт. Палитра берётся из meowbox-palette-{serverId},
+          // serverId — из meowbox-server (fallback 'main').
+          // Список палитр должен совпадать с PALETTE_OPTIONS в usePalette.ts
+          // и VALID_PALETTES в panel-settings.service.ts.
+          innerHTML: `(function(){try{var d=document.documentElement;var t=localStorage.getItem('meowbox-theme');if(t==='light')d.classList.add('theme-light');var s=localStorage.getItem('meowbox-server')||'main';var p=localStorage.getItem('meowbox-palette-'+s);var v=['amber','violet','emerald','sapphire','rose','teal','fuchsia'];if(v.indexOf(p)<0)p='amber';d.classList.add('palette-'+p)}catch(e){}})()`,
           type: 'text/javascript',
         },
       ],

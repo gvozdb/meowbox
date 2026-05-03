@@ -11,6 +11,8 @@ import { DatabasesModule } from './databases/databases.module';
 import { SslModule } from './ssl/ssl.module';
 import { BackupsModule } from './backups/backups.module';
 import { CronModule } from './cron/cron.module';
+import { SystemCronModule } from './system-cron/system-cron.module';
+import { MigrationHostpanelModule } from './migration-hostpanel/migration-hostpanel.module';
 import { FirewallModule } from './firewall/firewall.module';
 import { NginxModule } from './nginx/nginx.module';
 import { PhpModule } from './php/php.module';
@@ -81,6 +83,8 @@ import { CustomThrottlerGuard } from './common/guards/throttler-tracker.guard';
     SslModule,
     BackupsModule,
     CronModule,
+    SystemCronModule,
+    MigrationHostpanelModule,
     FirewallModule,
     NginxModule,
     PhpModule,

@@ -2,6 +2,13 @@ interface ApiOptions {
   method?: 'GET' | 'POST' | 'PUT' | 'DELETE' | 'PATCH';
   body?: unknown;
   requireAuth?: boolean;
+  /**
+   * Принудительно бить только в локальный мастер-API, игнорируя выбранный
+   * в сайдбаре slave. Нужно для master-only ресурсов (например, палитры
+   * серверов хранятся только на мастере, чтобы фича работала даже на
+   * старых slave-версиях).
+   */
+  noProxy?: boolean;
 }
 
 // Shared singleton — один refresh на весь клиент, даже если useApi() вызвали в разных компонентах.
@@ -102,7 +109,7 @@ export function useApi() {
   }
 
   async function request<T>(endpoint: string, options: ApiOptions = {}): Promise<T> {
-    const { method = 'GET', body, requireAuth = true } = options;
+    const { method = 'GET', body, requireAuth = true, noProxy = false } = options;
 
     const headers: Record<string, string> = {
       'Content-Type': 'application/json',
@@ -115,8 +122,10 @@ export function useApi() {
       }
     }
 
-    // Proxy prefix for remote servers (skip for /servers and /proxy/* endpoints)
-    const prefix = endpoint.startsWith('/servers') || endpoint.startsWith('/proxy/') ? '' : getProxyPrefix();
+    // Proxy prefix for remote servers (skip for /servers and /proxy/* endpoints, либо явный noProxy)
+    const prefix = noProxy || endpoint.startsWith('/servers') || endpoint.startsWith('/proxy/')
+      ? ''
+      : getProxyPrefix();
 
     try {
       const response = await $fetch<ApiResult<T>>(`${baseUrl}${prefix}${endpoint}`, {
@@ -348,11 +357,12 @@ export function useApi() {
   }
 
   return {
-    get: <T>(endpoint: string) => request<T>(endpoint),
-    post: <T>(endpoint: string, body?: unknown) =>
-      request<T>(endpoint, { method: 'POST', body }),
-    put: <T>(endpoint: string, body?: unknown) =>
-      request<T>(endpoint, { method: 'PUT', body }),
+    get: <T>(endpoint: string, opts?: { noProxy?: boolean }) =>
+      request<T>(endpoint, { noProxy: opts?.noProxy }),
+    post: <T>(endpoint: string, body?: unknown, opts?: { noProxy?: boolean }) =>
+      request<T>(endpoint, { method: 'POST', body, noProxy: opts?.noProxy }),
+    put: <T>(endpoint: string, body?: unknown, opts?: { noProxy?: boolean }) =>
+      request<T>(endpoint, { method: 'PUT', body, noProxy: opts?.noProxy }),
     del: <T>(endpoint: string, body?: unknown) =>
       request<T>(endpoint, { method: 'DELETE', body }),
     patch: <T>(endpoint: string, body?: unknown) =>

@@ -22,6 +22,7 @@
  */
 
 import type { SystemMigration } from './_types';
+import { ensureOndrejYandexMirror } from './_ondrej-repo';
 
 const PHP_VERSIONS = ['8.1', '8.2', '8.3', '8.4'];
 const PHP_EXTS = [
@@ -83,6 +84,16 @@ const migration: SystemMigration = {
       } else {
         ctx.log('OK: ondrej/php уже подключён');
       }
+
+      // Подключаем зеркало Yandex как fallback (apt сам выберет доступный
+      // источник если launchpad лежит). Идемпотентно — повторный запуск
+      // ничего не меняет если файл уже на месте.
+      const mirror = await ensureOndrejYandexMirror(ctx, {
+        distroId,
+        codename: distroCodename,
+        doAptUpdate: false, // общий apt-get update будет ниже
+      });
+      ctx.log(`[ondrej-mirror Yandex] ${mirror.reason}`);
     } else if (distroId === 'debian') {
       if (!distroCodename) {
         ctx.log('WARN: не удалось определить кодовое имя Debian — пропускаю sury.org');

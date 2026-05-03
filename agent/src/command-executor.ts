@@ -73,6 +73,26 @@ export class CommandExecutor {
     'restic',
     'diff',
     'which',
+    // SSH-семейство — нужно для миграции hostpanel: agent на slave подключается
+    // к источнику по SSH, гонит mysqldump через `ssh src "mysqldump ..."` и
+    // rsync с `-e "ssh -p X ..."` или `-e "sshpass -e ssh ..."`. Безопасность —
+    // через FORBIDDEN_CHARS + per-аргумент валидацию в migration handler'е.
+    'ssh',
+    'sshpass',
+    'scp',
+    // tee — для атомарного добавления конфигов certbot/manticore с stdin (через
+    // pipe, без shell). Нужен миграцией hostpanel при копировании Let's Encrypt.
+    'tee',
+    // ln — создание/переподтыкание симлинков (LE archive→live, certbot rename).
+    'ln',
+    // find — фильтрация файлов при rsync-исключениях, du-расчётах, audit'ах.
+    'find',
+    // pkill — закрытие зависших ssh-сессий по таймауту в migration cancel.
+    'pkill',
+    // sed — патчинг MODX config.core.php (замена путей при миграции).
+    'sed',
+    // realpath — резолв симлинков перед безопасными rm/chown в миграции.
+    'realpath',
   ]);
 
   // Accept versioned binaries like php8.2, php8.3, composer2
@@ -109,7 +129,7 @@ export class CommandExecutor {
    * режимами (`execute` и `executeStreaming`) — дублировать регулярку
    * опасно, один inline-fix разъехался бы.
    */
-  private validateArgs(args: string[]): void {
+  private validateArgs(args: string[], unsafeShellMetaArgs?: Set<number>): void {
     const sqlFlagArgs = new Set<number>();
     for (let i = 0; i < args.length; i++) {
       if ((args[i] === '-e' || args[i] === '-c') && i + 1 < args.length) {
@@ -121,13 +141,22 @@ export class CommandExecutor {
       if (typeof a !== 'string') {
         throw new Error('Argument must be a string');
       }
-      // Управляющие символы — глобальный запрет, даже для SQL.
+      // Управляющие символы — глобальный запрет, даже для SQL и unsafe-shell-args.
       // \n/\r ломают crontab/любые line-oriented tools, \0 обрывает строку.
       if (/[\x00\r\n]/.test(a)) {
         throw new Error('Argument contains control characters (NUL/CR/LF)');
       }
       if (sqlFlagArgs.has(i)) continue;
-      if (/[;&|`{}]/.test(a)) {
+      // unsafeShellMetaArgs — индексы аргументов, которые идут как remote-shell
+      // команда (например, последний arg к sshpass+ssh — он исполняется на
+      // удалённом хосте, локальный exec их не интерпретирует). Caller обязан
+      // самостоятельно проверить такие аргументы (assertSourceCommandReadOnly
+      // и т.п.) — здесь мы пропускаем shell-meta запрет.
+      if (unsafeShellMetaArgs?.has(i)) continue;
+      // {} — НЕ блокируем: в execFile (без shell) это литералы. Нужны для
+      // curl `-w '%{http_code}'` в verifyStage, awk/jq, MODX-серилизаций и т.п.
+      // Реальная опасность только у shell-метасимволов: ; & | `
+      if (/[;&|`]/.test(a)) {
         throw new Error(`Argument contains forbidden characters: ${a}`);
       }
     }
@@ -168,7 +197,18 @@ export class CommandExecutor {
   async execute(
     command: string,
     args: string[],
-    options: { cwd?: string; timeout?: number; env?: Record<string, string> } = {},
+    options: {
+      cwd?: string;
+      timeout?: number;
+      env?: Record<string, string>;
+      /**
+       * Индексы аргументов, для которых пропускаем проверку shell-метасимволов
+       * (`;&|\`{}`). Используется для remote-shell команд (sshpass+ssh последний
+       * arg) — там shell-операторы выполняются на удалённом хосте. Контрольные
+       * символы (NUL/CR/LF) блокируются всегда, без исключений.
+       */
+      unsafeShellMetaArgs?: number[];
+    } = {},
   ): Promise<{ stdout: string; stderr: string; exitCode: number }> {
     // Validate command against allowlist
     const basename = path.basename(command);
@@ -201,7 +241,12 @@ export class CommandExecutor {
     //     блокируем их всегда.
     //   - shell-метасимволы (;&|`{}) блокируем как layered defense.
     // SQL через -e/-c пропускаем — там SQL-синтаксис легитимен.
-    this.validateArgs(args);
+    // unsafeShellMetaArgs пропускаем — это аргумент-команда для удалённого
+    // shell (sshpass+ssh), локальный exec её не интерпретирует.
+    this.validateArgs(
+      args,
+      options.unsafeShellMetaArgs ? new Set(options.unsafeShellMetaArgs) : undefined,
+    );
 
     const timeout = Math.min(
       options.timeout || CommandExecutor.DEFAULT_TIMEOUT,

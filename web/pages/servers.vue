@@ -140,6 +140,27 @@
               <span class="server-card__label">Ошибка</span>
               <span class="server-card__value server-card__value--error" :title="server.lastError">{{ truncate(server.lastError, 40) }}</span>
             </div>
+            <div class="server-card__row">
+              <span class="server-card__label">Гамма</span>
+              <div class="server-card__palette">
+                <button
+                  v-for="opt in paletteOptions"
+                  :key="opt.id"
+                  type="button"
+                  class="palette-swatch"
+                  :class="[
+                    `palette-swatch--${opt.id}`,
+                    { 'palette-swatch--active': serverPalettes[server.id] === opt.id },
+                  ]"
+                  :disabled="paletteSavingId === server.id"
+                  :title="opt.label"
+                  @click="changeServerPalette(server, opt.id)"
+                >
+                  <svg v-if="serverPalettes[server.id] === opt.id" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round"><polyline points="20 6 9 17 4 12" /></svg>
+                </button>
+                <span v-if="paletteSavingId === server.id" class="server-card__palette-spinner" />
+              </div>
+            </div>
           </div>
           <button
             class="server-card__select"
@@ -449,6 +470,8 @@
 </template>
 
 <script setup lang="ts">
+import type { PaletteId } from '~/composables/usePalette';
+
 definePageMeta({ middleware: 'auth' });
 
 interface ServerInfo {
@@ -501,8 +524,59 @@ function truncate(s: string, n: number): string {
 
 const api = useApi();
 const serverStore = useServerStore();
+const {
+  options: paletteOptions,
+  setForServer: setPaletteForServer,
+  updateCache: updatePaletteCache,
+  loadAllFromApi: loadAllPalettesFromApi,
+  saveToApi: savePaletteToApi,
+} = usePalette();
 
 const refreshing = ref(false);
+
+// ── Палитра per-server ─────────────────────────────────────────────────────
+// reactive map: { serverId → palette id (или null если ещё не загрузили) }
+const serverPalettes = reactive<Record<string, PaletteId | null>>({});
+const paletteSavingId = ref<string | null>(null);
+
+/**
+ * Подтягиваем карту палитр всех серверов с мастера одним запросом.
+ * Бэк хранит { palettes: { serverId → palette } } в master-локальной БД,
+ * slave при этом не дёргается совсем (см. usePalette.loadAllFromApi).
+ */
+async function loadAllPalettes() {
+  const map = await loadAllPalettesFromApi(api);
+  for (const s of serverStore.servers) {
+    serverPalettes[s.id] = map[s.id] ?? null;
+  }
+}
+
+/**
+ * Меняет палитру сервера. PUT на мастер (NOT через proxy). Обновляет local map
+ * и cache. Если сервер сейчас активен — применяет класс на html сразу.
+ */
+async function changeServerPalette(server: ServerInfo, palette: PaletteId) {
+  if (serverPalettes[server.id] === palette) return;
+  paletteSavingId.value = server.id;
+  try {
+    const map = await savePaletteToApi(api, server.id, palette);
+    if (!map) {
+      showStatus('Не удалось сохранить гамму', true);
+      return;
+    }
+    const next = map[server.id] || palette;
+    serverPalettes[server.id] = next;
+    if (server.id === serverStore.currentServerId) {
+      // Применяем мгновенно с transition.
+      setPaletteForServer(server.id, next, /* withTransition */ true);
+    } else {
+      updatePaletteCache(server.id, next);
+    }
+    showStatus(`«${server.name}»: гамма «${paletteOptions.find((o) => o.id === next)?.label}»`);
+  } finally {
+    paletteSavingId.value = null;
+  }
+}
 const updating = ref(false);
 const updateResults = ref<UpdateResult[]>([]);
 
@@ -779,11 +853,20 @@ function selectServer(id: string) {
   navigateTo('/');
 }
 
-onMounted(() => {
+onMounted(async () => {
   if (serverStore.servers.length === 0) {
-    serverStore.loadServers();
+    await serverStore.loadServers();
   }
+  loadAllPalettes();
 });
+
+// Перезагрузка списка серверов (refresh / add / delete) — повторно подтягиваем
+// палитры. Используем length+id-string как зависимость, чтобы не дёргать на
+// каждое изменение поля внутри объекта (online/lastError mutation refresh'ом).
+watch(
+  () => serverStore.servers.map((s: ServerInfo) => s.id).join(','),
+  () => loadAllPalettes(),
+);
 </script>
 
 <style scoped>
@@ -1097,6 +1180,55 @@ onMounted(() => {
   color: #f87171;
   font-weight: 500;
 }
+
+.server-card__palette {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+}
+
+.palette-swatch {
+  position: relative;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  border: 2px solid var(--bg-elevated);
+  box-shadow: 0 0 0 1px var(--border-secondary), 0 1px 3px rgba(0, 0, 0, 0.18);
+  cursor: pointer;
+  transition: transform 0.12s ease, box-shadow 0.18s ease;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: #fff;
+  padding: 0;
+}
+.palette-swatch:hover:not(:disabled) {
+  transform: scale(1.08);
+}
+.palette-swatch:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+.palette-swatch--active {
+  box-shadow: 0 0 0 2px var(--primary), 0 1px 3px rgba(0, 0, 0, 0.22);
+}
+.palette-swatch--amber    { background: #f59e0b; }
+.palette-swatch--violet   { background: #8b5cf6; }
+.palette-swatch--emerald  { background: #10b981; }
+.palette-swatch--sapphire { background: #3b82f6; }
+.palette-swatch--rose     { background: #f43f5e; }
+.palette-swatch--teal     { background: #14b8a6; }
+.palette-swatch--fuchsia  { background: #d946ef; }
+
+.server-card__palette-spinner {
+  width: 12px;
+  height: 12px;
+  border: 2px solid var(--spinner-track);
+  border-top-color: var(--primary);
+  border-radius: 50%;
+  animation: spin 0.7s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
 
 .server-card__select {
   width: 100%;
@@ -1474,7 +1606,7 @@ onMounted(() => {
 }
 
 .provision-log__status--warn {
-  color: #fbbf24;
+  color: var(--primary-light);
 }
 
 .provision-log__output {
@@ -1666,7 +1798,7 @@ onMounted(() => {
 }
 
 .server-card--has-update {
-  border-color: rgba(245, 158, 11, 0.4);
+  border-color: rgba(var(--primary-rgb), 0.4);
 }
 
 .server-card__update-badge {
@@ -1680,28 +1812,28 @@ onMounted(() => {
   font-weight: 600;
   text-transform: uppercase;
   letter-spacing: 0.04em;
-  background: rgba(245, 158, 11, 0.12);
-  border: 1px solid rgba(245, 158, 11, 0.3);
+  background: rgba(var(--primary-rgb), 0.12);
+  border: 1px solid rgba(var(--primary-rgb), 0.3);
   border-radius: 6px;
-  color: #f59e0b;
+  color: var(--primary);
 }
 
 .server-card__update-dot {
   width: 6px;
   height: 6px;
   border-radius: 50%;
-  background: #f59e0b;
+  background: var(--primary);
   animation: pulse-update 2s ease-in-out infinite;
 }
 
 @keyframes pulse-update {
   0%, 100% { opacity: 0.5; transform: scale(1); }
-  50% { opacity: 1; transform: scale(1.3); box-shadow: 0 0 8px rgba(245, 158, 11, 0.6); }
+  50% { opacity: 1; transform: scale(1.3); box-shadow: 0 0 8px rgba(var(--primary-rgb), 0.6); }
 }
 
 .server-card__version-arrow {
   margin-left: 0.4rem;
-  color: #f59e0b;
+  color: var(--primary);
   font-size: 0.78rem;
   font-weight: 600;
 }

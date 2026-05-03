@@ -133,7 +133,7 @@ const { toasts, dismiss } = useMbToast();
 }
 
 .mb-toast--warning {
-  border-color: rgba(245, 158, 11, 0.25);
+  border-color: rgba(var(--primary-rgb), 0.25);
 }
 .mb-toast--warning .mb-toast__icon {
   background: var(--primary-bg);

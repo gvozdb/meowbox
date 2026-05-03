@@ -1,4 +1,12 @@
-/* ========== Theme Variables ========== */
+/* ========== Theme Variables ==========
+   Двухуровневая система:
+   1) Тема (dark/light) — задаёт base-цвета (фон, текст, границы, статусы).
+   2) Палитра (amber/violet/...) — задаёт primary-related переменные:
+      --primary*, --focus-ring, --shadow-button*, --shadow-login (тинт).
+   Класс <html class="theme-light? palette-{name}">.
+   Дефолт: dark + amber (amber-значения дублируются в :root для надёжности
+   на случай, если JS ещё не успел навесить класс palette-*).
+   ====================================== */
 :root {
   /* Background */
   --bg-body: #0a0a0f;
@@ -29,12 +37,15 @@
   --border-secondary: rgba(255, 255, 255, 0.06);
   --border-strong: rgba(255, 255, 255, 0.08);
 
-  /* Primary (amber/orange) */
+  /* Primary (amber/orange) — fallback, перекрывается классом palette-* */
   --primary: #f59e0b;
   --primary-light: #fbbf24;
   --primary-dark: #d97706;
   --primary-text: #fbbf24;
   --primary-text-on: #0a0a0f;
+  --primary-rgb: 245, 158, 11;
+  --primary-light-rgb: 251, 191, 36;
+  --primary-dark-rgb: 217, 119, 6;
   --primary-bg: rgba(245, 158, 11, 0.08);
   --primary-bg-hover: rgba(245, 158, 11, 0.12);
   --primary-border: rgba(245, 158, 11, 0.15);
@@ -91,9 +102,10 @@ html.theme-light {
   --border-secondary: rgba(0, 0, 0, 0.1);
   --border-strong: rgba(0, 0, 0, 0.13);
 
-  /* Primary overrides */
+  /* Primary (amber) light — fallback, перекрывается классом palette-* */
   --primary-text: #b45309;
   --primary-text-on: #ffffff;
+  --primary-dark-rgb: 180, 83, 9;
   --primary-bg: rgba(245, 158, 11, 0.06);
   --primary-bg-hover: rgba(245, 158, 11, 0.1);
   --primary-border: rgba(245, 158, 11, 0.2);
@@ -114,6 +126,268 @@ html.theme-light {
   --shadow-login: 0 1px 2px rgba(0, 0, 0, 0.04), 0 16px 48px -8px rgba(0, 0, 0, 0.08);
   --bar-bg: rgba(0, 0, 0, 0.06);
   --focus-ring: 0 0 0 3px rgba(245, 158, 11, 0.12);
+}
+
+/* ========== Палитра «Янтарь» (amber) — default ==========
+   Дублируем явно, чтобы переключение между палитрами работало симметрично.
+   --primary-rgb / -light-rgb / -dark-rgb — для произвольных rgba(...) с
+   кастомным alpha. Использование: rgba(var(--primary-rgb), 0.3). */
+html.palette-amber {
+  --primary: #f59e0b;
+  --primary-light: #fbbf24;
+  --primary-dark: #d97706;
+  --primary-text: #fbbf24;
+  --primary-text-on: #0a0a0f;
+  --primary-rgb: 245, 158, 11;
+  --primary-light-rgb: 251, 191, 36;
+  --primary-dark-rgb: 217, 119, 6;
+  --primary-bg: rgba(245, 158, 11, 0.08);
+  --primary-bg-hover: rgba(245, 158, 11, 0.12);
+  --primary-border: rgba(245, 158, 11, 0.15);
+  --shadow-button: 0 2px 8px rgba(245, 158, 11, 0.2);
+  --shadow-button-hover: 0 4px 16px rgba(245, 158, 11, 0.3);
+  --shadow-login: 0 0 0 1px rgba(255, 255, 255, 0.03), 0 24px 80px -12px rgba(0, 0, 0, 0.6), 0 0 120px -40px rgba(245, 158, 11, 0.08);
+  --focus-ring: 0 0 0 3px rgba(245, 158, 11, 0.06);
+}
+html.theme-light.palette-amber {
+  --primary: #f59e0b;
+  --primary-light: #fbbf24;
+  --primary-dark: #d97706;
+  --primary-text: #b45309;
+  --primary-text-on: #ffffff;
+  --primary-rgb: 245, 158, 11;
+  --primary-light-rgb: 251, 191, 36;
+  --primary-dark-rgb: 180, 83, 9;
+  --primary-bg: rgba(245, 158, 11, 0.06);
+  --primary-bg-hover: rgba(245, 158, 11, 0.1);
+  --primary-border: rgba(245, 158, 11, 0.2);
+  --shadow-button: 0 1px 4px rgba(245, 158, 11, 0.12);
+  --shadow-button-hover: 0 4px 12px rgba(245, 158, 11, 0.18);
+  --shadow-login: 0 1px 2px rgba(0, 0, 0, 0.04), 0 16px 48px -8px rgba(0, 0, 0, 0.08);
+  --focus-ring: 0 0 0 3px rgba(245, 158, 11, 0.12);
+}
+
+/* ========== Палитра «Аметист» (violet) ==========
+   violet-500 #8b5cf6, violet-400 #a78bfa, violet-600 #7c3aed,
+   violet-700 #6d28d9 — для primary-text в светлой теме (контраст). */
+html.palette-violet {
+  --primary: #8b5cf6;
+  --primary-light: #a78bfa;
+  --primary-dark: #7c3aed;
+  --primary-text: #a78bfa;
+  --primary-text-on: #0a0a0f;
+  --primary-rgb: 139, 92, 246;
+  --primary-light-rgb: 167, 139, 250;
+  --primary-dark-rgb: 124, 58, 237;
+  --primary-bg: rgba(139, 92, 246, 0.08);
+  --primary-bg-hover: rgba(139, 92, 246, 0.14);
+  --primary-border: rgba(139, 92, 246, 0.18);
+  --shadow-button: 0 2px 8px rgba(139, 92, 246, 0.22);
+  --shadow-button-hover: 0 4px 16px rgba(139, 92, 246, 0.32);
+  --shadow-login: 0 0 0 1px rgba(255, 255, 255, 0.03), 0 24px 80px -12px rgba(0, 0, 0, 0.6), 0 0 120px -40px rgba(139, 92, 246, 0.1);
+  --focus-ring: 0 0 0 3px rgba(139, 92, 246, 0.08);
+}
+html.theme-light.palette-violet {
+  --primary: #8b5cf6;
+  --primary-light: #a78bfa;
+  --primary-dark: #7c3aed;
+  --primary-text: #6d28d9;
+  --primary-text-on: #ffffff;
+  --primary-rgb: 139, 92, 246;
+  --primary-light-rgb: 167, 139, 250;
+  --primary-dark-rgb: 109, 40, 217;
+  --primary-bg: rgba(139, 92, 246, 0.07);
+  --primary-bg-hover: rgba(139, 92, 246, 0.12);
+  --primary-border: rgba(139, 92, 246, 0.22);
+  --shadow-button: 0 1px 4px rgba(139, 92, 246, 0.14);
+  --shadow-button-hover: 0 4px 12px rgba(139, 92, 246, 0.22);
+  --shadow-login: 0 1px 2px rgba(0, 0, 0, 0.04), 0 16px 48px -8px rgba(0, 0, 0, 0.08);
+  --focus-ring: 0 0 0 3px rgba(139, 92, 246, 0.14);
+}
+
+/* ========== Палитра «Изумруд» (emerald) ==========
+   emerald-500 #10b981, 400 #34d399, 600 #059669, 700 #047857. */
+html.palette-emerald {
+  --primary: #10b981;
+  --primary-light: #34d399;
+  --primary-dark: #059669;
+  --primary-text: #34d399;
+  --primary-text-on: #04231b;
+  --primary-rgb: 16, 185, 129;
+  --primary-light-rgb: 52, 211, 153;
+  --primary-dark-rgb: 5, 150, 105;
+  --primary-bg: rgba(16, 185, 129, 0.08);
+  --primary-bg-hover: rgba(16, 185, 129, 0.14);
+  --primary-border: rgba(16, 185, 129, 0.18);
+  --shadow-button: 0 2px 8px rgba(16, 185, 129, 0.22);
+  --shadow-button-hover: 0 4px 16px rgba(16, 185, 129, 0.32);
+  --shadow-login: 0 0 0 1px rgba(255, 255, 255, 0.03), 0 24px 80px -12px rgba(0, 0, 0, 0.6), 0 0 120px -40px rgba(16, 185, 129, 0.1);
+  --focus-ring: 0 0 0 3px rgba(16, 185, 129, 0.08);
+}
+html.theme-light.palette-emerald {
+  --primary: #10b981;
+  --primary-light: #34d399;
+  --primary-dark: #059669;
+  --primary-text: #047857;
+  --primary-text-on: #ffffff;
+  --primary-rgb: 16, 185, 129;
+  --primary-light-rgb: 52, 211, 153;
+  --primary-dark-rgb: 4, 120, 87;
+  --primary-bg: rgba(16, 185, 129, 0.07);
+  --primary-bg-hover: rgba(16, 185, 129, 0.12);
+  --primary-border: rgba(16, 185, 129, 0.22);
+  --shadow-button: 0 1px 4px rgba(16, 185, 129, 0.14);
+  --shadow-button-hover: 0 4px 12px rgba(16, 185, 129, 0.22);
+  --shadow-login: 0 1px 2px rgba(0, 0, 0, 0.04), 0 16px 48px -8px rgba(0, 0, 0, 0.08);
+  --focus-ring: 0 0 0 3px rgba(16, 185, 129, 0.14);
+}
+
+/* ========== Палитра «Сапфир» (sapphire) ==========
+   blue-500 #3b82f6, 400 #60a5fa, 600 #2563eb, 700 #1d4ed8. */
+html.palette-sapphire {
+  --primary: #3b82f6;
+  --primary-light: #60a5fa;
+  --primary-dark: #2563eb;
+  --primary-text: #60a5fa;
+  --primary-text-on: #06112a;
+  --primary-rgb: 59, 130, 246;
+  --primary-light-rgb: 96, 165, 250;
+  --primary-dark-rgb: 37, 99, 235;
+  --primary-bg: rgba(59, 130, 246, 0.08);
+  --primary-bg-hover: rgba(59, 130, 246, 0.14);
+  --primary-border: rgba(59, 130, 246, 0.18);
+  --shadow-button: 0 2px 8px rgba(59, 130, 246, 0.22);
+  --shadow-button-hover: 0 4px 16px rgba(59, 130, 246, 0.32);
+  --shadow-login: 0 0 0 1px rgba(255, 255, 255, 0.03), 0 24px 80px -12px rgba(0, 0, 0, 0.6), 0 0 120px -40px rgba(59, 130, 246, 0.1);
+  --focus-ring: 0 0 0 3px rgba(59, 130, 246, 0.08);
+}
+html.theme-light.palette-sapphire {
+  --primary: #3b82f6;
+  --primary-light: #60a5fa;
+  --primary-dark: #2563eb;
+  --primary-text: #1d4ed8;
+  --primary-text-on: #ffffff;
+  --primary-rgb: 59, 130, 246;
+  --primary-light-rgb: 96, 165, 250;
+  --primary-dark-rgb: 29, 78, 216;
+  --primary-bg: rgba(59, 130, 246, 0.07);
+  --primary-bg-hover: rgba(59, 130, 246, 0.12);
+  --primary-border: rgba(59, 130, 246, 0.22);
+  --shadow-button: 0 1px 4px rgba(59, 130, 246, 0.14);
+  --shadow-button-hover: 0 4px 12px rgba(59, 130, 246, 0.22);
+  --shadow-login: 0 1px 2px rgba(0, 0, 0, 0.04), 0 16px 48px -8px rgba(0, 0, 0, 0.08);
+  --focus-ring: 0 0 0 3px rgba(59, 130, 246, 0.14);
+}
+
+/* ========== Палитра «Роза» (rose) ==========
+   rose-500 #f43f5e, 400 #fb7185, 600 #e11d48, 700 #be123c. */
+html.palette-rose {
+  --primary: #f43f5e;
+  --primary-light: #fb7185;
+  --primary-dark: #e11d48;
+  --primary-text: #fb7185;
+  --primary-text-on: #2b070d;
+  --primary-rgb: 244, 63, 94;
+  --primary-light-rgb: 251, 113, 133;
+  --primary-dark-rgb: 225, 29, 72;
+  --primary-bg: rgba(244, 63, 94, 0.08);
+  --primary-bg-hover: rgba(244, 63, 94, 0.14);
+  --primary-border: rgba(244, 63, 94, 0.18);
+  --shadow-button: 0 2px 8px rgba(244, 63, 94, 0.22);
+  --shadow-button-hover: 0 4px 16px rgba(244, 63, 94, 0.32);
+  --shadow-login: 0 0 0 1px rgba(255, 255, 255, 0.03), 0 24px 80px -12px rgba(0, 0, 0, 0.6), 0 0 120px -40px rgba(244, 63, 94, 0.1);
+  --focus-ring: 0 0 0 3px rgba(244, 63, 94, 0.08);
+}
+html.theme-light.palette-rose {
+  --primary: #f43f5e;
+  --primary-light: #fb7185;
+  --primary-dark: #e11d48;
+  --primary-text: #be123c;
+  --primary-text-on: #ffffff;
+  --primary-rgb: 244, 63, 94;
+  --primary-light-rgb: 251, 113, 133;
+  --primary-dark-rgb: 190, 18, 60;
+  --primary-bg: rgba(244, 63, 94, 0.07);
+  --primary-bg-hover: rgba(244, 63, 94, 0.12);
+  --primary-border: rgba(244, 63, 94, 0.22);
+  --shadow-button: 0 1px 4px rgba(244, 63, 94, 0.14);
+  --shadow-button-hover: 0 4px 12px rgba(244, 63, 94, 0.22);
+  --shadow-login: 0 1px 2px rgba(0, 0, 0, 0.04), 0 16px 48px -8px rgba(0, 0, 0, 0.08);
+  --focus-ring: 0 0 0 3px rgba(244, 63, 94, 0.14);
+}
+
+/* ========== Палитра «Бирюза» (teal) ==========
+   teal-500 #14b8a6, 400 #2dd4bf, 600 #0d9488, 700 #0f766e. */
+html.palette-teal {
+  --primary: #14b8a6;
+  --primary-light: #2dd4bf;
+  --primary-dark: #0d9488;
+  --primary-text: #2dd4bf;
+  --primary-text-on: #04201d;
+  --primary-rgb: 20, 184, 166;
+  --primary-light-rgb: 45, 212, 191;
+  --primary-dark-rgb: 13, 148, 136;
+  --primary-bg: rgba(20, 184, 166, 0.08);
+  --primary-bg-hover: rgba(20, 184, 166, 0.14);
+  --primary-border: rgba(20, 184, 166, 0.18);
+  --shadow-button: 0 2px 8px rgba(20, 184, 166, 0.22);
+  --shadow-button-hover: 0 4px 16px rgba(20, 184, 166, 0.32);
+  --shadow-login: 0 0 0 1px rgba(255, 255, 255, 0.03), 0 24px 80px -12px rgba(0, 0, 0, 0.6), 0 0 120px -40px rgba(20, 184, 166, 0.1);
+  --focus-ring: 0 0 0 3px rgba(20, 184, 166, 0.08);
+}
+html.theme-light.palette-teal {
+  --primary: #14b8a6;
+  --primary-light: #2dd4bf;
+  --primary-dark: #0d9488;
+  --primary-text: #0f766e;
+  --primary-text-on: #ffffff;
+  --primary-rgb: 20, 184, 166;
+  --primary-light-rgb: 45, 212, 191;
+  --primary-dark-rgb: 15, 118, 110;
+  --primary-bg: rgba(20, 184, 166, 0.07);
+  --primary-bg-hover: rgba(20, 184, 166, 0.12);
+  --primary-border: rgba(20, 184, 166, 0.22);
+  --shadow-button: 0 1px 4px rgba(20, 184, 166, 0.14);
+  --shadow-button-hover: 0 4px 12px rgba(20, 184, 166, 0.22);
+  --shadow-login: 0 1px 2px rgba(0, 0, 0, 0.04), 0 16px 48px -8px rgba(0, 0, 0, 0.08);
+  --focus-ring: 0 0 0 3px rgba(20, 184, 166, 0.14);
+}
+
+/* ========== Палитра «Фуксия» (fuchsia) ==========
+   fuchsia-500 #d946ef, 400 #e879f9, 600 #c026d3, 700 #a21caf. */
+html.palette-fuchsia {
+  --primary: #d946ef;
+  --primary-light: #e879f9;
+  --primary-dark: #c026d3;
+  --primary-text: #e879f9;
+  --primary-text-on: #2a0731;
+  --primary-rgb: 217, 70, 239;
+  --primary-light-rgb: 232, 121, 249;
+  --primary-dark-rgb: 192, 38, 211;
+  --primary-bg: rgba(217, 70, 239, 0.08);
+  --primary-bg-hover: rgba(217, 70, 239, 0.14);
+  --primary-border: rgba(217, 70, 239, 0.18);
+  --shadow-button: 0 2px 8px rgba(217, 70, 239, 0.22);
+  --shadow-button-hover: 0 4px 16px rgba(217, 70, 239, 0.32);
+  --shadow-login: 0 0 0 1px rgba(255, 255, 255, 0.03), 0 24px 80px -12px rgba(0, 0, 0, 0.6), 0 0 120px -40px rgba(217, 70, 239, 0.1);
+  --focus-ring: 0 0 0 3px rgba(217, 70, 239, 0.08);
+}
+html.theme-light.palette-fuchsia {
+  --primary: #d946ef;
+  --primary-light: #e879f9;
+  --primary-dark: #c026d3;
+  --primary-text: #a21caf;
+  --primary-text-on: #ffffff;
+  --primary-rgb: 217, 70, 239;
+  --primary-light-rgb: 232, 121, 249;
+  --primary-dark-rgb: 162, 28, 175;
+  --primary-bg: rgba(217, 70, 239, 0.07);
+  --primary-bg-hover: rgba(217, 70, 239, 0.12);
+  --primary-border: rgba(217, 70, 239, 0.22);
+  --shadow-button: 0 1px 4px rgba(217, 70, 239, 0.14);
+  --shadow-button-hover: 0 4px 12px rgba(217, 70, 239, 0.22);
+  --shadow-login: 0 1px 2px rgba(0, 0, 0, 0.04), 0 16px 48px -8px rgba(0, 0, 0, 0.08);
+  --focus-ring: 0 0 0 3px rgba(217, 70, 239, 0.14);
 }
 
 /* ========== Global Resets ========== */
@@ -157,10 +431,10 @@ body {
   -webkit-tap-highlight-color: transparent;
 }
 
-/* Theme transition */
+/* Theme/palette transition */
 html.theme-transitioning,
 html.theme-transitioning *,
 html.theme-transitioning *::before,
 html.theme-transitioning *::after {
-  transition: background-color 0.3s ease, color 0.2s ease, border-color 0.3s ease, box-shadow 0.3s ease !important;
+  transition: background-color 0.3s ease, background-image 0.3s ease, color 0.2s ease, border-color 0.3s ease, box-shadow 0.3s ease, fill 0.2s ease, stroke 0.2s ease !important;
 }

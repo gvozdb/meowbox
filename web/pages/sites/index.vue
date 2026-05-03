@@ -162,14 +162,14 @@ onMounted(async () => {
   font-weight: 600;
   text-decoration: none;
   color: var(--primary-text-on);
-  background: linear-gradient(135deg, #fbbf24, #d97706);
-  box-shadow: 0 2px 8px rgba(245, 158, 11, 0.2);
+  background: linear-gradient(135deg, var(--primary-light), var(--primary-dark));
+  box-shadow: 0 2px 8px rgba(var(--primary-rgb), 0.2);
   transition: all 0.2s;
 }
 
 .sites-page__add-btn:hover {
   transform: translateY(-1px);
-  box-shadow: 0 4px 16px rgba(245, 158, 11, 0.3);
+  box-shadow: 0 4px 16px rgba(var(--primary-rgb), 0.3);
 }
 
 .sites-page__add-btn--small {

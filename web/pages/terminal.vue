@@ -142,14 +142,14 @@ async function openTerminal() {
       theme: isLight ? {
         background: '#f0f1f4',
         foreground: '#1a1a2e',
-        cursor: '#b45309',
+        cursor: 'var(--primary-text)',
         cursorAccent: '#f0f1f4',
-        selectionBackground: 'rgba(245, 158, 11, 0.18)',
+        selectionBackground: 'rgba(var(--primary-rgb), 0.18)',
         selectionForeground: '#1a1a2e',
         black: '#3c3c54',
         red: '#dc2626',
         green: '#16a34a',
-        yellow: '#b45309',
+        yellow: 'var(--primary-text)',
         blue: '#2563eb',
         magenta: '#9333ea',
         cyan: '#0891b2',
@@ -157,7 +157,7 @@ async function openTerminal() {
         brightBlack: '#94a3b8',
         brightRed: '#ef4444',
         brightGreen: '#22c55e',
-        brightYellow: '#f59e0b',
+        brightYellow: 'var(--primary)',
         brightBlue: '#3b82f6',
         brightMagenta: '#a855f7',
         brightCyan: '#06b6d4',
@@ -165,14 +165,14 @@ async function openTerminal() {
       } : {
         background: '#08080d',
         foreground: '#d4d4e0',
-        cursor: '#f59e0b',
+        cursor: 'var(--primary)',
         cursorAccent: '#08080d',
-        selectionBackground: 'rgba(245, 158, 11, 0.2)',
+        selectionBackground: 'rgba(var(--primary-rgb), 0.2)',
         selectionForeground: '#ffffff',
         black: '#1a1a2e',
         red: '#f87171',
         green: '#4ade80',
-        yellow: '#fbbf24',
+        yellow: 'var(--primary-light)',
         blue: '#60a5fa',
         magenta: '#c084fc',
         cyan: '#22d3ee',
@@ -335,7 +335,7 @@ onUnmounted(() => {
   opacity: 0.7;
 }
 .term-dot--red { background: #f87171; }
-.term-dot--yellow { background: #fbbf24; }
+.term-dot--yellow { background: var(--primary-light); }
 .term-dot--green { background: #4ade80; }
 .term-dot--pulse {
   opacity: 1;

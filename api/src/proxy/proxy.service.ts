@@ -197,7 +197,11 @@ export class ProxyService implements OnModuleInit {
   }
 
   /**
-   * Proxy an HTTP request to a remote server.
+   * JSON-only прокси — для внутренних вызовов мастера (pingServer, updateBulk).
+   * Тело сериализуется как JSON, ответ парсится как JSON. НЕ использовать
+   * для пользовательских запросов через /proxy/:serverId/* — там нужен
+   * raw pass-through (см. proxyRaw).
+   *
    * @param timeoutOverride — явный таймаут в мс (если не задан, выбирается smart по path)
    */
   async proxyRequest(
@@ -236,6 +240,83 @@ export class ProxyService implements OnModuleInit {
     const data = await response.json().catch(() => null);
 
     return { status: response.status, data };
+  }
+
+  /**
+   * Низкоуровневый pass-through для пользовательских запросов через UI.
+   * Сохраняет Content-Type/headers/тело как Buffer, возвращает Response с
+   * читаемым потоком тела — контроллер стримит его клиенту через res.pipe.
+   *
+   * Это критично для:
+   *   - multipart/form-data (загрузка файлов)
+   *   - бинарных скачиваний (бэкап-экспорты, дампы БД, файлы из /files)
+   *   - произвольных text/* ответов
+   *
+   * Никаких JSON.stringify/response.json — байты идут как есть.
+   *
+   * TODO(3b): сейчас 50GB-экспорты идут потоком через мастер (он становится
+   * bottleneck по сети). В будущем — переделать на one-shot signed URLs:
+   * slave отдаёт фронту прямой URL на свой nginx (с короткоживущим токеном),
+   * фронт качает мимо мастера. Требует, чтобы slave-домен был доступен фронту,
+   * и расширения proxy-auth на nginx-слое slave.
+   */
+  async proxyRaw(
+    server: ServerConfig,
+    method: string,
+    pathWithQuery: string,
+    headers: Record<string, string>,
+    body?: Buffer,
+    timeoutOverride?: number,
+  ): Promise<Response> {
+    const url = `${server.url}/api${pathWithQuery}`;
+
+    // Копируем входящие заголовки, выбрасываем те, что не должны проксироваться:
+    // - host/connection — относятся к master, не к slave
+    // - authorization — это JWT мастера, slave не должен видеть
+    // - cookie — те же соображения, plus сессии у slave свои
+    // - content-length — пересчитается автоматически из тела
+    const reqHeaders: Record<string, string> = {};
+    for (const [k, v] of Object.entries(headers)) {
+      const lk = k.toLowerCase();
+      if (
+        lk === 'host' ||
+        lk === 'connection' ||
+        lk === 'authorization' ||
+        lk === 'cookie' ||
+        lk === 'content-length' ||
+        lk === 'transfer-encoding' ||
+        lk === 'x-proxy-token' // если фронт случайно пропустил — игнорируем
+      ) {
+        continue;
+      }
+      reqHeaders[k] = v;
+    }
+    reqHeaders['X-Proxy-Token'] = server.token;
+    // Убираем accept-encoding: пусть undici возвращает ответ как есть
+    // (без gzip/br), иначе придётся декодить перед стримом клиенту.
+    delete reqHeaders['accept-encoding'];
+    delete reqHeaders['Accept-Encoding'];
+
+    // Path для smart-timeout (без query)
+    const pathOnly = pathWithQuery.split('?')[0] || pathWithQuery;
+    const timeoutMs = timeoutOverride ?? this.getTimeoutMs(pathOnly);
+
+    const fetchOptions: RequestInit = {
+      method,
+      headers: reqHeaders,
+      signal: AbortSignal.timeout(timeoutMs),
+      // duplex: 'half' нужен для streaming body, но мы передаём целиком Buffer
+      // (контроллер уже собрал raw body), так что это не критично.
+    };
+
+    if (body && body.length > 0 && method !== 'GET' && method !== 'HEAD') {
+      // node-fetch принимает Buffer — но lib.dom типы fetch BodyInit не
+      // включают node Buffer. Каст через unknown — runtime-совместимо.
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (fetchOptions as any).body = body;
+    }
+
+    return await fetch(url, fetchOptions);
   }
 
   /**

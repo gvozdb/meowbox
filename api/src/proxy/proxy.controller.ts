@@ -15,7 +15,8 @@ import {
   Logger,
 } from '@nestjs/common';
 import { Throttle } from '@nestjs/throttler';
-import { Request, Response } from 'express';
+import { Request, Response as ExpressResponse } from 'express';
+import { Readable } from 'stream';
 import { Roles } from '../common/decorators/roles.decorator';
 import { CurrentUser } from '../common/decorators/current-user.decorator';
 import { ProxyService } from './proxy.service';
@@ -244,17 +245,27 @@ export class ProxyController {
   }
 
   /**
-   * Universal proxy роутер.
+   * Universal proxy роутер. Pass-through: сохраняет Content-Type, тело,
+   * стримит ответ. Работает для:
+   *   - JSON CRUD (как раньше)
+   *   - multipart/form-data (загрузка файлов в /files, /backups/restore)
+   *   - бинарных скачиваний (бэкап-экспорты, дампы БД)
+   *   - произвольных text/html/octet-stream ответов
+   *
    * Rate-limit: 120 запросов / минуту на пользователя — достаточно для UI
    * (страница может делать ~10 параллельных запросов), но защищает slave
    * от DDOS через master.
+   *
+   * IMPORTANT: для этого роута в main.ts подключён express.raw({type:'star/star'}),
+   * который складывает входящее тело в req.body как Buffer, минуя обычный
+   * JSON-парсер. Без этого multipart/бинарь рушились бы на global JSON pipe.
    */
   @All('proxy/:serverId/*')
   @Throttle({ default: { limit: 120, ttl: 60_000 } })
   async proxyRequest(
     @Param('serverId') serverId: string,
     @Req() req: Request,
-    @Res() res: Response,
+    @Res() res: ExpressResponse,
     @CurrentUser() user: AuthCtx,
   ) {
     const server = this.proxyService.getServer(serverId);
@@ -262,39 +273,48 @@ export class ProxyController {
       throw new NotFoundException(`Server "${serverId}" not found in config`);
     }
 
-    const fullPath = req.path;
+    // req.path не содержит querystring — берём из originalUrl, чтобы пробросить ?param=
     const prefix = `/api/proxy/${serverId}`;
-    const targetPath = fullPath.startsWith(prefix)
-      ? fullPath.slice(prefix.length) || '/'
-      : fullPath;
+    const fullUrl = req.originalUrl || req.url;
+    const targetPathWithQuery = fullUrl.startsWith(prefix)
+      ? fullUrl.slice(prefix.length) || '/'
+      : fullUrl;
+    const targetPath = targetPathWithQuery.split('?')[0] || '/';
 
     const ip = (req.ip ?? 'unknown') as string;
     const ua = (req.headers['user-agent'] as string | undefined) ?? null;
     const t0 = Date.now();
 
+    // Собираем заголовки запроса — только string-значения. Express может
+    // вернуть string[] для повторяющихся (set-cookie и т.п.), для запроса
+    // это нерелевантно — берём первый.
+    const inHeaders: Record<string, string> = {};
+    for (const [k, v] of Object.entries(req.headers)) {
+      if (Array.isArray(v)) inHeaders[k] = v[0] ?? '';
+      else if (typeof v === 'string') inHeaders[k] = v;
+    }
+
+    // Тело: req.body после express.raw() — это Buffer (или undefined для GET).
+    // На случай, если что-то по пути ещё парснуло в JSON (security middleware)
+    // — для GET/HEAD не передаём тело вообще.
+    const bodyBuf =
+      req.method !== 'GET' && req.method !== 'HEAD'
+        ? Buffer.isBuffer(req.body)
+          ? (req.body as Buffer)
+          : (req.body !== undefined && req.body !== null)
+            ? Buffer.from(typeof req.body === 'string' ? req.body : JSON.stringify(req.body))
+            : undefined
+        : undefined;
+
+    let upstream: Response;
     try {
-      const { status, data } = await this.proxyService.proxyRequest(
+      upstream = await this.proxyService.proxyRaw(
         server,
         req.method,
-        targetPath,
-        req.body,
+        targetPathWithQuery,
+        inHeaders,
+        bodyBuf,
       );
-
-      // Логируем все proxy-действия (включая GET — для recap).
-      // Если вырастет volume — добавим фильтр на mutating методы.
-      await this.audit.logOut({
-        userId: user.id,
-        serverId: server.id,
-        serverName: server.name,
-        method: req.method,
-        path: targetPath,
-        statusCode: status,
-        durationMs: Date.now() - t0,
-        ipAddress: ip,
-        userAgent: ua,
-      });
-
-      res.status(status).json(data);
     } catch (err) {
       const msg = (err as Error).message;
       this.logger.error(`Proxy to ${server.name} failed: ${msg}`);
@@ -312,8 +332,70 @@ export class ProxyController {
       });
       res.status(502).json({
         success: false,
-        error: `Failed to reach server "${server.name}"`,
+        error: { code: 'PROXY_UPSTREAM_FAILED', message: `Failed to reach server "${server.name}": ${msg}` },
       });
+      return;
+    }
+
+    // Пробрасываем response-заголовки (с фильтром hop-by-hop).
+    upstream.headers.forEach((value, key) => {
+      const lk = key.toLowerCase();
+      if (
+        lk === 'connection' ||
+        lk === 'keep-alive' ||
+        lk === 'transfer-encoding' ||
+        lk === 'content-encoding' || // мы не запрашивали gzip — slave не должен слать, но на всякий
+        lk === 'content-length' // длина может поменяться при ретрансляции; пусть Express сам выставит
+      ) {
+        return;
+      }
+      res.setHeader(key, value);
+    });
+    res.status(upstream.status);
+
+    await this.audit.logOut({
+      userId: user.id,
+      serverId: server.id,
+      serverName: server.name,
+      method: req.method,
+      path: targetPath,
+      statusCode: upstream.status,
+      durationMs: Date.now() - t0,
+      ipAddress: ip,
+      userAgent: ua,
+    });
+
+    if (!upstream.body) {
+      res.end();
+      return;
+    }
+
+    // Стримим тело ответа через node:stream/Readable.fromWeb — без буферизации
+    // в памяти. Критично для бэкап-экспортов: 50GB не влезут в RAM мастера.
+    // TODO(3b): см. proxy.service.ts::proxyRaw — переезд на signed URLs
+    // позволит обходить мастера для тяжёлых скачиваний полностью.
+    try {
+      const nodeStream = Readable.fromWeb(upstream.body as never);
+      nodeStream.on('error', (err) => {
+        this.logger.error(`Proxy stream error from ${server.name}: ${err.message}`);
+        if (!res.headersSent) {
+          res.status(502).json({ success: false, error: { code: 'PROXY_STREAM_ERROR', message: err.message } });
+        } else {
+          res.end();
+        }
+      });
+      // Если клиент закрыл соединение — обрываем upstream.
+      res.on('close', () => {
+        nodeStream.destroy();
+      });
+      nodeStream.pipe(res);
+    } catch (err) {
+      this.logger.error(`Proxy stream setup failed: ${(err as Error).message}`);
+      if (!res.headersSent) {
+        res.status(502).json({ success: false, error: { code: 'PROXY_STREAM_SETUP', message: (err as Error).message } });
+      } else {
+        res.end();
+      }
     }
   }
 }

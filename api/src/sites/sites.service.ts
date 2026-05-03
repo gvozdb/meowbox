@@ -1660,12 +1660,13 @@ export class SitesService implements OnModuleInit {
       }
 
       // 5. SSL (Let's Encrypt) — если включён и домен публичный.
-      // SAN включает основной домен + все non-redirect алиасы. Redirect-алиасы
-      // будут обслужены отдельным server-блоком на 80/443 без TLS-терминации.
+      // SAN включает основной домен + ВСЕ алиасы (включая redirect=true).
+      // TLS-handshake идёт до ответа nginx, и без серта на алиасе браузер
+      // показывает cert mismatch раньше, чем мы можем отдать 301-редирект.
       if (sslEnabled) {
         try {
           step(`Выпуск SSL Let's Encrypt для ${dto.domain}`);
-          const sanAliases = aliasesForAgent.filter((a) => !a.redirect).map((a) => a.domain);
+          const sanAliases = aliasesForAgent.map((a) => a.domain);
           const sslResult = await this.agentRelay.emitToAgent('ssl:issue', {
             domain: dto.domain,
             aliases: sanAliases,

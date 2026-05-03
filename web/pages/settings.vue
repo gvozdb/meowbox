@@ -66,6 +66,46 @@
       </div>
     </div>
 
+    <!-- Appearance (Внешний вид) — выбор цветовой гаммы для активного сервера -->
+    <div v-if="activeTab === 'appearance'" class="tab-content">
+      <div class="settings-card">
+        <h3 class="settings-card__title">Цветовая гамма</h3>
+        <p class="settings-card__desc">
+          Применяется к серверу, активному в сайдбаре
+          <strong v-if="activeServerLabel">({{ activeServerLabel }})</strong>.
+          Каждый сервер имеет свою гамму. Гамма работает поверх светлой/тёмной темы.
+        </p>
+        <div class="palette-grid">
+          <button
+            v-for="opt in paletteOptions"
+            :key="opt.id"
+            type="button"
+            class="palette-card"
+            :class="{ 'palette-card--active': appearanceForm.palette === opt.id }"
+            :disabled="appearanceLoading || appearanceSaving"
+            @click="appearanceForm.palette = opt.id"
+          >
+            <span class="palette-card__preview" :class="`palette-preview--${opt.id}`">
+              <span class="palette-preview__sw palette-preview__sw--primary" />
+              <span class="palette-preview__sw palette-preview__sw--light" />
+              <span class="palette-preview__sw palette-preview__sw--dark" />
+              <span v-if="appearanceForm.palette === opt.id" class="palette-card__check">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round"><polyline points="20 6 9 17 4 12" /></svg>
+              </span>
+            </span>
+            <span class="palette-card__title">{{ opt.label }}</span>
+            <span class="palette-card__desc">{{ opt.description }}</span>
+          </button>
+        </div>
+      </div>
+
+      <div class="settings-actions">
+        <button class="settings-card__btn" :disabled="appearanceSaving || appearanceLoading || !paletteChanged" @click="saveAppearance">
+          {{ appearanceSaving ? 'Сохранение...' : 'Сохранить гамму' }}
+        </button>
+      </div>
+    </div>
+
     <!-- Site defaults (Дефолты сайтов) — пути + форма создания -->
     <div v-if="activeTab === 'site-defaults'" class="tab-content">
       <div class="settings-card">
@@ -433,18 +473,21 @@
 </template>
 
 <script setup lang="ts">
+import type { PaletteId } from '~/composables/usePalette';
+
 definePageMeta({ middleware: 'auth' });
 
 const api = useApi();
 const authStore = useAuthStore();
 
-const activeTab = useTabQuery(['general', 'site-defaults', 'security', 'notifications'], 'general');
+const activeTab = useTabQuery(['general', 'appearance', 'site-defaults', 'security', 'notifications'], 'general');
 const saving = ref(false);
 const mbToast = useMbToast();
 const passwordError = ref('');
 
 const tabs = [
   { id: 'general', label: 'Основные' },
+  { id: 'appearance', label: 'Внешний вид' },
   { id: 'site-defaults', label: 'Дефолты сайтов' },
   { id: 'security', label: 'Безопасность' },
   { id: 'notifications', label: 'Уведомления' },
@@ -500,6 +543,63 @@ async function saveGeneralSettings() {
     showStatus('Не удалось сохранить настройки', true);
   } finally {
     saving.value = false;
+  }
+}
+
+// ── Appearance (палитра — таб «Внешний вид») ──────────────────────────────
+// Палитра хранится на МАСТЕРЕ для каждого сервера (карта { serverId → palette }).
+// Сохранение всегда идёт в мастер (noProxy=true), чтобы фича работала и на
+// старых slave-версиях, не знающих /panel-settings/appearance.
+const serverStore = useServerStore();
+const {
+  options: paletteOptions,
+  setForServer: applyPaletteForServer,
+  loadAllFromApi: loadAllPalettesFromApi,
+  saveToApi: savePaletteToApi,
+} = usePalette();
+
+const activeServerLabel = computed(() => {
+  const s = serverStore.currentServer;
+  return s?.name || (serverStore.currentServerId === 'main' ? 'Этот сервер' : '');
+});
+
+const appearanceForm = reactive<{ palette: PaletteId }>({ palette: 'amber' });
+let appearanceInitial: PaletteId = 'amber';
+const appearanceLoading = ref(false);
+const appearanceSaving = ref(false);
+
+const paletteChanged = computed(() => appearanceForm.palette !== appearanceInitial);
+
+async function loadAppearance() {
+  appearanceLoading.value = true;
+  try {
+    const map = await loadAllPalettesFromApi(api);
+    const sid = serverStore.currentServerId || 'main';
+    const current = map[sid] || 'amber';
+    appearanceForm.palette = current;
+    appearanceInitial = current;
+  } finally {
+    appearanceLoading.value = false;
+  }
+}
+
+async function saveAppearance() {
+  appearanceSaving.value = true;
+  try {
+    const sid = serverStore.currentServerId || 'main';
+    const map = await savePaletteToApi(api, sid, appearanceForm.palette);
+    if (!map) {
+      showStatus('Не удалось сохранить гамму', true);
+      return;
+    }
+    const next = map[sid] || appearanceForm.palette;
+    appearanceInitial = next;
+    appearanceForm.palette = next;
+    // Применяем сразу к активному серверу — мгновенный визуальный эффект.
+    applyPaletteForServer(sid, next, /* withTransition */ true);
+    showStatus('Цветовая гамма обновлена');
+  } finally {
+    appearanceSaving.value = false;
   }
 }
 
@@ -917,6 +1017,7 @@ async function testNotif(id: string) {
 watch(activeTab, (tab) => {
   if (tab === 'notifications') loadNotifications();
   if (tab === 'general') loadGeneralSettings();
+  if (tab === 'appearance') loadAppearance();
   if (tab === 'site-defaults') loadSiteDefaults();
   if (tab === 'security') {
     loadBasicAuth();
@@ -1080,7 +1181,7 @@ onMounted(() => {
   font-family: inherit;
   cursor: pointer;
   transition: all 0.2s;
-  background: linear-gradient(135deg, #fbbf24, #d97706);
+  background: linear-gradient(135deg, var(--primary-light), var(--primary-dark));
   color: var(--primary-text-on);
 }
 
@@ -1119,7 +1220,7 @@ onMounted(() => {
   user-select: none;
 }
 
-.inline-check input { accent-color: #f59e0b; }
+.inline-check input { accent-color: var(--primary); }
 
 .settings-actions {
   display: flex;
@@ -1205,7 +1306,7 @@ onMounted(() => {
 .audit-item__action--login { background: rgba(34, 197, 94, 0.1); color: #4ade80; }
 .audit-item__action--logout { background: rgba(148, 163, 184, 0.1); color: #94a3b8; }
 .audit-item__action--create { background: rgba(99, 102, 241, 0.1); color: #818cf8; }
-.audit-item__action--update { background: rgba(245, 158, 11, 0.1); color: #fbbf24; }
+.audit-item__action--update { background: rgba(var(--primary-rgb), 0.1); color: var(--primary-light); }
 .audit-item__action--delete { background: rgba(239, 68, 68, 0.1); color: #f87171; }
 .audit-item__action--deploy { background: rgba(0, 220, 130, 0.1); color: #00dc82; }
 .audit-item__action--backup { background: rgba(139, 92, 246, 0.1); color: #a78bfa; }
@@ -1492,5 +1593,118 @@ onMounted(() => {
   .audit-item__action {
     min-width: unset;
   }
+}
+
+/* ========== Палитра (таб «Внешний вид») ========== */
+.palette-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 0.8rem;
+  margin-top: 0.4rem;
+}
+
+.palette-card {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 0.55rem;
+  padding: 0.85rem;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  cursor: pointer;
+  text-align: left;
+  font: inherit;
+  color: var(--text-primary);
+  transition: border-color 0.18s ease, background 0.18s ease, transform 0.12s ease, box-shadow 0.18s ease;
+}
+.palette-card:hover:not(:disabled) {
+  border-color: var(--border-strong);
+  background: var(--bg-surface-hover);
+}
+.palette-card:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+.palette-card--active {
+  border-color: var(--primary);
+  background: var(--primary-bg);
+  box-shadow: var(--focus-ring);
+}
+
+.palette-card__preview {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0.7rem 0.8rem;
+  border-radius: 10px;
+  background: var(--bg-surface);
+  border: 1px solid var(--border-secondary);
+  min-height: 48px;
+}
+
+.palette-preview__sw {
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  border: 2px solid var(--bg-elevated);
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.15);
+}
+
+/* Цвета swatch'ей фиксированы — это превью, не зависит от текущей палитры. */
+.palette-preview--amber .palette-preview__sw--primary { background: #f59e0b; }
+.palette-preview--amber .palette-preview__sw--light   { background: #fbbf24; }
+.palette-preview--amber .palette-preview__sw--dark    { background: #d97706; }
+
+.palette-preview--violet .palette-preview__sw--primary { background: #8b5cf6; }
+.palette-preview--violet .palette-preview__sw--light   { background: #a78bfa; }
+.palette-preview--violet .palette-preview__sw--dark    { background: #7c3aed; }
+
+.palette-preview--emerald .palette-preview__sw--primary { background: #10b981; }
+.palette-preview--emerald .palette-preview__sw--light   { background: #34d399; }
+.palette-preview--emerald .palette-preview__sw--dark    { background: #059669; }
+
+.palette-preview--sapphire .palette-preview__sw--primary { background: #3b82f6; }
+.palette-preview--sapphire .palette-preview__sw--light   { background: #60a5fa; }
+.palette-preview--sapphire .palette-preview__sw--dark    { background: #2563eb; }
+
+.palette-preview--rose .palette-preview__sw--primary { background: #f43f5e; }
+.palette-preview--rose .palette-preview__sw--light   { background: #fb7185; }
+.palette-preview--rose .palette-preview__sw--dark    { background: #e11d48; }
+
+.palette-preview--teal .palette-preview__sw--primary { background: #14b8a6; }
+.palette-preview--teal .palette-preview__sw--light   { background: #2dd4bf; }
+.palette-preview--teal .palette-preview__sw--dark    { background: #0d9488; }
+
+.palette-preview--fuchsia .palette-preview__sw--primary { background: #d946ef; }
+.palette-preview--fuchsia .palette-preview__sw--light   { background: #e879f9; }
+.palette-preview--fuchsia .palette-preview__sw--dark    { background: #c026d3; }
+
+.palette-card__check {
+  position: absolute;
+  top: 50%;
+  right: 0.7rem;
+  transform: translateY(-50%);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  background: var(--primary);
+  color: var(--primary-text-on);
+}
+
+.palette-card__title {
+  font-weight: 600;
+  font-size: 0.95rem;
+  color: var(--text-heading);
+}
+
+.palette-card__desc {
+  font-size: 0.8rem;
+  color: var(--text-tertiary);
+  line-height: 1.35;
 }
 </style>

@@ -46,7 +46,7 @@ function pawStyle(i: number) {
     position: 'absolute' as const,
     ...p,
     transform: `rotate(${p.rotate})`,
-    color: '#f59e0b',
+    color: 'var(--primary)',
     animationDelay: p.delay,
   };
 }
@@ -92,7 +92,7 @@ function pawStyle(i: number) {
   height: 600px;
   top: -200px;
   right: -100px;
-  background: radial-gradient(circle, rgba(217, 119, 6, 0.08) 0%, transparent 70%);
+  background: radial-gradient(circle, rgba(var(--primary-dark-rgb), 0.08) 0%, transparent 70%);
   animation-delay: 0s;
 }
 
@@ -101,7 +101,7 @@ function pawStyle(i: number) {
   height: 500px;
   bottom: -150px;
   left: -100px;
-  background: radial-gradient(circle, rgba(180, 83, 9, 0.06) 0%, transparent 70%);
+  background: radial-gradient(circle, rgba(var(--primary-dark-rgb), 0.06) 0%, transparent 70%);
   animation-delay: -7s;
 }
 
@@ -110,7 +110,7 @@ function pawStyle(i: number) {
   height: 300px;
   top: 40%;
   left: 50%;
-  background: radial-gradient(circle, rgba(245, 158, 11, 0.04) 0%, transparent 70%);
+  background: radial-gradient(circle, rgba(var(--primary-rgb), 0.04) 0%, transparent 70%);
   animation-delay: -14s;
 }
 

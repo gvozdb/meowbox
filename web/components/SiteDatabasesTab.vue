@@ -456,7 +456,7 @@ watch(() => props.active, (active) => {
   flex-shrink: 0;
 }
 
-.db-card__icon--mariadb { background: rgba(245, 158, 11, 0.12); color: rgb(251, 191, 36); }
+.db-card__icon--mariadb { background: rgba(var(--primary-rgb), 0.12); color: var(--primary-light); }
 .db-card__icon--postgresql { background: rgba(59, 130, 246, 0.12); color: rgb(96, 165, 250); }
 
 .db-card__info {
@@ -513,12 +513,12 @@ watch(() => props.active, (active) => {
   white-space: nowrap;
 }
 .btn--primary {
-  background: linear-gradient(135deg, #fbbf24, #d97706);
+  background: linear-gradient(135deg, var(--primary-light), var(--primary-dark));
   color: var(--primary-text-on);
 }
 .btn--primary:not(:disabled):hover {
   transform: translateY(-1px);
-  box-shadow: 0 4px 16px rgba(245, 158, 11, 0.2);
+  box-shadow: 0 4px 16px rgba(var(--primary-rgb), 0.2);
 }
 .btn--primary:disabled {
   opacity: 0.4;
@@ -627,8 +627,8 @@ watch(() => props.active, (active) => {
   transition: all 0.2s;
 }
 .form-input:focus {
-  border-color: var(--primary-border, rgba(245, 158, 11, 0.4));
-  box-shadow: 0 0 0 3px rgba(245, 158, 11, 0.08);
+  border-color: var(--primary-border, rgba(var(--primary-rgb), 0.4));
+  box-shadow: 0 0 0 3px rgba(var(--primary-rgb), 0.08);
 }
 .form-hint {
   font-size: 0.72rem;
@@ -657,11 +657,11 @@ watch(() => props.active, (active) => {
 }
 .radio-option:hover { border-color: var(--border-strong); }
 .radio-option--active {
-  background: rgba(245, 158, 11, 0.08);
-  border-color: rgba(245, 158, 11, 0.5);
+  background: rgba(var(--primary-rgb), 0.08);
+  border-color: rgba(var(--primary-rgb), 0.5);
   color: var(--text-heading);
 }
-.radio-option__input { accent-color: var(--primary, #f59e0b); }
+.radio-option__input { accent-color: var(--primary, var(--primary)); }
 
 /* ─────────── Прочее ─────────── */
 .spinner {
@@ -669,7 +669,7 @@ watch(() => props.active, (active) => {
   width: 14px;
   height: 14px;
   border: 2px solid var(--border-strong);
-  border-top-color: var(--primary, #f59e0b);
+  border-top-color: var(--primary, var(--primary));
   border-radius: 50%;
   animation: site-dbs-spin 0.8s linear infinite;
   vertical-align: middle;
@@ -690,7 +690,7 @@ watch(() => props.active, (active) => {
 }
 
 .link {
-  color: var(--primary, #fbbf24);
+  color: var(--primary, var(--primary-light));
   text-decoration: underline;
   text-underline-offset: 2px;
 }

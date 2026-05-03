@@ -46,10 +46,11 @@ export class SslService {
         issuedAt: true,
         expiresAt: true,
         daysRemaining: true,
-        // aliases нужны, чтобы вычислить missingAliases — non-redirect алиасы,
-        // которые не покрыты SAN текущего сертификата. Redirect-алиасы в SAN
-        // класть смысла нет (nginx отдаёт им 301 до выпуска SSL), поэтому
-        // их отсутствие в серте — не проблема.
+        // aliases нужны, чтобы вычислить missingAliases — алиасы, не покрытые
+        // SAN текущего серта. Включая redirect-алиасы: TLS-handshake идёт
+        // ДО ответа nginx, и без серта на www-домене браузер показывает
+        // cert error раньше, чем мы успеваем отдать 301. Поэтому редирект-
+        // алиасам тоже нужен валидный SAN.
         site: { select: { id: true, name: true, domain: true, aliases: true } },
       },
     });
@@ -58,8 +59,10 @@ export class SslService {
       const domainsInCert = parseStringArray(c.domains);
       const domainsSet = new Set(domainsInCert.map((d) => d.toLowerCase()));
       const aliases = parseSiteAliases(c.site.aliases);
+      // Включаем И redirect-алиасы: им тоже нужен SAN, иначе браузер
+      // показывает cert mismatch до того как nginx отдаст 301 редирект.
       const missingAliases = aliases
-        .filter((a) => !a.redirect && !domainsSet.has(a.domain.toLowerCase()))
+        .filter((a) => !domainsSet.has(a.domain.toLowerCase()))
         .map((a) => a.domain);
       // Основной домен должен быть в серте — если почему-то нет, это тоже
       // сигнал о проблеме. Кладём в отдельное поле.
@@ -122,11 +125,13 @@ export class SslService {
       data: { status: SslStatus.PENDING },
     });
 
-    // В SAN кладём только non-redirect алиасы: для редирект-алиасов TLS не нужен,
-    // они отвечают 301-ом на основной домен.
-    const sanAliases = parseSiteAliases(site.aliases)
-      .filter((a) => !a.redirect)
-      .map((a) => a.domain);
+    // В SAN кладём ВСЕ алиасы — и non-redirect, и redirect. TLS-handshake
+    // выполняется ДО того, как nginx может отдать 301 редирект, поэтому
+    // даже редирект-алиасу нужен валидный серт. Иначе браузер на
+    // https://www.example.com показывает «незащищённое соединение» и юзер
+    // должен вручную нажать «продолжить», чтобы наш 301→main сработал.
+    // Покрытие всех алиасов — must, не «nice to have».
+    const sanAliases = parseSiteAliases(site.aliases).map((a) => a.domain);
     const domains = [site.domain, ...sanAliases];
 
     // =========================================================================

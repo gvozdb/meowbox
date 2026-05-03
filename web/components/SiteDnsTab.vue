@@ -323,7 +323,7 @@ function pluralize(n: number): string {
 .site-dns__type-badge[data-type="NS"] { background: #fce7f3; color: #9d174d; }
 
 .site-dns__meta { font-size: 11px; color: var(--text-muted, #6b7280); margin-right: .35rem; }
-.site-dns__meta--cf { color: #b45309; font-weight: 600; }
+.site-dns__meta--cf { color: var(--primary-text); font-weight: 600; }
 
 .site-dns__note {
   font-size: 12px;

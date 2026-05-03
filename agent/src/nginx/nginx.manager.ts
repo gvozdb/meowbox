@@ -491,12 +491,16 @@ export class NginxManager {
 
   private async restoreFromBackup(siteName: string, backup: SiteBackup): Promise<void> {
     const mainPath = this.mainConfigPath(siteName);
+    const enabledLink = this.enabledLinkPath(siteName);
     const includeDir = this.siteIncludeDir(siteName);
 
     if (backup.main !== null) {
       await fs.writeFile(mainPath, backup.main, 'utf8').catch(() => {});
     } else {
+      // Сайта не было до миграции — убираем и main, и symlink, иначе
+      // dangling symlink в sites-enabled валит nginx -t у других сайтов.
       await fs.unlink(mainPath).catch(() => {});
+      await fs.unlink(enabledLink).catch(() => {});
     }
 
     // Восстанавливаем все чанки из бэкапа, удаляя те что появились после.

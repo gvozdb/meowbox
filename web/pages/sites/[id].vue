@@ -71,6 +71,29 @@
         </div>
       </div>
 
+      <!-- Hostpanel migration banner: SSL reissue (spec §9.4) -->
+      <div v-if="hostpanelMigrationBanner" class="site-detail__hp-banner">
+        <div class="site-detail__hp-banner-head">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+            <path d="M12 2 L2 22 L22 22 Z" /><line x1="12" y1="9" x2="12" y2="13" /><line x1="12" y1="17" x2="12.01" y2="17" />
+          </svg>
+          <strong>Сайт перенесён со старой hostPanel</strong>
+        </div>
+        <p class="site-detail__hp-banner-text">
+          Сертификат скопирован с источника. После того как привяжешь новый IP к домену
+          <code>{{ site.domain }}</code> — нажми <strong>«Выпустить»</strong> на вкладке SSL,
+          чтобы получить свежий сертификат от Let's Encrypt.
+        </p>
+        <div class="site-detail__hp-banner-actions">
+          <button class="btn btn--primary btn--sm" @click="activeTab = 'ssl'">
+            🔒 Перейти к SSL →
+          </button>
+          <button class="btn btn--ghost btn--sm" @click="dismissHostpanelBanner">
+            Скрыть до перевыпуска
+          </button>
+        </div>
+      </div>
+
       <!-- Error banner (provisioning/deploy errors) -->
       <div v-if="site.status === 'ERROR' && site.errorMessage" class="site-detail__error-banner">
         <div class="site-detail__error-banner-head">
@@ -752,7 +775,7 @@
               Текущий сертификат будет заменён: certbot переиздаст его с актуальным списком доменов (<strong>{{ site.domain }}</strong><template v-if="sslAliasesCount"> + {{ sslAliasesCount }} алиас{{ sslAliasesCount === 1 ? '' : (sslAliasesCount < 5 ? 'а' : 'ов') }}</template>). Используется <code>--expand</code>, revoke старой версии не нужен.
             </p>
             <p v-else class="ssl-le__desc">
-              Выпустить бесплатный SSL-сертификат для <strong>{{ site.domain }}</strong><template v-if="sslAliasesCount"> и {{ sslAliasesCount }} алиас(ов)</template>. Редирект-алиасы в SAN не включаются.
+              Выпустить бесплатный SSL-сертификат для <strong>{{ site.domain }}</strong><template v-if="sslAliasesCount"> и {{ sslAliasesCount }} алиас{{ sslAliasesCount === 1 ? '' : (sslAliasesCount < 5 ? 'а' : 'ов') }}</template>. В SAN включаются все алиасы (в т. ч. redirect — иначе TLS-handshake падает на cert-mismatch до 301).
             </p>
 
             <div class="ssl-le__actions">
@@ -867,17 +890,15 @@
             <div v-if="domainAliases.length" class="domains-list">
               <div v-for="(alias, idx) in domainAliases" :key="alias.domain + idx" class="domain-item">
                 <span
-                  v-if="coverageFor(alias.domain, alias.redirect) !== 'no-cert'"
+                  v-if="coverageFor(alias.domain) !== 'no-cert'"
                   class="cert-badge"
-                  :class="`cert-badge--${coverageFor(alias.domain, alias.redirect)}`"
+                  :class="`cert-badge--${coverageFor(alias.domain)}`"
                   :title="
-                    coverageFor(alias.domain, alias.redirect) === 'covered' ? 'Алиас покрыт SSL-сертификатом' :
-                    coverageFor(alias.domain, alias.redirect) === 'redirect' ? 'Redirect-алиас: в SAN быть не обязан (отдаёт 301 до TLS-handshake)' :
-                    'Алиас не в сертификате — перевыпусти SSL, чтобы добавить его в SAN'
+                    coverageFor(alias.domain) === 'covered' ? 'Алиас покрыт SSL-сертификатом' :
+                    'Алиас не в сертификате — перевыпусти SSL, чтобы добавить его в SAN (redirect-алиасы тоже должны быть в SAN, иначе TLS-handshake падает до 301)'
                   "
                 >
-                  <svg v-if="coverageFor(alias.domain, alias.redirect) === 'covered'" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round"><polyline points="20 6 9 17 4 12" /></svg>
-                  <svg v-else-if="coverageFor(alias.domain, alias.redirect) === 'redirect'" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><polyline points="15 18 9 12 15 6" /></svg>
+                  <svg v-if="coverageFor(alias.domain) === 'covered'" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round"><polyline points="20 6 9 17 4 12" /></svg>
                   <svg v-else width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" /></svg>
                 </span>
                 <span class="domain-item__name">{{ alias.domain }}</span>
@@ -1781,7 +1802,7 @@
                 </div>
                 <pre v-else-if="backupCompare.unifiedDiff" v-html="renderUnifiedDiff(backupCompare.unifiedDiff)" style="margin:0;white-space:pre-wrap;word-break:break-all;"></pre>
                 <p v-else style="color:var(--text-tertiary);">Кликни файл слева чтобы увидеть diff.</p>
-                <p v-if="backupCompare.fileTruncated" style="color:#fbbf24;margin-top:0.5rem;">⚠ Файл обрезан до 2 МБ — diff неполный.</p>
+                <p v-if="backupCompare.fileTruncated" style="color:var(--primary-light);margin-top:0.5rem;">⚠ Файл обрезан до 2 МБ — diff неполный.</p>
               </div>
             </div>
 
@@ -2271,7 +2292,7 @@ php_value[max_execution_time] = 300"
             <button
               v-if="!sshPasswordNewValue"
               class="modal__btn"
-              style="background: linear-gradient(135deg,#fbbf24,#d97706); color:#0a0a0f; border-color:transparent;"
+              style="background: linear-gradient(135deg,var(--primary-light),var(--primary-dark)); color:#0a0a0f; border-color:transparent;"
               :disabled="sshPasswordSaving"
               @click="submitSshPasswordChange"
             >
@@ -2557,6 +2578,12 @@ interface SiteDetail {
   deployBranch: string | null;
   envVars: Record<string, string>;
   errorMessage?: string | null;
+  /**
+   * JSON-строка с произвольной мета-инфой о сайте. hostpanel-миграция
+   * пишет сюда `requiresSslReissue: true` — UI показывает баннер
+   * «после переключения DNS перевыпусти SSL» (spec §9.4).
+   */
+  metadata?: string | null;
   createdAt: string;
   sslCertificate: {
     status: string;
@@ -2586,6 +2613,34 @@ const { terminalOpen, terminalInput, terminalResize, terminalClose, onTerminalDa
 const siteId = route.params.id as string;
 const site = ref<SiteDetail | null>(null);
 const loading = ref(true);
+
+/**
+ * Баннер «после переключения DNS перевыпусти SSL» (spec §9.4) — показываем,
+ * если в `Site.metadata.requiresSslReissue === true` и оператор не нажал
+ * «Скрыть» (флаг хранится в localStorage по siteId).
+ */
+const hostpanelBannerDismissed = ref(false);
+const hostpanelMigrationBanner = computed(() => {
+  if (!site.value?.metadata) return false;
+  if (hostpanelBannerDismissed.value) return false;
+  try {
+    const meta = JSON.parse(site.value.metadata) as Record<string, unknown>;
+    if (meta.importedFrom !== 'hostpanel') return false;
+    if (meta.requiresSslReissue !== true) return false;
+    return true;
+  } catch {
+    return false;
+  }
+});
+function dismissHostpanelBanner() {
+  if (!site.value) return;
+  try {
+    localStorage.setItem(`hp-banner-dismissed-${site.value.id}`, '1');
+  } catch {
+    /* ignore quota / disabled storage */
+  }
+  hostpanelBannerDismissed.value = true;
+}
 
 /**
  * Перезагрузка карточки сайта после CRUD-операций над БД (компонент
@@ -2709,8 +2764,9 @@ const aliasesSummary = computed(() => {
 });
 
 const sslAliasesCount = computed(() => {
-  // В SAN идут только non-redirect.
-  return normalizeAliases(site.value?.aliases).filter((a) => !a.redirect).length;
+  // В SAN идут ВСЕ алиасы (включая redirect — иначе TLS-handshake падает с
+  // cert-mismatch до того, как nginx успеет вернуть 301).
+  return normalizeAliases(site.value?.aliases).length;
 });
 
 /**
@@ -2733,21 +2789,22 @@ const certDomainsLower = computed(() => {
  * Статус покрытия домена сертификатом:
  *  - 'covered'      — в SAN
  *  - 'missing'      — сертификат есть, но домен не покрыт
- *  - 'redirect'     — алиас-редирект, в SAN ему быть не обязательно
  *  - 'no-cert'      — у сайта нет серта вообще, показывать нечего
+ *
+ * Redirect-алиасы тоже должны быть в SAN: TLS-handshake происходит ДО того,
+ * как nginx может вернуть 301 — иначе браузер ругается на cert-mismatch.
  */
-type CertCoverage = 'covered' | 'missing' | 'redirect' | 'no-cert';
-function coverageFor(domain: string, isRedirectAlias = false): CertCoverage {
+type CertCoverage = 'covered' | 'missing' | 'no-cert';
+function coverageFor(domain: string, _isRedirectAlias = false): CertCoverage {
   if (!hasActiveCert.value) return 'no-cert';
-  if (isRedirectAlias) return 'redirect';
   return certDomainsLower.value.has(domain.toLowerCase()) ? 'covered' : 'missing';
 }
 
-/** Список non-redirect алиасов, не покрытых текущим сертификатом. */
+/** Список ВСЕХ алиасов (вкл. redirect), не покрытых текущим сертификатом. */
 const missingAliasesInCert = computed(() => {
   if (!hasActiveCert.value) return [] as string[];
   return domainAliases.value
-    .filter((a) => !a.redirect && !certDomainsLower.value.has(a.domain.toLowerCase()))
+    .filter((a) => !certDomainsLower.value.has(a.domain.toLowerCase()))
     .map((a) => a.domain);
 });
 /** Основной домен не в сертификате (редкий, но возможный случай после смены домена). */
@@ -3278,7 +3335,7 @@ async function openSiteTerminal() {
       cursorStyle: 'bar',
       fontSize: 13,
       fontFamily: "'JetBrains Mono', 'Cascadia Code', 'Fira Code', monospace",
-      theme: { background: '#0d0d0d', foreground: '#e0e0e0', cursor: '#fbbf24' },
+      theme: { background: '#0d0d0d', foreground: '#e0e0e0', cursor: 'var(--primary-light)' },
       scrollback: 5000,
     });
 
@@ -3736,14 +3793,13 @@ async function pollDeployLog(deployId: string) {
 
 async function loadDeployLogs() {
   try {
-    const config = useRuntimeConfig();
-    const baseUrl = config.public.apiBase as string;
-    const token = localStorage.getItem('accessToken');
-    const response = await $fetch<Record<string, unknown>>(`${baseUrl}/sites/${siteId}/deploys?perPage=10`, {
-      headers: token ? { Authorization: `Bearer ${token}` } : {},
-    });
-    // Response shape: { success, logs: [...], meta: {...} }
-    deployLogs.value = (response.logs as typeof deployLogs.value) || [];
+    // Через api.get — иначе на remote-сервере фронт показал бы deploys ЛОКАЛЬНОГО
+    // сайта с тем же id (это разные сайты на разных серверах). Бывший прямой
+    // $fetch без proxy-префикса давал misleading данные.
+    const response = await api.get<{ logs?: typeof deployLogs.value }>(
+      `/sites/${siteId}/deploys?perPage=10`,
+    );
+    deployLogs.value = response.logs || [];
   } catch {
     // Silently fail
   }
@@ -4142,7 +4198,7 @@ const storageBarSegments = computed(() => {
   const d = storageData.value;
   if (!d || !d.totalBytes) return [] as Array<{ label: string; bytes: number; percent: number; color: string }>;
   const segs = [
-    { label: 'www', bytes: d.wwwBytes, color: '#f59e0b' },
+    { label: 'www', bytes: d.wwwBytes, color: 'var(--primary)' },
     { label: 'БД', bytes: d.dbBytes, color: '#6366f1' },
     { label: 'Логи', bytes: d.logsBytes, color: '#10b981' },
     { label: 'tmp', bytes: d.tmpBytes, color: '#94a3b8' },
@@ -4827,7 +4883,7 @@ async function onBackupCompareFileClick(item: BackupCompareItem) {
 function backupModifierColor(m: string): string {
   if (m === '+') return '#22c55e';
   if (m === '-') return '#ef4444';
-  if (m === 'M') return '#f59e0b';
+  if (m === 'M') return 'var(--primary)';
   return 'var(--text-tertiary)';
 }
 
@@ -5205,6 +5261,22 @@ async function downloadExportRow(ex: BackupExportRow) {
         `/backup-exports/${ex.id}/issue-token`,
         {},
       );
+      // На remote-сервере one-shot токен в querystring не сработает через
+      // нативный <a> — мастер требует JWT для proxy-роута. Тянем через
+      // api.download (с Authorization header) — тот сам добавит /proxy/{id}.
+      // TODO(3b): для bulk-скачиваний 50GB+ переехать на signed URL прямо
+      // к slave (см. proxy.service.ts::proxyRaw комментарий).
+      try {
+        const serverStore = useServerStore();
+        if (!serverStore.isLocal && res.downloadUrl.startsWith('/api/')) {
+          const dateStr = new Date(ex.createdAt).toISOString().slice(0, 10);
+          const filename = `export-${dateStr}-${ex.id.slice(0, 8)}.tar.gz`;
+          // Strip /api prefix — api.download сам добавит baseUrl
+          const endpoint = res.downloadUrl.slice(4);
+          await api.download(endpoint, filename);
+          return;
+        }
+      } catch { /* fallback to native open */ }
       openExportLink(res.downloadUrl);
     } else if (ex.downloadUrl) {
       openExportLink(ex.downloadUrl);
@@ -5609,6 +5681,15 @@ async function deleteSite() {
 onMounted(async () => {
   try {
     site.value = await api.get<SiteDetail>(`/sites/${siteId}`);
+    // Восстанавливаем dismissed-флаг hostpanel-баннера (spec §9.4) из
+    // localStorage по siteId — иначе после refresh оператор увидит баннер
+    // снова, хоть и нажал «скрыть».
+    try {
+      hostpanelBannerDismissed.value =
+        localStorage.getItem(`hp-banner-dismissed-${siteId}`) === '1';
+    } catch {
+      /* ignore disabled storage */
+    }
     domainAliases.value = normalizeAliases(site.value?.aliases);
     envOriginal.value = JSON.stringify(site.value?.envVars || {});
     syncSiteExcludesFromSite();
@@ -5815,6 +5896,53 @@ onBeforeUnmount(() => {
   word-break: break-word;
   max-height: 220px;
   overflow-y: auto;
+}
+
+/* Hostpanel migration banner — SSL reissue notice (spec §9.4) */
+.site-detail__hp-banner {
+  background: rgba(var(--primary-rgb), 0.08);
+  border: 1px solid rgba(var(--primary-rgb), 0.3);
+  border-radius: 10px;
+  padding: 0.85rem 1rem;
+  margin-bottom: 1rem;
+  color: #fcd34d;
+}
+html.theme-light .site-detail__hp-banner {
+  /* На светлой теме amber-300 (#fcd34d) сливается с фоном — используем
+     более насыщенный amber-700 для заголовка и стандартный text-secondary
+     для тела сообщения. */
+  background: rgba(var(--primary-rgb), 0.1);
+  border-color: rgba(var(--primary-rgb), 0.4);
+  color: var(--primary-text);
+}
+.site-detail__hp-banner-head {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-bottom: 0.4rem;
+}
+.site-detail__hp-banner-text {
+  margin: 0 0 0.6rem;
+  font-size: 0.82rem;
+  color: var(--text-secondary);
+  line-height: 1.45;
+}
+.site-detail__hp-banner-text code {
+  background: rgba(0, 0, 0, 0.3);
+  padding: 0.1rem 0.35rem;
+  border-radius: 4px;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.78rem;
+  color: #fcd34d;
+}
+html.theme-light .site-detail__hp-banner-text code {
+  background: rgba(var(--primary-rgb), 0.12);
+  color: var(--primary-text);
+}
+.site-detail__hp-banner-actions {
+  display: flex;
+  gap: 0.4rem;
+  flex-wrap: wrap;
 }
 
 /* Tabs */
@@ -6206,8 +6334,8 @@ html.theme-light .domains-cert-alert__body code {
   width: 38px;
   height: 38px;
   border-radius: 11px;
-  background: linear-gradient(135deg, rgba(245, 158, 11, 0.18), rgba(239, 68, 68, 0.15));
-  color: #fbbf24;
+  background: linear-gradient(135deg, rgba(var(--primary-rgb), 0.18), rgba(239, 68, 68, 0.15));
+  color: var(--primary-light);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -6997,13 +7125,13 @@ html.theme-light .domains-cert-alert__body code {
 }
 
 .btn--primary {
-  background: linear-gradient(135deg, #fbbf24, #d97706);
+  background: linear-gradient(135deg, var(--primary-light), var(--primary-dark));
   color: var(--primary-text-on);
 }
 
 .btn--primary:not(:disabled):hover {
   transform: translateY(-1px);
-  box-shadow: 0 4px 16px rgba(245, 158, 11, 0.2);
+  box-shadow: 0 4px 16px rgba(var(--primary-rgb), 0.2);
 }
 
 .btn--primary:disabled {
@@ -7726,7 +7854,7 @@ html.theme-light .domains-cert-alert__body code {
 }
 
 .fm-item--dir .fm-item__icon {
-  background: rgba(245, 158, 11, 0.08);
+  background: rgba(var(--primary-rgb), 0.08);
   color: var(--primary-text);
 }
 
@@ -8024,7 +8152,7 @@ html.theme-light .domains-cert-alert__body code {
   padding: 0.65rem 0.85rem;
   margin: 0 0 1rem;
   background: var(--bg-input);
-  border-left: 3px solid var(--primary-border, rgba(245, 158, 11, 0.35));
+  border-left: 3px solid var(--primary-border, rgba(var(--primary-rgb), 0.35));
   border-radius: 6px;
 }
 .backup-list { display: flex; flex-direction: column; gap: 0.35rem; }
@@ -8040,7 +8168,7 @@ html.theme-light .domains-cert-alert__body code {
 }
 .backup-item__icon--completed { background: rgba(34, 197, 94, 0.1); color: #4ade80; }
 .backup-item__icon--failed { background: rgba(239, 68, 68, 0.1); color: #f87171; }
-.backup-item__icon--in_progress, .backup-item__icon--pending { background: rgba(245, 158, 11, 0.1); color: #fbbf24; }
+.backup-item__icon--in_progress, .backup-item__icon--pending { background: rgba(var(--primary-rgb), 0.1); color: var(--primary-light); }
 .backup-item__info { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 0.15rem; }
 .backup-item__top { display: flex; align-items: center; gap: 0.4rem; }
 .backup-item__type { font-size: 0.82rem; font-weight: 500; color: var(--text-secondary); }
@@ -8057,7 +8185,7 @@ html.theme-light .domains-cert-alert__body code {
   padding: 0.2rem 0.5rem; border-radius: 6px; text-transform: uppercase; letter-spacing: 0.03em; flex-shrink: 0;
 }
 .backup-item__status--completed { background: rgba(34, 197, 94, 0.1); color: #4ade80; }
-.backup-item__status--pending, .backup-item__status--in_progress { background: rgba(245, 158, 11, 0.1); color: #fbbf24; }
+.backup-item__status--pending, .backup-item__status--in_progress { background: rgba(var(--primary-rgb), 0.1); color: var(--primary-light); }
 .backup-item__status--failed { background: rgba(239, 68, 68, 0.1); color: #f87171; }
 .backup-item__actions { display: flex; align-items: center; gap: 0.4rem; flex-shrink: 0; }
 
@@ -8067,7 +8195,7 @@ html.theme-light .domains-cert-alert__body code {
 }
 .backup-progress__fill {
   height: 100%; border-radius: 3px;
-  background: linear-gradient(90deg, #fbbf24, #d97706);
+  background: linear-gradient(90deg, var(--primary-light), var(--primary-dark));
   transition: width 0.4s ease;
 }
 .backup-progress__label {
@@ -8077,7 +8205,7 @@ html.theme-light .domains-cert-alert__body code {
 
 .backup-spinner {
   width: 16px; height: 16px; border: 2px solid var(--spinner-track);
-  border-top-color: #fbbf24; border-radius: 50%; animation: spin 0.6s linear infinite;
+  border-top-color: var(--primary-light); border-radius: 50%; animation: spin 0.6s linear infinite;
 }
 @keyframes spin { to { transform: rotate(360deg); } }
 
@@ -8132,8 +8260,8 @@ html.theme-light .domains-cert-alert__body code {
   border-color: var(--border-strong);
 }
 .snapshot-item--selected {
-  border-color: rgba(245, 158, 11, 0.4);
-  background: rgba(245, 158, 11, 0.06);
+  border-color: rgba(var(--primary-rgb), 0.4);
+  background: rgba(var(--primary-rgb), 0.06);
 }
 .snapshot-item__head {
   display: flex;
@@ -8363,8 +8491,8 @@ html.theme-light .domains-cert-alert__body code {
 /* ─── Backup export dialog ─── */
 .exp-warn {
   margin: 0.75rem 0; padding: 0.6rem 0.85rem;
-  background: rgba(245, 158, 11, 0.08); border: 1px solid rgba(245, 158, 11, 0.2);
-  color: #f59e0b; border-radius: 8px; font-size: 0.82rem;
+  background: rgba(var(--primary-rgb), 0.08); border: 1px solid rgba(var(--primary-rgb), 0.2);
+  color: var(--primary); border-radius: 8px; font-size: 0.82rem;
 }
 .exp-mode-hint {
   display: block; margin-top: 0.2rem;
@@ -8551,7 +8679,7 @@ html.theme-light .domains-cert-alert__body code {
 .db-pick__item:hover {
   border-color: var(--border-secondary);
 }
-.db-pick__item input[type="checkbox"] { accent-color: var(--primary, #f59e0b); }
+.db-pick__item input[type="checkbox"] { accent-color: var(--primary, var(--primary)); }
 .db-pick__name {
   font-family: 'JetBrains Mono', monospace;
   font-size: 0.82rem;
@@ -8687,7 +8815,7 @@ html.theme-light .domains-cert-alert__body code {
 .cron-form__preset--active {
   border-color: var(--primary);
   color: var(--primary);
-  background: rgba(245, 158, 11, 0.08);
+  background: rgba(var(--primary-rgb), 0.08);
 }
 
 .cron-form__command {
@@ -9028,7 +9156,7 @@ html.theme-light .domains-cert-alert__body code {
 }
 .kpi-bar__fill {
   height: 100%;
-  background: linear-gradient(90deg, #22c55e, #f59e0b, #ef4444);
+  background: linear-gradient(90deg, #22c55e, var(--primary), #ef4444);
   transition: width 0.3s;
 }
 
@@ -9072,7 +9200,7 @@ html.theme-light .domains-cert-alert__body code {
   display: block;
 }
 .monitor-chart__line {
-  stroke: var(--primary-text, #f59e0b);
+  stroke: var(--primary-text, var(--primary));
   stroke-width: 1.5;
 }
 .chart-dot--ok { fill: #22c55e; }
@@ -9224,7 +9352,7 @@ html.theme-light .domains-cert-alert__body code {
 .timeline__dot--login { background: #4ade80; box-shadow: 0 0 6px rgba(74, 222, 128, 0.4); }
 .timeline__dot--logout { background: #94a3b8; }
 .timeline__dot--create { background: #818cf8; box-shadow: 0 0 6px rgba(129, 140, 248, 0.4); }
-.timeline__dot--update { background: #fbbf24; box-shadow: 0 0 6px rgba(251, 191, 36, 0.3); }
+.timeline__dot--update { background: var(--primary-light); box-shadow: 0 0 6px rgba(var(--primary-light-rgb), 0.3); }
 .timeline__dot--delete { background: #f87171; box-shadow: 0 0 6px rgba(248, 113, 113, 0.4); }
 .timeline__dot--deploy { background: #00dc82; box-shadow: 0 0 6px rgba(0, 220, 130, 0.4); }
 .timeline__dot--backup { background: #a78bfa; box-shadow: 0 0 6px rgba(167, 139, 250, 0.3); }
@@ -9232,7 +9360,7 @@ html.theme-light .domains-cert-alert__body code {
 .timeline__dot--ssl_issue { background: #38bdf8; box-shadow: 0 0 6px rgba(56, 189, 248, 0.4); }
 .timeline__dot--service_start { background: #4ade80; box-shadow: 0 0 6px rgba(74, 222, 128, 0.3); }
 .timeline__dot--service_stop { background: #f87171; box-shadow: 0 0 6px rgba(248, 113, 113, 0.3); }
-.timeline__dot--service_restart { background: #fbbf24; box-shadow: 0 0 6px rgba(251, 191, 36, 0.3); }
+.timeline__dot--service_restart { background: var(--primary-light); box-shadow: 0 0 6px rgba(var(--primary-light-rgb), 0.3); }
 .timeline__content { flex: 1; min-width: 0; }
 .timeline__top {
   display: flex;
@@ -9255,7 +9383,7 @@ html.theme-light .domains-cert-alert__body code {
 .timeline__badge--login { background: rgba(34, 197, 94, 0.1); color: #4ade80; }
 .timeline__badge--logout { background: rgba(148, 163, 184, 0.1); color: #94a3b8; }
 .timeline__badge--create { background: rgba(99, 102, 241, 0.1); color: #818cf8; }
-.timeline__badge--update { background: rgba(245, 158, 11, 0.1); color: #fbbf24; }
+.timeline__badge--update { background: rgba(var(--primary-rgb), 0.1); color: var(--primary-light); }
 .timeline__badge--delete { background: rgba(239, 68, 68, 0.1); color: #f87171; }
 .timeline__badge--deploy { background: rgba(0, 220, 130, 0.1); color: #00dc82; }
 .timeline__badge--backup { background: rgba(139, 92, 246, 0.1); color: #a78bfa; }
@@ -9263,7 +9391,7 @@ html.theme-light .domains-cert-alert__body code {
 .timeline__badge--ssl_issue { background: rgba(56, 189, 248, 0.1); color: #38bdf8; }
 .timeline__badge--service_start { background: rgba(34, 197, 94, 0.1); color: #4ade80; }
 .timeline__badge--service_stop { background: rgba(239, 68, 68, 0.1); color: #f87171; }
-.timeline__badge--service_restart { background: rgba(245, 158, 11, 0.1); color: #fbbf24; }
+.timeline__badge--service_restart { background: rgba(var(--primary-rgb), 0.1); color: var(--primary-light); }
 .timeline__entity {
   font-size: 0.8rem;
   color: var(--text-secondary);
@@ -9396,16 +9524,16 @@ html.theme-light .domains-cert-alert__body code {
   cursor: pointer;
   /* Solid amber-градиент primary-кнопки проекта — одинаково контрастен и на
      светлой, и на тёмной теме. text-on автоматически меняется (#0a0a0f / #fff). */
-  background: linear-gradient(135deg, #fbbf24, #d97706);
+  background: linear-gradient(135deg, var(--primary-light), var(--primary-dark));
   color: var(--primary-text-on);
   border: 1px solid transparent;
-  box-shadow: 0 1px 2px rgba(217, 119, 6, 0.25);
+  box-shadow: 0 1px 2px rgba(var(--primary-dark-rgb), 0.25);
   transition: filter 0.15s, transform 0.05s, box-shadow 0.15s;
   align-self: center;
 }
 .utility-item__action:hover:not(:disabled) {
   filter: brightness(1.05);
-  box-shadow: 0 2px 8px rgba(217, 119, 6, 0.3);
+  box-shadow: 0 2px 8px rgba(var(--primary-dark-rgb), 0.3);
 }
 .utility-item__action:active:not(:disabled) { transform: translateY(1px); }
 .utility-item__action:disabled {
@@ -9530,8 +9658,8 @@ html.theme-light .domains-cert-alert__body code {
 }
 /* Warning — оранжевый. CSS-переменных нет, делаем явно по обе темы. */
 .doctor-issue--warning {
-  border: 2px solid #f59e0b;
-  background: rgba(245, 158, 11, 0.10);
+  border: 2px solid var(--primary);
+  background: rgba(var(--primary-rgb), 0.10);
 }
 .doctor-issue--info {
   border: 2px solid #3b82f6;
@@ -9555,7 +9683,7 @@ html.theme-light .domains-cert-alert__body code {
   color: #fff;
 }
 .doctor-issue--critical .doctor-issue__level { background: var(--danger); }
-.doctor-issue--warning  .doctor-issue__level { background: #f59e0b; }
+.doctor-issue--warning  .doctor-issue__level { background: var(--primary); }
 .doctor-issue--info     .doctor-issue__level { background: #3b82f6; }
 
 .doctor-issue__title {

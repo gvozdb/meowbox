@@ -613,7 +613,7 @@ onMounted(() => {
 }
 
 .badge--mariadb { background: rgba(99, 102, 241, 0.1); color: #818cf8; }
-.badge--mysql { background: rgba(245, 158, 11, 0.1); color: #fbbf24; }
+.badge--mysql { background: rgba(var(--primary-rgb), 0.1); color: var(--primary-light); }
 .badge--postgresql { background: rgba(59, 130, 246, 0.1); color: #60a5fa; }
 
 .row-actions {
@@ -632,7 +632,7 @@ onMounted(() => {
   transition: all 0.2s;
 }
 
-.row-action--amber { color: rgba(245, 158, 11, 0.4); }
+.row-action--amber { color: rgba(var(--primary-rgb), 0.4); }
 .row-action--amber:hover { color: var(--primary-text); border-color: var(--primary-border); background: var(--primary-bg); }
 .row-action--red { color: rgba(239, 68, 68, 0.4); }
 .row-action--red:hover { color: #f87171; border-color: rgba(239, 68, 68, 0.2); background: rgba(239, 68, 68, 0.05); }
@@ -668,11 +668,11 @@ onMounted(() => {
 }
 
 .btn--primary {
-  background: linear-gradient(135deg, #fbbf24, #d97706);
+  background: linear-gradient(135deg, var(--primary-light), var(--primary-dark));
   color: var(--primary-text-on);
 }
 
-.btn--primary:not(:disabled):hover { transform: translateY(-1px); box-shadow: 0 4px 16px rgba(245, 158, 11, 0.2); }
+.btn--primary:not(:disabled):hover { transform: translateY(-1px); box-shadow: 0 4px 16px rgba(var(--primary-rgb), 0.2); }
 .btn--primary:disabled { opacity: 0.4; cursor: not-allowed; }
 
 .btn--ghost {

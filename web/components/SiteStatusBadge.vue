@@ -73,11 +73,11 @@ const label = computed(() => {
 
 /* Deploying — amber */
 .status-badge--deploying {
-  background: rgba(245, 158, 11, 0.1);
-  color: #fbbf24;
+  background: rgba(var(--primary-rgb), 0.1);
+  color: var(--primary-light);
 }
 .status-badge--deploying .status-badge__dot {
-  background: #f59e0b;
+  background: var(--primary);
   animation: pulse-amber 1.5s ease-in-out infinite;
 }
 

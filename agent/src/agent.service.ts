@@ -92,6 +92,14 @@ export class AgentService {
   private mariadbEngine: MariadbEngineExecutor;
   private postgresqlEngine: PostgresqlEngineExecutor;
   private metricsInterval: ReturnType<typeof setInterval> | null = null;
+  /**
+   * Single-flight для hostpanel-миграции (см. spec §17.5: 1 одновременная
+   * миграция на slave). null = свободен; иначе — `probe:<migrationId>` или
+   * `run:<migrationId>:<itemId>`.
+   */
+  private hostpanelMigrationActive: string | null = null;
+  /** Soft-cancel токены — взводятся через `migrate:hostpanel:cancel`. */
+  private hostpanelCancelTokens: Set<string> = new Set();
 
   constructor() {
     this.nginx = new NginxManager();
@@ -415,13 +423,28 @@ export class AgentService {
       }
     });
 
+    // PHP install/uninstall — heavy apt-операции. Внутренний timeout
+    // `apt-get install` в phpfpm.manager — 600s. Handler timeout должен быть
+    // БОЛЬШЕ, иначе callback грохнут раньше чем apt закончит, UI получит
+    // "Failed to install PHP X.Y" хотя пакеты на самом деле доставились
+    // (timer убивает только callback, не процесс apt). 900s = 600s apt + 300s
+    // на ensurePhpRepository (apt-get update + add-apt-repository) + enable/start.
+    //
+    // Live-лог: каждая строка stdout/stderr улетает событием php:install:log →
+    // API форвардит в комнату клиентам, /php показывает её в drawer'е.
     this.safeOn(s, 'php:install', async (params: { version: string }, cb: Callback) => {
-      cb(await this.php.installVersion(params.version));
-    });
+      const onLog = (line: string, stream: 'stdout' | 'stderr') => {
+        if (s.connected) s.emit('php:install:log', { version: params.version, line, stream });
+      };
+      cb(await this.php.installVersion(params.version, onLog));
+    }, 900_000);
 
     this.safeOn(s, 'php:uninstall', async (params: { version: string }, cb: Callback) => {
-      cb(await this.php.uninstallVersion(params.version));
-    });
+      const onLog = (line: string, stream: 'stdout' | 'stderr') => {
+        if (s.connected) s.emit('php:install:log', { version: params.version, line, stream });
+      };
+      cb(await this.php.uninstallVersion(params.version, onLog));
+    }, 600_000);
 
     this.safeOn(s, 'php:read-ini', async (params: { version: string }, cb: Callback) => {
       cb(await this.php.readIni(params.version));
@@ -436,8 +459,18 @@ export class AgentService {
     });
 
     this.safeOn(s, 'php:extension-install', async (params: { version: string; name: string }, cb: Callback) => {
-      cb(await this.php.installExtension(params.version, params.name));
-    });
+      const onLog = (line: string, stream: 'stdout' | 'stderr') => {
+        if (s.connected) {
+          s.emit('php:ext-install:log', {
+            version: params.version,
+            name: params.name,
+            line,
+            stream,
+          });
+        }
+      };
+      cb(await this.php.installExtension(params.version, params.name, onLog));
+    }, 240_000);
 
     this.safeOn(s, 'php:extension-toggle', async (params: { version: string; name: string; enable: boolean }, cb: Callback) => {
       cb(await this.php.toggleExtension(params.version, params.name, params.enable));
@@ -1054,6 +1087,360 @@ export class AgentService {
     this.safeOn(s, 'user:set-password', async (params: { username: string; password: string }, cb: Callback) => {
       cb(await this.userMgr.setPassword(params.username, params.password));
     });
+
+    this.safeOn(s, 'system:user-exists', async (params: { username: string }, cb: Callback) => {
+      try {
+        const exists = await this.userMgr.userExists(params.username);
+        cb({ success: true, data: { exists } });
+      } catch (err) {
+        cb({ success: false, error: (err as Error).message });
+      }
+    });
+
+    // ─────────────────────────────────────────────────────────────────────
+    // Migration: hostpanel
+    //   Lazy-import чтобы не тащить SSH-bridge в обычные деплои.
+    //   Single-flight: одна миграция в один момент времени (см. spec §17.5).
+    //   Параллельные probe / run-item на агенте → отказ с понятным сообщением.
+    // ─────────────────────────────────────────────────────────────────────
+    // Phase 1 — shortlist (быстро, без du -sb / DB sizes / парсинга nginx).
+    // Возвращает только список сайтов с базовой инфой для отображения галочек.
+    this.safeOn(s, 'migrate:hostpanel:shortlist', async (params: {
+      source: import('./migration/hostpanel/types').MigrationSourceCreds;
+      migrationId: string;
+    }, cb: Callback) => {
+      if (this.hostpanelMigrationActive) {
+        cb({
+          success: false,
+          error: `Уже идёт другая миграция (${this.hostpanelMigrationActive}). ` +
+            `Дождись её окончания или cancel'и.`,
+        });
+        return;
+      }
+      this.hostpanelMigrationActive = `shortlist:${params.migrationId}`;
+      try {
+        const { runShortlist } = await import('./migration/hostpanel/discover');
+        const onLog = (line: string, step?: number, total?: number) => {
+          try {
+            s.emit('migrate:hostpanel:discover-log', {
+              migrationId: params.migrationId,
+              line, step, total,
+              phase: 'shortlist',
+              ts: new Date().toISOString(),
+            });
+          } catch { /* socket disconnected — shortlist всё равно продолжится */ }
+        };
+        const result = await runShortlist(params.source, onLog);
+        cb({ success: true, data: result });
+      } catch (err) {
+        cb({ success: false, error: (err as Error).message });
+      } finally {
+        this.hostpanelMigrationActive = null;
+      }
+    }, 300_000);
+
+    // Phase 2 — deep probe только по выбранным сайтам. Тяжёлая часть:
+    // du -sb, DB size, парсинг nginx/config.xml/dumper.yaml/php-fpm pool,
+    // SSL detect, MODX paths.
+    this.safeOn(s, 'migrate:hostpanel:probe-selected', async (params: {
+      source: import('./migration/hostpanel/types').MigrationSourceCreds;
+      migrationId: string;
+      sourceSiteIds: number[];
+    }, cb: Callback) => {
+      if (this.hostpanelMigrationActive) {
+        cb({
+          success: false,
+          error: `Уже идёт другая миграция (${this.hostpanelMigrationActive}). ` +
+            `Дождись её окончания или cancel'и.`,
+        });
+        return;
+      }
+      if (!Array.isArray(params.sourceSiteIds) || params.sourceSiteIds.length === 0) {
+        cb({ success: false, error: 'Не передан список выбранных sourceSiteIds' });
+        return;
+      }
+      this.hostpanelMigrationActive = `probe:${params.migrationId}`;
+      try {
+        const { runDeepProbeSelected } = await import('./migration/hostpanel/discover');
+        const onLog = (line: string, step?: number, total?: number) => {
+          try {
+            s.emit('migrate:hostpanel:discover-log', {
+              migrationId: params.migrationId,
+              line, step, total,
+              phase: 'plan',
+              ts: new Date().toISOString(),
+            });
+          } catch { /* socket disconnected */ }
+        };
+        const result = await runDeepProbeSelected(
+          params.source,
+          params.sourceSiteIds,
+          onLog,
+        );
+        cb({ success: true, data: result });
+      } catch (err) {
+        cb({ success: false, error: (err as Error).message });
+      } finally {
+        this.hostpanelMigrationActive = null;
+      }
+    }, 900_000);
+
+    // Backward-compat: старый монолитный probe (shortlist + полный per-site).
+    // Если фронт ещё не обновлён — этот handler ловит старые запросы.
+    this.safeOn(s, 'migrate:hostpanel:probe', async (params: {
+      source: import('./migration/hostpanel/types').MigrationSourceCreds;
+      migrationId: string;
+    }, cb: Callback) => {
+      if (this.hostpanelMigrationActive) {
+        cb({
+          success: false,
+          error: `Уже идёт другая миграция (${this.hostpanelMigrationActive}).`,
+        });
+        return;
+      }
+      this.hostpanelMigrationActive = `probe-legacy:${params.migrationId}`;
+      try {
+        const { runDiscovery } = await import('./migration/hostpanel/discover');
+        const onLog = (line: string, step?: number, total?: number) => {
+          try {
+            s.emit('migrate:hostpanel:discover-log', {
+              migrationId: params.migrationId,
+              line, step, total,
+              ts: new Date().toISOString(),
+            });
+          } catch { /* socket disconnected */ }
+        };
+        const result = await runDiscovery(params.source, onLog);
+        cb({ success: true, data: result });
+      } catch (err) {
+        cb({ success: false, error: (err as Error).message });
+      } finally {
+        this.hostpanelMigrationActive = null;
+      }
+    }, 900_000);
+
+    this.safeOn(s, 'migrate:hostpanel:run-item', async (params: {
+      migrationId: string;
+      itemId: string;
+      source: import('./migration/hostpanel/types').MigrationSourceCreds;
+    }, cb: Callback) => {
+      if (
+        this.hostpanelMigrationActive &&
+        !this.hostpanelMigrationActive.startsWith(`run:${params.migrationId}`)
+      ) {
+        cb({
+          success: false,
+          error: `Уже идёт другая миграция (${this.hostpanelMigrationActive}). ` +
+            `Параллельный запуск запрещён.`,
+        });
+        return;
+      }
+      this.hostpanelMigrationActive = `run:${params.migrationId}:${params.itemId}`;
+      try {
+        const { runItem } = await import('./migration/hostpanel/run-item');
+        // Plan тащим из БД мастера — но мастер уже передаёт source. Для plan'а
+        // придётся слать его в args либо тянуть через отдельный запрос. Пока —
+        // просим мастер передавать plan тоже (см. SourceWithPlan).
+        const planRequest = (params as unknown as { plan?: import('./migration/hostpanel/types').PlanItem }).plan;
+        if (!planRequest) {
+          cb({ success: false, error: 'plan не передан в run-item' });
+          return;
+        }
+        // Регистрируем cancel-маркер: если оператор нажмёт cancel —
+        // CancelToken взведётся, runItem проверит между стейджами.
+        if (this.hostpanelCancelTokens.has(params.migrationId)) {
+          cb({ success: false, error: 'Миграция отменена оператором' });
+          return;
+        }
+        const result = await runItem({
+          socket: s,
+          migrationId: params.migrationId,
+          itemId: params.itemId,
+          plan: planRequest,
+          creds: params.source,
+          isCancelled: () => this.hostpanelCancelTokens.has(params.migrationId),
+        });
+        cb({
+          success: result.success,
+          error: result.error,
+          data: {
+            newSiteId: result.newSiteId,
+            ssl: result.ssl,
+            verifyHttpCode: result.verifyHttpCode,
+            // Реальные креды (sftp_pass + mysql_pass + db name/user) — мастер
+            // их персистит в Site.sshPassword / Database.dbPasswordEnc. Без
+            // этого поля Adminer SSO не подхватит реальный пароль БД, а
+            // оператор не увидит SSH-пароль в UI (см. spec §6.2).
+            creds: result.creds,
+          },
+        });
+      } catch (err) {
+        cb({ success: false, error: (err as Error).message });
+      } finally {
+        // Освобождаем флаг ТОЛЬКО если это последний item (мастер сам решает).
+        // Чтобы не блокировать следующий item того же migrationId — снимаем сразу.
+        this.hostpanelMigrationActive = null;
+        // Cancel-token «съедается» текущим run-item'ом: если оператор отменил —
+        // остальные items уже либо не запускались (мастер их не вызвал), либо
+        // получат свежий токен от следующего cancel. Освобождаем — иначе retry
+        // через UI получит «Cancelled» по умолчанию.
+        this.hostpanelCancelTokens.delete(params.migrationId);
+      }
+    }, 12 * 60 * 60 * 1000);
+
+    this.safeOn(s, 'migrate:hostpanel:cancel', async (params: {
+      migrationId: string;
+    }, cb: Callback) => {
+      // Взводим cancel-token. runItem проверяет его:
+      //   1) между стейджами — следующий не запустится (через `next()` в run-item);
+      //   2) внутри `runStreaming` rsync — каждые 2с — SIGTERM, через 5с SIGKILL;
+      //   3) внутри `pipeDump` mysqldump — то же.
+      // По сути это hard-cancel для долгих стейджей (3, 5, 11) и soft-cancel
+      // для коротких (миллисекундных).
+      this.hostpanelCancelTokens.add(params.migrationId);
+      cb({ success: true });
+    });
+
+    // Check leak: есть ли на slave артефакты с указанным именем
+    // (linux-юзер / homedir / mariadb-db). Используется UI на step 4 для
+    // решения, показывать ли кнопку «Force-retry». Дешёвый probe.
+    this.safeOn(s, 'migrate:hostpanel:check-leak', async (params: {
+      name: string;
+    }, cb: Callback) => {
+      try {
+        const NAME_RE = /^[a-z][a-z0-9_-]{0,31}$/;
+        if (!NAME_RE.test(params.name)) {
+          cb({ success: false, error: `Invalid name: ${params.name}` });
+          return;
+        }
+        const exec = new CommandExecutor();
+        const userMgr = new SystemUserManager();
+
+        const userExists = await userMgr.userExists(params.name);
+
+        const homePath = path.join(
+          process.env.SITES_BASE_PATH || '/var/www',
+          params.name,
+        );
+        let homeExists = false;
+        try {
+          await fsp.access(homePath);
+          homeExists = true;
+        } catch { /* нет — нормально */ }
+
+        let dbExists = false;
+        const dbCheck = await exec.execute('mariadb', [
+          '-N', '-B', '-e',
+          `SELECT 1 FROM information_schema.schemata WHERE schema_name='${params.name.replace(/'/g, '')}'`,
+        ]);
+        if (dbCheck.exitCode === 0 && dbCheck.stdout.trim() === '1') {
+          dbExists = true;
+        }
+        cb({ success: true, data: { userExists, homeExists, dbExists } });
+      } catch (e) {
+        cb({ success: false, error: (e as Error).message });
+      }
+    }, 15_000);
+
+    // Force-cleanup leak'нутых артефактов от падшей/зомби-миграции.
+    // Используется UI-кнопкой «Очистить и повторить» на step 4: когда
+    // pre-flight упал из-за «Linux-юзер уже существует», но мы знаем,
+    // что юзер — leak от предыдущей попытки той же миграции (мастер
+    // проверяет на своей стороне).
+    //
+    // НИКОГДА не вызывается для арбитрарных имён — мастер проверяет, что
+    // имя действительно принадлежит leak'у этой миграции (нет conflict'а
+    // с running-миграцией и нет Site-записи в БД).
+    this.safeOn(s, 'migrate:hostpanel:force-cleanup-name', async (params: {
+      name: string;
+      domain?: string;
+      phpVersion?: string;
+    }, cb: Callback) => {
+      try {
+        const NAME_RE = /^[a-z][a-z0-9_-]{0,31}$/;
+        if (!NAME_RE.test(params.name)) {
+          cb({ success: false, error: `Invalid name: ${params.name}` });
+          return;
+        }
+        const log: string[] = [];
+        const tlog = (s: string) => { log.push(s); };
+
+        // 1) Cron-задачи site-юзера: `crontab -u <user> -r`. Если юзера нет —
+        // ничего страшного, дроп user'а ниже всё равно почистит spool. Если
+        // юзер ещё есть и крон у него есть — удалим до userdel, чтобы не
+        // зависал systemd-cron.
+        try {
+          const exec = new CommandExecutor();
+          await exec.execute('crontab', ['-u', params.name, '-r']).catch(() => {});
+          tlog(`crontab: cleared for user '${params.name}'`);
+        } catch (e) {
+          tlog(`crontab cleanup warn: ${(e as Error).message}`);
+        }
+
+        // 2) nginx-конфиг
+        try {
+          const nginx = new NginxManager();
+          await nginx.removeSiteConfig(params.name).catch(() => {});
+          tlog(`nginx: removed`);
+        } catch (e) {
+          tlog(`nginx cleanup warn: ${(e as Error).message}`);
+        }
+
+        // 3) php-fpm pool — пробуем все поддерживаемые версии (без знания phpVersion)
+        try {
+          const fpm = new PhpFpmManager();
+          const versions = params.phpVersion
+            ? [params.phpVersion]
+            : ['8.4', '8.3', '8.2', '8.1', '8.0', '7.4'];
+          for (const v of versions) {
+            await fpm.removePool(params.name, v).catch(() => {});
+          }
+          tlog(`php-fpm: pools removed (tried ${versions.length} versions)`);
+        } catch (e) {
+          tlog(`fpm cleanup warn: ${(e as Error).message}`);
+        }
+
+        // 4) MariaDB — DROP DATABASE и DROP USER
+        try {
+          const dm = new DatabaseManager();
+          await dm.dropDatabase(params.name, 'MARIADB', params.name).catch(() => {});
+          tlog(`mariadb: dropped database+user '${params.name}'`);
+        } catch (e) {
+          tlog(`db cleanup warn: ${(e as Error).message}`);
+        }
+
+        // 5) SSL — letsencrypt папки если есть домен
+        if (params.domain) {
+          const exec = new CommandExecutor();
+          await exec.execute('rm', ['-rf', `/etc/letsencrypt/live/${params.domain}`]).catch(() => {});
+          await exec.execute('rm', ['-rf', `/etc/letsencrypt/archive/${params.domain}`]).catch(() => {});
+          await exec.execute('rm', ['-f', `/etc/letsencrypt/renewal/${params.domain}.conf`]).catch(() => {});
+          tlog(`ssl: LE artifacts for ${params.domain} removed`);
+        }
+
+        // 6) Linux-юзер + домашняя директория
+        try {
+          const um = new SystemUserManager();
+          await um.deleteUser(params.name).catch(() => {});
+          const exec = new CommandExecutor();
+          // userdel без -r не сносит home; добиваем явно (path under SITES_BASE_PATH)
+          const home = path.join(
+            process.env.SITES_BASE_PATH || '/var/www',
+            params.name,
+          );
+          if (home.startsWith('/var/www/') && home !== '/var/www/') {
+            await exec.execute('rm', ['-rf', home]).catch(() => {});
+          }
+          tlog(`linux user '${params.name}' removed`);
+        } catch (e) {
+          tlog(`user cleanup warn: ${(e as Error).message}`);
+        }
+
+        cb({ success: true, log });
+      } catch (e) {
+        cb({ success: false, error: (e as Error).message });
+      }
+    }, 60_000);
 
     // Per-user PHP CLI shim — `php` в SSH/SFTP-сессии указывает на нужную версию.
     // phpVersion=null/'' → шим вычищается (ставим, когда PHP на сайте отключён).

@@ -203,7 +203,7 @@ onMounted(() => {
 
 .profile-card__avatar {
   width: 56px; height: 56px; border-radius: 14px; flex-shrink: 0;
-  background: linear-gradient(135deg, rgba(245, 158, 11, 0.2), rgba(217, 119, 6, 0.12));
+  background: linear-gradient(135deg, rgba(var(--primary-rgb), 0.2), rgba(var(--primary-dark-rgb), 0.12));
   border: 1px solid var(--primary-border);
   display: flex; align-items: center; justify-content: center;
   font-size: 1.35rem; font-weight: 700; color: var(--primary);
@@ -221,7 +221,7 @@ onMounted(() => {
   font-size: 0.62rem; font-weight: 600; font-family: 'JetBrains Mono', monospace;
   padding: 0.2rem 0.5rem; border-radius: 6px; letter-spacing: 0.03em;
 }
-.role-badge--admin { background: rgba(245, 158, 11, 0.1); color: #fbbf24; }
+.role-badge--admin { background: rgba(var(--primary-rgb), 0.1); color: var(--primary-light); }
 
 .totp-indicator { font-size: 0.7rem; font-weight: 500; font-family: 'JetBrains Mono', monospace; }
 .totp-indicator--on { color: #4ade80; }
@@ -235,8 +235,8 @@ onMounted(() => {
   border-radius: 10px; border: none; font-size: 0.82rem; font-weight: 600;
   font-family: inherit; cursor: pointer; transition: all 0.2s; white-space: nowrap;
 }
-.btn--primary { background: linear-gradient(135deg, #fbbf24, #d97706); color: var(--primary-text-on); }
-.btn--primary:not(:disabled):hover { transform: translateY(-1px); box-shadow: 0 4px 16px rgba(245, 158, 11, 0.2); }
+.btn--primary { background: linear-gradient(135deg, var(--primary-light), var(--primary-dark)); color: var(--primary-text-on); }
+.btn--primary:not(:disabled):hover { transform: translateY(-1px); box-shadow: 0 4px 16px rgba(var(--primary-rgb), 0.2); }
 .btn--primary:disabled { opacity: 0.4; cursor: not-allowed; }
 .btn--ghost { background: var(--bg-input); border: 1px solid var(--border-strong); color: var(--text-tertiary); }
 .btn--ghost:hover { color: var(--text-secondary); border-color: var(--border-strong); }
@@ -250,7 +250,7 @@ onMounted(() => {
   border-radius: 10px; padding: 0.55rem 0.8rem; font-size: 0.85rem;
   color: var(--text-primary); font-family: inherit; outline: none; transition: all 0.2s;
 }
-.form-input:focus { border-color: rgba(245, 158, 11, 0.25); box-shadow: var(--focus-ring); }
+.form-input:focus { border-color: rgba(var(--primary-rgb), 0.25); box-shadow: var(--focus-ring); }
 .form-hint { font-size: 0.68rem; color: var(--text-faint); }
 .form-hint code { background: var(--bg-input); padding: 0 0.25rem; border-radius: 3px; }
 

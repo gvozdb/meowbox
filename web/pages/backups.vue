@@ -1228,7 +1228,7 @@ onBeforeUnmount(() => {
 }
 .history-item__icon--completed { background: rgba(34, 197, 94, 0.1); color: #4ade80; }
 .history-item__icon--failed { background: rgba(239, 68, 68, 0.1); color: #f87171; }
-.history-item__icon--in_progress, .history-item__icon--pending { background: rgba(245, 158, 11, 0.1); color: #fbbf24; }
+.history-item__icon--in_progress, .history-item__icon--pending { background: rgba(var(--primary-rgb), 0.1); color: var(--primary-light); }
 
 .history-item__info { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 0.15rem; }
 .history-item__top { display: flex; align-items: center; gap: 0.4rem; }
@@ -1244,7 +1244,7 @@ onBeforeUnmount(() => {
 }
 .progress-bar__fill {
   height: 100%; border-radius: 3px;
-  background: linear-gradient(90deg, #fbbf24, #d97706);
+  background: linear-gradient(90deg, var(--primary-light), var(--primary-dark));
   transition: width 0.4s ease;
 }
 .progress-bar__label {
@@ -1254,7 +1254,7 @@ onBeforeUnmount(() => {
 
 .spinner-sm {
   width: 16px; height: 16px; border: 2px solid var(--spinner-track);
-  border-top-color: #fbbf24; border-radius: 50%; animation: spin 0.6s linear infinite;
+  border-top-color: var(--primary-light); border-radius: 50%; animation: spin 0.6s linear infinite;
 }
 
 /* Badges */
@@ -1265,14 +1265,14 @@ onBeforeUnmount(() => {
 }
 .badge--sm { font-size: 0.56rem; padding: 0.12rem 0.35rem; }
 .badge--full { background: rgba(99, 102, 241, 0.1); color: #818cf8; }
-.badge--files-only { background: rgba(245, 158, 11, 0.1); color: #fbbf24; }
+.badge--files-only { background: rgba(var(--primary-rgb), 0.1); color: var(--primary-light); }
 .badge--db-only { background: rgba(59, 130, 246, 0.1); color: #60a5fa; }
 .badge--storage { background: rgba(139, 92, 246, 0.1); color: #a78bfa; }
 .badge--engine { background: rgba(14, 165, 233, 0.12); color: #38bdf8; }
 .badge--off { background: rgba(148, 163, 184, 0.1); color: #94a3b8; }
 .badge--status-completed { background: rgba(34, 197, 94, 0.1); color: #4ade80; }
 .badge--status-failed { background: rgba(239, 68, 68, 0.1); color: #f87171; }
-.badge--status-in_progress { background: rgba(245, 158, 11, 0.1); color: #fbbf24; }
+.badge--status-in_progress { background: rgba(var(--primary-rgb), 0.1); color: var(--primary-light); }
 .badge--status-pending { background: rgba(148, 163, 184, 0.1); color: #94a3b8; }
 
 .empty-card {
@@ -1289,7 +1289,7 @@ onBeforeUnmount(() => {
   border-radius: 10px; padding: 0.55rem 0.8rem; font-size: 0.85rem;
   color: var(--text-primary); font-family: inherit; outline: none; transition: all 0.2s;
 }
-.form-input:focus { border-color: rgba(245, 158, 11, 0.25); box-shadow: var(--focus-ring); }
+.form-input:focus { border-color: rgba(var(--primary-rgb), 0.25); box-shadow: var(--focus-ring); }
 .form-input--select {
   appearance: none;
   background-image: url("data:image/svg+xml,%3Csvg width='10' height='6' viewBox='0 0 10 6' fill='none' xmlns='http://www.w3.org/2000/svg'%3E%3Cpath d='M1 1l4 4 4-4' stroke='%23666' stroke-width='1.5' stroke-linecap='round'/%3E%3C/svg%3E");
@@ -1308,12 +1308,12 @@ onBeforeUnmount(() => {
   font-family: inherit; cursor: pointer; transition: all 0.2s;
 }
 .cron-preset:hover { border-color: var(--border-strong); color: var(--text-secondary); }
-.cron-preset--active { border-color: rgba(245, 158, 11, 0.25); background: rgba(245, 158, 11, 0.05); color: var(--primary-text); }
+.cron-preset--active { border-color: rgba(var(--primary-rgb), 0.25); background: rgba(var(--primary-rgb), 0.05); color: var(--primary-text); }
 
 /* Checkbox */
 .checkbox-row { display: flex; align-items: center; gap: 0.5rem; cursor: pointer; }
 .checkbox-input {
-  width: 16px; height: 16px; accent-color: #d97706; cursor: pointer;
+  width: 16px; height: 16px; accent-color: var(--primary-dark); cursor: pointer;
 }
 .checkbox-label { font-size: 0.82rem; color: var(--text-secondary); }
 
@@ -1325,7 +1325,7 @@ onBeforeUnmount(() => {
 }
 .radio-option__label { font-size: 0.72rem; font-weight: 600; font-family: 'JetBrains Mono', monospace; color: var(--text-muted); transition: color 0.2s; }
 .radio-option:hover { border-color: var(--border-strong); }
-.radio-option--active { border-color: rgba(245, 158, 11, 0.25); background: rgba(245, 158, 11, 0.05); }
+.radio-option--active { border-color: rgba(var(--primary-rgb), 0.25); background: rgba(var(--primary-rgb), 0.05); }
 .radio-option--active .radio-option__label { color: var(--primary-text); }
 
 .btn {
@@ -1334,8 +1334,8 @@ onBeforeUnmount(() => {
   font-family: inherit; cursor: pointer; transition: all 0.2s; white-space: nowrap;
 }
 .btn--sm { padding: 0.4rem 0.8rem; font-size: 0.75rem; border-radius: 8px; }
-.btn--primary { background: linear-gradient(135deg, #fbbf24, #d97706); color: var(--primary-text-on); }
-.btn--primary:not(:disabled):hover { transform: translateY(-1px); box-shadow: 0 4px 16px rgba(245, 158, 11, 0.2); }
+.btn--primary { background: linear-gradient(135deg, var(--primary-light), var(--primary-dark)); color: var(--primary-text-on); }
+.btn--primary:not(:disabled):hover { transform: translateY(-1px); box-shadow: 0 4px 16px rgba(var(--primary-rgb), 0.2); }
 .btn--primary:disabled { opacity: 0.4; cursor: not-allowed; }
 .btn--ghost { background: var(--bg-input); border: 1px solid var(--border-strong); color: var(--text-tertiary); }
 .btn--ghost:hover { color: var(--text-secondary); border-color: var(--border-strong); }
@@ -1508,7 +1508,7 @@ onBeforeUnmount(() => {
   color: var(--text-primary);
   font-size: 0.9rem;
 }
-.inline-check input { accent-color: var(--primary-text, #f59e0b); }
+.inline-check input { accent-color: var(--primary-text, var(--primary)); }
 
 .form-hint {
   color: var(--text-tertiary);
@@ -1538,8 +1538,8 @@ onBeforeUnmount(() => {
   display: inline-block;
   padding: 0.08rem 0.5rem;
   border-radius: 999px;
-  background: var(--primary-bg, rgba(245,158,11,0.12));
-  color: var(--primary-text, #f59e0b);
+  background: var(--primary-bg, rgba(var(--primary-rgb), 0.12));
+  color: var(--primary-text, var(--primary));
   font-size: 0.72rem;
   font-weight: 500;
   margin-left: 0.4rem;
@@ -1622,7 +1622,7 @@ onBeforeUnmount(() => {
 .link-btn {
   background: none;
   border: none;
-  color: var(--primary-text, #f59e0b);
+  color: var(--primary-text, var(--primary));
   cursor: pointer;
   padding: 0;
   font-size: 0.85rem;

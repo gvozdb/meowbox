@@ -741,11 +741,11 @@ onUnmounted(() => {
 }
 
 .logs__line--warn {
-  background: rgba(245, 158, 11, 0.05);
+  background: rgba(var(--primary-rgb), 0.05);
 }
 
 .logs__line--warn .logs__line-text {
-  color: #fbbf24;
+  color: var(--primary-light);
 }
 
 :root.theme-light .logs__line--error {
@@ -757,23 +757,23 @@ onUnmounted(() => {
 }
 
 :root.theme-light .logs__line--warn {
-  background: rgba(245, 158, 11, 0.05);
+  background: rgba(var(--primary-rgb), 0.05);
 }
 
 :root.theme-light .logs__line--warn .logs__line-text {
-  color: #d97706;
+  color: var(--primary-dark);
 }
 
 /* Search highlight */
 .logs__line-text :deep(.logs__highlight) {
-  background: rgba(245, 158, 11, 0.25);
-  color: #fbbf24;
+  background: rgba(var(--primary-rgb), 0.25);
+  color: var(--primary-light);
   border-radius: 2px;
   padding: 0 1px;
 }
 
 :root.theme-light .logs__line-text :deep(.logs__highlight) {
-  background: rgba(245, 158, 11, 0.2);
+  background: rgba(var(--primary-rgb), 0.2);
   color: #92400e;
 }
 

@@ -9,6 +9,7 @@ import { Server, Socket } from 'socket.io';
 import { ConfigService } from '@nestjs/config';
 import { JwtService } from '@nestjs/jwt';
 import { timingSafeEqual, randomBytes } from 'crypto';
+import { io as ioClient, Socket as ClientSocket } from 'socket.io-client';
 import { AgentRelayService } from './agent-relay.service';
 import { DeployService } from '../deploy/deploy.service';
 import { BackupsService } from '../backups/backups.service';
@@ -18,12 +19,18 @@ import { SitesService } from '../sites/sites.service';
 import { MonitoringService } from '../monitoring/monitoring.service';
 import { LogsService } from '../logs/logs.service';
 import { AiService, AiEvent } from '../ai/ai.service';
+import { MigrationHostpanelService } from '../migration-hostpanel/migration-hostpanel.service';
+import { ProxyService } from '../proxy/proxy.service';
 
 interface AuthenticatedSocket extends Socket {
   data: {
-    type: 'agent' | 'client';
+    type: 'agent' | 'client' | 'proxy-client';
     userId?: string;
     role?: string;
+    /** При type='proxy-client' — upstream socket к выбранному slave-серверу. */
+    upstream?: ClientSocket;
+    /** При type='proxy-client' — id slave-сервера для аудита/логов. */
+    proxyServerId?: string;
   };
 }
 
@@ -100,6 +107,9 @@ export class AgentGateway implements OnGatewayConnection, OnGatewayDisconnect {
     private readonly monitoringService: MonitoringService,
     private readonly logsService: LogsService,
     private readonly aiService: AiService,
+    @Inject(forwardRef(() => MigrationHostpanelService))
+    private readonly migrationHostpanelService: MigrationHostpanelService,
+    private readonly proxyService: ProxyService,
   ) {}
 
   async handleConnection(client: AuthenticatedSocket) {
@@ -124,30 +134,90 @@ export class AgentGateway implements OnGatewayConnection, OnGatewayDisconnect {
       return;
     }
 
+    // --- Master proxy authentication (PROXY_TOKEN) ---
+    // Когда мастер ретранслирует WS-соединение оператора на slave, он
+    // подключается с proxySecret = PROXY_TOKEN. На slave-стороне это
+    // эквивалент клиента с ролью ADMIN (как и HTTP-прокси через
+    // ProxyAuthGuard). originUserId — id оператора на мастере, нужен
+    // только для AI-сессий (per-user state) и для логов.
+    if (auth.proxySecret) {
+      const expected = this.config.get<string>('PROXY_TOKEN', '') || '';
+      if (!expected) {
+        this.logger.warn('Proxy WS auth failed: PROXY_TOKEN not configured');
+        client.disconnect(true);
+        return;
+      }
+      const provided = String(auth.proxySecret);
+      if (!this.constantTimeCompare(provided, expected)) {
+        this.logger.warn('Proxy WS auth failed: invalid PROXY_TOKEN');
+        client.disconnect(true);
+        return;
+      }
+      // originUserId — необязательное поле (мастер шлёт его для аудита/AI).
+      // Если пусто — подставляем синтетический id, чтобы AI-сессии не
+      // схлёстывались между разными мастерами.
+      const originUserId =
+        typeof auth.originUserId === 'string' && auth.originUserId.trim()
+          ? `proxy:${String(auth.originUserId).slice(0, 64)}`
+          : `proxy:anon`;
+      client.data = {
+        type: 'client',
+        userId: originUserId,
+        role: 'ADMIN',
+      };
+      client.join(`user:${originUserId}`);
+      this.registerClientListeners(client);
+      this.logger.log(
+        `Proxy client connected: ${client.id} (origin=${originUserId})`,
+      );
+      return;
+    }
+
     // --- Browser client authentication (JWT) ---
     if (auth.token) {
+      let payload: { sub: string; role: string };
       try {
-        const payload = this.jwtService.verify<{
+        payload = this.jwtService.verify<{
           sub: string;
           role: string;
         }>(auth.token);
-
-        client.data = {
-          type: 'client',
-          userId: payload.sub,
-          role: payload.role,
-        };
-
-        // Join user-specific room for targeted events
-        client.join(`user:${payload.sub}`);
-        this.registerClientListeners(client);
-        this.logger.log(`Client connected: ${client.id} (user: ${payload.sub})`);
-        return;
       } catch {
         this.logger.warn('Client auth failed: invalid JWT');
         client.disconnect(true);
         return;
       }
+
+      // --- Proxy-mode: подключение оператора к выбранному slave ---
+      // Если фронт передал proxyServerId — мастер не обрабатывает события
+      // локально, а ретранслирует их на slave (upstream socket).
+      // Все ивенты, ack'и, rooms работают прозрачно для UI.
+      const proxyServerId =
+        typeof auth.proxyServerId === 'string' ? auth.proxyServerId.trim() : '';
+      if (proxyServerId) {
+        // Только ADMIN/MANAGER могут управлять серверами. Без проверки —
+        // VIEWER мог бы открыть терминал на slave обходом HTTP RBAC.
+        if (payload.role !== 'ADMIN' && payload.role !== 'MANAGER') {
+          this.logger.warn(
+            `Proxy WS rejected: insufficient role ${payload.role} (user=${payload.sub})`,
+          );
+          client.disconnect(true);
+          return;
+        }
+        await this.startProxyMode(client, proxyServerId, payload);
+        return;
+      }
+
+      client.data = {
+        type: 'client',
+        userId: payload.sub,
+        role: payload.role,
+      };
+
+      // Join user-specific room for targeted events
+      client.join(`user:${payload.sub}`);
+      this.registerClientListeners(client);
+      this.logger.log(`Client connected: ${client.id} (user: ${payload.sub})`);
+      return;
     }
 
     // No valid auth
@@ -155,7 +225,134 @@ export class AgentGateway implements OnGatewayConnection, OnGatewayDisconnect {
     client.disconnect(true);
   }
 
+  /**
+   * Открывает upstream socket к slave и форвардит события в обе стороны.
+   * Прозрачно для UI: фронт думает, что говорит с локальным API; ack'и,
+   * rooms, broadcast'ы — всё ретранслируется как есть.
+   */
+  private async startProxyMode(
+    client: AuthenticatedSocket,
+    serverId: string,
+    operator: { sub: string; role: string },
+  ): Promise<void> {
+    const server = this.proxyService.getServer(serverId);
+    if (!server) {
+      this.logger.warn(`Proxy WS: server "${serverId}" not found in config`);
+      client.emit('proxy:error', { code: 'SERVER_NOT_FOUND', message: `Сервер "${serverId}" не найден` });
+      client.disconnect(true);
+      return;
+    }
+
+    // Парсим URL slave — socket.io-client принимает базовый URL без /api.
+    const slaveUrl = server.url.replace(/\/+$/, '');
+
+    // Открываем upstream socket. proxySecret = PROXY_TOKEN slave'а
+    // (тот же, что и для HTTP); originUserId — id оператора на мастере.
+    const upstream = ioClient(slaveUrl, {
+      auth: {
+        proxySecret: server.token,
+        originUserId: operator.sub,
+      },
+      transports: ['websocket'],
+      reconnection: false, // upstream одноразовый — если падает, клиент пересоединится
+      timeout: 10_000,
+    });
+
+    // Дожидаемся коннекта. Если не получилось — закрываем клиента.
+    try {
+      await new Promise<void>((resolve, reject) => {
+        const onConnect = () => {
+          upstream.off('connect_error', onErr);
+          resolve();
+        };
+        const onErr = (err: Error) => {
+          upstream.off('connect', onConnect);
+          reject(err);
+        };
+        upstream.once('connect', onConnect);
+        upstream.once('connect_error', onErr);
+        // Hard-timeout на handshake
+        setTimeout(() => reject(new Error('upstream connect timeout')), 12_000);
+      });
+    } catch (err) {
+      const msg = (err as Error).message;
+      this.logger.warn(`Proxy WS upstream "${server.name}" failed: ${msg}`);
+      client.emit('proxy:error', { code: 'UPSTREAM_UNREACHABLE', message: `Не удалось подключиться к "${server.name}": ${msg}` });
+      try { upstream.disconnect(); } catch { /* noop */ }
+      client.disconnect(true);
+      return;
+    }
+
+    client.data = {
+      type: 'proxy-client',
+      userId: operator.sub,
+      role: operator.role,
+      upstream,
+      proxyServerId: serverId,
+    };
+
+    this.logger.log(
+      `Proxy WS connected: client=${client.id} → slave="${server.name}" (user=${operator.sub})`,
+    );
+
+    // --- Forward client → upstream (с ack support) ---
+    // Любой эмит от браузера ретранслируется на slave. Если последний аргумент
+    // — функция, это ack-callback: socket.io-client поддерживает ack нативно
+    // через emit(event, ...args, cb) — так что просто пробрасываем.
+    client.onAny((event: string, ...args: unknown[]) => {
+      // Безопасность: фильтруем служебные события socket.io (с префиксом).
+      // Полезные user-events не должны начинаться с этого префикса.
+      if (event.startsWith('connect') || event.startsWith('disconnect')) return;
+      const lastArg = args[args.length - 1];
+      if (typeof lastArg === 'function') {
+        const cb = lastArg as (...a: unknown[]) => void;
+        const fwdArgs = args.slice(0, -1);
+        try {
+          upstream.emit(event, ...fwdArgs, (...ackArgs: unknown[]) => {
+            try { cb(...ackArgs); } catch { /* swallow ack handler errors */ }
+          });
+        } catch (err) {
+          this.logger.warn(`Proxy WS forward (ack) failed: ${(err as Error).message}`);
+        }
+      } else {
+        try {
+          upstream.emit(event, ...args);
+        } catch (err) {
+          this.logger.warn(`Proxy WS forward failed: ${(err as Error).message}`);
+        }
+      }
+    });
+
+    // --- Forward upstream → client ---
+    // Slave шлёт события (terminal:data, ai:*, logs:tail:data, broadcast'ы).
+    // Все они должны долететь до браузера как есть.
+    upstream.onAny((event: string, ...args: unknown[]) => {
+      try {
+        client.emit(event, ...args);
+      } catch (err) {
+        this.logger.warn(`Proxy WS reverse forward failed: ${(err as Error).message}`);
+      }
+    });
+
+    // --- Lifecycle: если upstream отвалился — закрываем клиента ---
+    upstream.on('disconnect', (reason) => {
+      this.logger.log(`Proxy WS upstream disconnected (${reason}): client=${client.id}`);
+      client.emit('proxy:disconnected', { reason });
+      try { client.disconnect(true); } catch { /* noop */ }
+    });
+  }
+
   handleDisconnect(client: AuthenticatedSocket) {
+    // Закрываем upstream при отключении proxy-клиента — без этого
+    // на slave останется висящий socket с открытым PTY/tail.
+    if (client.data?.type === 'proxy-client' && client.data.upstream) {
+      try {
+        client.data.upstream.disconnect();
+      } catch { /* noop */ }
+      this.logger.log(`Proxy WS client disconnected: ${client.id}`);
+      return;
+    }
+
     if (client.data?.type === 'agent') {
       this.relay.setAgentSocket(null);
       this.logger.log('Agent disconnected');
@@ -191,6 +388,42 @@ export class AgentGateway implements OnGatewayConnection, OnGatewayDisconnect {
     // Log tail: available to ADMIN and MANAGER
     if (client.data.role === 'ADMIN' || client.data.role === 'MANAGER') {
       this.registerLogTailListeners(client);
+    }
+
+    // ─── Migration hostpanel: подписка на комнату миграции ───
+    // Любой залогиненный пользователь, имеющий доступ к /admin/migrate-hostpanel
+    // (= ADMIN), может подписаться. Логи и прогресс сами форвардятся в комнату.
+    if (client.data.role === 'ADMIN') {
+      client.on('migrate-hostpanel:subscribe', (payload: { migrationId: string }) => {
+        if (!payload?.migrationId || typeof payload.migrationId !== 'string') return;
+        if (!/^[a-f0-9-]{8,}$/i.test(payload.migrationId)) return;
+        client.join(`migrate-hostpanel:${payload.migrationId}`);
+      });
+      client.on('migrate-hostpanel:unsubscribe', (payload: { migrationId: string }) => {
+        if (!payload?.migrationId) return;
+        client.leave(`migrate-hostpanel:${payload.migrationId}`);
+      });
+
+      // ─── PHP install/extension live-log: подписка ───
+      // Клиент шлёт subscribe → joinит комнату php:install:<ver> или
+      // php:ext-install:<ver>:<name>, агент шлёт строки → форвардятся в комнату.
+      client.on('php:install:subscribe', (payload: { version: string }) => {
+        if (!payload?.version || !/^\d+\.\d+$/.test(payload.version)) return;
+        client.join(`php:install:${payload.version}`);
+      });
+      client.on('php:install:unsubscribe', (payload: { version: string }) => {
+        if (!payload?.version) return;
+        client.leave(`php:install:${payload.version}`);
+      });
+      client.on('php:ext-install:subscribe', (payload: { version: string; name: string }) => {
+        if (!payload?.version || !/^\d+\.\d+$/.test(payload.version)) return;
+        if (!payload.name || !/^[a-z][a-z0-9_]{0,63}$/.test(payload.name)) return;
+        client.join(`php:ext-install:${payload.version}:${payload.name}`);
+      });
+      client.on('php:ext-install:unsubscribe', (payload: { version: string; name: string }) => {
+        if (!payload?.version || !payload.name) return;
+        client.leave(`php:ext-install:${payload.version}:${payload.name}`);
+      });
     }
 
     // Terminal: ADMIN only
@@ -371,6 +604,36 @@ export class AgentGateway implements OnGatewayConnection, OnGatewayDisconnect {
    * Register listeners for events the Agent sends TO the API.
    */
   private registerAgentListeners(agent: AuthenticatedSocket) {
+    // --- PHP install live log streaming (форвард agent → room клиентов) ---
+    agent.on(
+      'php:install:log',
+      (data: { version: string; line: string; stream?: 'stdout' | 'stderr' }) => {
+        if (!data?.version || typeof data.line !== 'string') return;
+        if (!/^\d+\.\d+$/.test(data.version)) return;
+        this.server.to(`php:install:${data.version}`).emit('php:install:log', {
+          version: data.version,
+          line: data.line,
+          stream: data.stream || 'stdout',
+          timestamp: new Date().toISOString(),
+        });
+      },
+    );
+    agent.on(
+      'php:ext-install:log',
+      (data: { version: string; name: string; line: string; stream?: 'stdout' | 'stderr' }) => {
+        if (!data?.version || !data?.name || typeof data.line !== 'string') return;
+        if (!/^\d+\.\d+$/.test(data.version)) return;
+        if (!/^[a-z][a-z0-9_]{0,63}$/.test(data.name)) return;
+        this.server.to(`php:ext-install:${data.version}:${data.name}`).emit('php:ext-install:log', {
+          version: data.version,
+          name: data.name,
+          line: data.line,
+          stream: data.stream || 'stdout',
+          timestamp: new Date().toISOString(),
+        });
+      },
+    );
+
     // --- Deploy log streaming ---
     agent.on(
       'deploy:log',
@@ -453,6 +716,99 @@ export class AgentGateway implements OnGatewayConnection, OnGatewayDisconnect {
           status: data.success ? 'COMPLETED' : 'FAILED',
           timestamp: new Date().toISOString(),
         });
+      },
+    );
+
+    // --- Hostpanel migration: discovery live-progress ---
+    // Агент шлёт каждый шаг discover'а (SSH whoami → distro → sites → cron →
+    // per-site парсинг). Мы просто пробрасываем в комнату миграции — UI
+    // на /admin/migrate-hostpanel рендерит лог в реальном времени.
+    agent.on(
+      'migrate:hostpanel:discover-log',
+      (data: {
+        migrationId: string;
+        line: string;
+        step?: number;
+        total?: number;
+        ts?: string;
+      }) => {
+        this.server
+          .to(`migrate-hostpanel:${data.migrationId}`)
+          .emit('migrate-hostpanel:discover-log', {
+            migrationId: data.migrationId,
+            line: data.line,
+            step: data.step,
+            total: data.total,
+            timestamp: data.ts || new Date().toISOString(),
+          });
+      },
+    );
+
+    // --- Hostpanel migration: per-item log/progress/status ---
+    // ВНИМАНИЕ: db-dump-import шлёт сотни строк в секунду. appendItemLog
+    // буферизует в памяти и флашит пакетом — ошибок кидать не должен, но
+    // обворачиваем try на случай чего: unhandledRejection здесь раньше валил
+    // весь API → migration item помечался orphan FAILED.
+    agent.on(
+      'migrate:hostpanel:item:log',
+      (data: { migrationId: string; itemId: string; line: string }) => {
+        try {
+          this.migrationHostpanelService.appendItemLog(data.itemId, data.line);
+        } catch (e) {
+          this.logger.warn(
+            `appendItemLog failed: ${(e as Error).message}`,
+          );
+        }
+        // Forward to subscribed clients (room: migrate-hostpanel:<migrationId>)
+        this.server
+          .to(`migrate-hostpanel:${data.migrationId}`)
+          .emit('migrate-hostpanel:item:log', {
+            migrationId: data.migrationId,
+            itemId: data.itemId,
+            line: data.line,
+            timestamp: new Date().toISOString(),
+          });
+      },
+    );
+
+    agent.on(
+      'migrate:hostpanel:item:progress',
+      async (data: { migrationId: string; itemId: string; stage: string; progress: number }) => {
+        await this.migrationHostpanelService.updateItemStatus(data.itemId, {
+          currentStage: data.stage,
+          progressPercent: data.progress,
+        });
+        this.server
+          .to(`migrate-hostpanel:${data.migrationId}`)
+          .emit('migrate-hostpanel:item:progress', {
+            migrationId: data.migrationId,
+            itemId: data.itemId,
+            stage: data.stage,
+            progress: data.progress,
+          });
+      },
+    );
+
+    agent.on(
+      'migrate:hostpanel:item:status',
+      async (data: { migrationId: string; itemId: string; status: string; errorMsg?: string }) => {
+        const patch: Parameters<typeof this.migrationHostpanelService.updateItemStatus>[1] = {
+          status: data.status,
+          errorMsg: data.errorMsg ?? null,
+        };
+        if (data.status === 'DONE' || data.status === 'FAILED') {
+          patch.finishedAt = new Date();
+          if (data.status === 'DONE') patch.progressPercent = 100;
+        }
+        await this.migrationHostpanelService.updateItemStatus(data.itemId, patch);
+        this.server
+          .to(`migrate-hostpanel:${data.migrationId}`)
+          .emit('migrate-hostpanel:item:status', {
+            migrationId: data.migrationId,
+            itemId: data.itemId,
+            status: data.status,
+            errorMsg: data.errorMsg,
+          });
       },
     );
 
@@ -631,6 +987,30 @@ export class AgentGateway implements OnGatewayConnection, OnGatewayDisconnect {
       error,
       timestamp: new Date().toISOString(),
     });
+  }
+
+  /**
+   * Broadcast `migrate-hostpanel:complete` в комнату миграции.
+   * spec §15.5: финальный сигнал UI о завершении всей миграции
+   * (totalDone/totalFailed). Вызывается мастер-сервисом из
+   * `recomputeMigrationFinalStatus` когда status переходит в
+   * терминальный (DONE / FAILED / PARTIAL / CANCELLED).
+   */
+  broadcastMigrationComplete(
+    migrationId: string,
+    status: string,
+    totalDone: number,
+    totalFailed: number,
+  ): void {
+    this.server
+      .to(`migrate-hostpanel:${migrationId}`)
+      .emit('migrate-hostpanel:complete', {
+        migrationId,
+        status,
+        totalDone,
+        totalFailed,
+        timestamp: new Date().toISOString(),
+      });
   }
 
   private async reconcileOnConnect(agent: AuthenticatedSocket): Promise<void> {

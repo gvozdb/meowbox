@@ -7,16 +7,22 @@
       </div>
     </div>
 
-    <!-- Site Selector -->
+    <!-- Scope Selector: SYSTEM (root) | конкретный сайт -->
     <div class="cron__selector">
-      <label class="form-label">Select Site</label>
-      <select v-model="selectedSiteId" class="form-input form-input--select" @change="loadJobs">
-        <option value="">Choose a site...</option>
-        <option v-for="s in sites" :key="s.id" :value="s.id">{{ s.name }}</option>
+      <label class="form-label">Scope</label>
+      <select v-model="selectedScope" class="form-input form-input--select" @change="onScopeChange">
+        <option value="system">★ Системный (root)</option>
+        <option disabled value="-">— Сайты —</option>
+        <option v-for="s in sites" :key="s.id" :value="`site:${s.id}`">{{ s.name }}</option>
       </select>
     </div>
 
-    <template v-if="selectedSiteId">
+    <div v-if="isSystemScope" class="cron__system-banner">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 9v4M12 17h.01M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z" /></svg>
+      <span>Эти задачи выполняются от имени <strong>root</strong>. Будь осторожен — у них полный доступ к системе.</span>
+    </div>
+
+    <template v-if="hasScopeSelected">
       <div class="cron__toolbar">
         <span class="cron__count">{{ jobs.length }} job{{ jobs.length === 1 ? '' : 's' }}</span>
         <button class="btn btn--primary btn--sm" @click="openEditor()">
@@ -38,7 +44,12 @@
               </button>
             </div>
             <div class="job-card__info">
-              <span class="job-card__name">{{ job.name }}</span>
+              <span class="job-card__name">
+                <!-- spec §8.3: «иконка/значок root (например, ✦) рядом с именем» -->
+                <span v-if="isSystemScope" class="job-card__root-mark" title="root cron — выполняется от имени root">✦</span>
+                {{ job.name }}
+                <span v-if="job.source === 'IMPORTED_HOSTPANEL'" class="job-card__badge" title="Импортирован из старой hostPanel">imported</span>
+              </span>
               <code class="job-card__command">{{ job.command }}</code>
             </div>
             <div class="job-card__schedule">
@@ -73,7 +84,7 @@
 
     <div v-else class="cron__placeholder">
       <CatMascot :size="80" mood="sleepy" />
-      <p>Select a site to manage its cron jobs</p>
+      <p>Select scope to manage cron jobs</p>
     </div>
 
     <!-- Create/Edit Modal -->
@@ -129,13 +140,23 @@
 <script setup lang="ts">
 definePageMeta({ middleware: 'auth' });
 
-interface CronJob { id: string; name: string; schedule: string; command: string; status: string; lastRunAt?: string; lastExitCode?: number; lastOutput?: string; }
+interface CronJob { id: string; name: string; schedule: string; command: string; status: string; source?: string; comment?: string | null; lastRunAt?: string; lastExitCode?: number; lastOutput?: string; }
 interface SiteItem { id: string; name: string; }
 
 const api = useApi();
 const sites = ref<SiteItem[]>([]);
-const selectedSiteId = ref('');
+// Scope: 'system' (root crontab) | 'site:<id>' (per-site crontab) | '' (none)
+const selectedScope = ref<string>('system');
 const jobs = ref<CronJob[]>([]);
+
+// Производные геттеры для шаблона
+const isSystemScope = computed(() => selectedScope.value === 'system');
+const selectedSiteId = computed(() => {
+  return selectedScope.value.startsWith('site:')
+    ? selectedScope.value.slice('site:'.length)
+    : '';
+});
+const hasScopeSelected = computed(() => isSystemScope.value || !!selectedSiteId.value);
 
 const showEditor = ref(false);
 const editingJob = ref<CronJob | null>(null);
@@ -148,6 +169,11 @@ const deleting = ref(false);
 const expandedJobId = ref('');
 
 const toast = useMbToast();
+
+function onScopeChange() {
+  jobs.value = [];
+  loadJobs();
+}
 
 const presets = [
   { label: 'Every min', value: '* * * * *' },
@@ -185,6 +211,12 @@ function openEditor(job?: CronJob) {
 }
 
 async function loadJobs() {
+  if (isSystemScope.value) {
+    try {
+      jobs.value = await api.get<CronJob[]>('/system-cron');
+    } catch { jobs.value = []; }
+    return;
+  }
   if (!selectedSiteId.value) { jobs.value = []; return; }
   try {
     jobs.value = await api.get<CronJob[]>(`/sites/${selectedSiteId.value}/cron-jobs`);
@@ -196,10 +228,17 @@ async function saveJob() {
   editorError.value = '';
   try {
     if (editingJob.value) {
-      await api.put(`/cron-jobs/${editingJob.value.id}`, { name: editorForm.name, schedule: editorForm.schedule, command: editorForm.command });
+      const url = isSystemScope.value
+        ? `/system-cron/${editingJob.value.id}`
+        : `/cron-jobs/${editingJob.value.id}`;
+      await api.put(url, { name: editorForm.name, schedule: editorForm.schedule, command: editorForm.command });
       showToast('Cron job updated');
     } else {
-      await api.post('/cron-jobs', { siteId: selectedSiteId.value, name: editorForm.name, schedule: editorForm.schedule, command: editorForm.command });
+      if (isSystemScope.value) {
+        await api.post('/system-cron', { name: editorForm.name, schedule: editorForm.schedule, command: editorForm.command });
+      } else {
+        await api.post('/cron-jobs', { siteId: selectedSiteId.value, name: editorForm.name, schedule: editorForm.schedule, command: editorForm.command });
+      }
       showToast('Cron job created');
     }
     showEditor.value = false;
@@ -212,8 +251,11 @@ async function saveJob() {
 }
 
 async function toggleJob(job: CronJob) {
+  const url = isSystemScope.value
+    ? `/system-cron/${job.id}/toggle`
+    : `/cron-jobs/${job.id}/toggle`;
   try {
-    await api.post(`/cron-jobs/${job.id}/toggle`);
+    await api.post(url);
     await loadJobs();
   } catch {
     showToast('Failed to toggle job', true);
@@ -225,8 +267,11 @@ function confirmDelete(job: CronJob) { deleteTarget.value = job; }
 async function doDelete() {
   if (!deleteTarget.value) return;
   deleting.value = true;
+  const url = isSystemScope.value
+    ? `/system-cron/${deleteTarget.value.id}`
+    : `/cron-jobs/${deleteTarget.value.id}`;
   try {
-    await api.del(`/cron-jobs/${deleteTarget.value.id}`);
+    await api.del(url);
     showToast('Cron job deleted');
     deleteTarget.value = null;
     await loadJobs();
@@ -236,6 +281,8 @@ async function doDelete() {
 
 onMounted(async () => {
   try { sites.value = await api.get<SiteItem[]>('/sites'); } catch { /* ignore */ }
+  // На загрузке — сразу показываем системные краны (как и просили).
+  await loadJobs();
 });
 </script>
 
@@ -247,6 +294,32 @@ onMounted(async () => {
 .cron__toolbar { display: flex; align-items: center; justify-content: space-between; margin-bottom: 1rem; }
 .cron__count { font-size: 0.78rem; color: var(--text-muted); }
 .cron__placeholder { display: flex; flex-direction: column; align-items: center; padding: 4rem 1rem; gap: 0.75rem; color: var(--text-muted); font-size: 0.85rem; }
+.cron__system-banner {
+  display: flex; align-items: center; gap: 0.6rem;
+  padding: 0.65rem 0.85rem;
+  background: rgba(var(--primary-rgb), 0.08);
+  border: 1px solid rgba(var(--primary-rgb), 0.2);
+  border-radius: 10px;
+  font-size: 0.78rem; color: rgba(var(--primary-rgb), 0.9);
+  margin-bottom: 1rem;
+}
+.cron__system-banner strong { color: var(--text-secondary); font-weight: 600; }
+.cron__system-banner svg { flex-shrink: 0; }
+.job-card__root-mark {
+  display: inline-block; margin-right: 0.3rem;
+  color: var(--primary-light); font-size: 0.85rem; font-weight: 700;
+}
+.job-card__badge {
+  display: inline-block;
+  margin-left: 0.4rem;
+  padding: 0.05rem 0.4rem;
+  font-size: 0.6rem; font-weight: 600;
+  border-radius: 4px;
+  background: rgba(99, 102, 241, 0.12);
+  color: rgb(129, 140, 248);
+  text-transform: uppercase; letter-spacing: 0.04em;
+  vertical-align: middle;
+}
 
 /* Job list */
 .job-list { display: flex; flex-direction: column; gap: 0.4rem; }
@@ -282,7 +355,7 @@ onMounted(async () => {
 
 .job-card__schedule { text-align: right; flex-shrink: 0; display: flex; flex-direction: column; align-items: flex-end; gap: 0.1rem; }
 .job-card__schedule-label { font-size: 0.72rem; color: var(--text-tertiary); }
-.job-card__schedule-cron { font-size: 0.65rem; font-family: 'JetBrains Mono', monospace; color: rgba(245, 158, 11, 0.5); background: none; padding: 0; }
+.job-card__schedule-cron { font-size: 0.65rem; font-family: 'JetBrains Mono', monospace; color: rgba(var(--primary-rgb), 0.5); background: none; padding: 0; }
 
 .job-card__actions { display: flex; gap: 0.3rem; flex-shrink: 0; margin-left: 0.5rem; }
 
@@ -341,7 +414,7 @@ onMounted(async () => {
   border-radius: 10px; padding: 0.55rem 0.8rem; font-size: 0.85rem;
   color: var(--text-primary); font-family: inherit; outline: none; transition: all 0.2s;
 }
-.form-input:focus { border-color: rgba(245, 158, 11, 0.25); box-shadow: var(--focus-ring); }
+.form-input:focus { border-color: rgba(var(--primary-rgb), 0.25); box-shadow: var(--focus-ring); }
 .form-input.mono { font-family: 'JetBrains Mono', monospace; font-size: 0.82rem; }
 .form-input--select {
   appearance: none;
@@ -357,8 +430,8 @@ onMounted(async () => {
   font-family: inherit; cursor: pointer; transition: all 0.2s; white-space: nowrap;
 }
 .btn--sm { padding: 0.4rem 0.8rem; font-size: 0.75rem; border-radius: 8px; }
-.btn--primary { background: linear-gradient(135deg, #fbbf24, #d97706); color: var(--primary-text-on); }
-.btn--primary:not(:disabled):hover { transform: translateY(-1px); box-shadow: 0 4px 16px rgba(245, 158, 11, 0.2); }
+.btn--primary { background: linear-gradient(135deg, var(--primary-light), var(--primary-dark)); color: var(--primary-text-on); }
+.btn--primary:not(:disabled):hover { transform: translateY(-1px); box-shadow: 0 4px 16px rgba(var(--primary-rgb), 0.2); }
 .btn--primary:disabled { opacity: 0.4; cursor: not-allowed; }
 .btn--ghost { background: var(--bg-input); border: 1px solid var(--border-strong); color: var(--text-tertiary); }
 .btn--ghost:hover { color: var(--text-secondary); border-color: var(--border-strong); }

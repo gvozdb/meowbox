@@ -35,7 +35,7 @@ for f in "$SYSTEM_DIR"/${DATE}-*.ts; do
   base="$(basename "$f" .ts)"
   n="$(echo "$base" | awk -F- '{print $4}')"
   [[ "$n" =~ ^[0-9]+$ ]] || continue
-  (( n > MAX_N )) && MAX_N=$n
+  (( 10#$n > MAX_N )) && MAX_N=$((10#$n))
 done
 NEXT_N="$(printf '%03d' $((MAX_N + 1)))"
 ID="${DATE}-${NEXT_N}-${SLUG}"

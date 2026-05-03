@@ -197,7 +197,7 @@
                     <option v-for="opt in dbEngineOptions" :key="opt.value" :value="opt.value">{{ opt.label }}</option>
                   </select>
                 </div>
-                <span v-if="dbEngineOptions.length === 0" class="form-hint" style="color: var(--text-warning, #f59e0b);">
+                <span v-if="dbEngineOptions.length === 0" class="form-hint" style="color: var(--text-warning, var(--primary));">
                   Ни один движок БД не установлен на сервере. Открой
                   <NuxtLink to="/services" class="link">/services</NuxtLink>
                   и установи MariaDB или PostgreSQL.
@@ -919,7 +919,7 @@ onBeforeUnmount(() => {
 
 .create-site__progress-bar {
   height: 100%;
-  background: linear-gradient(90deg, #f59e0b, #fbbf24);
+  background: linear-gradient(90deg, var(--primary), var(--primary-light));
   border-radius: 3px;
   transition: width 0.4s cubic-bezier(0.16, 1, 0.3, 1);
 }
@@ -1059,7 +1059,7 @@ onBeforeUnmount(() => {
 .module-card__checkbox {
   width: 18px;
   height: 18px;
-  accent-color: #f59e0b;
+  accent-color: var(--primary);
   cursor: pointer;
 }
 
@@ -1111,7 +1111,7 @@ onBeforeUnmount(() => {
   cursor: pointer;
 }
 
-.module-sub input { accent-color: #f59e0b; }
+.module-sub input { accent-color: var(--primary); }
 
 /* Form fields */
 .create-site__fields {
@@ -1424,7 +1424,7 @@ onBeforeUnmount(() => {
 }
 
 .create-site__btn--primary {
-  background: linear-gradient(135deg, #fbbf24, #d97706);
+  background: linear-gradient(135deg, var(--primary-light), var(--primary-dark));
   color: var(--primary-text-on);
   box-shadow: var(--shadow-button);
 }
@@ -1506,7 +1506,7 @@ onBeforeUnmount(() => {
   padding: 1px 0;
 }
 
-.provision-log__line--warn { color: #fbbf24; }
+.provision-log__line--warn { color: var(--primary-light); }
 .provision-log__line--error { color: #f87171; }
 
 @media (max-width: 768px) {

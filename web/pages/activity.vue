@@ -334,7 +334,7 @@ onMounted(() => {
 .timeline__dot--login { background: #4ade80; box-shadow: 0 0 6px rgba(74, 222, 128, 0.4); }
 .timeline__dot--logout { background: #94a3b8; }
 .timeline__dot--create { background: #818cf8; box-shadow: 0 0 6px rgba(129, 140, 248, 0.4); }
-.timeline__dot--update { background: #fbbf24; box-shadow: 0 0 6px rgba(251, 191, 36, 0.3); }
+.timeline__dot--update { background: var(--primary-light); box-shadow: 0 0 6px rgba(var(--primary-light-rgb), 0.3); }
 .timeline__dot--delete { background: #f87171; box-shadow: 0 0 6px rgba(248, 113, 113, 0.4); }
 .timeline__dot--deploy { background: #00dc82; box-shadow: 0 0 6px rgba(0, 220, 130, 0.4); }
 .timeline__dot--backup { background: #a78bfa; box-shadow: 0 0 6px rgba(167, 139, 250, 0.3); }
@@ -342,7 +342,7 @@ onMounted(() => {
 .timeline__dot--ssl_issue { background: #38bdf8; box-shadow: 0 0 6px rgba(56, 189, 248, 0.4); }
 .timeline__dot--service_start { background: #4ade80; box-shadow: 0 0 6px rgba(74, 222, 128, 0.3); }
 .timeline__dot--service_stop { background: #f87171; box-shadow: 0 0 6px rgba(248, 113, 113, 0.3); }
-.timeline__dot--service_restart { background: #fbbf24; box-shadow: 0 0 6px rgba(251, 191, 36, 0.3); }
+.timeline__dot--service_restart { background: var(--primary-light); box-shadow: 0 0 6px rgba(var(--primary-light-rgb), 0.3); }
 
 .timeline__content {
   flex: 1;
@@ -370,7 +370,7 @@ onMounted(() => {
 .timeline__badge--login { background: rgba(34, 197, 94, 0.1); color: #4ade80; }
 .timeline__badge--logout { background: rgba(148, 163, 184, 0.1); color: #94a3b8; }
 .timeline__badge--create { background: rgba(99, 102, 241, 0.1); color: #818cf8; }
-.timeline__badge--update { background: rgba(245, 158, 11, 0.1); color: #fbbf24; }
+.timeline__badge--update { background: rgba(var(--primary-rgb), 0.1); color: var(--primary-light); }
 .timeline__badge--delete { background: rgba(239, 68, 68, 0.1); color: #f87171; }
 .timeline__badge--deploy { background: rgba(0, 220, 130, 0.1); color: #00dc82; }
 .timeline__badge--backup { background: rgba(139, 92, 246, 0.1); color: #a78bfa; }
@@ -378,7 +378,7 @@ onMounted(() => {
 .timeline__badge--ssl_issue { background: rgba(56, 189, 248, 0.1); color: #38bdf8; }
 .timeline__badge--service_start { background: rgba(34, 197, 94, 0.1); color: #4ade80; }
 .timeline__badge--service_stop { background: rgba(239, 68, 68, 0.1); color: #f87171; }
-.timeline__badge--service_restart { background: rgba(245, 158, 11, 0.1); color: #fbbf24; }
+.timeline__badge--service_restart { background: rgba(var(--primary-rgb), 0.1); color: var(--primary-light); }
 
 .timeline__entity {
   font-size: 0.8rem;

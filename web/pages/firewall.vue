@@ -351,8 +351,8 @@ onMounted(() => { loadRules(); loadPresets(); loadUfwStatus(); });
 /* Warning */
 .firewall__warning {
   display: flex; align-items: center; gap: 0.65rem; padding: 0.7rem 1rem;
-  background: var(--primary-bg); border: 1px solid rgba(245, 158, 11, 0.12);
-  border-radius: 12px; margin-bottom: 1.25rem; color: rgba(245, 158, 11, 0.7); font-size: 0.78rem;
+  background: var(--primary-bg); border: 1px solid rgba(var(--primary-rgb), 0.12);
+  border-radius: 12px; margin-bottom: 1.25rem; color: rgba(var(--primary-rgb), 0.7); font-size: 0.78rem;
 }
 
 /* Presets */
@@ -438,7 +438,7 @@ onMounted(() => { loadRules(); loadPresets(); loadUfwStatus(); });
   border-radius: 10px; padding: 0.55rem 0.8rem; font-size: 0.85rem;
   color: var(--text-primary); font-family: inherit; outline: none; transition: all 0.2s;
 }
-.form-input:focus { border-color: rgba(245, 158, 11, 0.25); box-shadow: var(--focus-ring); }
+.form-input:focus { border-color: rgba(var(--primary-rgb), 0.25); box-shadow: var(--focus-ring); }
 .form-input.mono { font-family: 'JetBrains Mono', monospace; font-size: 0.82rem; }
 .form-hint { font-size: 0.68rem; color: var(--text-faint); }
 
@@ -447,8 +447,8 @@ onMounted(() => { loadRules(); loadPresets(); loadUfwStatus(); });
   border-radius: 10px; border: none; font-size: 0.82rem; font-weight: 600;
   font-family: inherit; cursor: pointer; transition: all 0.2s; white-space: nowrap;
 }
-.btn--primary { background: linear-gradient(135deg, #fbbf24, #d97706); color: var(--primary-text-on); }
-.btn--primary:not(:disabled):hover { transform: translateY(-1px); box-shadow: 0 4px 16px rgba(245, 158, 11, 0.2); }
+.btn--primary { background: linear-gradient(135deg, var(--primary-light), var(--primary-dark)); color: var(--primary-text-on); }
+.btn--primary:not(:disabled):hover { transform: translateY(-1px); box-shadow: 0 4px 16px rgba(var(--primary-rgb), 0.2); }
 .btn--primary:disabled { opacity: 0.4; cursor: not-allowed; }
 .btn--ghost { background: var(--bg-input); border: 1px solid var(--border-strong); color: var(--text-tertiary); }
 .btn--ghost:hover { color: var(--text-secondary); border-color: var(--border-strong); }

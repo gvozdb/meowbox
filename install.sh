@@ -154,7 +154,9 @@ systemctl enable --now postgresql  >> "$LOG_FILE" 2>&1 || true
 # -----------------------------------------------------------------------------
 # PHP-FPM: дистровский PHP + ondrej/php PPA для нескольких версий
 # -----------------------------------------------------------------------------
-# Сайты в панели создаются с выбором phpVersion (8.1 / 8.2 / 8.3 / 8.4).
+# Сайты в панели создаются с выбором phpVersion (7.1–8.4). На первичной
+# установке автоматически ставим modern-набор 8.1–8.4, legacy-версии оператор
+# ставит явно через /php для миграций старых сайтов.
 # Если на сервере есть только дефолтная дистровская версия — провижининг
 # падает с "spawn php8.X ENOENT" посередине установки CMS. Чтобы у юзера
 # всегда был полный спектр, подключаем ondrej/php PPA и ставим 8.1+8.2+8.3.
@@ -170,6 +172,54 @@ if [[ "$DISTRO_ID" == "ubuntu" ]]; then
     add-apt-repository -y ppa:ondrej/php >> "$LOG_FILE" 2>&1 || \
       warn "Не удалось добавить ondrej/php — будет только дистровская версия PHP"
     apt-get update -qq >> "$LOG_FILE" 2>&1
+  fi
+
+  # Подключаем зеркало Yandex как fallback к ondrej PPA.
+  # Launchpad CDN периодически отдаёт 503 на сутки+ — зеркало yandex
+  # синхронизирует тот же репозиторий и стабильнее (особенно из RU/CIS).
+  # Apt сам выберет доступный/быстрый источник из двух. Зеркало есть
+  # только для Ubuntu codename'ов — на Debian не подключается.
+  YANDEX_CODENAMES=" bionic focal jammy noble oracular plucky "
+  YANDEX_SOURCES=/etc/apt/sources.list.d/ondrej-php-yandex.sources
+  YANDEX_KEYRING=/etc/apt/keyrings/ondrej-php.gpg
+  YANDEX_PPA_SRC=$(ls /etc/apt/sources.list.d/ondrej-ubuntu-php-*.sources 2>/dev/null | head -1)
+  if [[ "$YANDEX_CODENAMES" == *" $DISTRO_CODENAME "* ]] && [[ -n "$YANDEX_PPA_SRC" ]]; then
+    log "Adding Yandex mirror for ondrej/php (fallback for launchpad outages)..."
+    install -m 0755 -d /etc/apt/keyrings
+    if [[ ! -f "$YANDEX_KEYRING" ]]; then
+      # Извлекаем inline GPG-ключ из .sources файла, созданного add-apt-repository.
+      awk '/^Signed-By:/{f=1; sub(/^Signed-By:[[:space:]]*/,""); print; next}
+           f && /^[[:space:]]/{sub(/^[[:space:]]/,""); print; next}
+           f{exit}' "$YANDEX_PPA_SRC" \
+        | sed 's/^ *\.$//' \
+        | gpg --dearmor > "$YANDEX_KEYRING".tmp 2>>"$LOG_FILE" \
+        && mv "$YANDEX_KEYRING".tmp "$YANDEX_KEYRING" \
+        && chmod 0644 "$YANDEX_KEYRING" \
+        || warn "Не удалось извлечь GPG-ключ для yandex-зеркала ondrej/php"
+    fi
+    if [[ -f "$YANDEX_KEYRING" ]]; then
+      # Probe зеркала перед записью .sources (5s timeout).
+      YANDEX_HTTP=$(curl -4 -sS -o /dev/null --max-time 5 -w '%{http_code}' \
+        "https://mirror.yandex.ru/mirrors/launchpad/ondrej/php/dists/${DISTRO_CODENAME}/InRelease" 2>/dev/null || echo 000)
+      if [[ "$YANDEX_HTTP" == "200" ]]; then
+        cat > "$YANDEX_SOURCES" <<YANDEX_EOF
+Types: deb
+URIs: https://mirror.yandex.ru/mirrors/launchpad/ondrej/php/
+Suites: ${DISTRO_CODENAME}
+Components: main
+Signed-By: ${YANDEX_KEYRING}
+YANDEX_EOF
+        apt-get update -qq \
+          -o Dir::Etc::sourcelist=sources.list.d/ondrej-php-yandex.sources \
+          -o Dir::Etc::sourceparts=- \
+          -o APT::Get::List-Cleanup=0 \
+          -o Acquire::ForceIPv4=true >> "$LOG_FILE" 2>&1 \
+          || warn "apt-get update для yandex-зеркала упал (не критично)"
+        log "Yandex mirror for ondrej/php: подключено"
+      else
+        warn "Yandex mirror probe failed (http=$YANDEX_HTTP) — пропускаю подключение"
+      fi
+    fi
   fi
 elif [[ "$DISTRO_ID" == "debian" ]] && [[ -n "$DISTRO_CODENAME" ]]; then
   if [[ ! -f /etc/apt/sources.list.d/sury-php.list ]]; then
@@ -187,12 +237,15 @@ fi
 # Какие версии ставим: 8.1, 8.2, 8.3 (и 8.4 если есть в репо). Дистровская
 # версия всё равно устанавливается отдельно — её используют системные пакеты
 # (Adminer и т.п.).
-log "Installing PHP-FPM versions (8.1 + 8.2 + 8.3 + system default)..."
+log "Installing PHP-FPM versions (8.1 + 8.2 + 8.3 + 8.4 if available + system default)..."
+
+PHP_SITE_EXTS=(mysql pgsql sqlite3 mbstring curl zip xml gd bcmath intl opcache imagick)
 
 # Базовый набор: дистровский PHP (для Adminer и системных нужд).
 apt-get "${APT_OPTS[@]}" install \
   php-cli php-fpm php-mysql php-pgsql php-sqlite3 \
-  php-mbstring php-curl php-zip >> "$LOG_FILE" 2>&1
+  php-mbstring php-curl php-zip php-xml php-gd php-bcmath php-intl \
+  php-opcache php-imagick >> "$LOG_FILE" 2>&1
 
 # Дополнительные версии для пользовательских сайтов. Каждую обернём в `|| true`,
 # чтобы недоступная версия (например, 8.4 на старом репо) не валила установку.
@@ -204,9 +257,28 @@ for V in 8.1 8.2 8.3 8.4; do
       "php${V}-mysql" "php${V}-pgsql" "php${V}-sqlite3" \
       "php${V}-mbstring" "php${V}-curl" "php${V}-zip" \
       "php${V}-xml" "php${V}-gd" "php${V}-bcmath" "php${V}-intl" \
+      "php${V}-opcache" "php${V}-imagick" \
       >> "$LOG_FILE" 2>&1 || warn "    PHP ${V} install partial — некоторые модули не доступны"
   else
     log "  → PHP ${V} в репо не найден, пропускаю"
+  fi
+done
+
+# Дистровский `php-fpm` может оказаться, например, 7.4/8.0. Он ставится
+# unversioned-пакетами выше, но доустанавливаем versioned extensions тоже,
+# чтобы `/etc/php/<V>/fpm` получил тот же MODX-набор.
+for V in $(ls /etc/php 2>/dev/null | grep -E '^[0-9]+\.[0-9]+$' | sort -V); do
+  PKGS=()
+  for EXT in "${PHP_SITE_EXTS[@]}"; do
+    PKG="php${V}-${EXT}"
+    if apt-cache show "$PKG" >/dev/null 2>&1; then
+      PKGS+=("$PKG")
+    fi
+  done
+  if (( ${#PKGS[@]} > 0 )); then
+    log "  → ensuring PHP ${V} MODX extensions..."
+    apt-get "${APT_OPTS[@]}" install "${PKGS[@]}" \
+      >> "$LOG_FILE" 2>&1 || warn "    PHP ${V} extensions install partial — некоторые модули не доступны"
   fi
 done
 

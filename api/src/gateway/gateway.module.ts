@@ -9,6 +9,8 @@ import { SslModule } from '../ssl/ssl.module';
 import { SitesModule } from '../sites/sites.module';
 import { LogsModule } from '../logs/logs.module';
 import { AiModule } from '../ai/ai.module';
+import { MigrationHostpanelModule } from '../migration-hostpanel/migration-hostpanel.module';
+import { ProxyModule } from '../proxy/proxy.module';
 
 @Global()
 @Module({
@@ -26,6 +28,8 @@ import { AiModule } from '../ai/ai.module';
     forwardRef(() => SitesModule),
     forwardRef(() => LogsModule),
     forwardRef(() => AiModule),
+    forwardRef(() => MigrationHostpanelModule),
+    forwardRef(() => ProxyModule),
   ],
   providers: [AgentGateway, AgentRelayService],
   exports: [AgentRelayService, AgentGateway],

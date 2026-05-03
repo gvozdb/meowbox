@@ -72,12 +72,14 @@ export class PhpService {
   }
 
   async installVersion(version: string): Promise<void> {
-    const result = await this.agentRelay.emitToAgent('php:install', { version }, 600_000);
+    // Timeout > agent handler timeout (900s) + запас на сеть.
+    // Иначе API отдаст timeout раньше, чем handler успеет вернуть результат.
+    const result = await this.agentRelay.emitToAgent('php:install', { version }, 930_000);
     if (!result.success) throw new InternalServerErrorException(result.error || 'Install failed');
   }
 
   async uninstallVersion(version: string): Promise<void> {
-    const result = await this.agentRelay.emitToAgent('php:uninstall', { version }, 300_000);
+    const result = await this.agentRelay.emitToAgent('php:uninstall', { version }, 630_000);
     if (!result.success) throw new InternalServerErrorException(result.error || 'Uninstall failed');
   }
 
@@ -99,7 +101,9 @@ export class PhpService {
   }
 
   async installExtension(version: string, name: string): Promise<void> {
-    const result = await this.agentRelay.emitToAgent('php:extension-install', { version, name }, 120_000);
+    // Handler timeout 240s (apt-get install one extension + restart fpm).
+    // API timeout > handler timeout, чтобы API не выпал по timeout раньше.
+    const result = await this.agentRelay.emitToAgent('php:extension-install', { version, name }, 270_000);
     if (!result.success) throw new InternalServerErrorException(result.error || 'Install extension failed');
   }
 

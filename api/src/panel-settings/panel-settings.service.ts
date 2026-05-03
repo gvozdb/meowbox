@@ -2,6 +2,27 @@ import { Injectable } from '@nestjs/common';
 import { PrismaService } from '../common/prisma.service';
 
 /**
+ * Список валидных id палитр. ВАЖНО: должен совпадать с PALETTE_OPTIONS
+ * в `web/composables/usePalette.ts` — иначе фронт сможет послать новый id,
+ * а бэк его отбросит при валидации (BadRequest), либо наоборот пропустит,
+ * а getAppearance() отфильтрует. Любые изменения — синхронизируй обе точки.
+ */
+export const VALID_PALETTES = [
+  'amber',
+  'violet',
+  'emerald',
+  'sapphire',
+  'rose',
+  'teal',
+  'fuchsia',
+] as const;
+export type PaletteId = (typeof VALID_PALETTES)[number];
+
+export function isValidPalette(v: unknown): v is PaletteId {
+  return typeof v === 'string' && (VALID_PALETTES as readonly string[]).includes(v);
+}
+
+/**
  * KV-стор глобальных настроек панели.
  * Значения хранятся в SQLite как JSON-строки и парсятся при чтении.
  *
@@ -9,6 +30,7 @@ import { PrismaService } from '../common/prisma.service';
  *   - `general`        — мониторинг, автопроверка обновлений, сессии (ТТЛ/лимиты)
  *   - `site-defaults`  — дефолты формы создания сайта + пути хранения файлов
  *   - `backup-defaults`— авто-бэкапы: расписание, хранилище, retention
+ *   - `appearance`     — внешний вид панели: цветовая гамма (palette)
  */
 @Injectable()
 export class PanelSettingsService {
@@ -71,6 +93,13 @@ export class PanelSettingsService {
       checkReadDataSubset: '10%',
       checkMinIntervalHours: 20,
     },
+    // Внешний вид панели:
+    //   palettes — карта { serverId → палитра }. Хранится только на мастере;
+    //   /servers и /settings всегда пишут сюда (slave не участвует, чтобы фича
+    //   работала даже когда slave старой версии и не знает /panel-settings/appearance).
+    appearance: {
+      palettes: {} as Record<string, PaletteId>,
+    },
   } as const;
 
   async get<T>(key: keyof typeof this.defaults): Promise<T> {
@@ -128,5 +157,41 @@ export class PanelSettingsService {
     checkMinIntervalHours: number;
   }> {
     return this.get('backup-defaults');
+  }
+
+  /**
+   * Палитры всех известных серверов. Старая форма `{ palette: 'amber' }`
+   * (одиночная, до redesign'а) транслируется в `{ palettes: { main: ... } }`,
+   * чтобы апгрейд панели не сбрасывал выбранную мастер-гамму.
+   */
+  async getAppearance(): Promise<{ palettes: Record<string, PaletteId> }> {
+    const row = await this.prisma.panelSetting.findUnique({ where: { key: 'appearance' } });
+    if (!row) return { palettes: {} };
+    let raw: unknown;
+    try {
+      raw = JSON.parse(row.value);
+    } catch {
+      return { palettes: {} };
+    }
+    const obj = (raw && typeof raw === 'object' ? (raw as Record<string, unknown>) : {});
+    const palettes: Record<string, PaletteId> = {};
+    if (obj.palettes && typeof obj.palettes === 'object') {
+      for (const [k, v] of Object.entries(obj.palettes as Record<string, unknown>)) {
+        if (isValidPalette(v)) palettes[k] = v;
+      }
+    }
+    // Legacy миграция: { palette: 'amber' } → palettes.main
+    if (isValidPalette(obj.palette)) {
+      if (!palettes.main) palettes.main = obj.palette;
+    }
+    return { palettes };
+  }
+
+  /** Установить палитру одного сервера (мерж в карту). */
+  async setServerPalette(serverId: string, palette: PaletteId): Promise<{ palettes: Record<string, PaletteId> }> {
+    const current = await this.getAppearance();
+    current.palettes[serverId] = palette;
+    await this.set('appearance', { palettes: current.palettes });
+    return current;
   }
 }

@@ -53,6 +53,6 @@ const label = computed(() => {
 .site-type-icon--nuxt-3 { background: rgba(0, 220, 130, 0.1); color: #00dc82; }
 .site-type-icon--react { background: rgba(97, 218, 251, 0.1); color: #61dafb; }
 .site-type-icon--nestjs { background: rgba(234, 44, 78, 0.1); color: #ea2c4e; }
-.site-type-icon--static-html { background: rgba(245, 158, 11, 0.1); color: #fbbf24; }
+.site-type-icon--static-html { background: rgba(var(--primary-rgb), 0.1); color: var(--primary-light); }
 .site-type-icon--custom { background: rgba(148, 163, 184, 0.1); color: #94a3b8; }
 </style>

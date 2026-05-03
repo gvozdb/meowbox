@@ -549,7 +549,7 @@ onMounted(() => loadAll());
   color: var(--text-secondary);
   cursor: pointer;
 }
-.toggle input { accent-color: var(--primary, #f59e0b); }
+.toggle input { accent-color: var(--primary, var(--primary)); }
 .toggle small {
   color: var(--text-muted);
   font-size: 0.72rem;
@@ -563,7 +563,7 @@ onMounted(() => loadAll());
   padding: 0.85rem 0.95rem;
   border: 1px dashed var(--border-secondary);
   border-radius: 10px;
-  background: rgba(245, 158, 11, 0.04);
+  background: rgba(var(--primary-rgb), 0.04);
 }
 .site-nginx__rate-limit-head { }
 .site-nginx__rate-limit-grid {
@@ -598,8 +598,8 @@ onMounted(() => loadAll());
   tab-size: 4;
 }
 .site-nginx__editor:focus {
-  border-color: rgba(245, 158, 11, 0.5);
-  box-shadow: 0 0 0 3px rgba(245, 158, 11, 0.08);
+  border-color: rgba(var(--primary-rgb), 0.5);
+  box-shadow: 0 0 0 3px rgba(var(--primary-rgb), 0.08);
 }
 
 .site-nginx__banner {
@@ -643,10 +643,10 @@ onMounted(() => loadAll());
 .btn:disabled { opacity: 0.5; cursor: not-allowed; }
 .btn--sm { padding: 0.4rem 0.75rem; font-size: 0.75rem; border-radius: 8px; }
 .btn--primary {
-  background: var(--primary, #f59e0b);
+  background: var(--primary, var(--primary));
   color: var(--text-inverse, #1c1917);
 }
-.btn--primary:hover:not(:disabled) { background: var(--primary-strong, #fbbf24); }
+.btn--primary:hover:not(:disabled) { background: var(--primary-strong, var(--primary-light)); }
 .btn--ghost {
   border-color: var(--border-secondary);
   color: var(--text-secondary);
@@ -681,8 +681,8 @@ onMounted(() => loadAll());
   transition: all 0.2s;
 }
 .form-input:focus {
-  border-color: rgba(245, 158, 11, 0.4);
-  box-shadow: 0 0 0 3px rgba(245, 158, 11, 0.08);
+  border-color: rgba(var(--primary-rgb), 0.4);
+  box-shadow: 0 0 0 3px rgba(var(--primary-rgb), 0.08);
 }
 .form-hint {
   font-size: 0.72rem;
@@ -695,7 +695,7 @@ onMounted(() => loadAll());
   width: 14px;
   height: 14px;
   border: 2px solid var(--border-strong);
-  border-top-color: var(--primary, #f59e0b);
+  border-top-color: var(--primary, var(--primary));
   border-radius: 50%;
   animation: site-nginx-spin 0.8s linear infinite;
   vertical-align: middle;

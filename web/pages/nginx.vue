@@ -376,8 +376,8 @@ onMounted(async () => {
   font-family: inherit; cursor: pointer; transition: all 0.2s; white-space: nowrap;
 }
 .btn--sm { padding: 0.4rem 0.8rem; font-size: 0.75rem; border-radius: 8px; }
-.btn--primary { background: linear-gradient(135deg, #fbbf24, #d97706); color: var(--primary-text-on); }
-.btn--primary:not(:disabled):hover { transform: translateY(-1px); box-shadow: 0 4px 16px rgba(245, 158, 11, 0.2); }
+.btn--primary { background: linear-gradient(135deg, var(--primary-light), var(--primary-dark)); color: var(--primary-text-on); }
+.btn--primary:not(:disabled):hover { transform: translateY(-1px); box-shadow: 0 4px 16px rgba(var(--primary-rgb), 0.2); }
 .btn--primary:disabled { opacity: 0.4; cursor: not-allowed; }
 .btn--ghost { background: var(--bg-input); border: 1px solid var(--border-strong); color: var(--text-tertiary); }
 .btn--ghost:hover:not(:disabled) { color: var(--text-secondary); border-color: var(--border-strong); }

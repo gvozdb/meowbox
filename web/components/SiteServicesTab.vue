@@ -527,7 +527,7 @@ function dotClass(s: string): string {
   background: rgba(99, 102, 241, 0.12);
   color: rgb(129, 140, 248);
 }
-.ssvc__icon--search { background: rgba(245, 158, 11, 0.13); color: rgb(251, 191, 36); }
+.ssvc__icon--search { background: rgba(var(--primary-rgb), 0.13); color: var(--primary-light); }
 .ssvc__icon--cache { background: rgba(16, 185, 129, 0.13); color: rgb(52, 211, 153); }
 .ssvc__icon--queue { background: rgba(168, 85, 247, 0.13); color: rgb(192, 132, 252); }
 .ssvc__icon--database { background: rgba(59, 130, 246, 0.13); color: rgb(96, 165, 250); }
@@ -548,7 +548,7 @@ function dotClass(s: string): string {
   white-space: nowrap;
 }
 .ssvc__pill--ok { background: rgba(16, 185, 129, 0.13); color: rgb(52, 211, 153); }
-.ssvc__pill--warn { background: rgba(245, 158, 11, 0.13); color: rgb(251, 191, 36); }
+.ssvc__pill--warn { background: rgba(var(--primary-rgb), 0.13); color: var(--primary-light); }
 .ssvc__pill--err { background: rgba(239, 68, 68, 0.13); color: rgb(248, 113, 113); }
 .ssvc__pill--idle { background: rgba(115, 115, 115, 0.16); color: var(--text-tertiary); }
 
@@ -556,7 +556,7 @@ function dotClass(s: string): string {
   width: 7px; height: 7px; border-radius: 50%;
 }
 .status-dot--ok { background: rgb(52, 211, 153); box-shadow: 0 0 5px rgba(52, 211, 153, 0.6); }
-.status-dot--warn { background: rgb(251, 191, 36); }
+.status-dot--warn { background: var(--primary-light); }
 .status-dot--err { background: rgb(248, 113, 113); }
 .status-dot--idle { background: rgb(115, 115, 115); }
 
@@ -629,16 +629,16 @@ function dotClass(s: string): string {
 
 .ssvc__warn {
   font-size: 0.82rem;
-  color: rgb(251, 191, 36);
-  background: rgba(245, 158, 11, 0.08);
-  border: 1px solid rgba(245, 158, 11, 0.25);
+  color: var(--primary-light);
+  background: rgba(var(--primary-rgb), 0.08);
+  border: 1px solid rgba(var(--primary-rgb), 0.25);
   border-radius: 6px;
   padding: 0.5rem 0.7rem;
   margin: 0;
 }
 
 .ssvc__link {
-  color: rgb(251, 191, 36);
+  color: var(--primary-light);
   text-decoration: underline;
 }
 
@@ -738,7 +738,7 @@ function dotClass(s: string): string {
 .spinner {
   width: 24px; height: 24px;
   border: 2px solid var(--spinner-track, var(--border-subtle));
-  border-top-color: var(--primary, #fbbf24);
+  border-top-color: var(--primary, var(--primary-light));
   border-radius: 50%;
   animation: ssvcSpin 0.8s linear infinite;
 }
@@ -757,8 +757,8 @@ function dotClass(s: string): string {
   font-family: inherit; cursor: pointer; transition: all 0.2s; white-space: nowrap;
 }
 .btn--sm { padding: 0.45rem 0.85rem; font-size: 0.75rem; border-radius: 8px; }
-.btn--primary { background: linear-gradient(135deg, #fbbf24, #d97706); color: var(--primary-text-on); }
-.btn--primary:not(:disabled):hover { transform: translateY(-1px); box-shadow: 0 4px 16px rgba(245, 158, 11, 0.2); }
+.btn--primary { background: linear-gradient(135deg, var(--primary-light), var(--primary-dark)); color: var(--primary-text-on); }
+.btn--primary:not(:disabled):hover { transform: translateY(-1px); box-shadow: 0 4px 16px rgba(var(--primary-rgb), 0.2); }
 .btn--primary:disabled { opacity: 0.4; cursor: not-allowed; }
 .btn--ghost { background: var(--bg-input); border: 1px solid var(--border-strong); color: var(--text-tertiary); }
 .btn--ghost:hover:not(:disabled) { color: var(--text-secondary); border-color: var(--border-strong); }

@@ -465,7 +465,7 @@ onUnmounted(() => {
 
 .metric-card__icon--cpu { background: rgba(99, 102, 241, 0.1); color: #818cf8; }
 .metric-card__icon--memory { background: rgba(236, 72, 153, 0.1); color: #f472b6; }
-.metric-card__icon--disk { background: rgba(245, 158, 11, 0.1); color: #fbbf24; }
+.metric-card__icon--disk { background: rgba(var(--primary-rgb), 0.1); color: var(--primary-light); }
 .metric-card__icon--network { background: rgba(34, 197, 94, 0.1); color: #4ade80; }
 
 .metric-card__info {
@@ -718,7 +718,7 @@ onUnmounted(() => {
 .activity-item__badge--login { background: rgba(34, 197, 94, 0.1); color: #4ade80; }
 .activity-item__badge--logout { background: rgba(148, 163, 184, 0.1); color: #94a3b8; }
 .activity-item__badge--create { background: rgba(99, 102, 241, 0.1); color: #818cf8; }
-.activity-item__badge--update { background: rgba(245, 158, 11, 0.1); color: #fbbf24; }
+.activity-item__badge--update { background: rgba(var(--primary-rgb), 0.1); color: var(--primary-light); }
 .activity-item__badge--delete { background: rgba(239, 68, 68, 0.1); color: #f87171; }
 .activity-item__badge--deploy { background: rgba(0, 220, 130, 0.1); color: #00dc82; }
 .activity-item__badge--backup { background: rgba(139, 92, 246, 0.1); color: #a78bfa; }
@@ -726,7 +726,7 @@ onUnmounted(() => {
 .activity-item__badge--ssl_issue { background: rgba(56, 189, 248, 0.1); color: #38bdf8; }
 .activity-item__badge--service_start { background: rgba(34, 197, 94, 0.1); color: #4ade80; }
 .activity-item__badge--service_stop { background: rgba(239, 68, 68, 0.1); color: #f87171; }
-.activity-item__badge--service_restart { background: rgba(245, 158, 11, 0.1); color: #fbbf24; }
+.activity-item__badge--service_restart { background: rgba(var(--primary-rgb), 0.1); color: var(--primary-light); }
 
 .activity-item__info {
   display: flex;
@@ -777,7 +777,7 @@ onUnmounted(() => {
   justify-content: center;
 }
 
-.sec-card__icon--warn { background: rgba(245, 158, 11, 0.1); color: #fbbf24; }
+.sec-card__icon--warn { background: rgba(var(--primary-rgb), 0.1); color: var(--primary-light); }
 .sec-card__icon--info { background: rgba(99, 102, 241, 0.1); color: #818cf8; }
 .sec-card__icon--ok { background: rgba(34, 197, 94, 0.1); color: #4ade80; }
 
@@ -840,7 +840,7 @@ onUnmounted(() => {
 .backup-row__badge--completed { background: rgba(34, 197, 94, 0.1); color: #4ade80; }
 .backup-row__badge--failed { background: rgba(239, 68, 68, 0.1); color: #f87171; }
 .backup-row__badge--pending,
-.backup-row__badge--in_progress { background: rgba(245, 158, 11, 0.1); color: #fbbf24; }
+.backup-row__badge--in_progress { background: rgba(var(--primary-rgb), 0.1); color: var(--primary-light); }
 .backup-row__badge--never { background: rgba(148, 163, 184, 0.1); color: #94a3b8; }
 
 .backup-row__date {
@@ -887,8 +887,8 @@ onUnmounted(() => {
 }
 
 .ssl-row__dot--warn {
-  background: #fbbf24;
-  box-shadow: 0 0 6px rgba(251, 191, 36, 0.4);
+  background: var(--primary-light);
+  box-shadow: 0 0 6px rgba(var(--primary-light-rgb), 0.4);
 }
 
 .ssl-row__info {
@@ -958,7 +958,7 @@ onUnmounted(() => {
 }
 
 .sys-item__bar-fill--warn {
-  background: linear-gradient(90deg, #f59e0b, #fbbf24);
+  background: linear-gradient(90deg, var(--primary), var(--primary-light));
 }
 
 .sys-item__bar-fill--crit {

@@ -48,7 +48,13 @@ interface SiteProvisionDonePayload {
 }
 
 let socket: Socket | null = null;
-let remotePollTimer: ReturnType<typeof setInterval> | null = null;
+/**
+ * id slave-сервера, к которому привязан текущий socket. Если null — socket
+ * соединён с локальным мастером. При смене активного сервера в сайдбаре мы
+ * закрываем существующий socket и переоткрываем с новым auth.proxyServerId
+ * (см. ensureSocketForCurrentServer).
+ */
+let socketBoundServerId: string | null = null;
 const pendingListeners: Array<{ event: string; callback: Function }> = [];
 
 /** Register a socket listener, queuing it if the socket isn't connected yet */
@@ -79,8 +85,29 @@ export function useSocket() {
     }
   }
 
+  function getActiveServerId(): string | null {
+    try {
+      const serverStore = useServerStore();
+      // isLocal === true означает, что выбран master ('main') — сокет идёт в локальный мастер.
+      if (serverStore.isLocal) return null;
+      return serverStore.currentServerId || null;
+    } catch {
+      return null;
+    }
+  }
+
   function connect() {
-    if (socket?.connected) return;
+    const targetServerId = getActiveServerId();
+
+    // Если сокет уже подключён И привязан к нужному серверу — ничего не делаем.
+    if (socket?.connected && socketBoundServerId === targetServerId) return;
+
+    // Если сокет существует, но привязан к другому серверу — переоткрываем.
+    if (socket && socketBoundServerId !== targetServerId) {
+      try { socket.disconnect(); } catch { /* noop */ }
+      socket = null;
+      connected.value = false;
+    }
 
     const token = localStorage.getItem('accessToken');
     if (!token) return;
@@ -89,12 +116,20 @@ export function useSocket() {
     // Extract base URL (protocol + host) from apiBase
     const url = apiBase.replace(/\/api\/?$/, '');
 
+    // При выбранном slave-сервере шлём proxyServerId — мастер откроет upstream
+    // socket к slave и прозрачно ретранслирует все события в обе стороны.
+    // Это разблокирует terminal/logs-tail/AI/deploy-log/backup-progress/
+    // site-provision/php-install/migrate-hostpanel на удалённых серверах.
+    const auth: Record<string, string> = { token };
+    if (targetServerId) auth.proxyServerId = targetServerId;
+
     socket = io(url, {
-      auth: { token },
+      auth,
       transports: ['websocket'],
       reconnection: true,
       reconnectionDelay: 5000,
     });
+    socketBoundServerId = targetServerId;
 
     // Replay listeners that were registered before the socket was created
     for (const { event, callback } of pendingListeners) {
@@ -110,48 +145,26 @@ export function useSocket() {
       connected.value = false;
     });
 
-    // System metrics stream (every 10s from agent)
-    // Only update metrics if viewing the local (main) server
-    socket.on('system:metrics', (data: SystemMetrics) => {
-      if (!isRemoteServer()) {
-        metrics.value = data;
-      }
+    // Если мастер не смог достучаться до slave — закрываем сокет и кидаем
+    // toast (proxy:error прилетает один раз в начале сессии).
+    socket.on('proxy:error', (payload: { code?: string; message?: string }) => {
+      // eslint-disable-next-line no-console
+      console.warn('[useSocket] proxy error:', payload);
     });
 
-    // If remote server is selected, poll metrics via proxy API
-    if (isRemoteServer()) {
-      startRemotePoll();
-    }
+    // System metrics stream (every 10s) — на remote мастер ретранслирует метрики slave'а
+    // (после WS-прокси), на local — приходят от агента мастера.
+    socket.on('system:metrics', (data: SystemMetrics) => {
+      metrics.value = data;
+    });
   }
 
   function disconnect() {
-    stopRemotePoll();
     if (socket) {
       socket.disconnect();
       socket = null;
+      socketBoundServerId = null;
       connected.value = false;
-    }
-  }
-
-  function startRemotePoll() {
-    stopRemotePoll();
-    const api = useApi();
-    const poll = async () => {
-      try {
-        const data = await api.get<SystemMetrics | null>('/monitoring/current');
-        if (data) metrics.value = data;
-      } catch {
-        // Remote server unreachable
-      }
-    };
-    poll();
-    remotePollTimer = setInterval(poll, 10_000);
-  }
-
-  function stopRemotePoll() {
-    if (remotePollTimer) {
-      clearInterval(remotePollTimer);
-      remotePollTimer = null;
     }
   }
 

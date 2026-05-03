@@ -120,6 +120,11 @@ model Site {
   // Per-site список таблиц БД, которые дампятся БЕЗ данных (только структура).
   // JSON string[]. null/[] — fallback на глобальные.
   backupExcludeTables   String?  @map("backup_exclude_tables")
+  // Произвольный JSON для маркеров и meta-данных. Пример:
+  //   { "migrationId": "<HostpanelMigration.id>", "importedFrom": "vm120", "originalUid": 1002 }
+  // Используется hostpanel-миграцией для контракта cleanup'а: cleanup трогает
+  // только сайты с metadata.migrationId === currentMigrationId.
+  metadata              String?  // JSON object
   userId           String   @map("user_id")
   createdAt        DateTime @default(now()) @map("created_at")
   updatedAt        DateTime @updatedAt @map("updated_at")
@@ -766,4 +771,147 @@ model PanelUpdateHistory {
 
   @@index([startedAt])
   @@map("panel_update_history")
+}
+
+// =============================================================================
+// System cron jobs — задачи в crontab пользователя `root`. Управление
+// аналогично per-site CronJob, но scope = SYSTEM (вне привязки к Site).
+// Используется для общесистемных задач (дисковые проверки, бэкапы хоста и т.п.)
+// и для импорта root-крона при миграции с hostpanel.
+// =============================================================================
+
+model SystemCronJob {
+  id           String    @id @default(uuid())
+  name         String
+  schedule     String                // cron expression: "* * * * *"
+  command      String
+  status       String    @default("ACTIVE") // ACTIVE | DISABLED
+  // Источник записи: MANUAL — оператор создал из UI; IMPORTED_HOSTPANEL —
+  // строка пришла из hostpanel-миграции (отображается с пометкой в UI).
+  source       String    @default("MANUAL")
+  // Опциональный комментарий (одной строкой) — отображается под именем.
+  comment      String?
+  lastOutput   String?   @map("last_output")
+  lastRunAt    DateTime? @map("last_run_at")
+  lastExitCode Int?      @map("last_exit_code")
+  createdAt    DateTime  @default(now()) @map("created_at")
+  updatedAt    DateTime  @updatedAt @map("updated_at")
+
+  @@map("system_cron_jobs")
+}
+
+// =============================================================================
+// Hostpanel migration — перенос сайтов со старой "hostPanel" (компонент MODX)
+// на slave-сервер meowbox. Двухуровневая модель:
+//   - HostpanelMigration: один запуск (источник + целевой slave + общий статус)
+//   - HostpanelMigrationItem: один сайт внутри запуска (план + статус + лог)
+//
+// Безопасность кредов: SSH/MySQL пароли источника шифруются AES-256-GCM
+// ключом MIGRATION_SECRET (env, генерится system-миграцией). В UI пароли
+// никогда не отображаются после ввода.
+//
+// Транзакционная семантика: каждый item — независимая псевдо-транзакция.
+// На сбое — cleanup только артефактов с migrationId === currentId.
+// =============================================================================
+
+model HostpanelMigration {
+  id          String   @id @default(uuid())
+  // PLANNED — создан, ещё не запускался
+  // DISCOVERING — идёт пробинг источника
+  // READY — discovery закончен, оператор редактирует план
+  // RUNNING — выполняется
+  // DONE — все sайты успешно
+  // FAILED — все упали или фатальная ошибка
+  // PARTIAL — часть успешно, часть упала
+  // CANCELLED — отменён оператором
+  status      String   @default("PLANNED")
+  // JSON: { host, port, sshUser, sshPassEnc, mysqlHost, mysqlPort, mysqlUser,
+  //         mysqlPassEnc, hostpanelDb, hostpanelTablePrefix }
+  // Пароли в *Enc — base64(iv|tag|ciphertext) под MIGRATION_SECRET.
+  // Миграция всегда локальна слейву, на котором живёт эта запись (master
+  // проксирует REST-запросы по `/proxy/{serverId}/...` в выбранный slave).
+  source      String
+  // JSON: snapshot источника на момент discover (sites[], manticore, php-versions, ...)
+  // null до завершения discovery.
+  discovery   String?
+  totalSites  Int      @default(0) @map("total_sites")
+  doneSites   Int      @default(0) @map("done_sites")
+  failedSites Int      @default(0) @map("failed_sites")
+  // Append-only лог стрима. Хранится последние 500 KB.
+  log         String   @default("")
+  errorMessage String? @map("error_message")
+  createdAt   DateTime @default(now()) @map("created_at")
+  startedAt   DateTime? @map("started_at")
+  finishedAt  DateTime? @map("finished_at")
+  createdBy   String   @map("created_by") // User.id
+
+  items HostpanelMigrationItem[]
+
+  @@index([status])
+  @@index([createdAt])
+  @@map("hostpanel_migrations")
+}
+
+model HostpanelMigrationItem {
+  id              String    @id @default(uuid())
+  migrationId     String    @map("migration_id")
+  // hostpanel sites.id (modx_host_hostpanel_sites.id) — на источнике
+  sourceSiteId    Int       @map("source_site_id")
+  // JSON: исходная строка (sftp_pass, mysql_pass извлечены отдельно в migration.source)
+  sourceData      String    @map("source_data")
+  // JSON: PlanItem (см. spec §6.3) — финальный план миграции этого сайта
+  plan            String
+  // PLANNED|RUNNING|DONE|FAILED|SKIPPED|CONFLICT
+  status          String    @default("PLANNED")
+  // FK на Site после успеха (null до DONE или при FAILED/SKIPPED)
+  newSiteId       String?   @map("new_site_id")
+  errorMsg        String?   @map("error_msg")
+  startedAt       DateTime? @map("started_at")
+  finishedAt      DateTime? @map("finished_at")
+  // 0..100 — текущий прогресс (для rsync/dump — реальный, иначе round-up по стейджам)
+  progressPercent Int       @default(0) @map("progress_percent")
+  // Имя текущего стейджа: pre-flight | create-user | rsync-files | db-create | ...
+  currentStage    String?   @map("current_stage")
+  // Последние 200 KB лога этого item (rsync output, mysqldump errors etc.)
+  log             String    @default("")
+
+  migration HostpanelMigration @relation(fields: [migrationId], references: [id], onDelete: Cascade)
+
+  @@index([migrationId])
+  @@index([status])
+  @@map("hostpanel_migration_items")
+}
+
+// Сохранённые пресеты подключения к источникам hostPanel. Оператор не должен
+// каждый раз вбивать SSH/MySQL креды — выбрал из списка → форма
+// заполнилась → жмём «Сканировать». Пароли шифруются тем же
+// MIGRATION_SECRET'ом, что и в HostpanelMigration.source. Ни в каком виде
+// в API наружу не отдаются — для запуска discovery фронт шлёт sourceId,
+// бэкенд внутри подставляет креды.
+model HostpanelMigrationSource {
+  id                   String    @id @default(uuid())
+  // Удобочитаемое имя в UI («vm120 prod», «backup-server» и т.п.).
+  name                 String
+  host                 String
+  port                 Int       @default(22)
+  sshUser              String    @map("ssh_user")
+  sshPassEnc           String    @map("ssh_pass_enc") // base64 AES-256-GCM
+  mysqlHost            String    @map("mysql_host")
+  mysqlPort            Int       @default(3306) @map("mysql_port")
+  mysqlUser            String    @map("mysql_user")
+  mysqlPassEnc         String    @map("mysql_pass_enc")
+  hostpanelDb          String    @map("hostpanel_db")
+  hostpanelTablePrefix String    @map("hostpanel_table_prefix")
+  createdAt            DateTime  @default(now()) @map("created_at")
+  updatedAt            DateTime  @updatedAt @map("updated_at")
+  // Когда последний раз через этот пресет запускали discovery — сортируем
+  // по нему в UI, чтобы недавно использованные были сверху.
+  lastUsedAt           DateTime? @map("last_used_at")
+  createdBy            String    @map("created_by") // User.id
+
+  // Уникальная пара host+sshUser+mysqlUser защищает от дублей при невнимательном
+  // повторном сохранении того же сервера.
+  @@unique([host, sshUser, mysqlUser])
+  @@index([lastUsedAt])
+  @@map("hostpanel_migration_sources")
 }

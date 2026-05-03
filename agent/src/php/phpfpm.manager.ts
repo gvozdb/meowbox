@@ -340,15 +340,24 @@ ${s}
     }
   }
 
-  async installVersion(version: string): Promise<{ success: boolean; error?: string }> {
+  async installVersion(
+    version: string,
+    onLog?: (line: string, stream: 'stdout' | 'stderr') => void,
+  ): Promise<{ success: boolean; error?: string }> {
     try {
-      // Add ondrej/php PPA if not present
-      const ppaCheck = await this.executor.execute('ls', ['/etc/apt/sources.list.d/ondrej-ubuntu-php-*.list']);
-      if (ppaCheck.exitCode !== 0) {
-        await this.executor.execute('add-apt-repository', ['-y', 'ppa:ondrej/php'], { timeout: 120_000 });
-      }
+      assertRegex('phpVersion', version, RE_PHP_VERSION);
+      const log = (l: string, s: 'stdout' | 'stderr' = 'stdout') => {
+        try { onLog?.(l, s); } catch { /* ignore */ }
+      };
+      log(`▶ Installing PHP ${version}`);
+      log(`→ ensurePhpRepository...`);
+      await this.ensurePhpRepository(onLog);
 
-      await this.executor.execute('apt-get', ['update', '-qq'], { timeout: 120_000 });
+      log(`→ apt-get update`);
+      await this.executor.executeStreaming(
+        'apt-get', ['update'],
+        { timeout: 120_000, onLine: log, stdin: 'ignore' },
+      );
 
       const packages = [
         `php${version}-fpm`,
@@ -356,48 +365,193 @@ ${s}
         `php${version}-common`,
         `php${version}-mysql`,
         `php${version}-pgsql`,
+        `php${version}-sqlite3`,
         `php${version}-curl`,
         `php${version}-gd`,
         `php${version}-mbstring`,
         `php${version}-xml`,
         `php${version}-zip`,
         `php${version}-intl`,
+        `php${version}-bcmath`,
         `php${version}-opcache`,
+        `php${version}-imagick`,
       ];
 
-      const result = await this.executor.execute(
-        'apt-get', ['install', '-y', '-qq', ...packages],
-        { timeout: 600_000 },
+      log(`→ apt-get install ${packages.length} packages...`);
+      const result = await this.executor.executeStreaming(
+        'apt-get', ['install', '-y', ...packages],
+        {
+          timeout: 600_000,
+          onLine: log,
+          stdin: 'ignore',
+          env: { DEBIAN_FRONTEND: 'noninteractive' },
+        },
       );
 
       if (result.exitCode !== 0) {
-        return { success: false, error: result.stderr };
+        log(`✗ apt-get install exit=${result.exitCode}`, 'stderr');
+        return { success: false, error: result.stderr || `apt-get install exit ${result.exitCode}` };
       }
 
-      // Enable and start php-fpm
+      log(`→ systemctl enable php${version}-fpm`);
       await this.executor.execute('systemctl', ['enable', `php${version}-fpm`]);
+      log(`→ systemctl start php${version}-fpm`);
       await this.executor.execute('systemctl', ['start', `php${version}-fpm`]);
 
+      log(`✓ PHP ${version} installed`);
       return { success: true };
     } catch (err) {
-      return { success: false, error: (err as Error).message };
+      const msg = (err as Error).message;
+      try { onLog?.(`✗ ${msg}`, 'stderr'); } catch { /* ignore */ }
+      return { success: false, error: msg };
     }
   }
 
-  async uninstallVersion(version: string): Promise<{ success: boolean; error?: string }> {
+  private async ensurePhpRepository(
+    onLog?: (line: string, stream: 'stdout' | 'stderr') => void,
+  ): Promise<void> {
+    const log = (l: string, s: 'stdout' | 'stderr' = 'stdout') => {
+      try { onLog?.(l, s); } catch { /* ignore */ }
+    };
+    const osRelease = await this.readOsRelease();
+
+    if (osRelease.ID === 'ubuntu') {
+      if (await this.aptSourceContains('ondrej/php')) {
+        log(`  ondrej/php PPA уже настроен — пропускаем`);
+        return;
+      }
+
+      log(`  apt-get install deps (software-properties-common, ca-certificates, curl)`);
+      const deps = await this.executor.executeStreaming(
+        'apt-get',
+        ['install', '-y', 'software-properties-common', 'ca-certificates', 'curl'],
+        { timeout: 120_000, onLine: log, stdin: 'ignore', env: { DEBIAN_FRONTEND: 'noninteractive' } },
+      );
+      if (deps.exitCode !== 0) throw new Error(deps.stderr || 'Failed to install PPA dependencies');
+
+      log(`  add-apt-repository ppa:ondrej/php`);
+      const add = await this.executor.executeStreaming(
+        'add-apt-repository',
+        ['-y', 'ppa:ondrej/php'],
+        { timeout: 120_000, onLine: log, stdin: 'ignore' },
+      );
+      if (add.exitCode !== 0) throw new Error(add.stderr || 'Failed to add ondrej/php PPA');
+      return;
+    }
+
+    if (osRelease.ID === 'debian') {
+      const codename = osRelease.VERSION_CODENAME;
+      if (!codename) throw new Error('Cannot detect Debian VERSION_CODENAME for sury.org PHP repository');
+      const sourcePath = '/etc/apt/sources.list.d/sury-php.list';
+      if (await this.fileExists(sourcePath)) return;
+
+      const deps = await this.executor.execute(
+        'apt-get',
+        ['install', '-y', '-qq', 'ca-certificates', 'curl'],
+        { timeout: 120_000 },
+      );
+      if (deps.exitCode !== 0) throw new Error(deps.stderr || 'Failed to install sury.org dependencies');
+
+      await this.executor.execute('mkdir', ['-p', '/etc/apt/keyrings']);
+      const key = await this.executor.execute(
+        'curl',
+        ['-fsSL', 'https://packages.sury.org/php/apt.gpg', '-o', '/etc/apt/keyrings/sury-php.gpg'],
+        { timeout: 120_000 },
+      );
+      if (key.exitCode !== 0) throw new Error(key.stderr || 'Failed to download sury.org apt key');
+
+      await this.executor.execute('chmod', ['a+r', '/etc/apt/keyrings/sury-php.gpg']);
+      await fs.writeFile(
+        sourcePath,
+        `deb [signed-by=/etc/apt/keyrings/sury-php.gpg] https://packages.sury.org/php/ ${codename} main\n`,
+        'utf-8',
+      );
+      return;
+    }
+
+    throw new Error(`Unsupported distro for PHP repository: ${osRelease.ID || 'unknown'}`);
+  }
+
+  private async readOsRelease(): Promise<Record<string, string>> {
+    const content = await fs.readFile('/etc/os-release', 'utf-8');
+    const result: Record<string, string> = {};
+    for (const line of content.split(/\r?\n/)) {
+      const match = line.match(/^([A-Z0-9_]+)=(.*)$/);
+      if (!match) continue;
+      result[match[1]] = match[2].replace(/^"/, '').replace(/"$/, '');
+    }
+    return result;
+  }
+
+  private async fileExists(filePath: string): Promise<boolean> {
     try {
+      await fs.access(filePath);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  private async aptSourceContains(needle: string): Promise<boolean> {
+    const files = ['/etc/apt/sources.list'];
+    try {
+      const entries = await fs.readdir('/etc/apt/sources.list.d');
+      for (const entry of entries) {
+        if (entry.endsWith('.list') || entry.endsWith('.sources')) {
+          files.push(path.join('/etc/apt/sources.list.d', entry));
+        }
+      }
+    } catch {
+      // directory can be absent on stripped-down images
+    }
+
+    for (const file of files) {
+      try {
+        const content = await fs.readFile(file, 'utf-8');
+        if (content.includes(needle)) return true;
+      } catch {
+        // ignore unreadable/missing source files
+      }
+    }
+    return false;
+  }
+
+  async uninstallVersion(
+    version: string,
+    onLog?: (line: string, stream: 'stdout' | 'stderr') => void,
+  ): Promise<{ success: boolean; error?: string }> {
+    try {
+      assertRegex('phpVersion', version, RE_PHP_VERSION);
+      const log = (l: string, s: 'stdout' | 'stderr' = 'stdout') => {
+        try { onLog?.(l, s); } catch { /* ignore */ }
+      };
+      log(`▶ Uninstalling PHP ${version}`);
+      log(`→ systemctl stop php${version}-fpm`);
       await this.executor.execute('systemctl', ['stop', `php${version}-fpm`]);
-      const result = await this.executor.execute(
+      log(`→ apt-get remove --purge php${version}-*`);
+      const result = await this.executor.executeStreaming(
         'apt-get', ['remove', '-y', '--purge', `php${version}-*`],
-        { timeout: 300_000 },
+        {
+          timeout: 300_000,
+          onLine: log,
+          stdin: 'ignore',
+          env: { DEBIAN_FRONTEND: 'noninteractive' },
+        },
       );
       if (result.exitCode !== 0) {
-        return { success: false, error: result.stderr };
+        return { success: false, error: result.stderr || `apt-get remove exit ${result.exitCode}` };
       }
-      await this.executor.execute('apt-get', ['autoremove', '-y', '-qq'], { timeout: 120_000 });
+      log(`→ apt-get autoremove`);
+      await this.executor.executeStreaming(
+        'apt-get', ['autoremove', '-y'],
+        { timeout: 120_000, onLine: log, stdin: 'ignore', env: { DEBIAN_FRONTEND: 'noninteractive' } },
+      );
+      log(`✓ PHP ${version} uninstalled`);
       return { success: true };
     } catch (err) {
-      return { success: false, error: (err as Error).message };
+      const msg = (err as Error).message;
+      try { onLog?.(`✗ ${msg}`, 'stderr'); } catch { /* ignore */ }
+      return { success: false, error: msg };
     }
   }
 
@@ -449,21 +603,39 @@ ${s}
     }
   }
 
-  async installExtension(version: string, name: string): Promise<{ success: boolean; error?: string }> {
+  async installExtension(
+    version: string,
+    name: string,
+    onLog?: (line: string, stream: 'stdout' | 'stderr') => void,
+  ): Promise<{ success: boolean; error?: string }> {
     try {
       assertRegex('phpVersion', version, RE_PHP_VERSION);
       assertRegex('extensionName', name, RE_PHP_EXT);
-      const result = await this.executor.execute(
-        'apt-get', ['install', '-y', '-qq', `php${version}-${name}`],
-        { timeout: 120_000 },
+      const log = (l: string, s: 'stdout' | 'stderr' = 'stdout') => {
+        try { onLog?.(l, s); } catch { /* ignore */ }
+      };
+      log(`▶ Installing extension php${version}-${name}`);
+      const result = await this.executor.executeStreaming(
+        'apt-get', ['install', '-y', `php${version}-${name}`],
+        {
+          timeout: 180_000,
+          onLine: log,
+          stdin: 'ignore',
+          env: { DEBIAN_FRONTEND: 'noninteractive' },
+        },
       );
       if (result.exitCode !== 0) {
-        return { success: false, error: result.stderr };
+        log(`✗ apt-get install exit=${result.exitCode}`, 'stderr');
+        return { success: false, error: result.stderr || `apt-get install exit ${result.exitCode}` };
       }
+      log(`→ systemctl restart php${version}-fpm`);
       await this.executor.execute('systemctl', ['restart', `php${version}-fpm`]);
+      log(`✓ Extension php${version}-${name} installed`);
       return { success: true };
     } catch (err) {
-      return { success: false, error: (err as Error).message };
+      const msg = (err as Error).message;
+      try { onLog?.(`✗ ${msg}`, 'stderr'); } catch { /* ignore */ }
+      return { success: false, error: msg };
     }
   }
 

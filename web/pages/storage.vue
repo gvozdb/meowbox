@@ -393,8 +393,8 @@ onUnmounted(() => {
   display: flex;
   align-items: center;
   justify-content: center;
-  background: rgba(245, 158, 11, 0.1);
-  color: #fbbf24;
+  background: rgba(var(--primary-rgb), 0.1);
+  color: var(--primary-light);
   flex-shrink: 0;
 }
 
@@ -440,7 +440,7 @@ onUnmounted(() => {
   color: #4ade80;
 }
 
-.server-disk__pct--warn { color: #fbbf24; }
+.server-disk__pct--warn { color: var(--primary-light); }
 .server-disk__pct--crit { color: #f87171; }
 
 .server-disk__bar {
@@ -458,7 +458,7 @@ onUnmounted(() => {
 }
 
 .server-disk__bar-fill--warn {
-  background: linear-gradient(90deg, #f59e0b, #fbbf24);
+  background: linear-gradient(90deg, var(--primary), var(--primary-light));
 }
 
 .server-disk__bar-fill--crit {
@@ -619,7 +619,7 @@ onUnmounted(() => {
 }
 
 .storage-row__mini-fill--www { background: #818cf8; }
-.storage-row__mini-fill--logs { background: #fbbf24; }
+.storage-row__mini-fill--logs { background: var(--primary-light); }
 .storage-row__mini-fill--tmp { background: #94a3b8; }
 .storage-row__mini-fill--db { background: #f472b6; }
 
@@ -778,7 +778,7 @@ onUnmounted(() => {
 }
 
 .legend-dot--www { background: #818cf8; }
-.legend-dot--logs { background: #fbbf24; }
+.legend-dot--logs { background: var(--primary-light); }
 .legend-dot--tmp { background: #94a3b8; }
 .legend-dot--db { background: #f472b6; }
 

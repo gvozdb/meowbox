@@ -127,7 +127,7 @@ interface SslCert {
   siteName: string;
   domain: string;
   domains: string[];
-  /** Non-redirect алиасы сайта, отсутствующие в SAN сертификата. */
+  /** Алиасы сайта (вкл. redirect), отсутствующие в SAN сертификата. */
   missingAliases: string[];
   /** Основной домен не входит в SAN (возможно после смены главного домена). */
   missingMainDomain: boolean;
@@ -316,7 +316,7 @@ onMounted(() => {
 }
 
 .summary-card__icon--ok { background: rgba(34, 197, 94, 0.1); color: #4ade80; }
-.summary-card__icon--warn { background: rgba(245, 158, 11, 0.1); color: #fbbf24; }
+.summary-card__icon--warn { background: rgba(var(--primary-rgb), 0.1); color: var(--primary-light); }
 .summary-card__icon--crit { background: rgba(239, 68, 68, 0.1); color: #f87171; }
 .summary-card__icon--pending { background: rgba(99, 102, 241, 0.1); color: #818cf8; }
 
@@ -435,7 +435,7 @@ onMounted(() => {
 }
 
 .ssl-row__days--ok { color: #4ade80; }
-.ssl-row__days--warn { color: #fbbf24; }
+.ssl-row__days--warn { color: var(--primary-light); }
 .ssl-row__days--crit { color: #f87171; }
 
 .ssl-row__date {
@@ -463,7 +463,7 @@ onMounted(() => {
 }
 
 .status-badge--active { background: rgba(34, 197, 94, 0.1); color: #4ade80; }
-.status-badge--expiring_soon { background: rgba(245, 158, 11, 0.1); color: #fbbf24; }
+.status-badge--expiring_soon { background: rgba(var(--primary-rgb), 0.1); color: var(--primary-light); }
 .status-badge--expired { background: rgba(239, 68, 68, 0.1); color: #f87171; }
 .status-badge--pending { background: rgba(99, 102, 241, 0.1); color: #818cf8; }
 .status-badge--none { background: rgba(148, 163, 184, 0.1); color: #94a3b8; }

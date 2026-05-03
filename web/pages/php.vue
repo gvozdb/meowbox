@@ -9,13 +9,36 @@
 
     <!-- Install new version -->
     <div v-if="!loading" class="install-row">
-      <select v-model="installVersion" class="form-select">
+      <select v-model="installVersion" class="form-select" @change="onInstallVersionChange">
         <option value="">Install PHP version...</option>
-        <option v-for="v in availableVersions" :key="v" :value="v">PHP {{ v }}</option>
+        <optgroup label="Modern (supported)">
+          <option v-for="v in availableModernVersions" :key="v" :value="v">PHP {{ v }}</option>
+        </optgroup>
+        <optgroup label="Legacy (EOL — only for migration)">
+          <option v-for="v in availableLegacyVersions" :key="v" :value="v">PHP {{ v }} ⚠</option>
+        </optgroup>
       </select>
       <button class="btn btn--primary btn--sm" :disabled="!installVersion || installing" @click="doInstall">
         {{ installing ? 'Installing...' : 'Install' }}
       </button>
+    </div>
+
+    <!-- Live install log -->
+    <div v-if="installLog.length > 0" class="install-log">
+      <div class="install-log__head">
+        <strong>Лог установки {{ installLogVersion ? `PHP ${installLogVersion}` : '' }}</strong>
+        <button v-if="!installing" class="btn btn--ghost btn--sm" @click="installLog = []; installLogVersion = ''">Очистить</button>
+      </div>
+      <pre ref="installLogEl" class="install-log__body">{{ installLogText }}</pre>
+    </div>
+
+    <!-- Legacy warning -->
+    <div v-if="installVersion && isLegacy(installVersion)" class="legacy-warning">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z" /><line x1="12" y1="9" x2="12" y2="13" /><line x1="12" y1="17" x2="12.01" y2="17" /></svg>
+      <div>
+        <strong>PHP {{ installVersion }} снят с поддержки разработчиками PHP.</strong>
+        <p>Используй ТОЛЬКО для миграции старых сайтов. Новые проекты на legacy-PHP — известные уязвимости и отсутствие security-фиксов.</p>
+      </div>
     </div>
 
     <div v-if="loading" class="php__loading">
@@ -131,6 +154,13 @@
                   {{ installingExt ? 'Installing...' : 'Install' }}
                 </button>
               </div>
+              <div v-if="extInstallLog.length > 0" class="install-log install-log--inline">
+                <div class="install-log__head">
+                  <strong>Лог установки расширения {{ extInstallLogName || '' }}</strong>
+                  <button v-if="!installingExt" class="btn btn--ghost btn--sm" @click="extInstallLog = []; extInstallLogName = ''">Очистить</button>
+                </div>
+                <pre ref="extInstallLogEl" class="install-log__body">{{ extInstallLogText }}</pre>
+              </div>
               <div v-if="loadingExt" class="ext-loading">
                 <div class="spinner" />
                 <span>Loading extensions...</span>
@@ -169,19 +199,120 @@ definePageMeta({ middleware: 'auth' });
 interface PhpVersionStatus { running: boolean; version: string | null; poolCount: number; }
 interface PhpExtension { name: string; enabled: boolean; }
 
-const ALL_VERSIONS = ['8.0', '8.1', '8.2', '8.3', '8.4'];
+// Modern (актуально поддерживаемые) и Legacy (EOL — нужны только для миграций
+// со старых проектов). Legacy показываются отдельной optgroup'ой с warning'ом.
+const MODERN_VERSIONS = ['8.4', '8.3', '8.2', '8.1', '8.0'];
+const LEGACY_VERSIONS = ['7.4', '7.3', '7.2', '7.1'];
+const ALL_VERSIONS = [...MODERN_VERSIONS, ...LEGACY_VERSIONS];
+
+function isLegacy(v: string): boolean {
+  return LEGACY_VERSIONS.includes(v);
+}
 
 const api = useApi();
+const { connect: connectSocket, getSocket } = useSocket();
 const statuses = ref<PhpVersionStatus[]>([]);
 const loading = ref(true);
 const restarting = ref<string | null>(null);
 
+// ─── Live-log стрим установки/удаления PHP-версии ───
+// Подписываемся на php:install:log в комнате php:install:<version>.
+// Лог копится в реактивный массив, рендерится в <pre> с auto-scroll вниз.
+interface LogLine { line: string; stream: 'stdout' | 'stderr'; ts: string }
+const MAX_LOG_LINES = 800;
+const installLog = ref<LogLine[]>([]);
+const installLogVersion = ref('');
+const installLogEl = ref<HTMLElement | null>(null);
+const installLogText = computed(() =>
+  installLog.value.map((l) => (l.stream === 'stderr' ? '! ' : '  ') + l.line).join('\n'),
+);
+
+// Live-лог установки extension'а (внутри Extensions модалки)
+const extInstallLog = ref<LogLine[]>([]);
+const extInstallLogName = ref('');
+const extInstallLogEl = ref<HTMLElement | null>(null);
+const extInstallLogText = computed(() =>
+  extInstallLog.value.map((l) => (l.stream === 'stderr' ? '! ' : '  ') + l.line).join('\n'),
+);
+
+let phpInstallUnsub: (() => void) | null = null;
+let phpExtInstallUnsub: (() => void) | null = null;
+
+function startPhpInstallStream(version: string) {
+  // Сбрасываем старый лог + слушатель.
+  stopPhpInstallStream();
+  installLog.value = [];
+  installLogVersion.value = version;
+  connectSocket();
+  const socket = getSocket();
+  if (!socket) return;
+  socket.emit('php:install:subscribe', { version });
+  const handler = (data: { version: string; line: string; stream?: 'stdout' | 'stderr'; timestamp: string }) => {
+    if (data.version !== version) return;
+    installLog.value.push({ line: data.line, stream: data.stream || 'stdout', ts: data.timestamp });
+    if (installLog.value.length > MAX_LOG_LINES) installLog.value.splice(0, installLog.value.length - MAX_LOG_LINES);
+    nextTick(() => {
+      if (installLogEl.value) installLogEl.value.scrollTop = installLogEl.value.scrollHeight;
+    });
+  };
+  socket.on('php:install:log', handler);
+  phpInstallUnsub = () => {
+    socket.off('php:install:log', handler);
+    socket.emit('php:install:unsubscribe', { version });
+  };
+}
+
+function stopPhpInstallStream() {
+  if (phpInstallUnsub) { try { phpInstallUnsub(); } catch { /* ignore */ } }
+  phpInstallUnsub = null;
+}
+
+function startExtInstallStream(version: string, name: string) {
+  stopExtInstallStream();
+  extInstallLog.value = [];
+  extInstallLogName.value = name;
+  connectSocket();
+  const socket = getSocket();
+  if (!socket) return;
+  socket.emit('php:ext-install:subscribe', { version, name });
+  const handler = (data: { version: string; name: string; line: string; stream?: 'stdout' | 'stderr'; timestamp: string }) => {
+    if (data.version !== version || data.name !== name) return;
+    extInstallLog.value.push({ line: data.line, stream: data.stream || 'stdout', ts: data.timestamp });
+    if (extInstallLog.value.length > MAX_LOG_LINES) extInstallLog.value.splice(0, extInstallLog.value.length - MAX_LOG_LINES);
+    nextTick(() => {
+      if (extInstallLogEl.value) extInstallLogEl.value.scrollTop = extInstallLogEl.value.scrollHeight;
+    });
+  };
+  socket.on('php:ext-install:log', handler);
+  phpExtInstallUnsub = () => {
+    socket.off('php:ext-install:log', handler);
+    socket.emit('php:ext-install:unsubscribe', { version, name });
+  };
+}
+
+function stopExtInstallStream() {
+  if (phpExtInstallUnsub) { try { phpExtInstallUnsub(); } catch { /* ignore */ } }
+  phpExtInstallUnsub = null;
+}
+
+onBeforeUnmount(() => {
+  stopPhpInstallStream();
+  stopExtInstallStream();
+});
+
 // Install
 const installVersion = ref('');
 const installing = ref(false);
-const availableVersions = computed(() =>
-  ALL_VERSIONS.filter(v => !statuses.value.some(s => s.version === v))
+const availableModernVersions = computed(() =>
+  MODERN_VERSIONS.filter(v => !statuses.value.some(s => s.version === v)),
 );
+const availableLegacyVersions = computed(() =>
+  LEGACY_VERSIONS.filter(v => !statuses.value.some(s => s.version === v)),
+);
+
+function onInstallVersionChange() {
+  /* Реактивный warning рендерится через computed isLegacy в шаблоне */
+}
 
 // Uninstall
 const uninstalling = ref<string | null>(null);
@@ -232,15 +363,19 @@ async function doInstall() {
   const ver = installVersion.value;
   if (!ver) return;
   installing.value = true;
+  startPhpInstallStream(ver);
   try {
     await api.post('/php/install', { version: ver });
     showToast(`PHP ${ver} installed successfully`);
     installVersion.value = '';
     await loadStatuses();
-  } catch {
-    showToast(`Failed to install PHP ${ver}`, true);
+  } catch (e: unknown) {
+    showToast((e as Error)?.message || `Failed to install PHP ${ver}`, true);
   } finally {
     installing.value = false;
+    // Лог НЕ чистим — оператор может почитать что произошло.
+    // Слушатель отписываем, чтобы не копились зомби-listeners при следующем install.
+    stopPhpInstallStream();
   }
 }
 
@@ -253,14 +388,16 @@ async function doUninstall(version: string) {
   });
   if (!ok) return;
   uninstalling.value = version;
+  startPhpInstallStream(version);
   try {
     await api.delete(`/php/uninstall/${version}`);
     showToast(`PHP ${version} uninstalled`);
     await loadStatuses();
-  } catch {
-    showToast(`Failed to uninstall PHP ${version}`, true);
+  } catch (e: unknown) {
+    showToast((e as Error)?.message || `Failed to uninstall PHP ${version}`, true);
   } finally {
     uninstalling.value = null;
+    stopPhpInstallStream();
   }
 }
 
@@ -327,15 +464,17 @@ async function installExtension() {
   const name = newExtName.value.trim();
   if (!name) return;
   installingExt.value = true;
+  startExtInstallStream(extVersion.value, name);
   try {
     await api.post(`/php/${extVersion.value}/extensions/install`, { name });
     showToast(`${name} installed for PHP ${extVersion.value}`);
     newExtName.value = '';
     await loadExtensions(extVersion.value);
-  } catch {
-    showToast(`Failed to install ${name}`, true);
+  } catch (e: unknown) {
+    showToast((e as Error)?.message || `Failed to install ${name}`, true);
   } finally {
     installingExt.value = false;
+    stopExtInstallStream();
   }
 }
 
@@ -400,6 +539,39 @@ onMounted(loadStatuses);
 .install-row {
   display: flex; gap: 0.5rem; margin-bottom: 1rem; align-items: center;
 }
+
+/* Live log panel */
+.install-log {
+  margin-bottom: 1rem; max-width: 100%;
+  border: 1px solid var(--border); border-radius: 10px;
+  background: var(--bg-input); overflow: hidden;
+}
+.install-log--inline { margin-top: 0.6rem; margin-bottom: 0.6rem; }
+.install-log__head {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 0.5rem 0.85rem; border-bottom: 1px solid var(--border);
+  font-size: 0.78rem; color: var(--text-secondary);
+}
+.install-log__body {
+  margin: 0; padding: 0.6rem 0.85rem; max-height: 280px;
+  overflow-y: auto; font-family: 'JetBrains Mono', monospace;
+  font-size: 0.72rem; line-height: 1.45; color: var(--text-secondary);
+  white-space: pre-wrap; word-break: break-word;
+}
+
+/* Legacy warning */
+.legacy-warning {
+  display: flex; gap: 0.7rem; align-items: flex-start;
+  padding: 0.7rem 0.9rem; margin-bottom: 1rem;
+  background: rgba(239, 68, 68, 0.06);
+  border: 1px solid rgba(239, 68, 68, 0.2);
+  border-radius: 10px;
+  color: #fca5a5;
+  max-width: 720px;
+}
+.legacy-warning svg { flex-shrink: 0; color: #f87171; margin-top: 0.1rem; }
+.legacy-warning strong { display: block; color: #fda4a4; font-size: 0.85rem; margin-bottom: 0.2rem; font-weight: 600; }
+.legacy-warning p { margin: 0; font-size: 0.78rem; line-height: 1.5; color: rgba(252, 165, 165, 0.85); }
 .form-select {
   flex: 1; max-width: 280px; padding: 0.45rem 0.75rem; border-radius: 8px;
   border: 1px solid var(--border-strong); background: var(--bg-input); color: var(--text-secondary);

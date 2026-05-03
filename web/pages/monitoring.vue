@@ -119,12 +119,12 @@
         <div class="chart-card">
           <div class="chart-card__header">
             <span class="chart-card__title">Network Out</span>
-            <span class="chart-card__value" style="color: #fbbf24">{{ formatBps(lastHistoryPoint?.netTx) }}</span>
+            <span class="chart-card__value" style="color: var(--primary-light)">{{ formatBps(lastHistoryPoint?.netTx) }}</span>
           </div>
           <svg class="chart-svg" :viewBox="`0 0 ${chartW} ${chartH}`" preserveAspectRatio="none">
-            <defs><linearGradient :id="'grad-tx'" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="#fbbf24" stop-opacity="0.25" /><stop offset="100%" stop-color="#fbbf24" stop-opacity="0" /></linearGradient></defs>
+            <defs><linearGradient :id="'grad-tx'" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="var(--primary-light)" stop-opacity="0.25" /><stop offset="100%" stop-color="var(--primary-light)" stop-opacity="0" /></linearGradient></defs>
             <path :d="areaPath(history, 'netTx', netMax)" :fill="`url(#grad-tx)`" />
-            <polyline :points="linePath(history, 'netTx', netMax)" fill="none" stroke="#fbbf24" stroke-width="1.5" stroke-linejoin="round" />
+            <polyline :points="linePath(history, 'netTx', netMax)" fill="none" stroke="var(--primary-light)" stroke-width="1.5" stroke-linejoin="round" />
           </svg>
         </div>
       </div>
@@ -399,7 +399,7 @@ onUnmounted(() => {
 }
 .gauge__fill--cpu { stroke: #818cf8; }
 .gauge__fill--mem { stroke: #f472b6; }
-.gauge__fill--disk { stroke: #fbbf24; }
+.gauge__fill--disk { stroke: var(--primary-light); }
 
 .gauge__center {
   position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; gap: 0.1rem;
@@ -423,7 +423,7 @@ onUnmounted(() => {
 .load-bar__label { font-size: 0.68rem; font-family: 'JetBrains Mono', monospace; color: var(--text-muted); min-width: 28px; }
 .load-bar__track { flex: 1; height: 6px; background: var(--bar-bg); border-radius: 3px; overflow: hidden; }
 .load-bar__fill { height: 100%; background: linear-gradient(90deg, #22c55e, #4ade80); border-radius: 3px; transition: width 0.5s ease; }
-.load-bar__fill--warn { background: linear-gradient(90deg, #f59e0b, #fbbf24); }
+.load-bar__fill--warn { background: linear-gradient(90deg, var(--primary), var(--primary-light)); }
 .load-bar__fill--crit { background: linear-gradient(90deg, #ef4444, #f87171); }
 .load-bar__value { font-size: 0.72rem; font-family: 'JetBrains Mono', monospace; color: var(--text-tertiary); min-width: 36px; text-align: right; }
 
@@ -455,8 +455,8 @@ onUnmounted(() => {
 .disk-row { display: flex; align-items: center; gap: 0.75rem; }
 .disk-row__mount { font-size: 0.72rem; color: var(--text-tertiary); min-width: 80px; }
 .disk-row__bar { flex: 1; height: 6px; background: var(--bar-bg); border-radius: 3px; overflow: hidden; }
-.disk-row__bar-fill { height: 100%; background: linear-gradient(90deg, #fbbf24, #f59e0b); border-radius: 3px; transition: width 0.5s ease; }
-.disk-row__bar-fill--warn { background: linear-gradient(90deg, #f59e0b, #d97706); }
+.disk-row__bar-fill { height: 100%; background: linear-gradient(90deg, var(--primary-light), var(--primary)); border-radius: 3px; transition: width 0.5s ease; }
+.disk-row__bar-fill--warn { background: linear-gradient(90deg, var(--primary), var(--primary-dark)); }
 .disk-row__bar-fill--crit { background: linear-gradient(90deg, #ef4444, #f87171); }
 .disk-row__pct { font-size: 0.72rem; font-family: 'JetBrains Mono', monospace; color: var(--text-tertiary); min-width: 36px; text-align: right; }
 .disk-row__size { font-size: 0.68rem; color: var(--text-faint); min-width: 100px; text-align: right; }

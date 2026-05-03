@@ -197,7 +197,7 @@ const isActive = computed(() => {
   width: 3px;
   height: 16px;
   border-radius: 3px 0 0 3px;
-  background: linear-gradient(180deg, #fbbf24, #d97706);
-  box-shadow: 0 0 8px rgba(245, 158, 11, 0.3);
+  background: linear-gradient(180deg, var(--primary-light), var(--primary-dark));
+  box-shadow: 0 0 8px rgba(var(--primary-rgb), 0.3);
 }
 </style>

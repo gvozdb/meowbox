@@ -167,9 +167,9 @@ const props = withDefaults(
 
 const isBlinking = ref(false);
 
-const bodyFill = computed(() => '#f59e0b');
-const earFill = computed(() => '#f59e0b');
-const innerEarFill = computed(() => '#fbbf24');
+const bodyFill = computed(() => 'var(--primary)');
+const earFill = computed(() => 'var(--primary)');
+const innerEarFill = computed(() => 'var(--primary-light)');
 const eyeBgFill = computed(() => '#fef3c7');
 
 const pupilRx = computed(() => {
@@ -198,7 +198,7 @@ onUnmounted(() => {
 .cat-mascot {
   color: #92400e;
   display: inline-flex;
-  filter: drop-shadow(0 4px 24px rgba(245, 158, 11, 0.15));
+  filter: drop-shadow(0 4px 24px rgba(var(--primary-rgb), 0.15));
   animation: cat-float 4s ease-in-out infinite;
 }
 

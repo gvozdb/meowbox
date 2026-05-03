@@ -48,19 +48,57 @@
         </div>
       </div>
 
-      <!-- Server selector (only when multiple servers) -->
-      <div v-if="serverStore.hasMultipleServers" class="sidebar__server">
-        <select
-          :value="serverStore.currentServerId"
-          class="sidebar__server-select"
-          @change="onServerChange"
+      <!-- Server selector (only when multiple servers) — кастомный dropdown,
+           чтобы кругляш слева (статус) подсвечивался цветом палитры сервера.
+           Native <select> отказали: в <option> нельзя стилизовать псевдо-элементы. -->
+      <div
+        v-if="serverStore.hasMultipleServers"
+        ref="serverDropdownRef"
+        class="sidebar__server"
+        :class="{ 'sidebar__server--open': serverMenuOpen }"
+      >
+        <button
+          type="button"
+          class="sidebar__server-trigger"
+          @click="serverMenuOpen = !serverMenuOpen"
         >
-          <option
-            v-for="s in serverStore.servers"
-            :key="s.id"
-            :value="s.id"
-          >{{ s.online ? '\u25CF' : '\u25CB' }} {{ s.name }}</option>
-        </select>
+          <span
+            class="sidebar__server-dot"
+            :class="{ 'sidebar__server-dot--offline': !currentServerInfo?.online }"
+            :style="{ '--server-dot-color': currentServerSwatch }"
+          />
+          <span class="sidebar__server-name">{{ currentServerInfo?.name || '—' }}</span>
+          <svg class="sidebar__server-chevron" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+            <polyline points="6,9 12,15 18,9" />
+          </svg>
+        </button>
+        <Transition name="dropdown">
+          <div v-if="serverMenuOpen" class="sidebar__server-menu" role="listbox">
+            <button
+              v-for="s in serverStore.servers"
+              :key="s.id"
+              type="button"
+              class="sidebar__server-option"
+              :class="{ 'sidebar__server-option--active': s.id === serverStore.currentServerId }"
+              role="option"
+              :aria-selected="s.id === serverStore.currentServerId"
+              @click="selectServerFromMenu(s.id)"
+            >
+              <span
+                class="sidebar__server-dot"
+                :class="{ 'sidebar__server-dot--offline': !s.online }"
+                :style="{ '--server-dot-color': swatchForServer(s.id) }"
+              />
+              <span class="sidebar__server-name">{{ s.name }}</span>
+              <svg
+                v-if="s.id === serverStore.currentServerId"
+                class="sidebar__server-check"
+                width="13" height="13" viewBox="0 0 24 24" fill="none"
+                stroke="currentColor" stroke-width="2.5" stroke-linecap="round"
+              ><polyline points="20 6 9 17 4 12" /></svg>
+            </button>
+          </div>
+        </Transition>
       </div>
 
       <!-- Navigation -->
@@ -141,12 +179,74 @@
 </template>
 
 <script setup lang="ts">
+import { PALETTE_SWATCHES, type PaletteId } from '~/composables/usePalette';
+
 const authStore = useAuthStore();
 const serverStore = useServerStore();
 const sidebarOpen = ref(false);
 const { connect: connectSocket, disconnect: disconnectSocket } = useSocket();
 const { isDark, toggle: themeToggle, init: themeInit } = useTheme();
+const {
+  applyForServer: applyPaletteForServer,
+  setForServer: setPaletteForServer,
+  readForServer: readPaletteForServer,
+  loadAllFromApi: loadAllPalettesFromApi,
+  DEFAULT_PALETTE,
+} = usePalette();
 const api = useApi();
+
+// ── Кастомный селектор серверов (открывается по клику, дот = цвет палитры) ──
+const serverMenuOpen = ref(false);
+const serverDropdownRef = ref<HTMLElement | null>(null);
+
+const currentServerInfo = computed(() =>
+  serverStore.servers.find((s) => s.id === serverStore.currentServerId) ?? null,
+);
+
+/** Hex цвета палитры сервера (или дефолт если кеш пустой). */
+function swatchForServer(serverId: string): string {
+  const p = (readPaletteForServer(serverId) as PaletteId | null) ?? DEFAULT_PALETTE;
+  return PALETTE_SWATCHES[p];
+}
+
+const currentServerSwatch = computed(() =>
+  swatchForServer(serverStore.currentServerId || 'main'),
+);
+
+function selectServerFromMenu(id: string) {
+  serverMenuOpen.value = false;
+  if (id === serverStore.currentServerId) return;
+  // Применяем cached палитру нового сервера ДО reload — иначе мигнёт
+  // текущая палитра пока скрипт не перечитает cache.
+  applyPaletteForServer(id, /* withTransition */ false);
+  serverStore.selectServer(id);
+  window.location.reload();
+}
+
+// Закрываем меню при клике мимо.
+function onDocClick(e: MouseEvent) {
+  if (!serverMenuOpen.value) return;
+  const root = serverDropdownRef.value;
+  if (!root) return;
+  if (!root.contains(e.target as Node)) serverMenuOpen.value = false;
+}
+function onEsc(e: KeyboardEvent) {
+  if (e.key === 'Escape' && serverMenuOpen.value) serverMenuOpen.value = false;
+}
+
+/**
+ * Подтянуть карту палитр всех серверов с мастер-API одним запросом и
+ * засинхронизировать локальный cache. Затем применяем актуальную палитру
+ * текущего сервера. Молча игнорим ошибки сети — пользователь увидит cached.
+ */
+async function syncPaletteFromApi() {
+  const map = await loadAllPalettesFromApi(api);
+  const sid = serverStore.currentServerId || 'main';
+  const next = map[sid];
+  if (next) {
+    setPaletteForServer(sid, next, /* withTransition */ false);
+  }
+}
 
 interface VersionInfo {
   current: string;
@@ -163,20 +263,19 @@ async function loadVersion(refresh = false) {
   } catch { /* silent */ }
 }
 
-function onServerChange(e: Event) {
-  const id = (e.target as HTMLSelectElement).value;
-  serverStore.selectServer(id);
-  // Full reload to refetch all data for the new server
-  window.location.reload();
-}
-
 onMounted(() => {
   themeInit();
   authStore.initFromStorage();
   serverStore.initFromStorage();
+  // Применяем палитру для активного сервера сразу из cache (мгновенно).
+  // После загрузки данных сервера ниже — синхронизируем с актуальным значением API.
+  applyPaletteForServer(serverStore.currentServerId || 'main', /* withTransition */ false);
+  document.addEventListener('mousedown', onDocClick);
+  document.addEventListener('keydown', onEsc);
   if (authStore.accessToken) {
     authStore.fetchProfile().catch(() => {});
     serverStore.loadServers().catch(() => {});
+    syncPaletteFromApi();
     connectSocket();
     // Грузим текущую версию сразу (быстро, из кеша/файла), без ходокa в GitHub.
     loadVersion(false);
@@ -188,6 +287,8 @@ onMounted(() => {
 
 onUnmounted(() => {
   disconnectSocket();
+  document.removeEventListener('mousedown', onDocClick);
+  document.removeEventListener('keydown', onEsc);
   if (versionTimer) clearInterval(versionTimer);
 });
 </script>
@@ -315,7 +416,7 @@ onUnmounted(() => {
   align-items: center;
   gap: 0.3rem;
   text-decoration: none;
-  color: var(--primary, #f59e0b);
+  color: var(--primary, var(--primary));
   font-weight: 600;
   cursor: pointer;
 }
@@ -325,28 +426,32 @@ onUnmounted(() => {
   width: 6px;
   height: 6px;
   border-radius: 50%;
-  background: var(--primary, #f59e0b);
-  box-shadow: 0 0 0 0 rgba(245, 158, 11, 0.6);
+  background: var(--primary, var(--primary));
+  box-shadow: 0 0 0 0 rgba(var(--primary-rgb), 0.6);
   animation: sidebar-pulse 2s ease-in-out infinite;
 }
 .sidebar__update-arrow {
   font-size: 0.6rem;
-  color: var(--primary, #f59e0b);
+  color: var(--primary, var(--primary));
   opacity: 0.85;
 }
 @keyframes sidebar-pulse {
-  0%, 100% { box-shadow: 0 0 0 0 rgba(245, 158, 11, 0.55); }
-  50% { box-shadow: 0 0 0 6px rgba(245, 158, 11, 0); }
+  0%, 100% { box-shadow: 0 0 0 0 rgba(var(--primary-rgb), 0.55); }
+  50% { box-shadow: 0 0 0 6px rgba(var(--primary-rgb), 0); }
 }
 
-/* Server selector */
+/* Server selector — кастомный dropdown ради цветного дота палитры */
 .sidebar__server {
+  position: relative;
   padding: 0.6rem 0.75rem;
   border-bottom: 1px solid var(--border);
 }
 
-.sidebar__server-select {
+.sidebar__server-trigger {
   width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
   padding: 0.45rem 0.65rem;
   border-radius: 8px;
   border: 1px solid var(--border-secondary);
@@ -356,21 +461,114 @@ onUnmounted(() => {
   font-weight: 500;
   font-family: inherit;
   cursor: pointer;
-  transition: border-color 0.15s;
-  appearance: none;
-  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%23888' stroke-width='2'%3E%3Cpolyline points='6,9 12,15 18,9'/%3E%3C/svg%3E");
-  background-repeat: no-repeat;
-  background-position: right 0.5rem center;
-  padding-right: 1.5rem;
+  transition: border-color 0.15s, background 0.15s;
+  text-align: left;
 }
-
-.sidebar__server-select:hover {
+.sidebar__server-trigger:hover {
   border-color: var(--border);
 }
-
-.sidebar__server-select:focus {
-  outline: none;
+.sidebar__server--open .sidebar__server-trigger {
   border-color: var(--primary);
+  box-shadow: var(--focus-ring);
+}
+
+/* Цветной кругляш = цвет палитры сервера. Берём через CSS-переменную
+   --server-dot-color (присваиваем inline). Offline — slegka dim'им. */
+.sidebar__server-dot {
+  flex-shrink: 0;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: var(--server-dot-color, var(--primary));
+  box-shadow: 0 0 6px color-mix(in srgb, var(--server-dot-color, var(--primary)) 35%, transparent);
+}
+.sidebar__server-dot--offline {
+  background: transparent;
+  border: 1.5px solid var(--server-dot-color, var(--text-muted));
+  box-shadow: none;
+  opacity: 0.65;
+}
+
+.sidebar__server-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sidebar__server-chevron {
+  flex-shrink: 0;
+  color: var(--text-muted);
+  transition: transform 0.18s ease;
+}
+.sidebar__server--open .sidebar__server-chevron {
+  transform: rotate(180deg);
+}
+
+/* Меню */
+.sidebar__server-menu {
+  position: absolute;
+  z-index: 70;
+  top: calc(100% - 0.2rem);
+  left: 0.75rem;
+  right: 0.75rem;
+  margin-top: 0.35rem;
+  padding: 0.3rem;
+  background: var(--bg-modal);
+  background-image: var(--bg-modal-gradient);
+  border: 1px solid var(--border-secondary);
+  border-radius: 10px;
+  box-shadow: var(--shadow-modal);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  max-height: 50vh;
+  overflow-y: auto;
+}
+
+.sidebar__server-option {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+  padding: 0.45rem 0.55rem;
+  border: none;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 0.78rem;
+  font-weight: 500;
+  font-family: inherit;
+  cursor: pointer;
+  text-align: left;
+  transition: background 0.12s;
+}
+.sidebar__server-option:hover {
+  background: var(--bg-surface-hover);
+  color: var(--text-primary);
+}
+.sidebar__server-option--active {
+  background: var(--primary-bg);
+  color: var(--primary-text);
+}
+.sidebar__server-option--active:hover {
+  background: var(--primary-bg-hover);
+}
+
+.sidebar__server-check {
+  flex-shrink: 0;
+  color: var(--primary);
+}
+
+/* Dropdown transition */
+.dropdown-enter-active,
+.dropdown-leave-active {
+  transition: opacity 0.15s ease, transform 0.18s cubic-bezier(0.16, 1, 0.3, 1);
+}
+.dropdown-enter-from,
+.dropdown-leave-to {
+  opacity: 0;
+  transform: translateY(-4px);
 }
 
 /* Navigation */
@@ -440,7 +638,7 @@ onUnmounted(() => {
   width: 30px;
   height: 30px;
   border-radius: 8px;
-  background: linear-gradient(135deg, rgba(245, 158, 11, 0.15), rgba(217, 119, 6, 0.1));
+  background: linear-gradient(135deg, rgba(var(--primary-rgb), 0.15), rgba(var(--primary-dark-rgb), 0.1));
   border: 1px solid var(--primary-border);
   display: flex;
   align-items: center;

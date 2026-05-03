@@ -164,18 +164,55 @@ export class SslManager {
 
   /**
    * Revoke and delete a certificate.
+   *
+   * Семантика — «удалить серт с диска и попытаться отозвать в LE». Делаем в
+   * таком порядке, потому что:
+   *   - `certbot revoke` фейлится для МИГРИРОВАННЫХ сертов (account
+   *     mismatch — серт принадлежит LE-аккаунту исходного сервера) и для
+   *     уже отозванных. Если оставить только revoke, LE-папка остаётся
+   *     на диске → следующая миграция/выпуск этого же домена ловит
+   *     «уже существует» и фейлится. Поэтому rm всегда, даже при фейле revoke.
+   *   - Сначала revoke (если получится — LE-серт реально аннулируется на ACME),
+   *     потом force-rm как safety net.
+   *
+   * Идемпотентно: повторный вызов на уже снесённой папке — no-op.
    */
   async revokeCertificate(domain: string): Promise<{ success: boolean }> {
-    const certPath = `${LETSENCRYPT_LIVE_DIR}/${domain}/fullchain.pem`;
+    // Базовый sanity-check на имя домена — не пускаем `..` и слеши, чтобы
+    // rm не ушёл по какому-то traversal.
+    if (!/^[A-Za-z0-9.-]+$/.test(domain) || domain.includes('..')) {
+      return { success: false };
+    }
 
-    const result = await this.executor.execute('certbot', [
-      'revoke',
-      '--cert-path', certPath,
-      '--non-interactive',
-      '--delete-after-revoke',
-    ], { timeout: 60_000 });
+    const live = `${LETSENCRYPT_LIVE_DIR}/${domain}`;
+    const archive = `/etc/letsencrypt/archive/${domain}`;
+    const renewal = `/etc/letsencrypt/renewal/${domain}.conf`;
+    const certPath = `${live}/fullchain.pem`;
 
-    return { success: result.exitCode === 0 };
+    // 1) Пытаемся отозвать через certbot. Падает на migrated/уже-revoked сертах —
+    // не считаем это ошибкой: главное — почистить файлы.
+    let revokeOk = false;
+    try {
+      const liveExists = await fsp.stat(certPath).then(() => true).catch(() => false);
+      if (liveExists) {
+        const result = await this.executor.execute('certbot', [
+          'revoke',
+          '--cert-path', certPath,
+          '--non-interactive',
+          '--delete-after-revoke',
+        ], { timeout: 60_000 });
+        revokeOk = result.exitCode === 0;
+      }
+    } catch { /* проглатываем — переходим к force-cleanup */ }
+
+    // 2) Force-cleanup LE-артефактов. Если certbot уже всё удалил — это no-op.
+    // Если revoke фейлнулся — мы всё равно сносим папки, иначе следующая миграция
+    // зафейлится на «уже существует на slave».
+    await fsp.rm(live, { recursive: true, force: true }).catch(() => {});
+    await fsp.rm(archive, { recursive: true, force: true }).catch(() => {});
+    await fsp.rm(renewal, { force: true }).catch(() => {});
+
+    return { success: revokeOk };
   }
 
   /**

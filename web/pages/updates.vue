@@ -453,7 +453,7 @@ onMounted(() => {
 }
 
 .version-card__icon--pm2 {
-  background: rgba(245, 158, 11, 0.08);
+  background: rgba(var(--primary-rgb), 0.08);
   color: var(--primary-text);
 }
 

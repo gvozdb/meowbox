@@ -1,6 +1,7 @@
 import { NestFactory } from '@nestjs/core';
 import { ValidationPipe, Logger } from '@nestjs/common';
 import helmet from 'helmet';
+import * as express from 'express';
 import { AppModule } from './app.module';
 import {
   DEFAULT_API_JSON_LIMIT_MB,
@@ -26,9 +27,30 @@ try {
   return Number(this);
 };
 
+// Глобальная сетка безопасности: любой Promise без catch не должен ронять API.
+// Раньше Prisma-таймауты (SQLite-локи под нагрузкой db-dump-import) уходили в
+// unhandledRejection → процесс умирал → PM2 рестарт → миграционный item
+// помечался orphan FAILED. Теперь только пишем в лог и продолжаем работать.
+process.on('unhandledRejection', (reason) => {
+  // eslint-disable-next-line no-console
+  console.error(
+    '[unhandledRejection]',
+    reason instanceof Error ? reason.stack || reason.message : reason,
+  );
+});
+process.on('uncaughtException', (err) => {
+  // eslint-disable-next-line no-console
+  console.error('[uncaughtException]', err.stack || err.message);
+});
+
 async function bootstrap() {
+  // bodyParser: false — отключаем дефолтный JSON-парсер NestJS, чтобы он
+  // не «съедал» raw body для /api/proxy/* (multipart, бинарь). Парсеры
+  // подключаем вручную с правильным порядком: raw для proxy, json/urlencoded
+  // для всего остального.
   const app = await NestFactory.create(AppModule, {
     logger: ['error', 'warn', 'log'],
+    bodyParser: false,
   });
 
   // --- Security: HTTP headers ---
@@ -118,17 +140,20 @@ async function bootstrap() {
   // --- Security: Limit payload size ---
   app.use(
     (
-      req: { headers: Record<string, string | undefined> },
+      req: { url?: string; headers: Record<string, string | undefined> },
       res: { status: (code: number) => { json: (body: unknown) => void } },
       next: () => void,
     ) => {
+      // Proxy-роут пропускает любые типы тел (multipart, бинарь, JSON) —
+      // не ограничиваем JSON-лимитом, ориентируемся только на upload-лимит.
+      const isProxy = (req.url ?? '').startsWith('/api/proxy/');
       const contentType = req.headers['content-type'] || '';
       const contentLength = parseInt(req.headers['content-length'] || '0', 10);
       // Allow larger payloads for file uploads (multipart/form-data).
       // Переопределяется env API_JSON_LIMIT_MB / API_UPLOAD_LIMIT_MB.
       const jsonLimitMb = Number(process.env.API_JSON_LIMIT_MB) || DEFAULT_API_JSON_LIMIT_MB;
       const uploadLimitMb = Number(process.env.API_UPLOAD_LIMIT_MB) || DEFAULT_API_UPLOAD_LIMIT_MB;
-      const maxSize = contentType.includes('multipart/form-data')
+      const maxSize = isProxy || contentType.includes('multipart/form-data')
         ? uploadLimitMb * 1024 * 1024
         : jsonLimitMb * 1024 * 1024;
       if (contentLength > maxSize) {
@@ -138,6 +163,31 @@ async function bootstrap() {
       next();
     },
   );
+
+  // --- Body parsers (после отключения дефолтного через bodyParser: false) ---
+  // Порядок важен: для /api/proxy/* — raw (Buffer); для остальных — json + urlencoded.
+  // Лимиты совпадают с тем, что было в дефолтном парсере NestJS.
+  const jsonLimitMb = Number(process.env.API_JSON_LIMIT_MB) || DEFAULT_API_JSON_LIMIT_MB;
+  const uploadLimitMb = Number(process.env.API_UPLOAD_LIMIT_MB) || DEFAULT_API_UPLOAD_LIMIT_MB;
+
+  // 1) Raw body для proxy: нужен ОРИГИНАЛЬНЫЙ Buffer с оригинальным
+  //    Content-Type, чтобы 1:1 ретранслировать на slave (multipart, бинарь, JSON).
+  //    inflate=false: если slave когда-нибудь будет gzip-ить запрос — мы
+  //    ретранслируем его как есть (без распаковки, с сохранением CE).
+  app.use(
+    '/api/proxy',
+    express.raw({
+      type: '*/*',
+      limit: `${uploadLimitMb}mb`,
+      inflate: false,
+    }),
+  );
+
+  // 2) Стандартный JSON для всего остального API. Multer (file-uploads) сам
+  //    обрабатывает multipart per-controller через FileInterceptor — поэтому
+  //    json-парсер тут безопасен (он не трогает multipart bodies).
+  app.use(express.json({ limit: `${jsonLimitMb}mb` }));
+  app.use(express.urlencoded({ extended: true, limit: `${jsonLimitMb}mb` }));
 
   app.setGlobalPrefix('api');
 
