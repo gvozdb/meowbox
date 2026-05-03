@@ -541,11 +541,23 @@ ${s}
       if (result.exitCode !== 0) {
         return { success: false, error: result.stderr || `apt-get remove exit ${result.exitCode}` };
       }
-      log(`→ apt-get autoremove`);
+      log(`→ apt-get autoremove --purge`);
       await this.executor.executeStreaming(
-        'apt-get', ['autoremove', '-y'],
+        'apt-get', ['autoremove', '-y', '--purge'],
         { timeout: 120_000, onLine: log, stdin: 'ignore', env: { DEBIAN_FRONTEND: 'noninteractive' } },
       );
+      // apt-get --purge не всегда подчищает /etc/php/{version}/ (если внутри
+      // лежат файлы, не зарегистрированные dpkg, например пользовательские
+      // pool.d/*.conf). Без удаления каталога listVersions() продолжает
+      // возвращать эту версию как «установленную» — версия зависает в гриде
+      // /php и не появляется в селекторе для повторной установки.
+      const versionDir = `${PHP_FPM_POOL_DIR}/${version}`;
+      log(`→ rm -rf ${versionDir}`);
+      try {
+        await fs.rm(versionDir, { recursive: true, force: true });
+      } catch (err) {
+        log(`⚠ не смог удалить ${versionDir}: ${(err as Error).message}`, 'stderr');
+      }
       log(`✓ PHP ${version} uninstalled`);
       return { success: true };
     } catch (err) {
