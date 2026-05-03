@@ -188,6 +188,12 @@ export class ProxyService implements OnModuleInit {
     '/system/self-update',
     '/database/import',
     '/database/dump',
+    '/php/',               // install/uninstall PHP версий — apt-get тянет 60-180s по медленному каналу
+    '/services/',          // restart/install сервисов (mariadb/redis/nginx) могут быть >30s
+    '/firewall/',          // ufw enable/reload иногда заметно тормозит
+    '/ssl/issue',          // certbot до 60s по сети
+    '/sites/install',      // Wordpress/MODX install качает архив + setup БД
+    '/storage/auth',       // OAuth-флоу (Yandex) с редиректом на провайдера
   ];
 
   /** Таймаут в мс на основе path (smart-timeout). */
