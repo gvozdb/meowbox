@@ -158,7 +158,10 @@ say "Snapshot: $SNAP_PATH"
 # ----- 2. Download -----
 stage download "Скачиваю tarball $TARGET"
 TMP_DIR="$(mktemp -d)"
-trap 'rm -rf "$TMP_DIR"; rm -f "$LOCK_FILE"' EXIT
+# Перезаписываем trap из acquire_lock — добавляем чистку TMP_DIR.
+# КРИТИЧНО: cleanup_old_releases ОБЯЗАТЕЛЬНО оставляем, иначе старые релизы
+# никогда не чистятся (trap EXIT — единственное место, где это происходит).
+trap 'cleanup_old_releases; rm -rf "$TMP_DIR"; rm -f "$LOCK_FILE"' EXIT
 TARBALL="$TMP_DIR/meowbox-$TARGET.tar.gz"
 SUMS="$TMP_DIR/SHA256SUMS"
 
