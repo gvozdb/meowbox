@@ -1174,46 +1174,62 @@
       <div v-if="activeTab === 'cron'" class="tab-content">
         <div class="backups-toolbar">
           <span class="backups-toolbar__count">{{ cronJobs.length }} задач{{ cronJobs.length === 1 ? 'а' : (cronJobs.length >= 2 && cronJobs.length <= 4 ? 'и' : '') }}</span>
-          <button class="btn btn--primary btn--sm" @click="showCronModal = true">Добавить</button>
+          <button class="btn btn--primary btn--sm" @click="openCronEditor()">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="12" y1="5" x2="12" y2="19" /><line x1="5" y1="12" x2="19" y2="12" /></svg>
+            Добавить
+          </button>
         </div>
         <div v-if="cronLoading" class="fm-loading"><div class="fm-loading__spinner" /></div>
         <div v-else-if="!cronJobs.length" class="fm-empty">
           <span class="fm-empty__text">Крон-задач пока нет</span>
         </div>
-        <div v-else class="backup-list">
-          <div v-for="cj in cronJobs" :key="cj.id" class="backup-item">
-            <div class="backup-item__icon" :class="cj.status === 'ACTIVE' ? 'backup-item__icon--completed' : 'backup-item__icon--failed'">
-              <svg v-if="cj.status === 'ACTIVE'" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="20,6 9,17 4,12" /></svg>
-              <svg v-else width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10" /><line x1="8" y1="12" x2="16" y2="12" /></svg>
-            </div>
-            <div class="backup-item__info">
-              <div class="backup-item__top">
-                <span class="backup-item__type">{{ cj.name }}</span>
-                <span class="backup-item__badge backup-item__badge--storage">{{ cronScheduleLabel(cj.schedule) }}</span>
+        <div v-else class="cron-job-list">
+          <div v-for="cj in cronJobs" :key="cj.id" class="cron-job-card" :class="{ 'cron-job-card--disabled': cj.status !== 'ACTIVE' }">
+            <div class="cron-job-card__main">
+              <div class="cron-job-card__toggle">
+                <button class="cron-toggle" :class="{ 'cron-toggle--on': cj.status === 'ACTIVE' }" :title="cj.status === 'ACTIVE' ? 'Выключить' : 'Включить'" @click="toggleCronJob(cj.id)">
+                  <span class="cron-toggle__knob" />
+                </button>
               </div>
-              <span class="backup-item__meta cron-command">{{ cj.command }}</span>
+              <div class="cron-job-card__info">
+                <span class="cron-job-card__name">{{ cj.name }}</span>
+                <code class="cron-job-card__command">{{ cj.command }}</code>
+              </div>
+              <div class="cron-job-card__schedule">
+                <span class="cron-job-card__schedule-label">{{ describeCronSchedule(cj.schedule) }}</span>
+                <code class="cron-job-card__schedule-cron">{{ cj.schedule }}</code>
+              </div>
+              <div class="cron-job-card__actions">
+                <button v-if="cj.lastRunAt" class="cron-row-action" title="Последний запуск" @click="expandedCronId = expandedCronId === cj.id ? '' : cj.id">
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10" /><polyline points="12,6 12,12 16,14" /></svg>
+                </button>
+                <button class="cron-row-action" title="Редактировать" @click="openCronEditor(cj)">
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17 3a2.828 2.828 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z" /></svg>
+                </button>
+                <button class="cron-row-action cron-row-action--red" title="Удалить" @click="deleteCronJob(cj.id)">
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3,6 5,6 21,6" /><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" /></svg>
+                </button>
+              </div>
             </div>
-            <span class="backup-item__status" :class="cj.status === 'ACTIVE' ? 'backup-item__status--completed' : 'backup-item__status--failed'">
-              {{ cj.status === 'ACTIVE' ? 'Активна' : 'Выкл' }}
-            </span>
-            <div class="backup-item__actions">
-              <button class="btn-icon" :title="cj.status === 'ACTIVE' ? 'Выключить' : 'Включить'" @click="toggleCronJob(cj.id)">
-                <svg v-if="cj.status === 'ACTIVE'" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="6" y="4" width="12" height="16" rx="2" /></svg>
-                <svg v-else width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><polygon points="5,3 19,12 5,21" /></svg>
-              </button>
-              <button class="btn-icon btn-icon--danger" title="Удалить" @click="deleteCronJob(cj.id)">
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3,6 5,6 21,6" /><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" /></svg>
-              </button>
+            <div v-if="expandedCronId === cj.id && cj.lastRunAt" class="cron-job-card__log">
+              <div class="cron-job-card__log-header">
+                <span class="cron-job-card__log-label">Последний запуск: {{ formatCronDate(cj.lastRunAt) }}</span>
+                <span class="cron-job-card__log-exit" :class="{ 'cron-job-card__log-exit--ok': cj.lastExitCode === 0, 'cron-job-card__log-exit--fail': cj.lastExitCode != null && cj.lastExitCode !== 0 }">
+                  Exit {{ cj.lastExitCode ?? '?' }}
+                </span>
+              </div>
+              <pre v-if="cj.lastOutput" class="cron-job-card__log-output">{{ cj.lastOutput }}</pre>
+              <span v-else class="cron-job-card__log-empty">Нет вывода</span>
             </div>
           </div>
         </div>
       </div>
 
-      <!-- Cron Job Create Modal -->
+      <!-- Cron Job Create/Edit Modal -->
       <Teleport to="body">
-        <div v-if="showCronModal" class="modal-overlay" @mousedown.self="showCronModal = false">
+        <div v-if="showCronModal" class="modal-overlay" @mousedown.self="closeCronModal">
           <div class="modal">
-            <h3 class="modal__title">Новая крон-задача</h3>
+            <h3 class="modal__title">{{ editingCronJob ? 'Редактирование крон-задачи' : 'Новая крон-задача' }}</h3>
             <div class="cron-form">
               <input v-model="cronForm.name" class="form-input" placeholder="Название" maxlength="128" />
               <div class="cron-form__schedule">
@@ -1224,10 +1240,11 @@
               </div>
               <textarea v-model="cronForm.command" class="form-input form-input--mono cron-form__command" placeholder="Команда для выполнения" maxlength="1024" rows="3" />
             </div>
+            <div v-if="cronError" class="modal__error">{{ cronError }}</div>
             <div class="modal__actions">
-              <button class="btn btn--ghost" @click="showCronModal = false">Отмена</button>
-              <button class="btn btn--primary" :disabled="creatingCron || !cronForm.name.trim() || !cronForm.schedule.trim() || !cronForm.command.trim()" @click="createCronJob">
-                {{ creatingCron ? 'Создание...' : 'Создать' }}
+              <button class="btn btn--ghost" @click="closeCronModal">Отмена</button>
+              <button class="btn btn--primary" :disabled="creatingCron || !cronForm.name.trim() || !cronForm.schedule.trim() || !cronForm.command.trim()" @click="saveCronJob">
+                {{ creatingCron ? (editingCronJob ? 'Сохранение...' : 'Создание...') : (editingCronJob ? 'Сохранить' : 'Создать') }}
               </button>
             </div>
           </div>
@@ -5400,6 +5417,9 @@ interface CronJobItem {
   command: string;
   status: string;
   createdAt: string;
+  lastRunAt?: string | null;
+  lastExitCode?: number | null;
+  lastOutput?: string | null;
 }
 
 const cronJobs = ref<CronJobItem[]>([]);
@@ -5407,6 +5427,9 @@ const cronLoading = ref(false);
 const showCronModal = ref(false);
 const creatingCron = ref(false);
 const cronForm = reactive({ name: '', schedule: '', command: '' });
+const editingCronJob = ref<CronJobItem | null>(null);
+const expandedCronId = ref('');
+const cronError = ref('');
 
 const cronPresets = [
   { label: 'Каждую минуту', value: '*/1 * * * *' },
@@ -5415,9 +5438,19 @@ const cronPresets = [
   { label: 'Еженедельно', value: '0 3 * * 0' },
 ];
 
-function cronScheduleLabel(sched: string): string {
+function describeCronSchedule(sched: string): string {
   const p = cronPresets.find((x) => x.value === sched);
-  return p ? p.label : sched;
+  if (p) return p.label;
+  if (sched === '* * * * *') return 'Каждую минуту';
+  if (sched === '0 * * * *') return 'Ежечасно';
+  if (sched === '0 0 * * *') return 'Ежедневно в 00:00';
+  if (sched === '0 0 * * 0') return 'Еженедельно (вс)';
+  if (sched === '0 0 1 * *') return 'Ежемесячно (1-е)';
+  return 'Кастом';
+}
+
+function formatCronDate(iso: string): string {
+  return new Date(iso).toLocaleString('ru-RU', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
 }
 
 async function loadCronJobs() {
@@ -5428,22 +5461,49 @@ async function loadCronJobs() {
   finally { cronLoading.value = false; }
 }
 
-async function createCronJob() {
+function openCronEditor(job?: CronJobItem) {
+  editingCronJob.value = job || null;
+  cronForm.name = job?.name || '';
+  cronForm.schedule = job?.schedule || '';
+  cronForm.command = job?.command || '';
+  cronError.value = '';
+  showCronModal.value = true;
+}
+
+function closeCronModal() {
+  showCronModal.value = false;
+  editingCronJob.value = null;
+  cronForm.name = '';
+  cronForm.schedule = '';
+  cronForm.command = '';
+  cronError.value = '';
+}
+
+async function saveCronJob() {
   creatingCron.value = true;
+  cronError.value = '';
   try {
-    await api.post('/cron-jobs', {
-      siteId,
-      name: cronForm.name.trim(),
-      schedule: cronForm.schedule.trim(),
-      command: cronForm.command.trim(),
-    });
-    showCronModal.value = false;
-    cronForm.name = '';
-    cronForm.schedule = '';
-    cronForm.command = '';
+    if (editingCronJob.value) {
+      await api.put(`/cron-jobs/${editingCronJob.value.id}`, {
+        name: cronForm.name.trim(),
+        schedule: cronForm.schedule.trim(),
+        command: cronForm.command.trim(),
+      });
+    } else {
+      await api.post('/cron-jobs', {
+        siteId,
+        name: cronForm.name.trim(),
+        schedule: cronForm.schedule.trim(),
+        command: cronForm.command.trim(),
+      });
+    }
+    closeCronModal();
     await loadCronJobs();
-  } catch { /* ignore */ }
-  finally { creatingCron.value = false; }
+  } catch (e) {
+    cronError.value = (e as Error)?.message || 'Не удалось сохранить крон-задачу';
+  } finally {
+    creatingCron.value = false;
+  }
 }
 
 async function toggleCronJob(id: string) {
@@ -8766,15 +8826,107 @@ html.theme-light .domains-cert-alert__body code {
   justify-content: space-between;
 }
 
-/* ─── Cron Jobs ─── */
-.cron-command {
+/* ─── Cron Jobs (визуал синхронизирован с /cron) ─── */
+.cron-job-list { display: flex; flex-direction: column; gap: 0.4rem; }
+
+.cron-job-card {
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  transition: border-color 0.2s;
+}
+.cron-job-card:hover { border-color: var(--border-secondary); }
+.cron-job-card--disabled { opacity: 0.5; }
+
+.cron-job-card__main { display: flex; align-items: center; gap: 0.85rem; padding: 0.75rem 1rem; }
+.cron-job-card__toggle { flex-shrink: 0; }
+
+.cron-toggle {
+  width: 36px; height: 20px; border-radius: 10px; border: none; padding: 2px;
+  background: var(--border-strong); cursor: pointer; position: relative; transition: background 0.3s;
+}
+.cron-toggle--on { background: rgba(34, 197, 94, 0.3); }
+.cron-toggle__knob {
+  display: block; width: 16px; height: 16px; border-radius: 50%;
+  background: var(--text-tertiary); transition: all 0.3s;
+}
+.cron-toggle--on .cron-toggle__knob { transform: translateX(16px); background: #4ade80; }
+
+.cron-job-card__info { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 0.15rem; }
+.cron-job-card__name { font-size: 0.85rem; font-weight: 600; color: var(--text-secondary); }
+.cron-job-card__command {
+  font-size: 0.72rem; font-family: 'JetBrains Mono', 'Cascadia Code', 'Fira Code', monospace;
+  color: var(--text-muted);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  background: none; padding: 0;
+}
+
+.cron-job-card__schedule {
+  text-align: right; flex-shrink: 0;
+  display: flex; flex-direction: column; align-items: flex-end; gap: 0.1rem;
+}
+.cron-job-card__schedule-label { font-size: 0.72rem; color: var(--text-tertiary); }
+.cron-job-card__schedule-cron {
+  font-size: 0.65rem; font-family: 'JetBrains Mono', 'Cascadia Code', 'Fira Code', monospace;
+  color: rgba(var(--primary-rgb), 0.5); background: none; padding: 0;
+}
+
+.cron-job-card__actions { display: flex; gap: 0.3rem; flex-shrink: 0; margin-left: 0.5rem; }
+
+.cron-row-action {
+  background: none; border: 1px solid var(--border-secondary); border-radius: 8px;
+  padding: 0.35rem; cursor: pointer; display: flex;
+  color: var(--text-faint); transition: all 0.2s;
+}
+.cron-row-action:hover { color: var(--text-tertiary); border-color: var(--border-strong); }
+.cron-row-action--red:hover {
+  color: #f87171; border-color: rgba(239, 68, 68, 0.2); background: rgba(239, 68, 68, 0.05);
+}
+
+.cron-job-card__log {
+  padding: 0.6rem 1rem 0.75rem;
+  border-top: 1px solid var(--border);
+}
+.cron-job-card__log-header {
+  display: flex; align-items: center; justify-content: space-between; margin-bottom: 0.4rem;
+}
+.cron-job-card__log-label { font-size: 0.72rem; color: var(--text-muted); }
+.cron-job-card__log-exit {
+  font-size: 0.65rem; font-weight: 600;
   font-family: 'JetBrains Mono', 'Cascadia Code', 'Fira Code', monospace;
-  font-size: 0.75rem;
-  color: var(--text-tertiary);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  max-width: 400px;
+  padding: 0.15rem 0.4rem; border-radius: 5px;
+  background: rgba(148, 163, 184, 0.12); color: var(--text-muted);
+}
+.cron-job-card__log-exit--ok { background: rgba(34, 197, 94, 0.1); color: #4ade80; }
+.cron-job-card__log-exit--fail { background: rgba(239, 68, 68, 0.1); color: #f87171; }
+.cron-job-card__log-output {
+  background: var(--bg-input); border: 1px solid var(--border);
+  border-radius: 8px; padding: 0.5rem 0.65rem; margin: 0;
+  font-family: 'JetBrains Mono', 'Cascadia Code', 'Fira Code', monospace; font-size: 0.7rem;
+  color: var(--text-tertiary); white-space: pre-wrap; word-break: break-all;
+  max-height: 200px; overflow-y: auto;
+}
+.cron-job-card__log-empty { font-size: 0.72rem; color: var(--text-faint); }
+
+@media (max-width: 768px) {
+  .cron-job-card__main {
+    flex-wrap: wrap;
+    gap: 0.5rem;
+    padding: 0.65rem 0.75rem;
+  }
+  .cron-job-card__info { width: 100%; order: 1; }
+  .cron-job-card__toggle { order: 0; }
+  .cron-job-card__schedule {
+    text-align: left;
+    align-items: flex-start;
+    flex: 1;
+    order: 2;
+  }
+  .cron-job-card__actions {
+    order: 3;
+    justify-content: flex-end;
+  }
+  .cron-job-card__command { max-width: calc(100vw - 6rem); }
 }
 
 .cron-form {

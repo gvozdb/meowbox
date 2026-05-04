@@ -107,7 +107,7 @@
             </div>
             <div class="form-group">
               <label class="form-label">Command</label>
-              <input v-model="editorForm.command" type="text" class="form-input mono" placeholder="/usr/bin/php artisan schedule:run" />
+              <textarea v-model="editorForm.command" class="form-input mono editor-command" rows="3" maxlength="1024" placeholder="/usr/bin/php artisan schedule:run" />
             </div>
           </div>
           <div v-if="editorError" class="modal__error">{{ editorError }}</div>
@@ -416,6 +416,7 @@ onMounted(async () => {
 }
 .form-input:focus { border-color: rgba(var(--primary-rgb), 0.25); box-shadow: var(--focus-ring); }
 .form-input.mono { font-family: 'JetBrains Mono', monospace; font-size: 0.82rem; }
+.editor-command { resize: vertical; min-height: 70px; }
 .form-input--select {
   appearance: none;
   background-image: url("data:image/svg+xml,%3Csvg width='10' height='6' viewBox='0 0 10 6' fill='none' xmlns='http://www.w3.org/2000/svg'%3E%3Cpath d='M1 1l4 4 4-4' stroke='%23666' stroke-width='1.5' stroke-linecap='round'/%3E%3C/svg%3E");
