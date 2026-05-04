@@ -696,27 +696,62 @@ async function dbDumpImportStage(ctx: RunCtx) {
     }
     log(ctx, `  ✓ data dump+import OK`);
 
-    // Отдельным проходом — schema-only для tables-no-data
+    // Отдельным проходом — schema-only для tables-no-data.
+    // Цель: для таблиц из dbExcludeDataTables забираем CREATE TABLE
+    // (структура), но БЕЗ данных. На stage 1 они уже исключены целиком
+    // через --ignore-table, иначе попали бы туда с данными.
     if (ctx.plan.dbExcludeDataTables.length > 0) {
-      const noDataCmd = (ctx.ssh as SshSourceBridge).buildMysqldumpRemote({
-        user: ctx.creds.mysqlUser,
-        password: ctx.creds.mysqlPassword,
-        host: ctx.creds.mysqlHost,
-        port: ctx.creds.mysqlPort,
-        database: src.dbName,
-        extraArgs: ['--no-data', ...ctx.plan.dbExcludeDataTables.map((t) => `'${t}'`)],
-      });
-      log(ctx, `  schema-only dump для ${ctx.plan.dbExcludeDataTables.length} таблиц`);
-      const sd = await dumpAttempt(
-        'schema',
-        noDataCmd,
-        noDataDumpFile,
-        15 * 60 * 1000, // 15 мин — schema-only маленький
-        2,
-      );
-      if (!sd.ok) {
-        log(ctx, `  WARN: schema-only dump не прошёл: ${sd.lastError}`);
+      // Имена таблиц для позиционных аргументов — снова прогоняем через
+      // whitelist (DRY с stage 1, но дешевле перепроверить, чем словить
+      // injection в ssh-командной строке через спецсимвол в имени таблицы).
+      const safeTables: string[] = [];
+      for (const t of ctx.plan.dbExcludeDataTables) {
+        try {
+          validateSqlIdentifier(t, 'tableName');
+          safeTables.push(t);
+        } catch {
+          log(ctx, `  ⚠ schema-only: пропускаем невалидное имя таблицы '${t}'`);
+        }
+      }
+      if (safeTables.length === 0) {
+        log(ctx, `  WARN: schema-only пропущен — все имена таблиц невалидны`);
       } else {
+        const noDataCmd = (ctx.ssh as SshSourceBridge).buildMysqldumpRemote({
+          user: ctx.creds.mysqlUser,
+          password: ctx.creds.mysqlPassword,
+          host: ctx.creds.mysqlHost,
+          port: ctx.creds.mysqlPort,
+          database: src.dbName,
+          // --no-data — только CREATE TABLE без INSERT'ов.
+          extraArgs: ['--no-data'],
+          // Имена таблиц — позиционные args ПОСЛЕ имени БД, иначе mysqldump
+          // воспринимает первый такой arg как имя БД и падает (или отдаёт
+          // пустой дамп). Раньше был тут баг: имена шли в extraArgs.
+          tables: safeTables,
+        });
+        log(ctx, `  schema-only dump для ${safeTables.length} таблиц (структура без данных)`);
+        const sd = await dumpAttempt(
+          'schema',
+          noDataCmd,
+          noDataDumpFile,
+          15 * 60 * 1000, // 15 мин — schema-only маленький
+          2,
+        );
+        if (!sd.ok) {
+          // Раньше было WARN — но это значит, что таблиц-исключений в
+          // целевой БД физически НЕТ (CREATE не отработал), и MODX/приложение
+          // упадёт на первом обращении. Считаем это hard-failure.
+          throw new Error(
+            `Schema-only dump для исключённых таблиц упал: ${sd.lastError}. ` +
+              `Без структуры этих таблиц БД-импорт НЕ ПОЛНЫЙ.`,
+          );
+        }
+        if (sd.bytes < 32) {
+          throw new Error(
+            `Schema-only dump: подозрительно маленький файл (${sd.bytes} B), ` +
+              `вероятно не нашлось ни одной таблицы из списка: ${safeTables.join(', ')}`,
+          );
+        }
         const ir = await importFromGzFile({
           inputPath: noDataDumpFile,
           localCommand: 'mariadb',
@@ -732,10 +767,12 @@ async function dbDumpImportStage(ctx: RunCtx) {
           isCancelled: ctx.isCancelled,
         });
         if (ir.exitCode !== 0) {
-          log(ctx, `  WARN: schema-only import не прошёл: ${extractMariaDbError(ir.stderr)}`);
-        } else {
-          log(ctx, `  ✓ schema-only dump+import OK`);
+          keepDumpOnFailure = true;
+          throw new Error(
+            `Schema-only import упал: ${extractMariaDbError(ir.stderr)}`,
+          );
         }
+        log(ctx, `  ✓ schema-only dump+import OK (${safeTables.length} таблиц)`);
       }
     }
   } finally {
