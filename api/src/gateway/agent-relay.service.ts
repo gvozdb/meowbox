@@ -13,13 +13,53 @@ interface AgentResponse<T = unknown> {
 export class AgentRelayService {
   private readonly logger = new Logger('AgentRelay');
   private agentSocket: Socket | null = null;
+  /**
+   * Hooks, which are called every time the agent transitions from offline to
+   * online (incl. reconnect). Used by services (e.g. sites.service) which
+   * want to do best-effort tasks at startup, but the API may start before the
+   * agent is ready — without this hook, those tasks would silently skip.
+   * Errors in handlers are caught & logged, чтобы один кривой подписчик не
+   * валил остальные.
+   */
+  private connectHandlers: Array<() => void | Promise<void>> = [];
 
   setAgentSocket(socket: Socket | null) {
+    const wasConnected = this.isAgentConnected();
     this.agentSocket = socket;
     if (socket) {
       this.logger.log('Agent connected');
+      if (!wasConnected) {
+        for (const h of this.connectHandlers) {
+          Promise.resolve()
+            .then(() => h())
+            .catch((err) => {
+              this.logger.warn(
+                `onAgentConnect handler failed: ${(err as Error).message}`,
+              );
+            });
+        }
+      }
     } else {
       this.logger.warn('Agent disconnected');
+    }
+  }
+
+  /**
+   * Регистрирует колбэк, который сработает при следующем (и каждом
+   * последующем) подключении агента. Если агент УЖЕ подключён в момент
+   * вызова — колбэк выстрелит сразу, на ближайшем тике, чтобы вызывающие
+   * сервисы не пропустили событие из-за гонки порядка инициализации.
+   */
+  onAgentConnect(handler: () => void | Promise<void>): void {
+    this.connectHandlers.push(handler);
+    if (this.isAgentConnected()) {
+      Promise.resolve()
+        .then(() => handler())
+        .catch((err) => {
+          this.logger.warn(
+            `onAgentConnect immediate handler failed: ${(err as Error).message}`,
+          );
+        });
     }
   }
 

@@ -139,8 +139,13 @@ export class SitesService implements OnModuleInit {
    * миграция подхватится при следующем рестарте.
    */
   async onModuleInit(): Promise<void> {
-    // Небольшая задержка, чтобы агент успел подключиться по WS.
-    setTimeout(() => {
+    // Подписываемся на событие подключения агента — миграции запустятся,
+    // как только агент будет онлайн (и снова при reconnect, что важно после
+    // вынужденных рестартов агента/сети). Раньше миграции крутились через
+    // setTimeout(5s); если агент в этот момент офлайн — миграция тихо
+    // пропускалась НАВСЕГДА (до перезапуска API). Из-за этого, например,
+    // на части серверов так и не настроились per-user CLI-шимы PHP.
+    this.agentRelay.onAgentConnect(() => {
       this.migrateArtifactsToSiteNameSchema().catch((err) => {
         this.logger.warn(
           `Artifact migration skipped: ${(err as Error).message}`,
@@ -151,7 +156,17 @@ export class SitesService implements OnModuleInit {
           `PHP CLI shim migration skipped: ${(err as Error).message}`,
         );
       });
-    }, 5000);
+    });
+  }
+
+  /**
+   * Public-обёртка для ручного перезапуска миграции PHP-шимов. Используется
+   * админ-эндпоинтом `POST /api/admin/php-shim/resync` (вместе с Makefile-
+   * таргетом `make php-shim-resync`) для случая, когда автоматическая
+   * миграция не отработала (агент был офлайн / упал на полпути).
+   */
+  async resyncPhpCliShims(): Promise<{ ok: number; fail: number; total: number }> {
+    return this.runPhpCliShimsForAllSites();
   }
 
   /**
@@ -163,9 +178,13 @@ export class SitesService implements OnModuleInit {
    * молча скипаем, подхватится при следующем рестарте API.
    */
   private async migratePhpCliShimsForAllSites(): Promise<void> {
+    await this.runPhpCliShimsForAllSites();
+  }
+
+  private async runPhpCliShimsForAllSites(): Promise<{ ok: number; fail: number; total: number }> {
     if (!this.agentRelay.isAgentConnected()) {
       this.logger.log('PHP shim migration: agent offline — skip');
-      return;
+      return { ok: 0, fail: 0, total: 0 };
     }
 
     const sites = await this.prisma.site.findMany({
@@ -179,7 +198,7 @@ export class SitesService implements OnModuleInit {
 
     if (sites.length === 0) {
       this.logger.log('PHP shim migration: no PHP-enabled sites found');
-      return;
+      return { ok: 0, fail: 0, total: 0 };
     }
 
     let ok = 0;
@@ -214,6 +233,7 @@ export class SitesService implements OnModuleInit {
     this.logger.log(
       `PHP shim migration done: ok=${ok} fail=${fail} total=${sites.length}`,
     );
+    return { ok, fail, total: sites.length };
   }
 
   private async migrateArtifactsToSiteNameSchema(): Promise<void> {

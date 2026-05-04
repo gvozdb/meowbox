@@ -44,6 +44,27 @@ export class SitesController {
     return { success: true, data };
   }
 
+  /**
+   * POST /api/sites/php-shim/resync — ручной перезапуск настройки per-user
+   * CLI-шимов PHP для всех сайтов. Используется если автоматическая миграция
+   * (onModuleInit / onAgentConnect) не отработала — например, агент был
+   * офлайн в нужный момент или сайт был импортирован старой версией панели,
+   * где этого хука ещё не существовало.
+   *
+   * Симптом, при котором это нужно: `su - <siteUser>; php -v` показывает
+   * не ту версию, что выбрана для сайта в FPM.
+   *
+   * Только ADMIN. Throttle 2/мин — операция тяжёлая (по сетевому RTT
+   * на каждый сайт), повторных вызовов нам не нужно.
+   */
+  @Post('php-shim/resync')
+  @Roles(UserRole.ADMIN)
+  @Throttle({ default: { limit: 2, ttl: 60_000 } })
+  async resyncPhpShims() {
+    const result = await this.sitesService.resyncPhpCliShims();
+    return { success: true, data: result };
+  }
+
   @Get()
   async findAll(
     @CurrentUser('sub') userId: string,

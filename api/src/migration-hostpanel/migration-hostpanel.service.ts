@@ -1686,6 +1686,38 @@ export class MigrationHostpanelService implements OnModuleInit {
       }
     }
 
+    // 6) Per-user CLI-шим PHP — чтобы команда `php` под юзером сайта
+    // (`su - <user>`) указывала на ту же версию, что и FPM-пул. Без этого
+    // оператор после миграции получает global PHP (обычно последний
+    // установленный — 8.4), и крон-задачи / SSH-сессии работают на
+    // несовместимой версии. Best-effort: если упало — миграция всё равно
+    // считается успешной, оператор может позже дёрнуть
+    // `make php-shim-resync` или `POST /api/sites/php-shim/resync`.
+    if (plan.phpVersion && this.agentRelay.isAgentConnected()) {
+      try {
+        const shimRes = await this.agentRelay.emitToAgent<{ success: boolean; error?: string }>(
+          'user:setup-php-shim',
+          {
+            username: plan.newName,
+            homeDir: rootPath,
+            phpVersion: plan.phpVersion,
+          },
+          20_000,
+        );
+        if (!shimRes?.success) {
+          await this.appendMigrationLog(
+            migrationId,
+            `WARN: PHP CLI shim setup для site=${plan.newName} (php=${plan.phpVersion}) не прошёл: ${shimRes?.error || 'unknown'}. Запусти ручной resync: make php-shim-resync`,
+          );
+        }
+      } catch (e) {
+        await this.appendMigrationLog(
+          migrationId,
+          `WARN: PHP CLI shim emit упал для site=${plan.newName}: ${(e as Error).message}. Запусти ручной resync: make php-shim-resync`,
+        );
+      }
+    }
+
     return site.id;
   }
 
