@@ -27,10 +27,11 @@ export function isValidPalette(v: unknown): v is PaletteId {
  * Значения хранятся в SQLite как JSON-строки и парсятся при чтении.
  *
  * Ключи:
- *   - `general`        — мониторинг, автопроверка обновлений, сессии (ТТЛ/лимиты)
+ *   - `general`        — мониторинг, сессии (ТТЛ/лимиты)
  *   - `site-defaults`  — дефолты формы создания сайта + пути хранения файлов
  *   - `backup-defaults`— авто-бэкапы: расписание, хранилище, retention
  *   - `appearance`     — внешний вид панели: цветовая гамма (palette)
+ *   - `admin-ip-allowlist` — IP allowlist доступа в панель (по умолчанию выключен)
  */
 @Injectable()
 export class PanelSettingsService {
@@ -42,8 +43,6 @@ export class PanelSettingsService {
       alertCpuPercent: 85,
       alertRamPercent: 85,
       alertDiskPercent: 90,
-      autoUpdateCheck: true,
-      updateBranch: 'stable',
       sessionMaxAttempts: 5,
       sessionAccessTtlMinutes: 15,
       sessionRefreshTtlDays: 7,

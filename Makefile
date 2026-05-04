@@ -1,6 +1,6 @@
 .PHONY: start stop restart logs logs-api logs-web logs-agent status install build deploy seed \
         migrate migrate-prisma migrate-system migrate-status new-migration link-shared \
-        snapshot rollback update update-check healthcheck
+        snapshot rollback update update-check healthcheck ip-allow ip-allow-list ip-allow-clear
 
 # =============================================================================
 # Meowbox Management Commands
@@ -125,3 +125,22 @@ update:
 
 update-check:
 	@bash tools/update.sh --check
+
+# --- IP allowlist (быстрый escape-hatch из терминала) ---------------------
+# Используй когда страшно пилить с UI или когда заперся снаружи allowlist'а
+# и зашёл по SSH. Все изменения сразу подхватываются API через `reload`,
+# рестарт не требуется.
+#
+#   make ip-allow IP=1.2.3.4 LABEL=home   # добавить запись + включить allowlist
+#   make ip-allow IP=10.0.0.0/24          # добавить целую подсеть
+#   make ip-allow-list                    # посмотреть текущий список
+#   make ip-allow-clear                   # ВЫРУБИТЬ allowlist (открыть всё)
+ip-allow:
+	@if [ -z "$(IP)" ]; then echo "Usage: make ip-allow IP=1.2.3.4[/cidr] [LABEL=home]"; exit 2; fi
+	@bash tools/ip-allowlist.sh add "$(IP)" "$(LABEL)"
+
+ip-allow-list:
+	@bash tools/ip-allowlist.sh list
+
+ip-allow-clear:
+	@bash tools/ip-allowlist.sh clear

@@ -62,6 +62,15 @@ async function bootstrap() {
   // на всех модулях → закрывает HTTP сервер → процесс выходит сразу.
   app.enableShutdownHooks();
 
+  // --- Security: trust proxy (loopback) ---
+  // API живёт за nginx на 127.0.0.1. Без trust-proxy req.ip всегда 127.0.0.1
+  // → IpAllowlistGuard всегда пропускает по loopback bypass'у → allowlist
+  // бесполезен. Доверяем только loopback, чтобы X-Forwarded-For нельзя было
+  // подделать с публичных IP (внешние L7-балансеры на отдельной IP — вне
+  // дефолтного сетапа Meowbox).
+  const expressApp = app.getHttpAdapter().getInstance() as { set: (k: string, v: string | boolean) => void };
+  expressApp.set('trust proxy', 'loopback');
+
   // --- Security: HTTP headers ---
   app.use(
     helmet({

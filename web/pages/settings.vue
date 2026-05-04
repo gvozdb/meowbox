@@ -42,23 +42,6 @@
         </div>
       </div>
 
-      <div class="settings-card">
-        <h3 class="settings-card__title">Обслуживание панели</h3>
-        <div class="settings-fields">
-          <label class="inline-check">
-            <input type="checkbox" v-model="generalForm.autoUpdateCheck" />
-            Автоматически проверять обновления
-          </label>
-          <div class="form-group">
-            <label class="form-label">Ветка обновлений</label>
-            <select v-model="generalForm.updateBranch" class="form-input">
-              <option value="stable">stable (рекомендуется)</option>
-              <option value="main">main (bleeding-edge)</option>
-            </select>
-          </div>
-        </div>
-      </div>
-
       <div class="settings-actions">
         <button class="settings-card__btn" :disabled="saving || generalLoading" @click="saveGeneralSettings">
           {{ saving ? 'Сохранение...' : 'Сохранить настройки' }}
@@ -291,6 +274,79 @@
         </div>
       </div>
 
+      <!-- IP allowlist (whitelist по IP/CIDR на уровне приложения) -->
+      <div class="settings-card">
+        <h3 class="settings-card__title">Whitelist IP-адресов</h3>
+        <p class="settings-card__desc">
+          {{ ipAllowlist.enabled
+            ? `Включён. Доступ к панели разрешён только с указанных IP/подсетей. Loopback (127.0.0.1, ::1) разрешён всегда — escape-hatch через SSH-туннель.`
+            : 'Если включить — все запросы к панели (включая /login и /refresh) с IP, не входящих в список, будут отбиты 403. Loopback разрешён всегда.' }}
+        </p>
+
+        <div class="ip-allow__client" :class="{ 'ip-allow__client--in': ipAllowlist.clientIpAllowed }">
+          <span class="ip-allow__label">Ваш IP сейчас:</span>
+          <code class="ip-allow__ip">{{ ipAllowlist.clientIp || 'неизвестен' }}</code>
+          <span v-if="ipAllowlist.enabled" class="ip-allow__status">
+            {{ ipAllowlist.clientIpAllowed ? 'в списке' : 'НЕ в списке' }}
+          </span>
+        </div>
+
+        <div class="settings-fields">
+          <label class="inline-check">
+            <input type="checkbox" v-model="ipAllowlist.enabled" :disabled="ipAllowlistSaving" />
+            Включить allowlist
+          </label>
+        </div>
+
+        <div class="ip-allow__list">
+          <div v-if="ipAllowlist.entries.length === 0" class="audit-log__empty">
+            <p>Список пуст. Добавьте свой IP или подсеть ниже.</p>
+          </div>
+          <div v-for="(e, idx) in ipAllowlist.entries" :key="e.cidr" class="ip-allow__row">
+            <code class="ip-allow__row-cidr">{{ e.cidr }}</code>
+            <span class="ip-allow__row-label">{{ e.label || '—' }}</span>
+            <button class="session-item__revoke" :disabled="ipAllowlistSaving" @click="removeIpEntry(idx)">
+              Удалить
+            </button>
+          </div>
+        </div>
+
+        <div class="ip-allow__add">
+          <input
+            v-model="ipAllowEntry.cidr"
+            type="text"
+            class="form-input form-input--mono"
+            placeholder="например 1.2.3.4 или 10.0.0.0/24"
+            :disabled="ipAllowlistSaving"
+          />
+          <input
+            v-model="ipAllowEntry.label"
+            type="text"
+            class="form-input"
+            placeholder="метка (home, office, ...)"
+            maxlength="64"
+            :disabled="ipAllowlistSaving"
+          />
+          <button class="settings-card__btn settings-card__btn--sm" :disabled="ipAllowlistSaving || !ipAllowEntry.cidr" @click="addIpEntry()">
+            Добавить
+          </button>
+          <button
+            class="settings-card__btn settings-card__btn--sm"
+            :disabled="ipAllowlistSaving || !ipAllowlist.clientIp"
+            :title="ipAllowlist.clientIp ? `Добавит ${ipAllowlist.clientIp}` : 'IP не определён'"
+            @click="addClientIp()"
+          >
+            + мой текущий IP
+          </button>
+        </div>
+
+        <div class="settings-actions">
+          <button class="settings-card__btn" :disabled="ipAllowlistSaving" @click="saveIpAllowlist()">
+            {{ ipAllowlistSaving ? 'Сохранение...' : 'Сохранить' }}
+          </button>
+        </div>
+      </div>
+
       <!-- Active sessions (перенесено из отдельной вкладки) -->
       <div class="settings-card">
         <div class="sessions-header">
@@ -500,9 +556,6 @@ interface PanelSettings {
   alertCpuPercent: number;
   alertRamPercent: number;
   alertDiskPercent: number;
-  // Обслуживание
-  autoUpdateCheck: boolean;
-  updateBranch: 'stable' | 'main';
   // Безопасность
   sessionMaxAttempts: number;
   sessionAccessTtlMinutes: number;
@@ -514,8 +567,6 @@ const generalForm = reactive<PanelSettings>({
   alertCpuPercent: 85,
   alertRamPercent: 85,
   alertDiskPercent: 90,
-  autoUpdateCheck: true,
-  updateBranch: 'stable',
   sessionMaxAttempts: 5,
   sessionAccessTtlMinutes: 15,
   sessionRefreshTtlDays: 7,
@@ -696,6 +747,77 @@ async function enableBasicAuth() {
     showStatus(msg, true);
   } finally {
     basicAuthSaving.value = false;
+  }
+}
+
+// ── IP allowlist ───────────────────────────────────────────────────────────
+interface IpAllowEntry { cidr: string; label: string }
+interface IpAllowConfig {
+  enabled: boolean;
+  entries: IpAllowEntry[];
+  clientIp?: string;
+  clientIpAllowed?: boolean;
+}
+const ipAllowlist = reactive<IpAllowConfig>({
+  enabled: false,
+  entries: [],
+  clientIp: '',
+  clientIpAllowed: true,
+});
+const ipAllowEntry = reactive<IpAllowEntry>({ cidr: '', label: '' });
+const ipAllowlistSaving = ref(false);
+
+async function loadIpAllowlist() {
+  try {
+    const data = await api.get<IpAllowConfig>('/admin/ip-allowlist');
+    ipAllowlist.enabled = !!data.enabled;
+    ipAllowlist.entries = Array.isArray(data.entries) ? [...data.entries] : [];
+    ipAllowlist.clientIp = data.clientIp || '';
+    ipAllowlist.clientIpAllowed = !!data.clientIpAllowed;
+  } catch {
+    /* эндпоинт может быть на старой версии */
+  }
+}
+
+function removeIpEntry(idx: number) {
+  ipAllowlist.entries.splice(idx, 1);
+}
+
+async function addIpEntry() {
+  const cidr = ipAllowEntry.cidr.trim();
+  if (!cidr) return;
+  ipAllowlist.entries.push({ cidr, label: ipAllowEntry.label.trim() });
+  ipAllowEntry.cidr = '';
+  ipAllowEntry.label = '';
+}
+
+async function addClientIp() {
+  if (!ipAllowlist.clientIp) return;
+  const exists = ipAllowlist.entries.some((e) => e.cidr === ipAllowlist.clientIp || e.cidr.startsWith(`${ipAllowlist.clientIp}/`));
+  if (exists) {
+    showStatus('Этот IP уже в списке');
+    return;
+  }
+  ipAllowlist.entries.push({ cidr: ipAllowlist.clientIp, label: 'мой текущий IP' });
+}
+
+async function saveIpAllowlist() {
+  ipAllowlistSaving.value = true;
+  try {
+    const data = await api.put<IpAllowConfig>('/admin/ip-allowlist', {
+      enabled: ipAllowlist.enabled,
+      entries: ipAllowlist.entries.map((e) => ({ cidr: e.cidr, label: e.label })),
+    });
+    ipAllowlist.enabled = !!data.enabled;
+    ipAllowlist.entries = Array.isArray(data.entries) ? [...data.entries] : [];
+    showStatus('Whitelist IP сохранён');
+    // Перечитываем чтобы получить свежий clientIpAllowed.
+    await loadIpAllowlist();
+  } catch (e) {
+    const msg = (e as Error)?.message || 'Не удалось сохранить allowlist';
+    showStatus(msg, true);
+  } finally {
+    ipAllowlistSaving.value = false;
   }
 }
 
@@ -1023,6 +1145,7 @@ watch(activeTab, (tab) => {
     loadBasicAuth();
     loadGeneralSettings(); // для полей «Безопасность сессий», которые теперь тут
     loadSessions();
+    loadIpAllowlist();
   }
 });
 
@@ -1592,6 +1715,86 @@ onMounted(() => {
 
   .audit-item__action {
     min-width: unset;
+  }
+}
+
+/* ========== IP allowlist ========== */
+.ip-allow__client {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.55rem 0.75rem;
+  border-radius: 8px;
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  font-size: 0.8rem;
+  margin-bottom: 0.85rem;
+}
+.ip-allow__client--in {
+  border-color: var(--primary-border);
+  background: var(--primary-bg);
+}
+.ip-allow__label {
+  color: var(--text-muted);
+}
+.ip-allow__ip {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.78rem;
+  color: var(--text-heading);
+}
+.ip-allow__status {
+  margin-left: auto;
+  font-size: 0.72rem;
+  font-weight: 600;
+  padding: 0.15rem 0.5rem;
+  border-radius: 6px;
+  background: var(--bg-surface);
+  color: var(--text-tertiary);
+}
+.ip-allow__client--in .ip-allow__status {
+  color: #4ade80;
+}
+.ip-allow__list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  margin: 0.85rem 0;
+}
+.ip-allow__row {
+  display: grid;
+  grid-template-columns: 1.4fr 2fr auto;
+  gap: 0.6rem;
+  align-items: center;
+  padding: 0.45rem 0.65rem;
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+.ip-allow__row-cidr {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.8rem;
+  color: var(--text-secondary);
+}
+.ip-allow__row-label {
+  font-size: 0.78rem;
+  color: var(--text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ip-allow__add {
+  display: grid;
+  grid-template-columns: 1.5fr 1.5fr auto auto;
+  gap: 0.5rem;
+  margin-top: 0.5rem;
+}
+@media (max-width: 768px) {
+  .ip-allow__add {
+    grid-template-columns: 1fr;
+  }
+  .ip-allow__row {
+    grid-template-columns: 1fr;
+    gap: 0.3rem;
   }
 }
 

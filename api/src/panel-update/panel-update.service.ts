@@ -84,6 +84,69 @@ export class PanelUpdateService implements OnModuleInit {
   ) {}
 
   /**
+   * Идемпотентная запись в `PanelUpdateHistory`. Финализация апдейта может
+   * происходить в ТРЁХ местах:
+   *   1. `attachLogWatcher::finalize` — норм, watcher жив до конца.
+   *   2. `onModuleInit` — API стартует и видит status=running с мёртвым pid
+   *      (типичный кейс: pm2 reload в стадии reload убил предыдущий процесс).
+   *   3. `getStatus` — frontend дёрнул /status пока pid уже умер, но
+   *      onModuleInit его не подцепил (race на старте).
+   *
+   * Раньше history писался только из (1), а в (2) и (3) обновлялся ТОЛЬКО
+   * `panelUpdateState`. В итоге успешные апдейты при pm2 reload терялись —
+   * пользователь видел в «Истории обновлений» только фейлы.
+   *
+   * Идемпотентность: уникальный ключ — `startedAt` (один апдейт = один
+   * timestamp старта). Если запись уже есть — не дублируем.
+   */
+  private async ensureHistoryRecord(args: {
+    fromVersion: string | null;
+    toVersion: string;
+    status: 'succeeded' | 'failed' | 'rolled_back';
+    startedAt: Date;
+    finishedAt: Date;
+    triggeredBy: string | null;
+    errorMessage: string | null;
+  }): Promise<void> {
+    try {
+      const existing = await this.prisma.panelUpdateHistory.findFirst({
+        where: { startedAt: args.startedAt },
+      });
+      if (existing) return;
+      const durationMs = Math.max(0, args.finishedAt.getTime() - args.startedAt.getTime());
+      await this.prisma.panelUpdateHistory.create({
+        data: {
+          id: cryptoRandomUuid(),
+          fromVersion: args.fromVersion,
+          toVersion: args.toVersion,
+          status: args.status,
+          startedAt: args.startedAt,
+          finishedAt: args.finishedAt,
+          durationMs,
+          triggeredBy: args.triggeredBy,
+          errorMessage: args.errorMessage,
+        },
+      });
+      this.logger.log(`History record created: ${args.status} (${args.fromVersion ?? '?'} → ${args.toVersion})`);
+    } catch (e) {
+      this.logger.warn(`ensureHistoryRecord: ${(e as Error).message}`);
+    }
+  }
+
+  /** Удалить запись из истории обновлений (admin). */
+  async deleteHistory(id: string): Promise<void> {
+    if (!id || typeof id !== 'string') {
+      throw new BadRequestException('id обязателен');
+    }
+    const row = await this.prisma.panelUpdateHistory.findUnique({ where: { id } });
+    if (!row) {
+      throw new BadRequestException(`Запись истории "${id}" не найдена`);
+    }
+    await this.prisma.panelUpdateHistory.delete({ where: { id } });
+    this.logger.log(`History record deleted: ${id} (${row.fromVersion ?? '?'} → ${row.toVersion}, ${row.status})`);
+  }
+
+  /**
    * При старте API: если в БД висит status=running с живым pid — это значит
    * мы только что рестартанулись посередине апдейта (pm2 reload во время
    * стадии reload). Подцепляем watcher на лог-файл, чтобы продолжить
@@ -107,15 +170,29 @@ export class PanelUpdateService implements OnModuleInit {
         const okBySentinel = await this.fileExists(sentinelPath);
         const okByLog = /\[update\] ✓ Update OK:/.test(logTail);
         const ok = okBySentinel || okByLog;
+        const finishedAt = new Date();
+        const errorMessage = ok ? null : this.extractErrorFromLog(logTail) || 'update.sh died';
         await this.prisma.panelUpdateState.update({
           where: { id: 'current' },
           data: {
             status: ok ? 'succeeded' : 'failed',
-            finishedAt: new Date(),
-            errorMessage: ok ? null : this.extractErrorFromLog(logTail) || 'update.sh died',
+            finishedAt,
+            errorMessage,
             logTail: logTail.slice(-16 * 1024),
           },
         });
+        // Пишем запись в History, чтобы успехи после pm2 reload не терялись.
+        if (state.startedAt) {
+          await this.ensureHistoryRecord({
+            fromVersion: state.fromVersion,
+            toVersion: state.toVersion ?? 'unknown',
+            status: ok ? 'succeeded' : 'failed',
+            startedAt: state.startedAt,
+            finishedAt,
+            triggeredBy: null,
+            errorMessage,
+          });
+        }
         if (ok) {
           await fsp.unlink(sentinelPath).catch(() => {});
         }
@@ -200,15 +277,27 @@ export class PanelUpdateService implements OnModuleInit {
       // succeeded. Если нет — даём watcher'у дотикать; сам не мутируем
       // (watcher разгребёт и поставит failed, или onModuleInit подхватит).
       if (ok) {
+        const finishedAt = new Date();
         state = await this.prisma.panelUpdateState.update({
           where: { id: 'current' },
           data: {
             status: 'succeeded',
             errorMessage: null,
-            finishedAt: new Date(),
+            finishedAt,
             logTail: logTail.slice(-16 * 1024),
           },
         });
+        if (state.startedAt) {
+          await this.ensureHistoryRecord({
+            fromVersion: state.fromVersion,
+            toVersion: state.toVersion ?? 'unknown',
+            status: 'succeeded',
+            startedAt: state.startedAt,
+            finishedAt,
+            triggeredBy: null,
+            errorMessage: null,
+          });
+        }
         await fsp.unlink(sentinelPath).catch(() => {});
       } else {
         // Grace-period: pid умер только что, watcher ещё не финализировал.
@@ -217,15 +306,28 @@ export class PanelUpdateService implements OnModuleInit {
         const startedAt = state.startedAt?.getTime() ?? Date.now();
         const ageMs = Date.now() - startedAt;
         if (ageMs > 5_000) {
+          const finishedAt = new Date();
+          const errorMessage = this.extractErrorFromLog(logTail) || 'update.sh died unexpectedly (pid not found)';
           state = await this.prisma.panelUpdateState.update({
             where: { id: 'current' },
             data: {
               status: 'failed',
-              errorMessage: this.extractErrorFromLog(logTail) || 'update.sh died unexpectedly (pid not found)',
-              finishedAt: new Date(),
+              errorMessage,
+              finishedAt,
               logTail: logTail.slice(-16 * 1024),
             },
           });
+          if (state.startedAt) {
+            await this.ensureHistoryRecord({
+              fromVersion: state.fromVersion,
+              toVersion: state.toVersion ?? 'unknown',
+              status: 'failed',
+              startedAt: state.startedAt,
+              finishedAt,
+              triggeredBy: null,
+              errorMessage,
+            });
+          }
         }
         // если age < 5с — оставляем status=running, watcher дотикает
       }

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # =============================================================================
 # Meowbox — Server Management Panel
-# Установщик для Ubuntu 22.04+ / Debian 12+
+# Установщик для Ubuntu 22.04+ (только Ubuntu — Debian/CentOS/прочее не поддерживается).
 #
 # Хранилище: SQLite (один файл data/meowbox.db) — PostgreSQL и Redis больше
 # не требуются. Панель потребляет ~150 МБ RAM (было ~450 МБ с PG+Redis).
@@ -99,8 +99,14 @@ if [[ $EUID -ne 0 ]]; then
   error "Запусти под root (через sudo)"
 fi
 
-if ! grep -qiE 'ubuntu|debian' /etc/os-release 2>/dev/null; then
-  error "Поддерживается только Ubuntu 22.04+ / Debian 12+"
+# Только Ubuntu. Debian/CentOS/Rocky/AlmaLinux не поддерживаются — на других
+# дистрах ломается пакетная база (ondrej/php, нейминг php-fpm-юнитов, перфект-
+# ные дефолты mariadb-10.x vs 10.11, размещение nginx-конфигов). Лучше ошибка
+# на старте, чем странный битый сервер посередине провижининга.
+DISTRO_ID_PREFLIGHT=$(. /etc/os-release && echo "${ID:-unknown}")
+DISTRO_NAME_PREFLIGHT=$(. /etc/os-release && echo "${PRETTY_NAME:-unknown}")
+if [[ "$DISTRO_ID_PREFLIGHT" != "ubuntu" ]]; then
+  error "Поддерживается только Ubuntu (определено: ${DISTRO_NAME_PREFLIGHT}). Установка отменена."
 fi
 
 log "Starting Meowbox installation..."
@@ -162,15 +168,13 @@ systemctl enable --now postgresql  >> "$LOG_FILE" 2>&1 || true
 # ставит явно через /php для миграций старых сайтов.
 # Если на сервере есть только дефолтная дистровская версия — провижининг
 # падает с "spawn php8.X ENOENT" посередине установки CMS. Чтобы у юзера
-# всегда был полный спектр, подключаем ondrej/php PPA и ставим 8.1+8.2+8.3.
-# На Debian используем sury.org как эквивалент.
-log "Adding PHP repository (ondrej/php on Ubuntu, sury.org on Debian)..."
+# всегда был полный спектр, подключаем ondrej/php PPA.
+log "Adding PHP repository (ondrej/php)..."
 
-# Определяем дистрибутив.
-DISTRO_ID=$(. /etc/os-release && echo "${ID:-unknown}")
+# Codename Ubuntu (jammy/noble/...) — нужен для подключения yandex-зеркала.
 DISTRO_CODENAME=$(lsb_release -cs 2>/dev/null || echo "")
 
-if [[ "$DISTRO_ID" == "ubuntu" ]]; then
+if true; then
   if ! grep -rq "ondrej/php" /etc/apt/sources.list.d/ 2>/dev/null; then
     add-apt-repository -y ppa:ondrej/php >> "$LOG_FILE" 2>&1 || \
       warn "Не удалось добавить ondrej/php — будет только дистровская версия PHP"
@@ -223,17 +227,6 @@ YANDEX_EOF
         warn "Yandex mirror probe failed (http=$YANDEX_HTTP) — пропускаю подключение"
       fi
     fi
-  fi
-elif [[ "$DISTRO_ID" == "debian" ]] && [[ -n "$DISTRO_CODENAME" ]]; then
-  if [[ ! -f /etc/apt/sources.list.d/sury-php.list ]]; then
-    install -m 0755 -d /etc/apt/keyrings
-    curl -fsSL https://packages.sury.org/php/apt.gpg \
-      -o /etc/apt/keyrings/sury-php.gpg 2>>"$LOG_FILE" && \
-      chmod a+r /etc/apt/keyrings/sury-php.gpg && \
-      echo "deb [signed-by=/etc/apt/keyrings/sury-php.gpg] https://packages.sury.org/php/ ${DISTRO_CODENAME} main" \
-        > /etc/apt/sources.list.d/sury-php.list && \
-      apt-get update -qq >> "$LOG_FILE" 2>&1 || \
-      warn "Не удалось добавить sury.org — будет только дистровская версия PHP"
   fi
 fi
 

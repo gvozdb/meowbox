@@ -36,6 +36,8 @@ import { StorageLocationsModule } from './storage-locations/storage-locations.mo
 import { DnsModule } from './dns/dns.module';
 import { ServicesModule } from './services/services.module';
 import { PanelUpdateModule } from './panel-update/panel-update.module';
+import { AdminSecurityModule } from './admin-security/admin-security.module';
+import { IpAllowlistGuard } from './admin-security/ip-allowlist.guard';
 import { GlobalExceptionFilter } from './common/filters/http-exception.filter';
 import { AuditInterceptor } from './common/interceptors/audit.interceptor';
 import { JwtAuthGuard } from './common/guards/jwt-auth.guard';
@@ -107,11 +109,19 @@ import { CustomThrottlerGuard } from './common/guards/throttler-tracker.guard';
     DnsModule,
     ServicesModule,
     PanelUpdateModule,
+    AdminSecurityModule,
   ],
   providers: [
     {
       provide: APP_FILTER,
       useClass: GlobalExceptionFilter,
+    },
+    // IP allowlist первым в цепочке — фильтрует ВСЕ запросы (включая
+    // /auth/login и /auth/refresh), кроме явных исключений (loopback,
+    // /api/proxy/* для master↔slave). Если allowlist выключен — пропускает.
+    {
+      provide: APP_GUARD,
+      useClass: IpAllowlistGuard,
     },
     {
       provide: APP_GUARD,

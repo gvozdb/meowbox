@@ -134,6 +134,7 @@
           <span>Статус</span>
           <span>Длительность</span>
           <span>Кем</span>
+          <span></span>
         </div>
         <div v-for="h in status.history" :key="h.id" class="history-row" :class="`history-row--${h.status}`">
           <span class="history-row__time">{{ humanTime(h.startedAt) }}</span>
@@ -141,6 +142,17 @@
           <span class="history-row__status">{{ statusLabel(h.status) }}</span>
           <span class="history-row__dur">{{ humanDuration(h.durationMs) }}</span>
           <span class="history-row__by">{{ h.triggeredBy ?? '—' }}</span>
+          <button
+            class="history-row__delete"
+            :disabled="deletingId === h.id"
+            title="Удалить запись"
+            @click="onDeleteHistory(h.id)"
+          >
+            <svg v-if="deletingId !== h.id" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+              <polyline points="3 6 5 6 21 6" /><path d="M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6m3 0V4a2 2 0 012-2h4a2 2 0 012 2v2" />
+            </svg>
+            <span v-else class="spinner spinner--sm" />
+          </button>
         </div>
       </div>
     </section>
@@ -229,6 +241,24 @@ async function onCheckLatest() {
     await loadStatus(true);
   } finally {
     checkingLatest.value = false;
+  }
+}
+
+const deletingId = ref<string | null>(null);
+
+async function onDeleteHistory(id: string) {
+  if (!confirm('Удалить запись из истории обновлений? Это действие необратимо.')) return;
+  deletingId.value = id;
+  try {
+    await api.del(`/admin/update/history/${id}`);
+    if (status.value) {
+      status.value.history = status.value.history.filter((h) => h.id !== id);
+    }
+    showBanner('ok', 'Запись удалена');
+  } catch (e) {
+    showBanner('err', `Не удалось удалить: ${(e as Error).message}`, 6000);
+  } finally {
+    deletingId.value = null;
   }
 }
 
@@ -531,12 +561,13 @@ onBeforeUnmount(() => stopPolling());
 .history-table { display: flex; flex-direction: column; }
 .history-row {
   display: grid;
-  grid-template-columns: 1.5fr 2fr 1fr 1fr 1.2fr;
+  grid-template-columns: 1.5fr 2fr 1fr 1fr 1.2fr 32px;
   gap: 0.75rem;
   padding: 0.55rem 0.5rem;
   font-size: 0.8rem;
   color: var(--text-secondary);
   border-bottom: 1px dashed var(--border-secondary);
+  align-items: center;
 }
 .history-row:last-child { border-bottom: none; }
 .history-row--header {
@@ -551,6 +582,29 @@ onBeforeUnmount(() => stopPolling());
 .history-row__ver {
   font-family: 'JetBrains Mono', monospace;
   font-size: 0.78rem;
+}
+.history-row__delete {
+  width: 28px;
+  height: 28px;
+  border-radius: 6px;
+  border: 1px solid var(--border-secondary);
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  transition: all 0.15s;
+}
+.history-row__delete:hover:not(:disabled) {
+  background: rgba(239, 68, 68, 0.08);
+  border-color: rgba(239, 68, 68, 0.3);
+  color: #fca5a5;
+}
+.history-row__delete:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
 }
 
 .alert {

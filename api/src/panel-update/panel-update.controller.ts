@@ -1,4 +1,4 @@
-import { Body, Controller, Get, Post, Query } from '@nestjs/common';
+import { Body, Controller, Delete, Get, Param, Post, Query } from '@nestjs/common';
 
 import { CurrentUser } from '../common/decorators/current-user.decorator';
 import { Roles } from '../common/decorators/roles.decorator';
@@ -55,5 +55,17 @@ export class PanelUpdateController {
   ) {
     const data = await this.service.triggerUpdate(body?.version ?? null, user.id, user.role);
     return { success: true, data };
+  }
+
+  /**
+   * DELETE /api/admin/update/history/:id — удалить запись из истории.
+   * История — append-only лог; ручное удаление нужно для чистки старых
+   * fail-ов, после того как починили root cause.
+   */
+  @Delete('history/:id')
+  @Roles(UserRole.ADMIN)
+  async deleteHistory(@Param('id') id: string) {
+    await this.service.deleteHistory(id);
+    return { success: true, data: { id } };
   }
 }

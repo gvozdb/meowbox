@@ -1,11 +1,16 @@
-import { Controller, Get, Put, Body, BadRequestException } from '@nestjs/common';
+import { Controller, Get, Put, Body, BadRequestException, Logger } from '@nestjs/common';
 import { PanelSettingsService, VALID_PALETTES, isValidPalette } from './panel-settings.service';
 import { Roles } from '../common/decorators/roles.decorator';
+import { ProxyService } from '../proxy/proxy.service';
 
 @Controller('panel-settings')
 @Roles('ADMIN')
 export class PanelSettingsController {
-  constructor(private readonly service: PanelSettingsService) {}
+  private readonly logger = new Logger('PanelSettingsController');
+  constructor(
+    private readonly service: PanelSettingsService,
+    private readonly proxy: ProxyService,
+  ) {}
 
   // ── General (мониторинг/сессии/обновления) ─────────────────────────────
   @Get()
@@ -104,6 +109,34 @@ export class PanelSettingsController {
       );
     }
     const data = await this.service.setServerPalette(serverId, paletteRaw);
+
+    // Палитра физически живёт в БД мастера. Когда оператор меняет её для
+    // slave из /servers — slave своей собственной БД об этом не знает,
+    // поэтому при заходе на прямой URL slave (где currentServerId='main')
+    // он показывает свою старую запись `appearance.palettes.main`.
+    //
+    // Чтобы этого не было — проксируем тот же PUT на slave с serverId='main'.
+    // Best-effort: если slave офлайн или старой версии (нет endpoint'а) —
+    // просто логируем варн, мастер-запись уже сохранена.
+    if (serverId !== 'main') {
+      const slave = this.proxy.getServer(serverId);
+      if (slave) {
+        try {
+          await this.proxy.proxyRequest(
+            slave,
+            'PUT',
+            '/panel-settings/appearance',
+            { serverId: 'main', palette: paletteRaw },
+            undefined,
+            5_000,
+          );
+        } catch (e) {
+          this.logger.warn(
+            `Не удалось засинхронизировать палитру на slave ${slave.name} (${slave.id}): ${(e as Error).message}`,
+          );
+        }
+      }
+    }
     return { success: true, data };
   }
 }
