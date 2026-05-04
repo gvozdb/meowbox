@@ -445,7 +445,9 @@ async function rsyncFilesStage(ctx: RunCtx) {
 
   const args = [
     '-aHAX',
-    '--info=progress2',
+    // progress2 → один сводный % по всем файлам.
+    // name0 → не печатает имена файлов (тихо, без громких логов).
+    '--info=progress2,name0',
     '--no-inc-recursive',
     '-e', sshSpec,
     ...allExcludes.flatMap((e) => ['--exclude', e]),
@@ -455,9 +457,45 @@ async function rsyncFilesStage(ctx: RunCtx) {
 
   log(ctx, `  rsync ${sourceHome}/ → ${targetHome}/  (${allExcludes.length} excludes)`);
 
+  // Маппим внутристейджевый прогресс rsync (0..100%) на общую шкалу миграции.
+  // 'rsync-files' — 3-й стейдж из 13 (см. STAGES). Stage-base считаем из той же
+  // формулы, что и в next() (см. выше).
+  const stageIdx1 = STAGES.indexOf('rsync-files') + 1; // 1-based
+  const stageStartPct = ((stageIdx1 - 1) / STAGES.length) * 100;
+  const stageEndPct = (stageIdx1 / STAGES.length) * 100;
+  let lastEmittedPct = -1;
+  let lastEmittedAt = 0;
+
+  // Регексп под `--info=progress2` rsync. Пример строки:
+  //   "  1,234,567,890  45%   12.34MB/s    0:01:23 (xfr#1234, to-chk=5678/9012)"
+  // Захватываем percent (group 2), speed (group 3), eta (group 4).
+  const RSYNC_PROGRESS_RE = /^[\s\d,]+\s+(\d{1,3})%\s+(\S+)\s+(\d+:\d+:\d+)/;
+
+  const handleLine = (line: string) => {
+    const m = line.match(RSYNC_PROGRESS_RE);
+    if (!m) {
+      // Не прогресс-строка — обычный лог (warning/error/summary).
+      log(ctx, `    ${line}`);
+      return;
+    }
+    const subPct = Math.max(0, Math.min(100, parseInt(m[1]!, 10)));
+    const speed = m[2]!;
+    const eta = m[3]!;
+    const overall = stageStartPct + (subPct / 100) * (stageEndPct - stageStartPct);
+    const overallInt = Math.floor(overall);
+    const now = Date.now();
+    // Throttle: не чаще раза в секунду И только если процент сдвинулся.
+    if (overallInt !== lastEmittedPct && now - lastEmittedAt >= 800) {
+      lastEmittedPct = overallInt;
+      lastEmittedAt = now;
+      emitProgress(ctx, 'rsync-files', overallInt);
+      log(ctx, `    rsync ${subPct}% @ ${speed} eta ${eta}`);
+    }
+  };
+
   await runStreaming('rsync', args, {
     env,
-    onLine: (line) => log(ctx, `    ${line}`),
+    onLine: handleLine,
     timeoutMs: 12 * 60 * 60 * 1000,
     isCancelled: ctx.isCancelled,
   });
@@ -765,6 +803,13 @@ async function applyNginxStage(ctx: RunCtx) {
   const nginx = new NginxManager();
   const homeDir = path.join(SITES_BASE_PATH, ctx.plan.newName);
   const filesRelPath = ctx.plan.filesRelPath || 'www';
+  // ВАЖНО: миграция Hostpanel создаёт Site в БД master ПОСЛЕ apply-nginx
+  // (см. migration-hostpanel.service.ts::persistMigratedSiteRecords). Поэтому
+  // обычный путь "API регенерит meowbox-zones.conf перед nginx:create-config"
+  // здесь не отрабатывает, и `nginx -t` падает с
+  // "zero size shared memory zone site_<newName>". Страхуемся идемпотентным
+  // append'ом зоны прямо в агенте — после persist API перепишет файл целиком.
+  await nginx.ensureZoneForSite(ctx.plan.newName);
   // spec §7.2: если на источнике есть `if ($host != $main_host) return 301`
   // — все алиасы 301-редиректят на главный домен. Передаём это в NginxManager
   // через формат `{domain, redirect: true}[]` (см. NginxAliasInput в templates.ts).
@@ -1154,7 +1199,10 @@ function runStreaming(
     const onChunk = (chunk: Buffer) => {
       bumpActivity();
       const s = chunk.toString();
-      const lines = s.split('\n');
+      // Сплитим и по \n, и по \r — rsync --info=progress2 шлёт обновления
+      // прогресса через возврат каретки (\r) без \n. Без этого все апдейты
+      // склеиваются в одну гигантскую "строку" пока не придёт финальный \n.
+      const lines = s.split(/[\r\n]/);
       for (const line of lines) {
         if (line.trim()) opts.onLine?.(line.trim());
       }

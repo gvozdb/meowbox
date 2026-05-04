@@ -313,6 +313,42 @@ export class NginxManager {
     }
   }
 
+  /**
+   * Идемпотентно добавляет shared zone `site_<safe>` в `/etc/nginx/conf.d/meowbox-zones.conf`,
+   * если её там ещё нет. Используется когда регенерация полного списка зон со стороны API
+   * невозможна (миграция Hostpanel: Site создаётся в БД master ПОСЛЕ apply-nginx).
+   * Без этой страховки `nginx -t` падает: "zero size shared memory zone site_<name>".
+   *
+   * NB: после persist Site мастер всё равно регенерит файл из БД авторитетно —
+   * этот append временный и переживёт ровно до следующего создания/удаления сайта.
+   */
+  async ensureZoneForSite(siteName: string, rps = 30): Promise<void> {
+    const zonesPath = '/etc/nginx/conf.d/meowbox-zones.conf';
+    const safe = String(siteName).replace(/[^a-zA-Z0-9_-]/g, '_');
+    if (!safe) return;
+    const zoneId = `zone=site_${safe}:`;
+    const rate = rps && rps > 0 ? rps : 30;
+    const newLine = `limit_req_zone $binary_remote_addr zone=site_${safe}:1m rate=${rate}r/s;`;
+
+    let current = '';
+    try { current = await fs.readFile(zonesPath, 'utf8'); } catch { /* отсутствует — создадим */ }
+    if (current.includes(zoneId)) return;
+
+    const header =
+`# === Meowbox global rate-limit zones (управляется агентом) ===
+# Файл регенерируется при создании/удалении сайта и при изменении rate-limit настроек.
+# Не редактируй вручную — изменения будут затёрты.
+
+# Legacy fallback zone (для конфигов сайтов, которые ещё не пере-генерены под per-site zone).
+limit_req_zone $binary_remote_addr zone=site_limit:10m rate=30r/s;
+`;
+    const base = current && current.trim().length > 0 ? current : header;
+    const next = base.endsWith('\n') ? `${base}${newLine}\n` : `${base}\n${newLine}\n`;
+    await fs.mkdir(path.dirname(zonesPath), { recursive: true });
+    await fs.writeFile(zonesPath, next, 'utf8');
+    await fs.chmod(zonesPath, 0o644).catch(() => {});
+  }
+
   // ---------------------------------------------------------------------------
   // GLOBAL
   // ---------------------------------------------------------------------------
