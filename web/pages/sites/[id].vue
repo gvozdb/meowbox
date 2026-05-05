@@ -23,7 +23,7 @@
             <div>
               <h1 class="site-detail__title">{{ site.displayName || site.name }}</h1>
               <p class="site-detail__domain">
-                {{ site.domain }}
+                <a :href="domainUrl(site.domain)" target="_blank" rel="noopener noreferrer" class="domain-link">{{ site.domain }}</a>
                 <span v-if="site.displayName" class="site-detail__sysname">· {{ site.name }}</span>
               </p>
             </div>
@@ -194,11 +194,15 @@
             <div class="info-card__rows">
               <div class="info-row">
                 <span class="info-row__label">Домен</span>
-                <span class="info-row__value info-row__value--mono">{{ site.domain }}</span>
+                <a :href="domainUrl(site.domain)" target="_blank" rel="noopener noreferrer" class="info-row__value info-row__value--mono domain-link">{{ site.domain }}</a>
               </div>
               <div v-if="site.aliases?.length" class="info-row">
                 <span class="info-row__label">Алиасы</span>
-                <span class="info-row__value info-row__value--mono">{{ aliasesSummary }}</span>
+                <span class="info-row__value info-row__value--mono info-row__aliases">
+                  <template v-for="(a, i) in normalizedAliasList" :key="a.domain + i">
+                    <a :href="domainUrl(a.domain)" target="_blank" rel="noopener noreferrer" class="domain-link">{{ a.domain }}</a><span v-if="a.redirect" class="info-row__aliases-arrow"> →</span><span v-if="i < normalizedAliasList.length - 1">, </span>
+                  </template>
+                </span>
               </div>
               <div v-if="site.sslCertificate" class="info-row">
                 <span class="info-row__label">SSL</span>
@@ -983,7 +987,7 @@ sudo mv {{ site?.rootPath }}/{{ site?.filesRelPath || 'www' }}/* {{ site?.rootPa
                     <svg v-if="coverageFor(site.domain) === 'covered'" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round"><polyline points="20 6 9 17 4 12" /></svg>
                     <svg v-else width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" /></svg>
                   </span>
-                  <span class="info-row__value info-row__value--mono">{{ site.domain }}</span>
+                  <a :href="domainUrl(site.domain)" target="_blank" rel="noopener noreferrer" class="info-row__value info-row__value--mono domain-link">{{ site.domain }}</a>
                 </span>
                 <button class="info-row__btn info-row__btn--inline" :disabled="savingDomains" @click="openEditMainDomain">
                   <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7" /><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z" /></svg>
@@ -1012,7 +1016,7 @@ sudo mv {{ site?.rootPath }}/{{ site?.filesRelPath || 'www' }}/* {{ site?.rootPa
                   <svg v-if="coverageFor(alias.domain) === 'covered'" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round"><polyline points="20 6 9 17 4 12" /></svg>
                   <svg v-else width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" /></svg>
                 </span>
-                <span class="domain-item__name">{{ alias.domain }}</span>
+                <a :href="domainUrl(alias.domain)" target="_blank" rel="noopener noreferrer" class="domain-item__name domain-link">{{ alias.domain }}</a>
                 <label class="domain-item__toggle" :title="alias.redirect ? 'Редирект на основной домен (301)' : 'Алиас отдаёт сайт (200)'">
                   <input
                     type="checkbox"
@@ -2955,6 +2959,8 @@ const aliasesSummary = computed(() => {
     .join(', ');
 });
 
+const normalizedAliasList = computed(() => normalizeAliases(site.value?.aliases));
+
 const sslAliasesCount = computed(() => {
   // В SAN идут ВСЕ алиасы (включая redirect — иначе TLS-handshake падает с
   // cert-mismatch до того, как nginx успеет вернуть 301).
@@ -2990,6 +2996,18 @@ type CertCoverage = 'covered' | 'missing' | 'no-cert';
 function coverageFor(domain: string, _isRedirectAlias = false): CertCoverage {
   if (!hasActiveCert.value) return 'no-cert';
   return certDomainsLower.value.has(domain.toLowerCase()) ? 'covered' : 'missing';
+}
+
+/**
+ * URL домена для перехода: https если домен покрыт активным (не expired) сертом,
+ * иначе http. Если запостить https на непокрытый домен — браузер кинет
+ * NET::ERR_CERT_COMMON_NAME_INVALID до того, как nginx успеет ответить.
+ */
+function domainUrl(domain: string): string {
+  const s = site.value?.sslCertificate?.status;
+  const valid = s === 'ACTIVE' || s === 'EXPIRING_SOON';
+  const covered = certDomainsLower.value.has(domain.toLowerCase());
+  return `${valid && covered ? 'https' : 'http'}://${domain}`;
 }
 
 /** Список ВСЕХ алиасов (вкл. redirect), не покрытых текущим сертификатом. */
@@ -6421,13 +6439,39 @@ html.theme-light .site-detail__hp-banner-text code {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 1rem;
+  gap: 0;
 }
 
 .info-row__label {
   font-size: 0.78rem;
   color: var(--text-muted);
   flex-shrink: 0;
+  flex: 1;
+}
+
+.info-row__aliases {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 0 0.15rem;
+  justify-content: flex-end;
+}
+
+.info-row__aliases-arrow {
+  color: var(--text-muted);
+}
+
+.domain-link {
+  color: inherit;
+  text-decoration: none;
+  border-bottom: 1px dashed var(--border-secondary);
+  transition: color 0.15s, border-color 0.15s;
+}
+
+.domain-link:hover,
+.domain-link:focus-visible {
+  color: var(--primary-text);
+  border-bottom-color: currentColor;
+  outline: none;
 }
 
 .info-row__value {
