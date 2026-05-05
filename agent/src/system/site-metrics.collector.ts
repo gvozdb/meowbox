@@ -2,6 +2,17 @@ import { CommandExecutor } from '../command-executor';
 import * as fs from 'fs/promises';
 import { TIMEOUTS, SITES_BASE_PATH } from '../config';
 
+/**
+ * Нормализация filesRelPath в безопасный относительный путь без
+ * leading slash, без `..` и shell-метасимволов. Невалидное → дефолт `www`.
+ */
+function sanitizeFilesRelPath(rel: string | undefined | null): string {
+  const v = (rel || '').trim();
+  if (!v) return 'www';
+  if (!/^[A-Za-z0-9._-]+(?:\/[A-Za-z0-9._-]+)*$/.test(v)) return 'www';
+  return v;
+}
+
 export interface SiteMetrics {
   cpuPercent: number;
   memoryBytes: number;
@@ -117,12 +128,18 @@ export class SiteMetricsCollector {
 
   async getStorageBreakdown(params: {
     rootPath: string;
+    /** Web-root внутри homedir. Дефолт `www`. Может быть `www/public`. */
+    filesRelPath?: string;
   }): Promise<{ success: boolean; data?: StorageBreakdown; error?: string }> {
     try {
-      const dirs = ['www', 'logs', 'tmp'];
-      const sizes = await Promise.all(
-        dirs.map((d) => this.getDiskUsage(`${params.rootPath}/${d}`)),
-      );
+      const webRel = sanitizeFilesRelPath(params.filesRelPath);
+      // wwwBytes — занятое место под web-файлами (поле имени историческое:
+      // metric называется "www", но сейчас может ссылаться на любой webRel).
+      const sizes = await Promise.all([
+        this.getDiskUsage(`${params.rootPath}/${webRel}`),
+        this.getDiskUsage(`${params.rootPath}/logs`),
+        this.getDiskUsage(`${params.rootPath}/tmp`),
+      ]);
       const [wwwBytes, logsBytes, tmpBytes] = sizes;
       return {
         success: true,
@@ -136,13 +153,16 @@ export class SiteMetricsCollector {
   async getTopFiles(params: {
     rootPath: string;
     limit?: number;
+    /** Web-root внутри homedir. Дефолт `www`. */
+    filesRelPath?: string;
   }): Promise<{ success: boolean; data?: TopFile[]; error?: string }> {
     const limit = params.limit || 20;
+    const webRel = sanitizeFilesRelPath(params.filesRelPath);
     try {
       // du -S gives size of each directory excluding subdirs, but we want files only
       // Use du -ab and then filter out directories via fs.lstat on top candidates
       const result = await this.cmd.execute('du', [
-        '-ab', '--max-depth=5', `${params.rootPath}/www`,
+        '-ab', '--max-depth=5', `${params.rootPath}/${webRel}`,
       ], { timeout: TIMEOUTS.SHORT });
 
       const entries: { size: number; absPath: string; relPath: string }[] = [];

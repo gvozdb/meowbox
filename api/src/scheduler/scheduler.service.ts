@@ -587,6 +587,7 @@ export class SchedulerService {
           id: true,
           name: true,
           rootPath: true,
+          filesRelPath: true,
           databases: { select: { sizeBytes: true } },
         },
       });
@@ -595,7 +596,7 @@ export class SchedulerService {
         try {
           const res = await this.agentRelay.emitToAgent<{
             wwwBytes: number; logsBytes: number; tmpBytes: number; totalBytes: number;
-          }>('site:storage', { rootPath: site.rootPath }, 30_000);
+          }>('site:storage', { rootPath: site.rootPath, filesRelPath: site.filesRelPath || undefined }, 30_000);
 
           if (res.success && res.data) {
             const dbBytes = site.databases.reduce(

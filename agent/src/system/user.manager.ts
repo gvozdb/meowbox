@@ -49,11 +49,17 @@ export class SystemUserManager {
    * - Home directory = site root path
    * - Added to www-data group so Nginx can read via FPM socket
    * - Password set for SSH/SFTP login
+   *
+   * filesRelPath — относительный путь к web-root внутри homedir. По умолчанию
+   * `www`. Допускается вложенный путь (например `www/public` для front-controller
+   * паттернов: twig/symfony/laravel) — все промежуточные папки создаются с
+   * правами 750, чтобы nginx (через group www-data) мог пройти по дереву.
    */
   async createUser(
     username: string,
     homeDir: string,
     password?: string,
+    filesRelPath?: string,
   ): Promise<{ success: boolean; error?: string }> {
     const exists = await this.userExists(username);
     if (exists) {
@@ -86,15 +92,28 @@ export class SystemUserManager {
       await this.setPassword(username, password);
     }
 
-    // Create standard directory structure
-    for (const dir of ['www', 'tmp', 'logs']) {
+    // Web-root: дефолт `www`, валидируем — без leading `/`, без `..`,
+    // только [A-Za-z0-9._-] в каждом сегменте.
+    const safeRel = (filesRelPath || 'www').trim();
+    const validRel = /^[A-Za-z0-9._-]+(?:\/[A-Za-z0-9._-]+)*$/.test(safeRel);
+    const webRel = validRel ? safeRel : 'www';
+
+    // Create standard directory structure: <webRel>, tmp, logs.
+    for (const dir of [webRel, 'tmp', 'logs']) {
       await this.executor.execute('mkdir', ['-p', `${homeDir}/${dir}`]);
     }
 
     // Set ownership and permissions
     await this.executor.execute('chown', ['-R', `${username}:${username}`, homeDir]);
     await this.executor.execute('chmod', ['750', homeDir]);
-    await this.executor.execute('chmod', ['750', `${homeDir}/www`]);
+
+    // Все промежуточные сегменты webRel должны быть 750, чтобы www-data
+    // (через group user) мог по ним пройти. Для `www/public` — и `www/`, и `www/public/`.
+    let acc = homeDir;
+    for (const seg of webRel.split('/').filter(Boolean)) {
+      acc = `${acc}/${seg}`;
+      await this.executor.execute('chmod', ['750', acc]);
+    }
     await this.executor.execute('chmod', ['700', `${homeDir}/tmp`]);
     await this.executor.execute('chmod', ['750', `${homeDir}/logs`]);
 

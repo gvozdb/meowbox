@@ -131,12 +131,15 @@
                 <span class="info-row__value">{{ typeLabel }}</span>
               </div>
               <div class="info-row">
-                <span class="info-row__label">Статус</span>
-                <SiteStatusBadge :status="site.status" />
-              </div>
-              <div class="info-row">
                 <span class="info-row__label">Корневой путь</span>
                 <span class="info-row__value info-row__value--mono">{{ site.rootPath }}</span>
+              </div>
+              <div class="info-row">
+                <span class="info-row__label">Папка с веб файлами</span>
+                <span class="info-row__value info-row__value--mono">{{ site.filesRelPath || 'www' }}</span>
+                <button class="info-row__btn" @click="openEditFilesRelPath" title="Изменить папку с веб файлами">
+                  Изменить
+                </button>
               </div>
               <div v-if="site.phpVersion" class="info-row">
                 <span class="info-row__label">Версия PHP</span>
@@ -327,6 +330,10 @@
                 <span v-else class="info-row__value info-row__value--muted">Не загружен</span>
                 <button class="info-row__btn" @click="toggleCmsPassword">
                   {{ cmsPassword ? (cmsPasswordVisible ? 'Скрыть' : 'Показать') : 'Загрузить' }}
+                </button>
+                <button class="info-row__btn info-row__btn--text" title="Сменить пароль MODX-админа" @click="openCmsAdminPasswordModal">
+                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4 12.5-12.5z"/></svg>
+                  Изменить
                 </button>
               </div>
               <div v-if="isModxSite" class="info-row">
@@ -1026,6 +1033,106 @@
                 >
                   <svg v-if="!savingMainDomain" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><polyline points="20 6 9 17 4 12" /></svg>
                   {{ savingMainDomain ? 'Применяю...' : 'Сменить домен' }}
+                </button>
+              </div>
+            </div>
+          </div>
+        </Teleport>
+
+        <!-- Modal: edit files rel path (web-root внутри homedir) -->
+        <Teleport to="body">
+          <div v-if="showEditFilesRelPath" class="modal-overlay" @mousedown.self="showEditFilesRelPath = false">
+            <div class="domain-modal">
+              <div class="domain-modal__header">
+                <div class="domain-modal__title-group">
+                  <div class="domain-modal__icon">
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+                      <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" />
+                    </svg>
+                  </div>
+                  <div>
+                    <h3 class="domain-modal__title">Папка с веб файлами</h3>
+                    <p class="domain-modal__subtitle">
+                      Сменит <code>root</code> в nginx. PHP-FPM пул и nginx будут перезагружены сразу.
+                    </p>
+                  </div>
+                </div>
+                <button class="domain-modal__close" :disabled="savingFilesRelPath" @click="showEditFilesRelPath = false">
+                  <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" /></svg>
+                </button>
+              </div>
+
+              <div class="domain-modal__body">
+                <div class="domain-modal__swap">
+                  <div class="domain-modal__swap-col">
+                    <label class="domain-modal__label">Сейчас</label>
+                    <div class="domain-modal__chip domain-modal__chip--current">
+                      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="10" /></svg>
+                      <code>{{ site?.filesRelPath || 'www' }}</code>
+                    </div>
+                  </div>
+                  <div class="domain-modal__arrow">
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="5" y1="12" x2="19" y2="12" /><polyline points="12 5 19 12 12 19" /></svg>
+                  </div>
+                  <div class="domain-modal__swap-col">
+                    <label class="domain-modal__label">Новая папка</label>
+                    <div class="domain-modal__input-wrap" :class="{ 'domain-modal__input-wrap--error': !!editFilesRelPathError }">
+                      <svg class="domain-modal__input-icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" /></svg>
+                      <input
+                        v-model="editFilesRelPathValue"
+                        type="text"
+                        class="domain-modal__input"
+                        placeholder="www/public"
+                        :disabled="savingFilesRelPath"
+                        autocomplete="off"
+                        spellcheck="false"
+                        @keyup.enter="saveFilesRelPath"
+                      />
+                    </div>
+                    <span v-if="editFilesRelPathError" class="domain-modal__error">{{ editFilesRelPathError }}</span>
+                  </div>
+                </div>
+
+                <div class="domain-modal__impact">
+                  <div class="domain-modal__impact-title">
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="10" /><line x1="12" y1="8" x2="12" y2="12" /><line x1="12" y1="16" x2="12.01" y2="16" /></svg>
+                    Что произойдёт
+                  </div>
+                  <ul class="domain-modal__impact-list">
+                    <li>
+                      В nginx-конфиге <code>00-server.conf</code> поменяется <code>root</code> на
+                      <code>{{ site?.rootPath }}/{{ editFilesRelPathValue.trim() || 'www' }}</code>.
+                      Конфиг будет проверен <code>nginx -t</code> и перезагружен.
+                    </li>
+                    <li v-if="site?.phpVersion">
+                      PHP-FPM пул сайта будет пересобран — на случай если в кастомном
+                      php-конфиге (<code>php-fpm pool</code>) есть пути с прежней папкой.
+                    </li>
+                    <li class="domain-modal__impact-danger">
+                      <b>Папка на диске НЕ переедет автоматически.</b> Перенеси содержимое сам:
+                      <pre class="domain-modal__cmd">sudo -u {{ site?.systemUser }} mkdir -p {{ site?.rootPath }}/{{ editFilesRelPathValue.trim() || 'www' }}
+sudo mv {{ site?.rootPath }}/{{ site?.filesRelPath || 'www' }}/* {{ site?.rootPath }}/{{ editFilesRelPathValue.trim() || 'www' }}/</pre>
+                      После — проверь права на промежуточные папки (<code>chmod 750</code>),
+                      чтобы nginx прошёл по дереву.
+                    </li>
+                    <li>
+                      Если в <code>95-custom.conf</code> есть пути с прежней папкой — обнови их вручную.
+                    </li>
+                  </ul>
+                </div>
+              </div>
+
+              <div class="domain-modal__footer">
+                <button class="btn btn--ghost" :disabled="savingFilesRelPath" @click="showEditFilesRelPath = false">
+                  Отмена
+                </button>
+                <button
+                  class="btn btn--danger"
+                  :disabled="savingFilesRelPath || !editFilesRelPathValue.trim() || editFilesRelPathValue.trim() === (site?.filesRelPath || 'www')"
+                  @click="saveFilesRelPath"
+                >
+                  <svg v-if="!savingFilesRelPath" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><polyline points="20 6 9 17 4 12" /></svg>
+                  {{ savingFilesRelPath ? 'Применяю...' : 'Сменить папку' }}
                 </button>
               </div>
             </div>
@@ -2320,6 +2427,55 @@ php_value[max_execution_time] = 300"
       </div>
     </Teleport>
 
+    <!-- MODX admin password change modal -->
+    <Teleport to="body">
+      <div v-if="showCmsAdminPasswordModal" class="modal-overlay" @mousedown.self="!cmsAdminPasswordSaving && closeCmsAdminPasswordModal()">
+        <div class="modal">
+          <h3 class="modal__title">Сменить пароль MODX-админа</h3>
+          <p class="modal__text">
+            Пароль будет обновлён через bootstrap MODX (<code>$user-&gt;changePassword(...)</code>) для логина
+            <strong class="info-row__value--mono">{{ site?.cmsAdminUser }}</strong>. Старый пароль не нужен — мы пишем напрямую в БД сайта.
+          </p>
+          <div class="form-group" style="margin-bottom: 0.75rem;">
+            <label class="form-label">Новый пароль (мин. 8 символов)</label>
+            <input
+              v-model="cmsAdminPasswordInput"
+              type="text"
+              class="form-input form-input--mono"
+              placeholder="Оставь пустым — сгенерирую сам"
+              autocomplete="off"
+              :disabled="cmsAdminPasswordSaving"
+              @keydown.enter="!cmsAdminPasswordSaving && !cmsAdminPasswordNewValue && submitCmsAdminPasswordChange()"
+            />
+          </div>
+          <p v-if="cmsAdminPasswordError" class="modal__text" style="color: var(--danger-light); font-size: 0.8rem;">
+            {{ cmsAdminPasswordError }}
+          </p>
+          <p v-if="cmsAdminPasswordNewValue" class="modal__text" style="color: var(--success-light); font-size: 0.8rem;">
+            Готово. Новый пароль: <strong class="info-row__value--mono">{{ cmsAdminPasswordNewValue }}</strong>
+          </p>
+          <div class="modal__actions">
+            <button
+              class="modal__btn modal__btn--cancel"
+              :disabled="cmsAdminPasswordSaving"
+              @click="closeCmsAdminPasswordModal"
+            >
+              {{ cmsAdminPasswordNewValue ? 'Закрыть' : 'Отмена' }}
+            </button>
+            <button
+              v-if="!cmsAdminPasswordNewValue"
+              class="modal__btn"
+              style="background: linear-gradient(135deg,var(--primary-light),var(--primary-dark)); color:#0a0a0f; border-color:transparent;"
+              :disabled="cmsAdminPasswordSaving"
+              @click="submitCmsAdminPasswordChange"
+            >
+              {{ cmsAdminPasswordSaving ? 'Сохранение...' : 'Сменить' }}
+            </button>
+          </div>
+        </div>
+      </div>
+    </Teleport>
+
     <!-- MODX version update modal -->
     <Teleport to="body">
       <div v-if="showModxUpdateModal" class="modal-overlay" @mousedown.self="!modxUpdating && closeModxUpdateModal()">
@@ -2704,6 +2860,13 @@ const sshPasswordSaving = ref(false);
 const sshPasswordError = ref('');
 const sshPasswordNewValue = ref('');
 
+// MODX admin password change modal
+const showCmsAdminPasswordModal = ref(false);
+const cmsAdminPasswordInput = ref('');
+const cmsAdminPasswordSaving = ref(false);
+const cmsAdminPasswordError = ref('');
+const cmsAdminPasswordNewValue = ref('');
+
 // MODX version update modal
 const showModxUpdateModal = ref(false);
 const modxTargetVersion = ref('');
@@ -2756,6 +2919,14 @@ const showEditMainDomain = ref(false);
 const editMainDomainValue = ref('');
 const editMainDomainError = ref('');
 const savingMainDomain = ref(false);
+
+// Edit filesRelPath modal (web-root внутри homedir).
+// Меняет nginx root + (если есть PHP) пересобирает FPM pool — оба идут на агента
+// сразу при сохранении. Папку на диске панель НЕ переносит — это на совести админа.
+const showEditFilesRelPath = ref(false);
+const editFilesRelPathValue = ref('');
+const editFilesRelPathError = ref('');
+const savingFilesRelPath = ref(false);
 
 /** Нормализатор: API может вернуть и string[], и объекты {domain,redirect}. */
 function normalizeAliases(raw: Array<SiteAlias | string> | null | undefined): SiteAlias[] {
@@ -2980,6 +3151,55 @@ async function submitSshPasswordChange() {
     sshPasswordError.value = msg;
   } finally {
     sshPasswordSaving.value = false;
+  }
+}
+
+// ─── MODX admin password change ───
+function openCmsAdminPasswordModal() {
+  cmsAdminPasswordInput.value = '';
+  cmsAdminPasswordError.value = '';
+  cmsAdminPasswordNewValue.value = '';
+  showCmsAdminPasswordModal.value = true;
+}
+
+function closeCmsAdminPasswordModal() {
+  if (cmsAdminPasswordSaving.value) return;
+  showCmsAdminPasswordModal.value = false;
+  cmsAdminPasswordInput.value = '';
+  cmsAdminPasswordError.value = '';
+  cmsAdminPasswordNewValue.value = '';
+}
+
+async function submitCmsAdminPasswordChange() {
+  cmsAdminPasswordError.value = '';
+  const pwd = cmsAdminPasswordInput.value.trim();
+  if (pwd) {
+    if (pwd.length < 8) {
+      cmsAdminPasswordError.value = 'Минимум 8 символов';
+      return;
+    }
+    if (pwd.length > 128) {
+      cmsAdminPasswordError.value = 'Максимум 128 символов';
+      return;
+    }
+    if (!/^[!-~]+$/.test(pwd)) {
+      cmsAdminPasswordError.value = 'Только printable ASCII без пробелов';
+      return;
+    }
+  }
+  cmsAdminPasswordSaving.value = true;
+  try {
+    const res = await api.post<{ password: string }>(`/sites/${siteId}/cms-admin-password`, {
+      password: pwd || undefined,
+    });
+    cmsAdminPasswordNewValue.value = res?.password || '';
+    // Обновляем видимый пароль в info-card.
+    cmsPassword.value = res?.password || null;
+    cmsPasswordVisible.value = true;
+  } catch (e) {
+    cmsAdminPasswordError.value = (e as Error)?.message || 'Не удалось сменить пароль';
+  } finally {
+    cmsAdminPasswordSaving.value = false;
   }
 }
 
@@ -3698,6 +3918,39 @@ async function saveMainDomain() {
     editMainDomainError.value = (err as Error).message || 'Не удалось сменить домен';
   } finally {
     savingMainDomain.value = false;
+  }
+}
+
+function openEditFilesRelPath() {
+  editFilesRelPathValue.value = site.value?.filesRelPath || 'www';
+  editFilesRelPathError.value = '';
+  showEditFilesRelPath.value = true;
+}
+
+async function saveFilesRelPath() {
+  if (!site.value) return;
+  const next = editFilesRelPathValue.value.trim();
+  editFilesRelPathError.value = '';
+  const current = site.value.filesRelPath || 'www';
+  if (!next || next === current) return;
+  // Клиентская валидация: без leading `/`, без `..`, только [A-Za-z0-9._-] в сегментах.
+  if (!/^[A-Za-z0-9._-]+(?:\/[A-Za-z0-9._-]+)*$/.test(next)) {
+    editFilesRelPathError.value = 'Допустимо: «www», «public_html», «www/public» — без слеша вначале и без «..»';
+    return;
+  }
+  savingFilesRelPath.value = true;
+  try {
+    await api.put(`/sites/${siteId}`, { filesRelPath: next });
+    site.value = await api.get<SiteDetail>(`/sites/${siteId}`);
+    showEditFilesRelPath.value = false;
+  } catch (err: unknown) {
+    const e = err as { data?: { message?: string | string[] }; message?: string };
+    const msg = e.data?.message;
+    editFilesRelPathError.value = Array.isArray(msg)
+      ? msg.join('; ')
+      : (msg || e.message || 'Не удалось сменить папку');
+  } finally {
+    savingFilesRelPath.value = false;
   }
 }
 
@@ -6610,6 +6863,34 @@ html.theme-light .domains-cert-alert__body code {
 }
 .domain-modal__impact-danger { color: #fca5a5; }
 .domain-modal__impact-danger code { background: rgba(239, 68, 68, 0.12); color: #fca5a5; }
+
+/* Светлая тема: pink-300 на белом плохо читается — берём более тёмный. */
+html.theme-light .domain-modal__impact-danger { color: #b91c1c; }
+html.theme-light .domain-modal__impact-danger code {
+  background: rgba(239, 68, 68, 0.08);
+  color: #b91c1c;
+}
+
+/* Блок с готовой shell-командой внутри пункта impact-list. Используется
+   для подсказки переноса папки на диске после смены filesRelPath. */
+.domain-modal__cmd {
+  display: block;
+  margin: 0.45rem 0 0;
+  padding: 0.55rem 0.7rem;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.72rem;
+  line-height: 1.45;
+  color: var(--text-secondary);
+  background: var(--bg-input, var(--bg-elevated));
+  border: 1px solid var(--border-subtle, var(--border-secondary));
+  border-radius: 7px;
+  white-space: pre-wrap;
+  word-break: break-all;
+  user-select: all;
+}
+html.theme-light .domain-modal__cmd {
+  background: rgba(0, 0, 0, 0.03);
+}
 
 .domain-modal__footer {
   display: flex;

@@ -614,6 +614,102 @@ export class SitesService implements OnModuleInit {
   }
 
   /**
+   * Смена пароля админа MODX (Revo / 3). Использует bootstrap MODX_API_MODE
+   * на агенте — нативный механизм MODX гарантирует совместимый hash (соль,
+   * стратегия pbkdf2/sha1) для любой версии установленного ядра.
+   *
+   * Если password пустой — генерим случайный 16-байтный base64url.
+   * Возвращает фактически применённый пароль (как и changeSshPassword).
+   *
+   * Требования:
+   *   - Сайт типа MODX_REVO или MODX_3
+   *   - У сайта прописан cmsAdminUser (мы не угадываем имя)
+   */
+  async changeCmsAdminPassword(
+    id: string,
+    userId: string,
+    role: string,
+    newPassword?: string,
+  ): Promise<{ password: string }> {
+    const site = await this.prisma.site.findUnique({
+      where: { id },
+      select: {
+        id: true,
+        userId: true,
+        name: true,
+        type: true,
+        rootPath: true,
+        filesRelPath: true,
+        phpVersion: true,
+        systemUser: true,
+        cmsAdminUser: true,
+      },
+    });
+
+    if (!site) throw new NotFoundException('Site not found');
+    if (role !== 'ADMIN' && site.userId !== userId) {
+      throw new ForbiddenException('Access denied');
+    }
+    if (site.type !== SiteType.MODX_REVO && site.type !== SiteType.MODX_3) {
+      throw new ConflictException('Сайт не на MODX — менять админский пароль нечего');
+    }
+    if (!site.cmsAdminUser) {
+      throw new ConflictException(
+        'У сайта не указан логин MODX-админа в БД панели — заполни сначала имя пользователя',
+      );
+    }
+
+    // Валидация / генерация пароля. Дублируем DTO-проверку — defense in depth
+    // (DTO не сработает, если контроллер кто-то будет дёргать в обход).
+    let password: string;
+    if (newPassword && newPassword.length > 0) {
+      if (newPassword.length < 8) {
+        throw new ConflictException('Пароль MODX-админа должен быть не короче 8 символов');
+      }
+      if (newPassword.length > 128) {
+        throw new ConflictException('Пароль MODX-админа слишком длинный (макс. 128)');
+      }
+      // eslint-disable-next-line no-control-regex
+      if (/[\x00-\x1f\x7f]/.test(newPassword)) {
+        throw new ConflictException('Пароль содержит управляющие символы');
+      }
+      password = newPassword;
+    } else {
+      password = randomBytes(16).toString('base64url');
+    }
+
+    const agentResult = await this.agentRelay.emitToAgent<{ success: boolean; error?: string; message?: string }>(
+      'modx:change-admin-password',
+      {
+        rootPath: site.rootPath,
+        filesRelPath: site.filesRelPath ?? 'www',
+        phpVersion: site.phpVersion ?? undefined,
+        systemUser: site.systemUser ?? undefined,
+        username: site.cmsAdminUser,
+        password,
+        // На существующем сайте логин уже есть → не создаём нового юзера, если
+        // вдруг в самом MODX его нет (несоответствие БД панели и MODX). Лучше
+        // явная ошибка, чем тихо плодить sudo-юзеров.
+        createIfMissing: false,
+      },
+    );
+
+    if (!agentResult.success) {
+      throw new InternalServerErrorException(
+        `Не удалось сменить пароль MODX-админа: ${agentResult.error || 'unknown agent error'}`,
+      );
+    }
+
+    await this.prisma.site.update({
+      where: { id },
+      data: { cmsAdminPassword: password },
+    });
+
+    this.logger.log(`MODX admin password changed for site "${site.name}" (user "${site.cmsAdminUser}")`);
+    return { password };
+  }
+
+  /**
    * Обновление версии установленного MODX-сайта.
    * Работает для MODX_REVO (через ZIP overlay) и MODX_3 (через composer require).
    */
@@ -942,9 +1038,11 @@ export class SitesService implements OnModuleInit {
     const systemUser = safeName;
 
     // Пути — из panel-settings (KV) + fallback на .env/дефолт.
+    // DTO может явно перебить: rootPath (полный homedir) и filesRelPath
+    // (web-root внутри homedir). Без override — собираем дефолтные.
     const { basePath, relPath } = await this.resolvePathDefaults();
-    const rootPath = `${basePath}/${safeName}`;
-    const filesRelPath = relPath;
+    const rootPath = dto.rootPath?.trim() || `${basePath}/${safeName}`;
+    const filesRelPath = dto.filesRelPath?.trim() || relPath;
     const sshPassword = randomBytes(16).toString('base64url');
 
     // Атомарность: Site + SslCertificate создаются в одной транзакции. До
@@ -1185,12 +1283,15 @@ export class SitesService implements OnModuleInit {
     const step = (title: string) => log('info', `▶ ${title}`);
 
     try {
-      // 1) Linux-юзер.
+      // 1) Linux-юзер. Прокидываем filesRelPath источника, чтобы у дубликата
+      // на диске сразу была та же структура папок (нужно если у source
+      // не дефолтный путь, например `www/public`).
       step(`Создание Linux-юзера "${ctx.newSystemUser}"`);
       const userRes = await this.agentRelay.emitToAgent('user:create', {
         username: ctx.newSystemUser,
         homeDir: ctx.newRootPath,
         password: ctx.newSshPassword,
+        filesRelPath: (source as { filesRelPath?: string | null }).filesRelPath || undefined,
       });
       if (!userRes.success) throw new Error(`User create failed: ${userRes.error}`);
       log('info', `✓ Linux-юзер "${ctx.newSystemUser}" создан`);
@@ -1417,12 +1518,16 @@ export class SitesService implements OnModuleInit {
     };
 
     try {
-      // 0. Системный Linux-юзер (per-site isolation)
+      // 0. Системный Linux-юзер (per-site isolation).
+      // Прокидываем filesRelPath, чтобы агент сразу создал нужную вложенную
+      // структуру (например `www/public` для front-controller паттернов),
+      // а не только дефолтную `www/`.
       step(`Создание Linux-юзера "${systemUser}"`);
       const userResult = await this.agentRelay.emitToAgent('user:create', {
         username: systemUser,
         homeDir: rootPath,
         password: sshPassword,
+        filesRelPath,
       });
       if (!userResult.success) {
         throw new Error(`System user creation failed: ${userResult.error}`);
@@ -1890,6 +1995,10 @@ export class SitesService implements OnModuleInit {
               )
             : null,
         }),
+        // filesRelPath — где лежат файлы относительно rootPath. Меняем строкой
+        // в БД; физически папки на диске панель НЕ переносит (на совести
+        // админа). Регенерация nginx + (при наличии PHP) php-fpm pool ниже.
+        ...(dto.filesRelPath !== undefined && { filesRelPath: dto.filesRelPath.trim() }),
       },
     });
     const updated = mapSite(updatedRaw);
@@ -1933,13 +2042,20 @@ export class SitesService implements OnModuleInit {
       stringifySiteAliases(dto.aliases) !==
         stringifySiteAliases((site as { aliases?: unknown }).aliases as never);
 
-    if ((domainChanged || aliasesChanged) && this.agentRelay.isAgentConnected()) {
+    // Сменился ли web-root внутри homedir (filesRelPath).
+    const filesRelPathChanged =
+      dto.filesRelPath !== undefined &&
+      dto.filesRelPath.trim() !== ((site as { filesRelPath?: string | null }).filesRelPath || 'www');
+
+    if ((domainChanged || aliasesChanged || filesRelPathChanged) && this.agentRelay.isAgentConnected()) {
       // Имена nginx/php-fpm артефактов якорятся на Site.name (safeName =
       // Linux-юзер), а НЕ на домене. Поэтому смена главного домена:
       //   • НЕ пересоздаёт pool-файл PHP-FPM (ни имя, ни сокет не зависят от домена)
       //   • НЕ переименовывает /etc/nginx/sites-available/{...}.conf — файл живёт
       //     под siteName. Ниже создаём конфиг идемпотентно (перезаписывается
       //     поверх), внутри обновляется только server_name.
+      // Смена filesRelPath тоже требует регенерации (root в 00-server.conf
+      // собирается из rootPath/filesRelPath).
       try {
         await this.agentRelay.emitToAgent(
           'nginx:create-config',
@@ -1947,6 +2063,25 @@ export class SitesService implements OnModuleInit {
         );
       } catch (err) {
         this.logger.error(`Nginx reconfig failed: ${(err as Error).message}`);
+      }
+    }
+
+    // Если филипперемен сменился, а на сайте есть PHP — пересоздаём пул.
+    // Кастомный php_admin_value/open_basedir в phpPoolCustom может содержать
+    // абсолютный путь с filesRelPath; перегенерация подставит свежий путь.
+    if (filesRelPathChanged && updated.phpVersion && this.agentRelay.isAgentConnected()) {
+      try {
+        await this.agentRelay.emitToAgent('php:create-pool', {
+          siteName: updated.name,
+          domain: updated.domain,
+          phpVersion: updated.phpVersion,
+          user: updated.systemUser,
+          rootPath: updated.rootPath,
+          sslEnabled: sslActive,
+          customConfig: (updated as { phpPoolCustom?: string | null }).phpPoolCustom ?? null,
+        });
+      } catch (err) {
+        this.logger.error(`PHP-FPM pool regen failed after filesRelPath change: ${(err as Error).message}`);
       }
     }
 

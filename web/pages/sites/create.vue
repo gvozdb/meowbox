@@ -341,6 +341,47 @@
           </div>
         </div>
 
+        <!-- Кастомные пути сайта (homedir + папка с веб-файлами) -->
+        <div class="create-site__fields create-site__fields--group">
+          <h3 class="create-site__group-title">Расположение файлов</h3>
+          <p class="create-site__group-desc">
+            Дефолты подгружены из <NuxtLink to="/settings" class="link">/settings → дефолты сайтов</NuxtLink>.
+            Можно переопределить под конкретный сайт.
+          </p>
+
+          <div class="form-group">
+            <label class="form-label">Корневая директория сайта (homedir)</label>
+            <input
+              v-model="form.rootPath"
+              type="text"
+              class="form-input form-input--mono"
+              :placeholder="defaultRootPathPreview"
+              maxlength="256"
+              pattern="^/[A-Za-z0-9._/-]+$"
+            />
+            <span class="form-hint">
+              Абсолютный путь. Создаётся как home Linux-юзера сайта. Пусто — будет
+              <code>{{ defaultRootPathPreview }}</code>.
+            </span>
+          </div>
+
+          <div class="form-group">
+            <label class="form-label">Папка с веб файлами (relPath)</label>
+            <input
+              v-model="form.filesRelPath"
+              type="text"
+              class="form-input form-input--mono"
+              :placeholder="siteDefaults.siteFilesRelativePath || 'www'"
+              maxlength="128"
+              pattern="^[A-Za-z0-9._-]+(?:/[A-Za-z0-9._-]+)*$"
+            />
+            <span class="form-hint">
+              Относительный путь внутри homedir. В nginx: <code>root {{ effectiveRootPath }}/{{ form.filesRelPath || siteDefaults.siteFilesRelativePath || 'www' }}</code>.
+              Можно вложенный, например <code>www/public</code> для twig/symfony фронт-контроллера.
+            </span>
+          </div>
+        </div>
+
         <!-- Git-репозиторий — только для CUSTOM (MODX ставится через composer/zip) -->
         <div v-if="!isMODX" class="create-site__fields create-site__fields--group">
           <h3 class="create-site__group-title">Git-деплой (опционально)</h3>
@@ -573,7 +614,41 @@ const form = reactive({
   managerPath: '',
   connectorsPath: '',
   modxVersion: '3.1.2-pl',
+  // Расположение файлов (override дефолтов из /settings)
+  rootPath: '',
+  filesRelPath: '',
 });
+
+// Дефолты путей хранения файлов из /panel-settings/site-defaults.
+// Подгружаются в onMounted; используются как placeholder и для preview-строки
+// nginx-root в подсказке поля «Папка с веб файлами».
+const siteDefaults = reactive({
+  sitesBasePath: '/var/www',
+  siteFilesRelativePath: 'www',
+});
+
+async function loadSiteDefaults() {
+  try {
+    const data = await api.get<{ sitesBasePath?: string; siteFilesRelativePath?: string }>(
+      '/panel-settings/site-defaults',
+    );
+    if (data?.sitesBasePath) siteDefaults.sitesBasePath = data.sitesBasePath;
+    if (data?.siteFilesRelativePath) siteDefaults.siteFilesRelativePath = data.siteFilesRelativePath;
+  } catch {
+    /* keep fallback */
+  }
+}
+
+// Превью homedir: пользователь видит, какой путь получится без override.
+const defaultRootPathPreview = computed(() =>
+  `${siteDefaults.sitesBasePath.replace(/\/+$/, '')}/${form.name || 'sitename'}`,
+);
+
+// Если override homedir не задан — используем дефолт; нужно для preview
+// строки nginx root в подсказке поля «Папка с веб файлами».
+const effectiveRootPath = computed(() =>
+  (form.rootPath.trim() || defaultRootPathPreview.value).replace(/\/+$/, ''),
+);
 
 const siteTypes = [
   { value: 'MODX_REVO', label: 'MODX Revolution', desc: 'Классический MODX 2.x на PHP + MySQL' },
@@ -726,6 +801,7 @@ onMounted(() => {
   loadModxVersions();
   loadInstalledDbEngines();
   loadInstalledPhpVersions();
+  loadSiteDefaults();
 });
 
 const isMODX = computed(() => form.type === 'MODX_REVO' || form.type === 'MODX_3');
@@ -848,6 +924,11 @@ async function handleSubmit() {
 
     const filteredAliases = form.aliases.filter((a) => a.trim());
     if (filteredAliases.length) payload.aliases = filteredAliases;
+
+    // Override путей. Шлём только если пользователь явно ввёл — иначе бэк
+    // возьмёт дефолты из /panel-settings/site-defaults.
+    if (form.rootPath.trim()) payload.rootPath = form.rootPath.trim();
+    if (form.filesRelPath.trim()) payload.filesRelPath = form.filesRelPath.trim();
 
     if (isMODX.value) {
       if (form.cmsAdminUser.trim()) payload.cmsAdminUser = form.cmsAdminUser.trim();
@@ -1156,6 +1237,22 @@ onBeforeUnmount(() => {
   text-transform: uppercase;
   letter-spacing: 0.05em;
   margin: 0 0 0.25rem;
+}
+
+.create-site__group-desc {
+  font-size: 0.78rem;
+  color: var(--text-muted);
+  margin: -0.1rem 0 0.5rem;
+  line-height: 1.5;
+}
+
+.create-site__group-desc .link {
+  color: var(--primary);
+  text-decoration: none;
+}
+
+.create-site__group-desc .link:hover {
+  text-decoration: underline;
 }
 
 .form-row {

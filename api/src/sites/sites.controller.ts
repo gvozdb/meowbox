@@ -19,6 +19,7 @@ import {
   DuplicateSiteDto,
   DeleteSiteOptionsDto,
   ChangeSshPasswordDto,
+  ChangeCmsAdminPasswordDto,
   UpdatePhpPoolConfigDto,
 } from './sites.dto';
 import { CurrentUser } from '../common/decorators/current-user.decorator';
@@ -201,6 +202,23 @@ export class SitesController {
     @CurrentUser('role') role: string,
   ) {
     const data = await this.sitesService.changeSshPassword(id, userId, role, body?.password);
+    return { success: true, data };
+  }
+
+  /**
+   * Смена пароля администратора MODX (Revo / 3). Под капотом — bootstrap
+   * MODX_API_MODE на агенте + `$user->changePassword(...)`.
+   * Body: `{ password?: string }` — если пусто, генерим случайный.
+   */
+  @Post(':id/cms-admin-password')
+  @Roles(UserRole.ADMIN)
+  async changeCmsAdminPassword(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() body: ChangeCmsAdminPasswordDto,
+    @CurrentUser('sub') userId: string,
+    @CurrentUser('role') role: string,
+  ) {
+    const data = await this.sitesService.changeCmsAdminPassword(id, userId, role, body?.password);
     return { success: true, data };
   }
 

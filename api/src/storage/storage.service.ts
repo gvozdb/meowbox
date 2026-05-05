@@ -49,6 +49,7 @@ export class StorageService {
         name: true,
         domain: true,
         rootPath: true,
+        filesRelPath: true,
         databases: { select: { sizeBytes: true } },
       },
       orderBy: { name: 'asc' },
@@ -73,7 +74,7 @@ export class StorageService {
       try {
         const res = await this.agentRelay.emitToAgent<{
           wwwBytes: number; logsBytes: number; tmpBytes: number; totalBytes: number;
-        }>('site:storage', { rootPath: site.rootPath }, 30_000);
+        }>('site:storage', { rootPath: site.rootPath, filesRelPath: site.filesRelPath || undefined }, 30_000);
 
         if (res.success && res.data) {
           results.push({
@@ -106,13 +107,15 @@ export class StorageService {
   async getSiteTopFiles(siteId: string, userId: string, role: string): Promise<TopFile[]> {
     const site = await this.prisma.site.findUnique({
       where: { id: siteId },
-      select: { rootPath: true, userId: true },
+      select: { rootPath: true, filesRelPath: true, userId: true },
     });
     if (!site) throw new NotFoundException('Site not found');
     if (role !== 'ADMIN' && site.userId !== userId) throw new ForbiddenException();
 
     const res = await this.agentRelay.emitToAgent<TopFile[]>(
-      'site:top-files', { rootPath: site.rootPath, limit: 20 }, 60_000,
+      'site:top-files',
+      { rootPath: site.rootPath, limit: 20, filesRelPath: site.filesRelPath || undefined },
+      60_000,
     );
     return res.success && res.data ? res.data : [];
   }

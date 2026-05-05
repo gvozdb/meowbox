@@ -13,6 +13,7 @@ import { CronManager } from './cron/cron.manager';
 import { SiteInstaller } from './installer/site-installer';
 import { PermissionsManager } from './installer/permissions';
 import { ModxDoctor } from './installer/doctor';
+import { ModxAdminPassChanger } from './installer/modx-admin-pass';
 import { SystemUserManager } from './system/user.manager';
 import { CommandExecutor } from './command-executor';
 import { TerminalManager } from './terminal/terminal.manager';
@@ -79,6 +80,7 @@ export class AgentService {
   private installer: SiteInstaller;
   private permsMgr: PermissionsManager;
   private modxDoctor: ModxDoctor;
+  private modxPassChanger: ModxAdminPassChanger;
   private userMgr: SystemUserManager;
   private terminal: TerminalManager;
   private fileMgr: FileManager;
@@ -119,6 +121,7 @@ export class AgentService {
     this.cmdExec = new CommandExecutor();
     this.permsMgr = new PermissionsManager(this.cmdExec);
     this.modxDoctor = new ModxDoctor(this.cmdExec);
+    this.modxPassChanger = new ModxAdminPassChanger(this.cmdExec);
     this.logReader = new LogReader(this.cmdExec);
     this.tailManager = new LogTailManager();
     this.userMgr = new SystemUserManager(this.cmdExec);
@@ -1072,8 +1075,8 @@ export class AgentService {
     });
 
     // -- System User Management --
-    this.safeOn(s, 'user:create', async (params: { username: string; homeDir: string; password?: string }, cb: Callback) => {
-      cb(await this.userMgr.createUser(params.username, params.homeDir, params.password));
+    this.safeOn(s, 'user:create', async (params: { username: string; homeDir: string; password?: string; filesRelPath?: string }, cb: Callback) => {
+      cb(await this.userMgr.createUser(params.username, params.homeDir, params.password, params.filesRelPath));
     });
 
     this.safeOn(s, 'user:delete', async (params: { username: string }, cb: Callback) => {
@@ -1087,6 +1090,26 @@ export class AgentService {
     this.safeOn(s, 'user:set-password', async (params: { username: string; password: string }, cb: Callback) => {
       cb(await this.userMgr.setPassword(params.username, params.password));
     });
+
+    // Смена / создание пароля админа MODX (Revo + 3) через bootstrap MODX_API_MODE.
+    // Под капотом: пишем .php-скрипт в /tmp, запускаем его под per-site юзером
+    // через `sudo -u <systemUser>` (чтобы кэш MODX не остался под root).
+    this.safeOn(s, 'modx:change-admin-password', async (params: {
+      rootPath: string;
+      filesRelPath?: string;
+      phpVersion?: string;
+      systemUser?: string;
+      username: string;
+      password: string;
+      createIfMissing?: boolean;
+    }, cb: Callback) => {
+      try {
+        const result = await this.modxPassChanger.run(params);
+        cb(result);
+      } catch (err) {
+        cb({ success: false, error: (err as Error).message });
+      }
+    }, 90_000);
 
     this.safeOn(s, 'system:user-exists', async (params: { username: string }, cb: Callback) => {
       try {
@@ -1975,11 +1998,11 @@ export class AgentService {
     });
 
     // -- Storage --
-    this.safeOn(s, 'site:storage', async (params: { rootPath: string }, cb: Callback) => {
+    this.safeOn(s, 'site:storage', async (params: { rootPath: string; filesRelPath?: string }, cb: Callback) => {
       cb(await this.siteMetrics.getStorageBreakdown(params));
     });
 
-    this.safeOn(s, 'site:top-files', async (params: { rootPath: string; limit?: number }, cb: Callback) => {
+    this.safeOn(s, 'site:top-files', async (params: { rootPath: string; limit?: number; filesRelPath?: string }, cb: Callback) => {
       cb(await this.siteMetrics.getTopFiles(params));
     });
 

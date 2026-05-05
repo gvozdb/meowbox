@@ -221,6 +221,30 @@ export class CreateSiteDto {
     message: 'Connectors path can only contain letters, numbers, underscores, and hyphens',
   })
   connectorsPath?: string;
+
+  // ── Кастомные пути сайта (override дефолтов из /settings) ───────────────
+  // Корневая директория сайта (homedir Linux-юзера). Если не указано —
+  // собирается как `${sitesBasePath}/${name}` из panel-settings.
+  // Только absolute path, без `..` и shell-метасимволов.
+  @IsOptional()
+  @IsString()
+  @MaxLength(256)
+  @Matches(/^\/[A-Za-z0-9._/-]+$/, {
+    message: 'Root path must be an absolute path with [A-Za-z0-9._/-] only',
+  })
+  @Matches(/^(?!.*\.\.).*$/, { message: 'Root path must not contain ".."' })
+  rootPath?: string;
+
+  // Относительный путь до web-root внутри homedir (попадает в nginx `root`).
+  // Если не указано — берётся `siteFilesRelativePath` из panel-settings (default `www`).
+  // Без leading `/`, без `..`. Допустимо вложенное (например `www/public`).
+  @IsOptional()
+  @IsString()
+  @MaxLength(128)
+  @Matches(/^[A-Za-z0-9._-]+(?:\/[A-Za-z0-9._-]+)*$/, {
+    message: 'Web files path must be like "www" or "www/public" — no leading slash, no ".."',
+  })
+  filesRelPath?: string;
 }
 
 export class UpdateSiteDto {
@@ -290,6 +314,17 @@ export class UpdateSiteDto {
   @IsString({ each: true })
   @MaxLength(4096, { each: true })
   backupExcludeTables?: string[];
+
+  // Папка с веб-файлами (попадает в nginx `root`). Допускается вложенный путь
+  // вида `www/public` для front-controller паттернов (twig/symfony). Папку
+  // на диске панель НЕ переносит — это на совести админа после смены значения.
+  @IsOptional()
+  @IsString()
+  @MaxLength(128)
+  @Matches(/^[A-Za-z0-9._-]+(?:\/[A-Za-z0-9._-]+)*$/, {
+    message: 'Web files path must be like "www" or "www/public" — no leading slash, no ".."',
+  })
+  filesRelPath?: string;
 }
 
 /**
@@ -398,6 +433,22 @@ export class ChangeSshPasswordDto {
   @MaxLength(128)
   @Matches(/^[!-~]+$/, {
     message: 'SSH password must contain only printable ASCII characters',
+  })
+  password?: string;
+}
+
+/**
+ * DTO для смены пароля администратора MODX. Если `password` пустой — генерим
+ * случайный 16-байтовый base64url. Допускаем только printable ASCII (без пробела
+ * и контрольных) — этот же набор валиден для argv exec'а на агенте и для
+ * MODX-формы логина.
+ */
+export class ChangeCmsAdminPasswordDto {
+  @IsOptional()
+  @IsString()
+  @MaxLength(128)
+  @Matches(/^[!-~]+$/, {
+    message: 'Пароль может содержать только printable ASCII без пробелов',
   })
   password?: string;
 }
