@@ -138,7 +138,7 @@ export class PhpFpmManager {
       `rlimit_files = 4096`,
       ``,
       `; Security — per-site isolation`,
-      `php_admin_value[open_basedir] = ${homeDir}:${homeDir}/tmp:/usr/share/php`,
+      `php_admin_value[open_basedir] = ${homeDir}:${homeDir}/tmp:${homeDir}/.npm-global:/usr/share/php:/usr/bin:/usr/local/bin:/usr/local/lib/node_modules`,
       `php_admin_value[sys_temp_dir] = ${homeDir}/tmp`,
       `php_admin_value[upload_tmp_dir] = ${homeDir}/tmp`,
       `php_admin_value[session.save_path] = ${homeDir}/tmp`,
