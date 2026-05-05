@@ -238,10 +238,19 @@ log "Installing PHP-FPM versions (8.1 + 8.2 + 8.3 + 8.4 if available + system de
 PHP_SITE_EXTS=(mysql pgsql sqlite3 mbstring curl zip xml gd bcmath intl opcache imagick)
 
 # Базовый набор: дистровский PHP (для Adminer и системных нужд).
+# ВАЖНО: на Ubuntu 24.04 (noble) убрали unversioned `php-opcache` мета-пакет — opcache
+# теперь идёт встроенно в `php-fpm`/`php-cli`. Если оставить — `set -e` рубит установку.
+# imagick вынесли отдельной попыткой, потому что на минимальных образах/арм-зеркалах
+# его иногда нет, и из-за одного отсутствующего пакета не должен падать весь install.
 apt-get "${APT_OPTS[@]}" install \
   php-cli php-fpm php-mysql php-pgsql php-sqlite3 \
   php-mbstring php-curl php-zip php-xml php-gd php-bcmath php-intl \
-  php-opcache php-imagick >> "$LOG_FILE" 2>&1
+  >> "$LOG_FILE" 2>&1 \
+  || warn "Базовый PHP-набор установился частично — некоторые пакеты не доступны в репо"
+
+# imagick — best-effort (зависит от libmagickwand которого может не быть).
+apt-get "${APT_OPTS[@]}" install php-imagick >> "$LOG_FILE" 2>&1 \
+  || warn "php-imagick не установлен (нет в репо или dep-конфликт) — pdf/изображения в CMS могут не работать"
 
 # Дополнительные версии для пользовательских сайтов. Каждую обернём в `|| true`,
 # чтобы недоступная версия (например, 8.4 на старом репо) не валила установку.
