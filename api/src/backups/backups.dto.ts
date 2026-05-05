@@ -227,6 +227,38 @@ export class UpdateAutoBackupSettingsDto {
   @IsArray()
   @IsString({ each: true })
   excludeTableData?: string[];
+
+  // ── Restic check (структурная/глубокая проверка репозиториев) ──
+  @IsOptional()
+  @IsBoolean()
+  checkEnabled?: boolean;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(64)
+  @Matches(CRON_SCHEDULE_REGEX, {
+    message: 'Invalid cron schedule format',
+  })
+  checkSchedule?: string;
+
+  @IsOptional()
+  @IsBoolean()
+  checkReadData?: boolean;
+
+  // Формат: число или процент ('10', '10%'). См. agent/src/backup/restic.executor.ts.
+  @IsOptional()
+  @IsString()
+  @MaxLength(8)
+  @Matches(/^\d{1,3}%?$/, {
+    message: 'checkReadDataSubset must be like "10" or "10%"',
+  })
+  checkReadDataSubset?: string;
+
+  @IsOptional()
+  @IsInt()
+  @Min(0)
+  @Max(720)
+  checkMinIntervalHours?: number;
 }
 
 // ─── Restore & Restic check DTOs ───
