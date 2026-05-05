@@ -691,7 +691,7 @@
           <span class="fm-empty__text">Нет записей</span>
         </div>
 
-        <pre v-else class="logs-output" ref="logOutput"><code>{{ logLines.join('\n') }}</code></pre>
+        <pre v-else class="logs-output" ref="logOutput"><code>{{ formattedLogText }}</code></pre>
       </div>
 
       <!-- Tab content: Databases -->
@@ -3311,8 +3311,32 @@ async function openCmsAdmin() {
 }
 
 // ─── PHP Version ───
-const phpVersions = ['7.4', '8.0', '8.1', '8.2', '8.3'];
+// Список доступен динамически — тот же, что и на /php (только реально
+// установленные FPM-пулы). Хардкод раньше был [7.4, 8.0–8.3] — и на сервере,
+// где доустановили 8.4 / снесли 7.4, дропдаун врал. Фолбэк = SUPPORTED_PHP_VERSIONS
+// из shared (агент так же). Загружаем в onMounted через loadInstalledPhpVersions().
+const phpVersions = ref<string[]>(['8.4', '8.3', '8.2', '8.1', '8.0', '7.4']);
 const phpVersionChanging = ref(false);
+
+async function loadInstalledPhpVersions() {
+  try {
+    const versions = await api.get<string[]>('/php/versions');
+    if (Array.isArray(versions) && versions.length) {
+      // sort: 8.4, 8.3, ..., 7.4 (свежие сверху, как в /php).
+      phpVersions.value = [...versions].sort((a, b) =>
+        b.localeCompare(a, undefined, { numeric: true }),
+      );
+      // Если у сайта стоит версия, которой больше нет в списке (например,
+      // источник на 7.2, а на этой машине 7.2 не установлен) — добавляем
+      // её в список с пометкой, чтобы select мог корректно отрендерить.
+      if (site.value?.phpVersion && !phpVersions.value.includes(site.value.phpVersion)) {
+        phpVersions.value = [site.value.phpVersion, ...phpVersions.value];
+      }
+    }
+  } catch {
+    /* keep fallback */
+  }
+}
 
 async function changePhpVersion(newVersion: string) {
   if (!site.value || newVersion === site.value.phpVersion) return;
@@ -5542,6 +5566,28 @@ const logOutput = ref<HTMLElement | null>(null);
 const logAutoRefresh = ref(false);
 let logAutoRefreshTimer: ReturnType<typeof setInterval> | undefined;
 
+/**
+ * Форматтер строк лога. PHP-FPM при логировании в stderr склеивает
+ * множество `PHP message: ...` в ОДНУ физическую строку nginx-error.log
+ * (без переноса). Получается простыня типа:
+ *   "...stderr: \"PHP message: PHP Notice: ... PHP message: PHP Notice: ...\""
+ * Чтобы это можно было читать — режем каждую строку по ` PHP message: `
+ * и каждый сегмент рендерим с отступом, не теряя префикс с timestamp/error
+ * перед первым `PHP message:`.
+ */
+const formattedLogText = computed(() => {
+  return logLines.value
+    .map((line) => {
+      if (!line.includes('PHP message:')) return line;
+      // Делим перед каждым `PHP message:`, КРОМЕ первого вхождения внутри
+      // строки (тот идёт сразу за nginx-преамбулой, переносить не нужно).
+      const parts = line.split(/ (?=PHP message: )/);
+      if (parts.length <= 1) return line;
+      return parts.map((p, i) => (i === 0 ? p : '    ' + p)).join('\n');
+    })
+    .join('\n');
+});
+
 function toggleLogAutoRefresh() {
   logAutoRefresh.value = !logAutoRefresh.value;
   if (logAutoRefresh.value) {
@@ -5759,6 +5805,7 @@ onMounted(async () => {
     loadSiteHealth();
     loadSiteStorage();
     loadSiteActivity();
+    loadInstalledPhpVersions();
     serverStore.loadServers();
     setupBackupProgressWs();
 

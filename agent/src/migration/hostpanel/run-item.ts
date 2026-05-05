@@ -787,52 +787,131 @@ async function dbDumpImportStage(ctx: RunCtx) {
 async function patchModxStage(ctx: RunCtx) {
   const newRoot = path.join(SITES_BASE_PATH, ctx.plan.newName, 'www');
   const oldRoot = ctx.plan.sourceWebroot.replace(/\/$/, '');
+  const oldName = ctx.plan.sourceUser;
+  const newName = ctx.plan.newName;
 
-  // 1) www/config.core.php (имя config.inc.php — стандартное `config`)
-  const files = [
+  // Готовим набор пар замены, от более специфичной к более широкой.
+  // Раньше патчили только oldRoot→newRoot, и пути за пределами webroot
+  // (например `/var/www/<old>/private/`, `/var/www/<old>/logs/`, или
+  // `MODX_CORE_PATH = '/var/www/<old>/core/'` если оператор вынес core
+  // ВЫШЕ webroot для безопасности) оставались с прибитым старым именем —
+  // сайт после миграции падал на require'ах.
+  const replacements: Array<[string, string]> = [];
+  if (oldRoot !== newRoot) replacements.push([oldRoot, newRoot]);
+  if (oldName !== newName) {
+    // Trailing slash — критично, иначе схватим префикс другого юзера
+    // (`/var/www/all` сматчит `/var/www/all-backup/...`).
+    replacements.push([
+      `${SITES_BASE_PATH}/${oldName}/`,
+      `${SITES_BASE_PATH}/${newName}/`,
+    ]);
+  }
+  if (replacements.length === 0) {
+    log(ctx, `  patch-modx: имя и webroot не изменились → пропускаем`);
+    return;
+  }
+
+  // Список файлов, которые потенциально содержат прибитые абсолютные пути.
+  // MODX-конфиги и точки входа (index.php у root/manager/connectors часто
+  // хардкодят `MODX_CORE_PATH` напрямую, минуя config.core.php).
+  const candidateFiles = [
     `${newRoot}/config.core.php`,
     `${newRoot}/${ctx.plan.modxPaths.connectorsDir}/config.core.php`,
     `${newRoot}/${ctx.plan.modxPaths.managerDir}/config.core.php`,
+    `${newRoot}/index.php`,
+    `${newRoot}/${ctx.plan.modxPaths.connectorsDir}/index.php`,
+    `${newRoot}/${ctx.plan.modxPaths.managerDir}/index.php`,
+    `${newRoot}/.htaccess`,
   ];
 
-  for (const f of files) {
+  for (const f of candidateFiles) {
     try {
       await fs.access(f);
     } catch {
-      log(ctx, `  skip ${f} (нет файла)`);
+      // Файла нет — нормально (например `.htaccess` опционален).
       continue;
     }
     // Вместо `sed` — читаем/пишем напрямую: command-executor блокирует
     // `|` как shell-meta, а другие разделители (`#`, `@`) ненадёжны (могут
     // встречаться в путях). split/join — литеральная замена без regex-эскейпов.
     let content = await fs.readFile(f, 'utf-8');
-    if (content.includes(oldRoot)) {
-      content = content.split(oldRoot).join(newRoot);
+    let changed = false;
+    for (const [from, to] of replacements) {
+      if (content.includes(from)) {
+        content = content.split(from).join(to);
+        changed = true;
+      }
+    }
+    if (changed) {
       await fs.writeFile(f, content);
       log(ctx, `  patched: ${f}`);
-    } else {
-      log(ctx, `  skip ${f} (oldRoot не найден внутри)`);
     }
   }
 
-  // 2) www/core/config/config.inc.php — db creds + paths
+  // 2) www/core/config/config.inc.php — db creds + paths.
+  // На slave БД переименована в newName, юзер тоже = newName, пароль
+  // оставляем как у источника. Если хоть одна переменная не совпадёт с
+  // реальным состоянием — xpdo падает «Access denied for user '<new>'@'localhost'
+  // to database '<old>'» (классический симптом: сменили linux-юзера, БД
+  // переименована, но `$dbase`/`$database_dsn` остались с именем источника).
   const configIncPath = `${newRoot}/core/config/config.inc.php`;
   try {
     let content = await fs.readFile(configIncPath, 'utf-8');
     const dbCreds = await fetchHostpanelDbCreds(ctx);
-    // Меняем пути
-    content = content.replace(
-      new RegExp(oldRoot.replace(/[.[\]^$*+?{}/|]/g, '\\$&'), 'g'),
-      newRoot,
-    );
-    // Меняем db user / pass / dbase на новые (= newName / тот же pass / newName)
-    content = content.replace(/(\$database_user\s*=\s*['"])[^'"]+/g, `$1${ctx.plan.newName}`);
-    content = content.replace(/(\$database_password\s*=\s*['"])[^'"]+/g, `$1${dbCreds.dbPass}`);
-    content = content.replace(/(\$dbase\s*=\s*['"])[^'"]+/g, `$1${ctx.plan.newName}`);
+    // Меняем все известные пути литеральной заменой.
+    for (const [from, to] of replacements) {
+      content = content.split(from).join(to);
+    }
+    // Все известные имена переменных, которые держат db-юзера / пароль /
+    // имя БД у MODX Revolution и MODX 3 (xpdo всегда лезет в эти поля,
+    // плюс отдельный `$database_dsn` собирает финальный DSN — он перетирает
+    // `$database_server`/`$dbase`, если xpdo использует именно DSN-ветку).
+    const newDb = ctx.plan.newName;
+    const userVars = ['database_user'];
+    const passVars = ['database_password'];
+    const dbVars = ['dbase', 'database_db', 'database_dbname'];
+    for (const v of userVars) {
+      content = content.replace(
+        new RegExp(`(\\$${v}\\s*=\\s*['"])[^'"]+`, 'g'),
+        `$1${newDb}`,
+      );
+    }
+    for (const v of passVars) {
+      content = content.replace(
+        new RegExp(`(\\$${v}\\s*=\\s*['"])[^'"]+`, 'g'),
+        `$1${dbCreds.dbPass}`,
+      );
+    }
+    for (const v of dbVars) {
+      content = content.replace(
+        new RegExp(`(\\$${v}\\s*=\\s*['"])[^'"]+`, 'g'),
+        `$1${newDb}`,
+      );
+    }
+    // Внутри `$database_dsn = 'mysql:host=localhost;dbname=allfini;charset=utf8'`
+    // нужно подменить именно `dbname=` (xpdo приоритезирует DSN над $dbase).
+    // Без этой подмены MODX продолжает ходить в БД с именем источника даже
+    // если $dbase уже свежий — отсюда «Access denied for user 'wear' to
+    // database 'allfini'» при сменённом linux-юзере.
+    content = content.replace(/(dbname=)[^;'"\s]+/g, `$1${newDb}`);
     await fs.writeFile(configIncPath, content);
-    log(ctx, `  patched: ${configIncPath}`);
+    log(ctx, `  patched: ${configIncPath} (db user/pass/dbase + DSN)`);
   } catch (e) {
     log(ctx, `  config.inc.php: ${(e as Error).message}`);
+  }
+
+  // 3) Чистка MODX cache. В `core/cache/` лежат закэшированные .cache.php
+  // файлы (system_settings, lexicon_topics, resource map) — внутри них
+  // абсолютные пути СТАРОГО webroot. Если cache не снести, MODX читает
+  // его при первом запросе, идёт по протухшим путям и валит 500.
+  // Сами cache-файлы регенерируются автоматически при первом обращении.
+  const cacheDir = `${newRoot}/core/cache`;
+  try {
+    await fs.access(cacheDir);
+    await fs.rm(cacheDir, { recursive: true, force: true });
+    log(ctx, `  cleared MODX cache: ${cacheDir} (перегенерируется при первом запросе)`);
+  } catch {
+    /* нет каталога cache — нечего чистить */
   }
 }
 

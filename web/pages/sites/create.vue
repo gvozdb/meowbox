@@ -581,17 +581,39 @@ const siteTypes = [
   { value: 'CUSTOM', label: 'Пустой', desc: 'Чистый скелет, модули подключай сам' },
 ];
 
-const phpVersions = [
-  { value: '7.1', label: 'PHP 7.1 (EOL)' },
-  { value: '7.2', label: 'PHP 7.2 (EOL)' },
-  { value: '7.3', label: 'PHP 7.3 (EOL)' },
-  { value: '7.4', label: 'PHP 7.4' },
-  { value: '8.0', label: 'PHP 8.0' },
-  { value: '8.1', label: 'PHP 8.1' },
-  { value: '8.2', label: 'PHP 8.2' },
-  { value: '8.3', label: 'PHP 8.3' },
+// Список PHP-версий — динамический, тянем установленные с агента (тот же
+// /php/versions, что и страница /php). Хардкод на 7.1–8.4 показывал в селекте
+// версии, которых физически нет на машине, и юзер мог создать сайт со ссылкой
+// на не существующий php-fpm pool. Фолбэк = SUPPORTED_PHP_VERSIONS до загрузки.
+const phpVersions = ref<Array<{ value: string; label: string }>>([
   { value: '8.4', label: 'PHP 8.4' },
-];
+  { value: '8.3', label: 'PHP 8.3' },
+  { value: '8.2', label: 'PHP 8.2' },
+  { value: '8.1', label: 'PHP 8.1' },
+  { value: '8.0', label: 'PHP 8.0' },
+  { value: '7.4', label: 'PHP 7.4' },
+]);
+
+async function loadInstalledPhpVersions() {
+  try {
+    const versions = await api.get<string[]>('/php/versions');
+    if (Array.isArray(versions) && versions.length) {
+      phpVersions.value = [...versions]
+        .sort((a, b) => b.localeCompare(a, undefined, { numeric: true }))
+        .map((v) => ({
+          value: v,
+          label: /^7\./.test(v) ? `PHP ${v} (EOL)` : `PHP ${v}`,
+        }));
+      // Если дефолт ('8.2') не среди установленных — берём первый из списка.
+      const first = phpVersions.value[0];
+      if (first && !phpVersions.value.some((p) => p.value === form.phpVersion)) {
+        form.phpVersion = first.value;
+      }
+    }
+  } catch {
+    /* keep fallback */
+  }
+}
 
 // Версии MODX тянем с бэка (ModxVersionsService → GitHub releases, кеш 1ч).
 // Стартовый фолбэк — latest-дефолты из shared/constants.ts, чтобы select не был
@@ -703,6 +725,7 @@ async function loadModxVersions() {
 onMounted(() => {
   loadModxVersions();
   loadInstalledDbEngines();
+  loadInstalledPhpVersions();
 });
 
 const isMODX = computed(() => form.type === 'MODX_REVO' || form.type === 'MODX_3');
