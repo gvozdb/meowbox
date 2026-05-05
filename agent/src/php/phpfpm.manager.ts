@@ -142,7 +142,7 @@ export class PhpFpmManager {
       `php_admin_value[sys_temp_dir] = ${homeDir}/tmp`,
       `php_admin_value[upload_tmp_dir] = ${homeDir}/tmp`,
       `php_admin_value[session.save_path] = ${homeDir}/tmp`,
-      `php_admin_value[disable_functions] = exec,passthru,shell_exec,system,proc_open,popen`,
+      `php_admin_value[disable_functions] = exec,passthru,shell_exec,system,popen`,
       `php_admin_value[expose_php] = Off`,
       `php_admin_value[allow_url_fopen] = Off`,
       `php_admin_value[session.cookie_httponly] = On`,
