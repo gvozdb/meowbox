@@ -687,10 +687,8 @@ export class SitesService implements OnModuleInit {
         systemUser: site.systemUser ?? undefined,
         username: site.cmsAdminUser,
         password,
-        // На существующем сайте логин уже есть → не создаём нового юзера, если
-        // вдруг в самом MODX его нет (несоответствие БД панели и MODX). Лучше
-        // явная ошибка, чем тихо плодить sudo-юзеров.
-        createIfMissing: false,
+        // Семантика 1:1 с оригинальным changeAdminPass.php: юзера нет →
+        // создать sudo, есть → сменить пароль. Без флагов.
       },
     );
 

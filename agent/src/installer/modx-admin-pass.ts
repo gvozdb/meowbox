@@ -42,17 +42,22 @@ import { DEFAULT_PHP_VERSION } from '@meowbox/shared';
  */
 const MODX_CHANGE_PASS_SCRIPT = `<?php
 /**
- * Сменить / создать пароль админа MODX.
+ * Сменить / создать пароль админа MODX (Revo + 3).
  *   argv[1] = absolute base path (где лежит index.php от MODX)
  *   argv[2] = username
  *   argv[3] = new password
- *   argv[4] = "1"|"0" — делать sudo-юзера при создании (default 1).
+ *   argv[4] = createIfMissing: "1" — если юзера нет, создать sudo-админа
+ *                              "0" — если юзера нет, вернуть ошибку (default 1).
+ *
+ * Создание ВСЕГДА с sudo=true (primary_group + setSudo(1)) — как в оригинальном
+ * сценарии: если уж создаём админа, он должен быть полноценным sudo-юзером,
+ * иначе бесполезно.
  */
 if (!empty($argv)) {
-    $base_path = isset($argv[1]) ? $argv[1] : null;
-    $username  = isset($argv[2]) ? $argv[2] : null;
-    $password  = isset($argv[3]) ? $argv[3] : null;
-    $sudo      = isset($argv[4]) ? (bool)$argv[4] : true;
+    $base_path        = isset($argv[1]) ? $argv[1] : null;
+    $username         = isset($argv[2]) ? $argv[2] : null;
+    $password         = isset($argv[3]) ? $argv[3] : null;
+    $createIfMissing  = isset($argv[4]) ? (bool)$argv[4] : true;
 }
 if (empty($base_path) || empty($username) || empty($password)) {
     fwrite(STDOUT, '{"success":false,"message":"INVALID_ARGUMENTS"}');
@@ -78,16 +83,19 @@ $modx->error->reset();
 
 $user = $modx->getObject('modUser', ['username' => $username]);
 if (!$user) {
+    if (!$createIfMissing) {
+        fwrite(STDOUT, '{"success":false,"message":"USER_NOT_FOUND"}');
+        exit(7);
+    }
     $user = $modx->newObject('modUser');
     $user->fromArray([
         'username' => $username,
         'password' => $password,
         'active'   => true,
     ]);
-    if ($sudo) {
-        $user->set('primary_group', true);
-        $user->setSudo(1);
-    }
+    // Всегда даём sudo при создании — иначе смысла нет.
+    $user->set('primary_group', 1);
+    $user->setSudo(1);
     $profile = $modx->newObject('modUserProfile');
     $profile->fromArray([
         'fullname' => $username,
@@ -125,8 +133,6 @@ export interface ChangeModxAdminPasswordParams {
   username: string;
   /** Новый пароль. */
   password: string;
-  /** Если юзер не найден — создавать ли его с sudo-флагом (default true). */
-  createIfMissing?: boolean;
 }
 
 export interface ChangeModxAdminPasswordResult {
@@ -208,14 +214,14 @@ export class ModxAdminPassChanger {
     await fs.writeFile(scriptPath, MODX_CHANGE_PASS_SCRIPT, { mode: 0o644 });
 
     try {
-      const sudoFlag = params.createIfMissing === false ? '0' : '1';
-
+      // PHP-скрипт сам решает: юзера нет → создать с sudo=1; есть → сменить
+      // пароль. Никаких флагов снаружи. Логика 1:1 с оригинальным changeAdminPass.php.
       let command: string;
       let args: string[];
       let unsafeShellMetaArgs: number[];
 
       if (params.systemUser) {
-        // sudo -n -u <user> phpX.Y /tmp/<script>.php <wwwDir> <username> <password> <sudoFlag>
+        // sudo -n -u <user> phpX.Y /tmp/<script>.php <wwwDir> <username> <password>
         command = 'sudo';
         args = [
           '-n',
@@ -225,14 +231,13 @@ export class ModxAdminPassChanger {
           wwwDir,
           params.username,
           params.password,
-          sudoFlag,
         ];
         // password — индекс 7
         unsafeShellMetaArgs = [7];
       } else {
         // legacy сайт без per-site юзера — фолбэк: запускаем под root.
         command = phpBin;
-        args = [scriptPath, wwwDir, params.username, params.password, sudoFlag];
+        args = [scriptPath, wwwDir, params.username, params.password];
         // password — индекс 3
         unsafeShellMetaArgs = [3];
       }

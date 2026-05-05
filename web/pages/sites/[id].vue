@@ -575,6 +575,110 @@
             </div>
           </template>
         </section>
+
+        <!-- Modal: edit files rel path (web-root внутри homedir).
+             Кнопка-триггер «Изменить» лежит в info-card «Основное» этого же
+             overview-таба (строка «Папка с веб файлами»). Teleport должен быть
+             в одном v-if-блоке с кнопкой, иначе при кликe v-if=false и модалка
+             не рендерится. -->
+        <Teleport to="body">
+          <div v-if="showEditFilesRelPath" class="modal-overlay" @mousedown.self="showEditFilesRelPath = false">
+            <div class="domain-modal">
+              <div class="domain-modal__header">
+                <div class="domain-modal__title-group">
+                  <div class="domain-modal__icon">
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+                      <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" />
+                    </svg>
+                  </div>
+                  <div>
+                    <h3 class="domain-modal__title">Папка с веб файлами</h3>
+                    <p class="domain-modal__subtitle">
+                      Сменит <code>root</code> в nginx. PHP-FPM пул и nginx будут перезагружены сразу.
+                    </p>
+                  </div>
+                </div>
+                <button class="domain-modal__close" :disabled="savingFilesRelPath" @click="showEditFilesRelPath = false">
+                  <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" /></svg>
+                </button>
+              </div>
+
+              <div class="domain-modal__body">
+                <div class="domain-modal__swap">
+                  <div class="domain-modal__swap-col">
+                    <label class="domain-modal__label">Сейчас</label>
+                    <div class="domain-modal__chip domain-modal__chip--current">
+                      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="10" /></svg>
+                      <code>{{ site?.filesRelPath || 'www' }}</code>
+                    </div>
+                  </div>
+                  <div class="domain-modal__arrow">
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="5" y1="12" x2="19" y2="12" /><polyline points="12 5 19 12 12 19" /></svg>
+                  </div>
+                  <div class="domain-modal__swap-col">
+                    <label class="domain-modal__label">Новая папка</label>
+                    <div class="domain-modal__input-wrap" :class="{ 'domain-modal__input-wrap--error': !!editFilesRelPathError }">
+                      <svg class="domain-modal__input-icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" /></svg>
+                      <input
+                        v-model="editFilesRelPathValue"
+                        type="text"
+                        class="domain-modal__input"
+                        placeholder="www/public"
+                        :disabled="savingFilesRelPath"
+                        autocomplete="off"
+                        spellcheck="false"
+                        @keyup.enter="saveFilesRelPath"
+                      />
+                    </div>
+                    <span v-if="editFilesRelPathError" class="domain-modal__error">{{ editFilesRelPathError }}</span>
+                  </div>
+                </div>
+
+                <div class="domain-modal__impact">
+                  <div class="domain-modal__impact-title">
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="10" /><line x1="12" y1="8" x2="12" y2="12" /><line x1="12" y1="16" x2="12.01" y2="16" /></svg>
+                    Что произойдёт
+                  </div>
+                  <ul class="domain-modal__impact-list">
+                    <li>
+                      В nginx-конфиге <code>00-server.conf</code> поменяется <code>root</code> на
+                      <code>{{ site?.rootPath }}/{{ editFilesRelPathValue.trim() || 'www' }}</code>.
+                      Конфиг будет проверен <code>nginx -t</code> и перезагружен.
+                    </li>
+                    <li v-if="site?.phpVersion">
+                      PHP-FPM пул сайта будет пересобран — на случай если в кастомном
+                      php-конфиге (<code>php-fpm pool</code>) есть пути с прежней папкой.
+                    </li>
+                    <li class="domain-modal__impact-danger">
+                      <b>Папка на диске НЕ переедет автоматически.</b> Перенеси содержимое сам:
+                      <pre class="domain-modal__cmd">sudo -u {{ site?.systemUser }} mkdir -p {{ site?.rootPath }}/{{ editFilesRelPathValue.trim() || 'www' }}
+sudo mv {{ site?.rootPath }}/{{ site?.filesRelPath || 'www' }}/* {{ site?.rootPath }}/{{ editFilesRelPathValue.trim() || 'www' }}/</pre>
+                      После — проверь права на промежуточные папки (<code>chmod 750</code>),
+                      чтобы nginx прошёл по дереву.
+                    </li>
+                    <li>
+                      Если в <code>95-custom.conf</code> есть пути с прежней папкой — обнови их вручную.
+                    </li>
+                  </ul>
+                </div>
+              </div>
+
+              <div class="domain-modal__footer">
+                <button class="btn btn--ghost" :disabled="savingFilesRelPath" @click="showEditFilesRelPath = false">
+                  Отмена
+                </button>
+                <button
+                  class="btn btn--danger"
+                  :disabled="savingFilesRelPath || !editFilesRelPathValue.trim() || editFilesRelPathValue.trim() === (site?.filesRelPath || 'www')"
+                  @click="saveFilesRelPath"
+                >
+                  <svg v-if="!savingFilesRelPath" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><polyline points="20 6 9 17 4 12" /></svg>
+                  {{ savingFilesRelPath ? 'Применяю...' : 'Сменить папку' }}
+                </button>
+              </div>
+            </div>
+          </div>
+        </Teleport>
       </div>
 
       <!-- Tab content: Files -->
@@ -1033,106 +1137,6 @@
                 >
                   <svg v-if="!savingMainDomain" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><polyline points="20 6 9 17 4 12" /></svg>
                   {{ savingMainDomain ? 'Применяю...' : 'Сменить домен' }}
-                </button>
-              </div>
-            </div>
-          </div>
-        </Teleport>
-
-        <!-- Modal: edit files rel path (web-root внутри homedir) -->
-        <Teleport to="body">
-          <div v-if="showEditFilesRelPath" class="modal-overlay" @mousedown.self="showEditFilesRelPath = false">
-            <div class="domain-modal">
-              <div class="domain-modal__header">
-                <div class="domain-modal__title-group">
-                  <div class="domain-modal__icon">
-                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
-                      <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" />
-                    </svg>
-                  </div>
-                  <div>
-                    <h3 class="domain-modal__title">Папка с веб файлами</h3>
-                    <p class="domain-modal__subtitle">
-                      Сменит <code>root</code> в nginx. PHP-FPM пул и nginx будут перезагружены сразу.
-                    </p>
-                  </div>
-                </div>
-                <button class="domain-modal__close" :disabled="savingFilesRelPath" @click="showEditFilesRelPath = false">
-                  <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" /></svg>
-                </button>
-              </div>
-
-              <div class="domain-modal__body">
-                <div class="domain-modal__swap">
-                  <div class="domain-modal__swap-col">
-                    <label class="domain-modal__label">Сейчас</label>
-                    <div class="domain-modal__chip domain-modal__chip--current">
-                      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="10" /></svg>
-                      <code>{{ site?.filesRelPath || 'www' }}</code>
-                    </div>
-                  </div>
-                  <div class="domain-modal__arrow">
-                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="5" y1="12" x2="19" y2="12" /><polyline points="12 5 19 12 12 19" /></svg>
-                  </div>
-                  <div class="domain-modal__swap-col">
-                    <label class="domain-modal__label">Новая папка</label>
-                    <div class="domain-modal__input-wrap" :class="{ 'domain-modal__input-wrap--error': !!editFilesRelPathError }">
-                      <svg class="domain-modal__input-icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" /></svg>
-                      <input
-                        v-model="editFilesRelPathValue"
-                        type="text"
-                        class="domain-modal__input"
-                        placeholder="www/public"
-                        :disabled="savingFilesRelPath"
-                        autocomplete="off"
-                        spellcheck="false"
-                        @keyup.enter="saveFilesRelPath"
-                      />
-                    </div>
-                    <span v-if="editFilesRelPathError" class="domain-modal__error">{{ editFilesRelPathError }}</span>
-                  </div>
-                </div>
-
-                <div class="domain-modal__impact">
-                  <div class="domain-modal__impact-title">
-                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="10" /><line x1="12" y1="8" x2="12" y2="12" /><line x1="12" y1="16" x2="12.01" y2="16" /></svg>
-                    Что произойдёт
-                  </div>
-                  <ul class="domain-modal__impact-list">
-                    <li>
-                      В nginx-конфиге <code>00-server.conf</code> поменяется <code>root</code> на
-                      <code>{{ site?.rootPath }}/{{ editFilesRelPathValue.trim() || 'www' }}</code>.
-                      Конфиг будет проверен <code>nginx -t</code> и перезагружен.
-                    </li>
-                    <li v-if="site?.phpVersion">
-                      PHP-FPM пул сайта будет пересобран — на случай если в кастомном
-                      php-конфиге (<code>php-fpm pool</code>) есть пути с прежней папкой.
-                    </li>
-                    <li class="domain-modal__impact-danger">
-                      <b>Папка на диске НЕ переедет автоматически.</b> Перенеси содержимое сам:
-                      <pre class="domain-modal__cmd">sudo -u {{ site?.systemUser }} mkdir -p {{ site?.rootPath }}/{{ editFilesRelPathValue.trim() || 'www' }}
-sudo mv {{ site?.rootPath }}/{{ site?.filesRelPath || 'www' }}/* {{ site?.rootPath }}/{{ editFilesRelPathValue.trim() || 'www' }}/</pre>
-                      После — проверь права на промежуточные папки (<code>chmod 750</code>),
-                      чтобы nginx прошёл по дереву.
-                    </li>
-                    <li>
-                      Если в <code>95-custom.conf</code> есть пути с прежней папкой — обнови их вручную.
-                    </li>
-                  </ul>
-                </div>
-              </div>
-
-              <div class="domain-modal__footer">
-                <button class="btn btn--ghost" :disabled="savingFilesRelPath" @click="showEditFilesRelPath = false">
-                  Отмена
-                </button>
-                <button
-                  class="btn btn--danger"
-                  :disabled="savingFilesRelPath || !editFilesRelPathValue.trim() || editFilesRelPathValue.trim() === (site?.filesRelPath || 'www')"
-                  @click="saveFilesRelPath"
-                >
-                  <svg v-if="!savingFilesRelPath" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><polyline points="20 6 9 17 4 12" /></svg>
-                  {{ savingFilesRelPath ? 'Применяю...' : 'Сменить папку' }}
                 </button>
               </div>
             </div>
