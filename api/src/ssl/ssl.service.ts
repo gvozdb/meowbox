@@ -157,6 +157,12 @@ export class SslService {
         domain: site.domain,
         domains,
         rootPath: site.rootPath,
+        // ОБЯЗАТЕЛЬНО передаём filesRelPath: certbot должен класть
+        // challenge в ту же директорию, откуда nginx её отдаёт. Если
+        // юзер сменил web-root (например, на `www/public` для Laravel/MODX),
+        // без этого certbot пишет в `www/.well-known/...`, а nginx
+        // отдаёт 404 из `www/public/.well-known/...`.
+        filesRelPath: site.filesRelPath,
       }, CERTBOT_ISSUE_TIMEOUT_MS);
 
       // Socket.io ack прилетает как есть — нормализуем к плоскому виду.

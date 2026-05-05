@@ -633,7 +633,7 @@ export class AgentService {
     });
 
     // -- SSL --
-    this.safeOn(s, 'ssl:issue', async (params: { domain: string; domains: string[]; rootPath: string; email?: string }, cb: Callback) => {
+    this.safeOn(s, 'ssl:issue', async (params: { domain: string; domains: string[]; rootPath: string; filesRelPath?: string; email?: string }, cb: Callback) => {
       const result = await this.ssl.issueCertificate(params);
       cb(result);
     });
@@ -2059,8 +2059,12 @@ export class AgentService {
 
       for (const d of params.deploys) {
         try {
-          const shaRes = await this.cmdExec.execute('git', ['rev-parse', 'HEAD'], { cwd: `${d.rootPath}/www` });
-          const msgRes = await this.cmdExec.execute('git', ['log', '-1', '--format=%s'], { cwd: `${d.rootPath}/www` });
+          // Git репо у деплоя живёт прямо в rootPath (см. deploy.executor.ts —
+          // `git clone … rootPath`, проверка `path.join(rootPath, '.git')`).
+          // НЕ в `${rootPath}/www` — это был ошибочный хардкод, который ломал
+          // reconcile у любого сайта с filesRelPath != 'www'.
+          const shaRes = await this.cmdExec.execute('git', ['rev-parse', 'HEAD'], { cwd: d.rootPath });
+          const msgRes = await this.cmdExec.execute('git', ['log', '-1', '--format=%s'], { cwd: d.rootPath });
           if (shaRes.exitCode === 0) {
             deployResults.push({
               deployId: d.deployId,

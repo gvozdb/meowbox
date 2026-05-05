@@ -1789,10 +1789,16 @@ export class SitesService implements OnModuleInit {
       if (sslEnabled) {
         try {
           step(`Выпуск SSL Let's Encrypt для ${dto.domain}`);
+          // Контракт `ssl:issue` (см. agent/src/ssl/ssl.manager.ts::IssueSslParams):
+          //   { domain, domains, rootPath, filesRelPath?, email? }
+          // Раньше тут летел сломанный payload (`aliases` вместо `domains`,
+          // без rootPath/filesRelPath) — серт во время провижининга не выпускался.
           const sanAliases = aliasesForAgent.map((a) => a.domain);
           const sslResult = await this.agentRelay.emitToAgent('ssl:issue', {
             domain: dto.domain,
-            aliases: sanAliases,
+            domains: [dto.domain, ...sanAliases],
+            rootPath,
+            filesRelPath,
             email: `admin@${dto.domain}`,
           }, 180_000);
           if (!sslResult.success) {

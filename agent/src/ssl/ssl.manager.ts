@@ -7,6 +7,13 @@ interface IssueSslParams {
   domain: string;
   domains: string[];
   rootPath: string;
+  /**
+   * Относительный путь к веб-файлам внутри `rootPath` (по умолчанию `www`).
+   * ВАЖНО: должен точно совпадать с тем, что прописано в nginx-конфиге сайта,
+   * иначе certbot положит challenge в одну директорию, а nginx будет искать
+   * его в другой → 404. См. `agent/src/nginx/templates.ts::resolveWebRoot`.
+   */
+  filesRelPath?: string;
   email?: string;
 }
 
@@ -40,8 +47,12 @@ export class SslManager {
    * Issue/renew SSL certificate using certbot webroot mode.
    */
   async issueCertificate(params: IssueSslParams): Promise<SslResult> {
-    const { domain, domains, rootPath, email } = params;
-    const webroot = `${rootPath}/www`;
+    const { domain, domains, rootPath, filesRelPath, email } = params;
+    // Webroot ДОЛЖЕН совпадать с nginx `root` для `.well-known/acme-challenge/`.
+    // Сан-логика дублирует resolveWebRoot() из nginx/templates.ts: убираем
+    // ведущие/трейлинг слэши и `..`, fallback — `www`.
+    const rel = (filesRelPath || 'www').replace(/^\/+/, '').replace(/\.\.+/g, '').replace(/\/+$/, '') || 'www';
+    const webroot = `${rootPath}/${rel}`;
 
     // Build certbot args.
     // --expand ВАЖЕН: если серт с --cert-name уже существует и список -d
