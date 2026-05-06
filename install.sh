@@ -222,52 +222,58 @@ fi
 
 # 2) Yandex mirror — как fallback (или единственный источник, если launchpad down).
 #    Apt сам выберет доступный источник, если оба активны.
+#
+# Весь блок завернут в `{ ... } || warn` — чтобы любая ошибка внутри (упавший
+# pipe, недоступный keyserver и т.п.) НЕ убила всю установку через set -e.
+# Yandex mirror — это nice-to-have fallback, ради него не стоит ронять install.
 if [[ "$YANDEX_AVAILABLE" == "1" ]]; then
-  log "Adding Yandex mirror for ondrej/php..."
-  YANDEX_SOURCES=/etc/apt/sources.list.d/ondrej-php-yandex.sources
-  YANDEX_KEYRING=/etc/apt/keyrings/ondrej-php.gpg
-  install -m 0755 -d /etc/apt/keyrings
+  {
+    log "Adding Yandex mirror for ondrej/php..."
+    YANDEX_SOURCES=/etc/apt/sources.list.d/ondrej-php-yandex.sources
+    YANDEX_KEYRING=/etc/apt/keyrings/ondrej-php.gpg
+    install -m 0755 -d /etc/apt/keyrings
 
-  if [[ ! -f "$YANDEX_KEYRING" ]]; then
-    # Try 1: извлечь inline-ключ из .sources файла, созданного add-apt-repository.
-    YANDEX_PPA_SRC=$(ls /etc/apt/sources.list.d/ondrej-ubuntu-php-*.sources 2>/dev/null | head -1)
-    if [[ -n "$YANDEX_PPA_SRC" ]]; then
-      awk '/^Signed-By:/{f=1; sub(/^Signed-By:[[:space:]]*/,""); print; next}
-           f && /^[[:space:]]/{sub(/^[[:space:]]/,""); print; next}
-           f{exit}' "$YANDEX_PPA_SRC" \
-        | sed 's/^ *\.$//' \
-        | gpg --dearmor > "$YANDEX_KEYRING".tmp 2>>"$LOG_FILE" \
-        && mv "$YANDEX_KEYRING".tmp "$YANDEX_KEYRING" \
-        && chmod 0644 "$YANDEX_KEYRING" \
-        || rm -f "$YANDEX_KEYRING".tmp
-    fi
-    # Try 2: тянем ключ напрямую с keyserver.ubuntu.com. Это отдельный хост от
-    # launchpad.net, поэтому работает даже когда launchpad CDN лежит.
-    # Fingerprint ondrej/php: 14AA40EC0831756756D7F66C4F4EA0AAE5267A6C
     if [[ ! -f "$YANDEX_KEYRING" ]]; then
-      log "  fetching ondrej/php GPG key from keyserver.ubuntu.com..."
-      curl -fsSL --max-time 15 \
+      # Тянем ключ ondrej/php напрямую по фингерпринту с публичных keyservers.
+      # Это отдельные хосты от launchpad.net, поэтому работают даже когда
+      # launchpad CDN лежит. Пробуем два keyserver'а последовательно.
+      # Fingerprint ondrej/php: 14AA40EC0831756756D7F66C4F4EA0AAE5267A6C
+      log "  fetching ondrej/php GPG key from public keyservers..."
+      KEY_OK=0
+      for KS in \
         "https://keyserver.ubuntu.com/pks/lookup?op=get&search=0x14aa40ec0831756756d7f66c4f4ea0aae5267a6c" \
-        2>>"$LOG_FILE" \
-        | gpg --dearmor > "$YANDEX_KEYRING".tmp 2>>"$LOG_FILE" \
-        && mv "$YANDEX_KEYRING".tmp "$YANDEX_KEYRING" \
-        && chmod 0644 "$YANDEX_KEYRING" \
-        || { rm -f "$YANDEX_KEYRING".tmp; warn "Не удалось получить GPG-ключ ondrej/php с keyserver.ubuntu.com"; }
+        "https://keys.openpgp.org/vks/v1/by-fingerprint/14AA40EC0831756756D7F66C4F4EA0AAE5267A6C"
+      do
+        rm -f "$YANDEX_KEYRING".tmp
+        if curl -fsSL --max-time 15 "$KS" 2>>"$LOG_FILE" \
+             | gpg --dearmor > "$YANDEX_KEYRING".tmp 2>>"$LOG_FILE"; then
+          if [[ -s "$YANDEX_KEYRING".tmp ]]; then
+            mv "$YANDEX_KEYRING".tmp "$YANDEX_KEYRING"
+            chmod 0644 "$YANDEX_KEYRING"
+            KEY_OK=1
+            break
+          fi
+        fi
+      done
+      rm -f "$YANDEX_KEYRING".tmp
+      if [[ "$KEY_OK" != "1" ]]; then
+        warn "Не удалось получить GPG-ключ ondrej/php ни с одного keyserver'а"
+      fi
     fi
-  fi
 
-  if [[ -f "$YANDEX_KEYRING" ]]; then
-    cat > "$YANDEX_SOURCES" <<YANDEX_EOF
+    if [[ -f "$YANDEX_KEYRING" ]]; then
+      cat > "$YANDEX_SOURCES" <<YANDEX_EOF
 Types: deb
 URIs: https://mirror.yandex.ru/mirrors/launchpad/ondrej/php/
 Suites: ${DISTRO_CODENAME}
 Components: main
 Signed-By: ${YANDEX_KEYRING}
 YANDEX_EOF
-    log "Yandex mirror for ondrej/php: подключено"
-  else
-    warn "GPG-ключ ondrej/php не получен — yandex-зеркало не подключаю"
-  fi
+      log "Yandex mirror for ondrej/php: подключено"
+    else
+      warn "GPG-ключ ondrej/php не получен — yandex-зеркало не подключаю"
+    fi
+  } || warn "yandex-mirror setup упал — продолжаю без зеркала"
 fi
 
 # 3) apt-get update — best-effort. Один из источников может быть нестабилен,
