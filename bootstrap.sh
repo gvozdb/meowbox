@@ -10,6 +10,16 @@
 #   curl -fsSL https://raw.githubusercontent.com/gvozdb/meowbox/main/bootstrap.sh \
 #     | sudo PANEL_PORT=18443 PANEL_DOMAIN=panel.example.com bash
 #
+# Тестовый режим — поставить с конкретной ветки/коммита git (без релиза):
+#   curl -fsSL https://raw.githubusercontent.com/gvozdb/meowbox/main/bootstrap.sh \
+#     | sudo MEOWBOX_REF=main bash
+#   # — или с конкретного коммита/тега:
+#   curl -fsSL ... | sudo MEOWBOX_REF=dev bash
+#   curl -fsSL ... | sudo MEOWBOX_REF=abc1234 bash
+# В этом режиме bootstrap качает архив ветки (без SHA-проверки), а install.sh
+# сам собирает dist/ из исходников через `--from-source`. Удобно для проверки
+# фиксов без лишнего тег→workflow→release цикла.
+#
 # Что делает:
 #   1. Минимальные deps (curl, tar, ca-certificates, jq, sha256sum) через apt
 #   2. Создаёт layout: /opt/meowbox/{state/{data,logs,backups,snapshots},releases}
@@ -22,7 +32,10 @@
 #
 # Env-переменные (опционально):
 #   MEOWBOX_DIR     — корень установки (по умолчанию /opt/meowbox)
-#   MEOWBOX_VERSION — конкретная версия (по умолчанию latest)
+#   MEOWBOX_VERSION — конкретная версия релиза (по умолчанию latest)
+#   MEOWBOX_REF     — ветка/тег/коммит git для тестового режима. Если задана,
+#                     MEOWBOX_VERSION игнорируется, тянется архив с git и dist
+#                     собирается локально (требует ~2 ГБ диска под devDeps + build).
 #   GITHUB_REPO     — owner/name (по умолчанию gvozdb/meowbox)
 #   GITHUB_TOKEN    — нужен только для приватных репо
 #   PANEL_DOMAIN    — домен панели (по умолчанию localhost)
@@ -40,6 +53,7 @@ export NEEDRESTART_SUSPEND=1
 MEOWBOX_DIR="${MEOWBOX_DIR:-/opt/meowbox}"
 GITHUB_REPO="${GITHUB_REPO:-gvozdb/meowbox}"
 TARGET="${MEOWBOX_VERSION:-}"
+MEOWBOX_REF="${MEOWBOX_REF:-}"
 
 GREEN='\033[0;32m'
 RED='\033[0;31m'
@@ -81,6 +95,69 @@ api_curl() {
   curl -sfL "${auth[@]}" -H "Accept: application/vnd.github+json" "$@"
 }
 
+TMP_DIR="$(mktemp -d)"
+trap 'rm -rf "$TMP_DIR"' EXIT
+
+DL_AUTH=()
+[[ -n "${GITHUB_TOKEN:-}" ]] && DL_AUTH=(-H "Authorization: Bearer $GITHUB_TOKEN")
+
+# =============================================================================
+# Branch-mode: тестовая установка с произвольной ветки/тега/коммита git.
+# Без релизного tarball, без SHA-проверки. install.sh соберёт всё сам.
+# =============================================================================
+if [[ -n "$MEOWBOX_REF" ]]; then
+  warn "MEOWBOX_REF=$MEOWBOX_REF — ставлю с git-ветки (тестовый режим, без SHA-проверки)"
+
+  # Уникальное имя релиза с timestamp'ом — чтобы повторные запуски не путались.
+  TS="$(date -u +%Y%m%d-%H%M%S)"
+  TARGET="branch-${MEOWBOX_REF//\//-}-${TS}"
+  RELEASE_DIR="$MEOWBOX_DIR/releases/$TARGET"
+
+  TARBALL="$TMP_DIR/source.tar.gz"
+  log "Скачиваю архив ветки/коммита '$MEOWBOX_REF' с github..."
+  # Универсальный URL: работает для веток (refs/heads/<name>), тегов
+  # (refs/tags/<name>), и коммитов (<sha>). Github отдаёт tarball'ом каталог
+  # вида <repo>-<ref>/.
+  if ! curl -sfL "${DL_AUTH[@]}" \
+        "https://github.com/$GITHUB_REPO/archive/refs/heads/${MEOWBOX_REF}.tar.gz" \
+        -o "$TARBALL" 2>/dev/null; then
+    # Не ветка — пробуем тег
+    if ! curl -sfL "${DL_AUTH[@]}" \
+          "https://github.com/$GITHUB_REPO/archive/refs/tags/${MEOWBOX_REF}.tar.gz" \
+          -o "$TARBALL" 2>/dev/null; then
+      # Не тег — пробуем коммит
+      curl -sfL "${DL_AUTH[@]}" \
+        "https://github.com/$GITHUB_REPO/archive/${MEOWBOX_REF}.tar.gz" \
+        -o "$TARBALL" \
+        || error "Не нашёл '$MEOWBOX_REF' ни как ветку, ни как тег, ни как коммит в $GITHUB_REPO"
+    fi
+  fi
+
+  log "Распаковываю в releases/$TARGET..."
+  mkdir -p "$RELEASE_DIR"
+  tar -xzf "$TARBALL" -C "$TMP_DIR"
+  # Ищем top-level каталог внутри архива (github называет его как <repo>-<ref>).
+  EXTRACTED_DIR="$(find "$TMP_DIR" -mindepth 1 -maxdepth 1 -type d ! -name '.*' | head -1)"
+  [[ -d "$EXTRACTED_DIR" ]] || error "Не нашёл распакованный каталог в архиве"
+  cp -a "$EXTRACTED_DIR/." "$RELEASE_DIR/"
+
+  # Симлинки persistent state
+  ln -sfn "$MEOWBOX_DIR/state/.env" "$RELEASE_DIR/.env"
+  ln -sfn "$MEOWBOX_DIR/state/data" "$RELEASE_DIR/data"
+
+  # Переключаем current
+  ln -sfn "$RELEASE_DIR" "$MEOWBOX_DIR/current"
+  log "current → releases/$TARGET"
+
+  [[ -f "$MEOWBOX_DIR/current/install.sh" ]] || error "install.sh не найден в архиве '$MEOWBOX_REF'"
+  log "Запускаю install.sh с --from-source (build из исходников)..."
+  chmod +x "$MEOWBOX_DIR/current/install.sh"
+  exec bash "$MEOWBOX_DIR/current/install.sh" --from-source "$@"
+fi
+
+# =============================================================================
+# Release-mode: обычная установка с релизного tarball + SHA256.
+# =============================================================================
 if [[ -z "$TARGET" ]]; then
   log "Узнаю latest release из github.com/$GITHUB_REPO..."
   TARGET="$(api_curl "https://api.github.com/repos/$GITHUB_REPO/releases/latest" \
@@ -98,13 +175,8 @@ if [[ -L "$MEOWBOX_DIR/current" ]] && [[ "$(readlink -f "$MEOWBOX_DIR/current")"
 fi
 
 # ----- Download tarball + checksum -----
-TMP_DIR="$(mktemp -d)"
-trap 'rm -rf "$TMP_DIR"' EXIT
 TARBALL="$TMP_DIR/meowbox-$TARGET.tar.gz"
 SUMS="$TMP_DIR/SHA256SUMS"
-
-DL_AUTH=()
-[[ -n "${GITHUB_TOKEN:-}" ]] && DL_AUTH=(-H "Authorization: Bearer $GITHUB_TOKEN")
 
 log "Скачиваю tarball..."
 curl -sfL "${DL_AUTH[@]}" \

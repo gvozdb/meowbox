@@ -20,6 +20,7 @@ NODE_VERSION="22"
 LOG_FILE="${LOG_FILE:-/var/log/meowbox-install.log}"
 PROXY_TOKEN=""
 RELEASE_MODE="auto"  # auto | release | legacy
+BUILD_FROM_SOURCE=0  # 1 = full npm ci + build (вместо `npm ci --omit=dev`)
 
 # Parse arguments
 while [[ $# -gt 0 ]]; do
@@ -34,6 +35,13 @@ while [[ $# -gt 0 ]]; do
       ;;
     --legacy-mode)
       RELEASE_MODE="legacy"
+      shift
+      ;;
+    --from-source)
+      # Bootstrap из ветки/коммита git: dist'ов нет, билдим локально, но
+      # раскладку держим как у релиза (state в /opt/meowbox/state).
+      RELEASE_MODE="release"
+      BUILD_FROM_SOURCE=1
       shift
       ;;
     *)
@@ -577,7 +585,7 @@ chmod 700 "${STATE_DIR}/data"
 
 cd "${CODE_DIR}"
 
-if [[ "$RELEASE_MODE" == "release" ]]; then
+if [[ "$RELEASE_MODE" == "release" ]] && [[ "$BUILD_FROM_SOURCE" != "1" ]]; then
   # Тарболл уже содержит dist/. Ставим production-зависимости только в тех
   # пакетах, у которых есть package-lock.json и реальные runtime-deps.
   # shared/ и migrations/ — это собранные артефакты без runtime-зависимостей
@@ -604,6 +612,45 @@ if [[ "$RELEASE_MODE" == "release" ]]; then
     mkdir -p "${CODE_DIR}/migrations/node_modules/@prisma"
     ln -sfn "../../../api/node_modules/@prisma/client" "${CODE_DIR}/migrations/node_modules/@prisma/client"
   fi
+elif [[ "$RELEASE_MODE" == "release" ]] && [[ "$BUILD_FROM_SOURCE" == "1" ]]; then
+  # Bootstrap из git-ветки: dist'ов нет, ставим ВСЕ зависимости (с devDeps)
+  # и собираем локально. Раскладка release-mode'овая (state в /opt/meowbox/state).
+  log "Branch-mode: full npm ci + build из исходников..."
+  for pkg in shared api agent web migrations; do
+    if [[ -f "${CODE_DIR}/${pkg}/package-lock.json" ]]; then
+      log "  → npm ci в ${pkg}..."
+      (cd "${CODE_DIR}/${pkg}" && npm ci --no-audit --no-fund >> "$LOG_FILE" 2>&1) \
+        || error "npm ci провалился в ${pkg}"
+    fi
+  done
+
+  # Симлинки @meowbox/shared — нужны и для build (tsc находит types), и для рантайма.
+  log "Создаю symlink-и @meowbox/shared в node_modules пакетов..."
+  for pkg in api agent web migrations; do
+    mkdir -p "${CODE_DIR}/${pkg}/node_modules/@meowbox"
+    ln -sfn "../../../shared" "${CODE_DIR}/${pkg}/node_modules/@meowbox/shared"
+  done
+  if [[ -d "${CODE_DIR}/api/node_modules/@prisma/client" ]]; then
+    mkdir -p "${CODE_DIR}/migrations/node_modules/@prisma"
+    ln -sfn "../../../api/node_modules/@prisma/client" "${CODE_DIR}/migrations/node_modules/@prisma/client"
+  fi
+
+  # Build — порядок важен: shared → agent → api → web → migrations.
+  log "  → build shared..."
+  (cd "${CODE_DIR}/shared" && npm run build >> "$LOG_FILE" 2>&1) \
+    || error "shared build упал — смотри $LOG_FILE"
+  log "  → build agent..."
+  (cd "${CODE_DIR}/agent" && npm run build >> "$LOG_FILE" 2>&1) \
+    || error "agent build упал — смотри $LOG_FILE"
+  log "  → build api..."
+  (cd "${CODE_DIR}/api" && npm run build >> "$LOG_FILE" 2>&1) \
+    || error "api build упал — смотри $LOG_FILE"
+  log "  → build web (Nuxt)..."
+  (cd "${CODE_DIR}/web" && npm run build >> "$LOG_FILE" 2>&1) \
+    || error "web build упал — смотри $LOG_FILE"
+  log "  → build migrations runner..."
+  (cd "${CODE_DIR}/migrations" && npm run build >> "$LOG_FILE" 2>&1) \
+    || error "migrations build упал — смотри $LOG_FILE"
 else
   log "Installing Meowbox dependencies (full, legacy mode)..."
   # Shared — собирается первым, используется остальными через paths
