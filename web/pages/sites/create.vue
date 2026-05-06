@@ -657,16 +657,21 @@ const siteTypes = [
 ];
 
 // Список PHP-версий — динамический, тянем установленные с агента (тот же
-// /php/versions, что и страница /php). Хардкод на 7.1–8.4 показывал в селекте
-// версии, которых физически нет на машине, и юзер мог создать сайт со ссылкой
-// на не существующий php-fpm pool. Фолбэк = SUPPORTED_PHP_VERSIONS до загрузки.
+// /php/versions, что и страница /php). Хардкод показывал в селекте версии,
+// которых физически нет на машине, и юзер мог создать сайт со ссылкой на
+// не существующий php-fpm pool. Фолбэк = SUPPORTED_PHP_VERSIONS до загрузки
+// (синхронизирован с agent/src/config.ts:SUPPORTED_PHP_VERSIONS).
 const phpVersions = ref<Array<{ value: string; label: string }>>([
   { value: '8.4', label: 'PHP 8.4' },
   { value: '8.3', label: 'PHP 8.3' },
   { value: '8.2', label: 'PHP 8.2' },
   { value: '8.1', label: 'PHP 8.1' },
   { value: '8.0', label: 'PHP 8.0' },
-  { value: '7.4', label: 'PHP 7.4' },
+  { value: '7.4', label: 'PHP 7.4 (EOL)' },
+  { value: '7.3', label: 'PHP 7.3 (EOL)' },
+  { value: '7.2', label: 'PHP 7.2 (EOL)' },
+  { value: '7.1', label: 'PHP 7.1 (EOL)' },
+  { value: '7.0', label: 'PHP 7.0 (EOL)' },
 ]);
 
 async function loadInstalledPhpVersions() {

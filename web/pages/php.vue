@@ -202,7 +202,7 @@ interface PhpExtension { name: string; enabled: boolean; }
 // Modern (актуально поддерживаемые) и Legacy (EOL — нужны только для миграций
 // со старых проектов). Legacy показываются отдельной optgroup'ой с warning'ом.
 const MODERN_VERSIONS = ['8.4', '8.3', '8.2', '8.1', '8.0'];
-const LEGACY_VERSIONS = ['7.4', '7.3', '7.2', '7.1'];
+const LEGACY_VERSIONS = ['7.4', '7.3', '7.2', '7.1', '7.0'];
 const ALL_VERSIONS = [...MODERN_VERSIONS, ...LEGACY_VERSIONS];
 
 function isLegacy(v: string): boolean {

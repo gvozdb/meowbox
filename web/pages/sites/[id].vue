@@ -3557,7 +3557,7 @@ async function openCmsAdmin() {
 // установленные FPM-пулы). Хардкод раньше был [7.4, 8.0–8.3] — и на сервере,
 // где доустановили 8.4 / снесли 7.4, дропдаун врал. Фолбэк = SUPPORTED_PHP_VERSIONS
 // из shared (агент так же). Загружаем в onMounted через loadInstalledPhpVersions().
-const phpVersions = ref<string[]>(['8.4', '8.3', '8.2', '8.1', '8.0', '7.4']);
+const phpVersions = ref<string[]>(['8.4', '8.3', '8.2', '8.1', '8.0', '7.4', '7.3', '7.2', '7.1', '7.0']);
 const phpVersionChanging = ref(false);
 
 async function loadInstalledPhpVersions() {
