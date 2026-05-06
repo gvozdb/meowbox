@@ -1214,7 +1214,12 @@ async function testNotif(id: string) {
   }
 }
 
-watch(activeTab, (tab) => {
+// Загрузка данных конкретной вкладки. Вынесено отдельно, чтобы и
+// onMounted (учитывая ?tab= из URL), и watcher на смену вкладки шли через
+// один путь — иначе при F5/прямой ссылке на /settings?tab=site-defaults
+// данные нужного таба не подтягивались (watch без immediate, а onMounted
+// слепо звал только loadGeneralSettings).
+function loadDataForTab(tab: string) {
   if (tab === 'notifications') loadNotifications();
   if (tab === 'general') loadGeneralSettings();
   if (tab === 'appearance') loadAppearance();
@@ -1225,14 +1230,16 @@ watch(activeTab, (tab) => {
     loadSessions();
     loadIpAllowlist();
   }
-});
+}
+
+watch(activeTab, (tab) => loadDataForTab(tab));
 
 onMounted(() => {
   if (authStore.user) {
     profileForm.email = authStore.user.email || '';
   }
-  // первая вкладка = general
-  loadGeneralSettings();
+  // Грузим данные текущей вкладки (учитываем ?tab= в URL после F5/ссылки).
+  loadDataForTab(activeTab.value);
 });
 </script>
 
