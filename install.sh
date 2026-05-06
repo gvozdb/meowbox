@@ -289,31 +289,29 @@ fi
 apt-get update -qq >> "$LOG_FILE" 2>&1 \
   || warn "apt-get update частично упал — продолжаю установку с доступными источниками"
 
-# Какие версии ставим: 8.1, 8.2, 8.3 (и 8.4 если есть в репо). Дистровская
-# версия всё равно устанавливается отдельно — её используют системные пакеты
-# (Adminer и т.п.).
-log "Installing PHP-FPM versions (8.1 + 8.2 + 8.3 + 8.4 if available + system default)..."
+# =============================================================================
+# Single source of truth: версии PHP, которыми управляет панель.
+# Чтобы добавить поддержку новой версии (8.5/8.6/9.0/...) — допиши её сюда.
+# Этот же массив используется ниже:
+#   - apt install (только эти версии ставим явно)
+#   - ensure MODX extensions (только эти, чтобы случайно установленная 8.5
+#     зависимостью не подхватывалась)
+#   - выбор PHP для Adminer pool (берём самую высокую УСТАНОВЛЕННУЮ из списка)
+# Порядок — от старшей к младшей: первый match при поиске = самая высокая.
+# =============================================================================
+PHP_MANAGED_VERSIONS=("8.4" "8.3" "8.2" "8.1")
+
+# ВАЖНО: НЕ ставим unversioned `php-cli`/`php-fpm`/`php-mysql`/etc — они тянут
+# LATEST из ondrej/php (на сегодня 8.5+), которую мы не апрувили и для которой
+# не запускали `apt-get install php8.5-fpm` → pool.d отсутствует, Adminer падает.
+# Все нужные версии перечислены в PHP_MANAGED_VERSIONS и ставятся явно ниже.
+# Системный `php` symlink создаст `update-alternatives` автоматически.
+log "Installing PHP-FPM versions: ${PHP_MANAGED_VERSIONS[*]} (доступные в репо)..."
 
 PHP_SITE_EXTS=(mysql pgsql sqlite3 mbstring curl zip xml gd bcmath intl opcache imagick)
 
-# Базовый набор: дистровский PHP (для Adminer и системных нужд).
-# ВАЖНО: на Ubuntu 24.04 (noble) убрали unversioned `php-opcache` мета-пакет — opcache
-# теперь идёт встроенно в `php-fpm`/`php-cli`. Если оставить — `set -e` рубит установку.
-# imagick вынесли отдельной попыткой, потому что на минимальных образах/арм-зеркалах
-# его иногда нет, и из-за одного отсутствующего пакета не должен падать весь install.
-apt-get "${APT_OPTS[@]}" install \
-  php-cli php-fpm php-mysql php-pgsql php-sqlite3 \
-  php-mbstring php-curl php-zip php-xml php-gd php-bcmath php-intl \
-  >> "$LOG_FILE" 2>&1 \
-  || warn "Базовый PHP-набор установился частично — некоторые пакеты не доступны в репо"
-
-# imagick — best-effort (зависит от libmagickwand которого может не быть).
-apt-get "${APT_OPTS[@]}" install php-imagick >> "$LOG_FILE" 2>&1 \
-  || warn "php-imagick не установлен (нет в репо или dep-конфликт) — pdf/изображения в CMS могут не работать"
-
-# Дополнительные версии для пользовательских сайтов. Каждую обернём в `|| true`,
-# чтобы недоступная версия (например, 8.4 на старом репо) не валила установку.
-for V in 8.1 8.2 8.3 8.4; do
+# Ставим в порядке от младшей к старшей — чисто для красоты лога.
+for V in $(printf '%s\n' "${PHP_MANAGED_VERSIONS[@]}" | sort -V); do
   if apt-cache show "php${V}-cli" >/dev/null 2>&1; then
     log "  → installing PHP ${V}..."
     apt-get "${APT_OPTS[@]}" install \
@@ -328,10 +326,13 @@ for V in 8.1 8.2 8.3 8.4; do
   fi
 done
 
-# Дистровский `php-fpm` может оказаться, например, 7.4/8.0. Он ставится
-# unversioned-пакетами выше, но доустанавливаем versioned extensions тоже,
-# чтобы `/etc/php/<V>/fpm` получил тот же MODX-набор.
-for V in $(ls /etc/php 2>/dev/null | grep -E '^[0-9]+\.[0-9]+$' | sort -V); do
+# Доустанавливаем MODX-расширения только для УПРАВЛЯЕМЫХ версий.
+# Раньше итерировали по `ls /etc/php/` — это подхватывало случайно установленную
+# 8.5 (через unversioned зависимости) и обрабатывало её как валидную. Теперь
+# ограничиваемся PHP_MANAGED_VERSIONS — все остальные версии в /etc/php/
+# игнорируем (даже если они там есть).
+for V in $(printf '%s\n' "${PHP_MANAGED_VERSIONS[@]}" | sort -V); do
+  [[ -d "/etc/php/${V}" ]] || continue
   PKGS=()
   for EXT in "${PHP_SITE_EXTS[@]}"; do
     PKG="php${V}-${EXT}"
@@ -346,15 +347,21 @@ for V in $(ls /etc/php 2>/dev/null | grep -E '^[0-9]+\.[0-9]+$' | sort -V); do
   fi
 done
 
-# Определяем дефолтную дистровскую версию для путей /etc/php/X.Y/fpm/...
-# (используется секцией Adminer ниже). Берём САМУЮ ВЫСОКУЮ установленную,
-# а не первую попавшуюся — это совпадает с системным `php` симлинком.
-PHP_VERSION=$(ls /etc/php 2>/dev/null | grep -E '^[0-9]+\.[0-9]+$' | sort -rV | head -n1)
+# Самая высокая УСТАНОВЛЕННАЯ из управляемых версий — для Adminer pool ниже.
+# Если в системе случайно оказалась 8.5+ (через зависимости старых установок),
+# она игнорируется — мы не управляем версиями вне PHP_MANAGED_VERSIONS.
+PHP_VERSION=""
+for V in "${PHP_MANAGED_VERSIONS[@]}"; do
+  if [[ -d "/etc/php/${V}/fpm/pool.d" ]]; then
+    PHP_VERSION="$V"
+    break
+  fi
+done
 if [[ -z "$PHP_VERSION" ]]; then
-  error "PHP не установился — проверь $LOG_FILE"
+  error "Ни одна из управляемых версий PHP (${PHP_MANAGED_VERSIONS[*]}) не установилась — проверь $LOG_FILE"
 fi
-log "Default PHP version (для Adminer): ${PHP_VERSION}"
-log "Установленные PHP версии: $(ls /etc/php 2>/dev/null | grep -E '^[0-9]+\.[0-9]+$' | sort -V | tr '\n' ' ')"
+log "Самая высокая управляемая PHP: ${PHP_VERSION}"
+log "Установленные управляемые PHP версии: $(for V in $(printf '%s\n' "${PHP_MANAGED_VERSIONS[@]}" | sort -V); do [[ -d "/etc/php/${V}" ]] && echo -n "${V} "; done)"
 
 # -----------------------------------------------------------------------------
 # Composer — нужен агенту для composer-based установок (MODX 3, Laravel и т.п.).
@@ -707,16 +714,41 @@ else
 fi
 
 ADMINER_VERSION="${ADMINER_VERSION:-4.8.1}"
-ADMINER_URL="https://github.com/vrana/adminer/releases/download/v${ADMINER_VERSION}/adminer-${ADMINER_VERSION}.php"
+# Два источника: GitHub releases (primary) и официальный adminer.org (fallback).
+# На некоторых VPS-провайдерах SSL до github.com отдаёт timeout (MitM/firewall),
+# поэтому держим зеркало — иначе install падает посередине.
+ADMINER_URLS=(
+  "https://github.com/vrana/adminer/releases/download/v${ADMINER_VERSION}/adminer-${ADMINER_VERSION}.php"
+  "https://www.adminer.org/static/download/${ADMINER_VERSION}/adminer-${ADMINER_VERSION}.php"
+)
 ADMINER_BIN="${ADMINER_DIR}/adminer.php"
 
 mkdir -p "${ADMINER_DIR}/lib"
 
 # Скачиваем единый PHP-файл Adminer'а, если его ещё нет (или версия отличается).
+ADMINER_DOWNLOAD_OK=1
 if [[ ! -f "${ADMINER_BIN}" ]] || ! grep -q "v${ADMINER_VERSION}" "${ADMINER_BIN}" 2>/dev/null; then
   log "Downloading Adminer ${ADMINER_VERSION}..."
-  curl -fsSL -o "${ADMINER_BIN}.tmp" "${ADMINER_URL}" >> "$LOG_FILE" 2>&1
-  mv "${ADMINER_BIN}.tmp" "${ADMINER_BIN}"
+  ADMINER_DOWNLOAD_OK=0
+  for ADMINER_URL in "${ADMINER_URLS[@]}"; do
+    log "  trying ${ADMINER_URL}"
+    rm -f "${ADMINER_BIN}.tmp"
+    if curl -fsSL --retry 5 --retry-delay 3 --retry-connrefused \
+           --connect-timeout 30 --max-time 180 \
+           -o "${ADMINER_BIN}.tmp" "${ADMINER_URL}" >> "$LOG_FILE" 2>&1; then
+      if [[ -s "${ADMINER_BIN}.tmp" ]]; then
+        mv "${ADMINER_BIN}.tmp" "${ADMINER_BIN}"
+        ADMINER_DOWNLOAD_OK=1
+        break
+      fi
+    fi
+    warn "  не удалось скачать с ${ADMINER_URL} — пробую следующий источник"
+  done
+  rm -f "${ADMINER_BIN}.tmp"
+  if [[ "$ADMINER_DOWNLOAD_OK" != "1" ]]; then
+    warn "Adminer ${ADMINER_VERSION} не скачался ни с одного источника (firewall/SSL?)."
+    warn "Установка продолжится, но Adminer не будет работать до ручной загрузки в ${ADMINER_BIN}"
+  fi
 fi
 
 # -----------------------------------------------------------------------------
@@ -741,7 +773,29 @@ find "${ADMINER_DIR}" -type f -exec chmod 640 {} \;
 # -----------------------------------------------------------------------------
 # PHP-FPM pool config — отдельный сокет, отдельный юзер, open_basedir lock.
 # -----------------------------------------------------------------------------
-ADMINER_POOL="/etc/php/${PHP_VERSION}/fpm/pool.d/meowbox-adminer.conf"
+# Adminer хардкодом на php8.4 — стабильная версия из ondrej/php, на ней
+# писали и тестировали adminer-конфиг. PHP_VERSION берёт самую высокую (может
+# быть 8.5+ из ondrej, для которой apt-get install php8.5-fpm не выполнялся —
+# pool.d отсутствует, install падает).
+# Если 8.4 не установлена (старая Ubuntu / launchpad down) — fallback на
+# самую высокую доступную из 8.1–8.3.
+ADMINER_PHP_VERSION="8.4"
+if [[ ! -d "/etc/php/${ADMINER_PHP_VERSION}/fpm/pool.d" ]]; then
+  warn "PHP ${ADMINER_PHP_VERSION} не установлен — fallback для Adminer на 8.3/8.2/8.1"
+  ADMINER_PHP_VERSION=""
+  for V in 8.3 8.2 8.1; do
+    if [[ -d "/etc/php/${V}/fpm/pool.d" ]]; then
+      ADMINER_PHP_VERSION="$V"
+      break
+    fi
+  done
+  if [[ -z "$ADMINER_PHP_VERSION" ]]; then
+    error "Не нашёл подходящей версии PHP-FPM (8.1–8.4) для Adminer — проверь $LOG_FILE"
+  fi
+fi
+log "Adminer будет работать на php${ADMINER_PHP_VERSION}-fpm"
+
+ADMINER_POOL="/etc/php/${ADMINER_PHP_VERSION}/fpm/pool.d/meowbox-adminer.conf"
 cat > "${ADMINER_POOL}" << POOL
 ; Meowbox Adminer FPM pool — изолированный, без доступа к файлам сайтов.
 [meowbox-adminer]
@@ -795,9 +849,9 @@ chmod 640 /var/log/meowbox-adminer.error.log
 # нужен только как fallback — но юзер не сможет его читать, и это нормально.
 # Поэтому НИЧЕГО не добавляем в группы.
 
-systemctl enable "php${PHP_VERSION}-fpm" >> "$LOG_FILE" 2>&1 || true
-systemctl restart "php${PHP_VERSION}-fpm" >> "$LOG_FILE" 2>&1
-log "Adminer PHP-FPM pool ready (socket /run/php/meowbox-adminer.sock)"
+systemctl enable "php${ADMINER_PHP_VERSION}-fpm" >> "$LOG_FILE" 2>&1 || true
+systemctl restart "php${ADMINER_PHP_VERSION}-fpm" >> "$LOG_FILE" 2>&1
+log "Adminer PHP-FPM pool ready (socket /run/php/meowbox-adminer.sock, php${ADMINER_PHP_VERSION})"
 
 # Сервисы, которые должны переживать ребут хоста.
 systemctl enable nginx >> "$LOG_FILE" 2>&1 || true
