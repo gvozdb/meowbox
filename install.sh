@@ -171,30 +171,67 @@ systemctl enable --now postgresql  >> "$LOG_FILE" 2>&1 || true
 # всегда был полный спектр, подключаем ondrej/php PPA.
 log "Adding PHP repository (ondrej/php)..."
 
-# Codename Ubuntu (jammy/noble/...) — нужен для подключения yandex-зеркала.
+# Codename Ubuntu (jammy/noble/...) — нужен и для add-apt-repository, и для yandex-зеркала.
 DISTRO_CODENAME=$(lsb_release -cs 2>/dev/null || echo "")
 
-if true; then
-  if ! grep -rq "ondrej/php" /etc/apt/sources.list.d/ 2>/dev/null; then
-    add-apt-repository -y ppa:ondrej/php >> "$LOG_FILE" 2>&1 || \
-      warn "Не удалось добавить ondrej/php — будет только дистровская версия PHP"
-    apt-get update -qq >> "$LOG_FILE" 2>&1
-  fi
+# -----------------------------------------------------------------------------
+# Pre-flight probes.
+# Launchpad CDN периодически отдаёт 503 на сутки+ из RU/CIS/DE/etc — это не
+# зависит от локации сервера. Если в этот момент тупо вызвать `add-apt-repository
+# ppa:ondrej/php` + `apt-get update`, то set -e рубит весь install посередине.
+# Поэтому решаем заранее, какой источник использовать: launchpad, yandex-mirror,
+# или ничего (только дистровский PHP).
+# -----------------------------------------------------------------------------
+LAUNCHPAD_HTTP=000
+YANDEX_HTTP=000
+if [[ -n "$DISTRO_CODENAME" ]]; then
+  LAUNCHPAD_HTTP=$(curl -4 -sS -o /dev/null --max-time 8 -w '%{http_code}' \
+    "https://ppa.launchpadcontent.net/ondrej/php/ubuntu/dists/${DISTRO_CODENAME}/InRelease" 2>/dev/null || echo 000)
+  YANDEX_HTTP=$(curl -4 -sS -o /dev/null --max-time 5 -w '%{http_code}' \
+    "https://mirror.yandex.ru/mirrors/launchpad/ondrej/php/dists/${DISTRO_CODENAME}/InRelease" 2>/dev/null || echo 000)
+fi
+log "  probes: launchpad=${LAUNCHPAD_HTTP}, yandex=${YANDEX_HTTP}"
 
-  # Подключаем зеркало Yandex как fallback к ondrej PPA.
-  # Launchpad CDN периодически отдаёт 503 на сутки+ — зеркало yandex
-  # синхронизирует тот же репозиторий и стабильнее (особенно из RU/CIS).
-  # Apt сам выберет доступный/быстрый источник из двух. Зеркало есть
-  # только для Ubuntu codename'ов — на Debian не подключается.
-  YANDEX_CODENAMES=" bionic focal jammy noble oracular plucky "
+# Yandex-зеркало есть только для Ubuntu codename'ов.
+YANDEX_CODENAMES=" bionic focal jammy noble oracular plucky "
+YANDEX_AVAILABLE=0
+if [[ "$YANDEX_HTTP" == "200" ]] && [[ "$YANDEX_CODENAMES" == *" $DISTRO_CODENAME "* ]]; then
+  YANDEX_AVAILABLE=1
+fi
+
+# 1) Launchpad PPA — добавляем только если он реально отвечает.
+if [[ "$LAUNCHPAD_HTTP" == "200" ]]; then
+  if ! grep -rq "ondrej/php" /etc/apt/sources.list.d/ 2>/dev/null; then
+    add-apt-repository -y ppa:ondrej/php >> "$LOG_FILE" 2>&1 \
+      || warn "add-apt-repository ppa:ondrej/php упал — попробую yandex-зеркало"
+  fi
+elif [[ "$YANDEX_AVAILABLE" == "1" ]]; then
+  warn "launchpad недоступен (http=${LAUNCHPAD_HTTP}) — переключаюсь на yandex-зеркало"
+  # Если PPA добавлялся раньше (например, при повторной попытке install) — отключаем
+  # его .sources/.list файлы, чтобы apt-get update не падал на 503 от launchpad.
+  shopt -s nullglob
+  for SRC in /etc/apt/sources.list.d/ondrej-ubuntu-php-*.sources \
+             /etc/apt/sources.list.d/ondrej-ubuntu-php-*.list; do
+    mv "$SRC" "${SRC}.disabled" 2>/dev/null \
+      && log "  отключил $SRC (launchpad down)"
+  done
+  shopt -u nullglob
+else
+  warn "launchpad (http=${LAUNCHPAD_HTTP}) и yandex (http=${YANDEX_HTTP}) недоступны — будет только дистровский PHP"
+fi
+
+# 2) Yandex mirror — как fallback (или единственный источник, если launchpad down).
+#    Apt сам выберет доступный источник, если оба активны.
+if [[ "$YANDEX_AVAILABLE" == "1" ]]; then
+  log "Adding Yandex mirror for ondrej/php..."
   YANDEX_SOURCES=/etc/apt/sources.list.d/ondrej-php-yandex.sources
   YANDEX_KEYRING=/etc/apt/keyrings/ondrej-php.gpg
-  YANDEX_PPA_SRC=$(ls /etc/apt/sources.list.d/ondrej-ubuntu-php-*.sources 2>/dev/null | head -1)
-  if [[ "$YANDEX_CODENAMES" == *" $DISTRO_CODENAME "* ]] && [[ -n "$YANDEX_PPA_SRC" ]]; then
-    log "Adding Yandex mirror for ondrej/php (fallback for launchpad outages)..."
-    install -m 0755 -d /etc/apt/keyrings
-    if [[ ! -f "$YANDEX_KEYRING" ]]; then
-      # Извлекаем inline GPG-ключ из .sources файла, созданного add-apt-repository.
+  install -m 0755 -d /etc/apt/keyrings
+
+  if [[ ! -f "$YANDEX_KEYRING" ]]; then
+    # Try 1: извлечь inline-ключ из .sources файла, созданного add-apt-repository.
+    YANDEX_PPA_SRC=$(ls /etc/apt/sources.list.d/ondrej-ubuntu-php-*.sources 2>/dev/null | head -1)
+    if [[ -n "$YANDEX_PPA_SRC" ]]; then
       awk '/^Signed-By:/{f=1; sub(/^Signed-By:[[:space:]]*/,""); print; next}
            f && /^[[:space:]]/{sub(/^[[:space:]]/,""); print; next}
            f{exit}' "$YANDEX_PPA_SRC" \
@@ -202,33 +239,41 @@ if true; then
         | gpg --dearmor > "$YANDEX_KEYRING".tmp 2>>"$LOG_FILE" \
         && mv "$YANDEX_KEYRING".tmp "$YANDEX_KEYRING" \
         && chmod 0644 "$YANDEX_KEYRING" \
-        || warn "Не удалось извлечь GPG-ключ для yandex-зеркала ondrej/php"
+        || rm -f "$YANDEX_KEYRING".tmp
     fi
-    if [[ -f "$YANDEX_KEYRING" ]]; then
-      # Probe зеркала перед записью .sources (5s timeout).
-      YANDEX_HTTP=$(curl -4 -sS -o /dev/null --max-time 5 -w '%{http_code}' \
-        "https://mirror.yandex.ru/mirrors/launchpad/ondrej/php/dists/${DISTRO_CODENAME}/InRelease" 2>/dev/null || echo 000)
-      if [[ "$YANDEX_HTTP" == "200" ]]; then
-        cat > "$YANDEX_SOURCES" <<YANDEX_EOF
+    # Try 2: тянем ключ напрямую с keyserver.ubuntu.com. Это отдельный хост от
+    # launchpad.net, поэтому работает даже когда launchpad CDN лежит.
+    # Fingerprint ondrej/php: 14AA40EC0831756756D7F66C4F4EA0AAE5267A6C
+    if [[ ! -f "$YANDEX_KEYRING" ]]; then
+      log "  fetching ondrej/php GPG key from keyserver.ubuntu.com..."
+      curl -fsSL --max-time 15 \
+        "https://keyserver.ubuntu.com/pks/lookup?op=get&search=0x14aa40ec0831756756d7f66c4f4ea0aae5267a6c" \
+        2>>"$LOG_FILE" \
+        | gpg --dearmor > "$YANDEX_KEYRING".tmp 2>>"$LOG_FILE" \
+        && mv "$YANDEX_KEYRING".tmp "$YANDEX_KEYRING" \
+        && chmod 0644 "$YANDEX_KEYRING" \
+        || { rm -f "$YANDEX_KEYRING".tmp; warn "Не удалось получить GPG-ключ ondrej/php с keyserver.ubuntu.com"; }
+    fi
+  fi
+
+  if [[ -f "$YANDEX_KEYRING" ]]; then
+    cat > "$YANDEX_SOURCES" <<YANDEX_EOF
 Types: deb
 URIs: https://mirror.yandex.ru/mirrors/launchpad/ondrej/php/
 Suites: ${DISTRO_CODENAME}
 Components: main
 Signed-By: ${YANDEX_KEYRING}
 YANDEX_EOF
-        apt-get update -qq \
-          -o Dir::Etc::sourcelist=sources.list.d/ondrej-php-yandex.sources \
-          -o Dir::Etc::sourceparts=- \
-          -o APT::Get::List-Cleanup=0 \
-          -o Acquire::ForceIPv4=true >> "$LOG_FILE" 2>&1 \
-          || warn "apt-get update для yandex-зеркала упал (не критично)"
-        log "Yandex mirror for ondrej/php: подключено"
-      else
-        warn "Yandex mirror probe failed (http=$YANDEX_HTTP) — пропускаю подключение"
-      fi
-    fi
+    log "Yandex mirror for ondrej/php: подключено"
+  else
+    warn "GPG-ключ ondrej/php не получен — yandex-зеркало не подключаю"
   fi
 fi
+
+# 3) apt-get update — best-effort. Один из источников может быть нестабилен,
+#    важнее чтобы install продолжился, а не умер тут по set -e.
+apt-get update -qq >> "$LOG_FILE" 2>&1 \
+  || warn "apt-get update частично упал — продолжаю установку с доступными источниками"
 
 # Какие версии ставим: 8.1, 8.2, 8.3 (и 8.4 если есть в репо). Дистровская
 # версия всё равно устанавливается отдельно — её используют системные пакеты
