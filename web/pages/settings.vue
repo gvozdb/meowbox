@@ -117,21 +117,27 @@
         <div class="settings-fields">
           <div class="form-group">
             <label class="form-label">Версия PHP по умолчанию</label>
-            <select v-model="siteDefaultsForm.defaultPhpVersion" class="form-input">
-              <option value="7.4">PHP 7.4</option>
-              <option value="8.0">PHP 8.0</option>
-              <option value="8.1">PHP 8.1</option>
-              <option value="8.2">PHP 8.2</option>
-              <option value="8.3">PHP 8.3</option>
+            <select v-model="siteDefaultsForm.defaultPhpVersion" class="form-input" :disabled="installedPhpVersions.length === 0">
+              <option v-if="installedPhpVersions.length === 0" value="" disabled>PHP не установлен — открой /php</option>
+              <option v-for="v in installedPhpVersions" :key="v" :value="v">
+                {{ phpVersionLabel(v) }}
+              </option>
             </select>
+            <span v-if="installedPhpVersions.length === 0" class="form-hint">
+              На сервере не найдено ни одной установленной версии PHP-FPM. Установи через
+              <NuxtLink to="/php" class="link">/php</NuxtLink>.
+            </span>
           </div>
           <div class="form-group">
             <label class="form-label">Тип БД по умолчанию</label>
-            <select v-model="siteDefaultsForm.defaultDbType" class="form-input">
-              <option value="MARIADB">MariaDB</option>
-              <option value="MYSQL">MySQL</option>
-              <option value="POSTGRESQL">PostgreSQL</option>
+            <select v-model="siteDefaultsForm.defaultDbType" class="form-input" :disabled="availableDbTypes.length === 0">
+              <option v-if="availableDbTypes.length === 0" value="" disabled>Ни одного движка БД не установлено — открой /services</option>
+              <option v-for="t in availableDbTypes" :key="t.value" :value="t.value">{{ t.label }}</option>
             </select>
+            <span v-if="availableDbTypes.length === 0" class="form-hint">
+              На сервере не установлено ни MariaDB/MySQL, ни PostgreSQL. Установи на
+              <NuxtLink to="/services" class="link">/services</NuxtLink>.
+            </span>
           </div>
           <label class="inline-check">
             <input type="checkbox" v-model="siteDefaultsForm.defaultAutoSsl" />
@@ -674,6 +680,76 @@ const siteDefaultsForm = reactive<SiteDefaults>({
 });
 const siteDefaultsLoading = ref(false);
 
+// ── PHP-версии: тянем установленные с агента (тот же /php/versions, что и
+// страница /php). Без этого селект показывал хардкод 7.4–8.3, в т.ч. версии,
+// которых физически нет на сервере, и юзер сохранял дефолт-фантом.
+const installedPhpVersions = ref<string[]>([]);
+
+function phpVersionLabel(v: string): string {
+  // 7.x — EOL legacy, помечаем как на /php-странице.
+  return /^7\./.test(v) ? `PHP ${v} (EOL)` : `PHP ${v}`;
+}
+
+async function loadInstalledPhpVersions() {
+  try {
+    const versions = await api.get<string[]>('/php/versions');
+    if (Array.isArray(versions) && versions.length > 0) {
+      installedPhpVersions.value = [...versions].sort((a, b) =>
+        b.localeCompare(a, undefined, { numeric: true }),
+      );
+      // Если сохранённый дефолт больше не среди установленных — переключаем
+      // на самую высокую доступную (обычно 8.4 после свежего инсталла панели).
+      if (
+        siteDefaultsForm.defaultPhpVersion &&
+        !installedPhpVersions.value.includes(siteDefaultsForm.defaultPhpVersion)
+      ) {
+        siteDefaultsForm.defaultPhpVersion = installedPhpVersions.value[0];
+      }
+    } else {
+      installedPhpVersions.value = [];
+    }
+  } catch {
+    // /php/versions может быть недоступен (агент offline). Не ломаем UI —
+    // оставляем пустой список, шаблон покажет хинт "PHP не установлен".
+    installedPhpVersions.value = [];
+  }
+}
+
+// ── БД-движки: тянем фактически установленные с сервера через /services
+// (тот же endpoint, что в databases.vue / sites/create.vue). Унифицируем
+// MariaDB и MySQL под одной опцией "MySQL / MariaDB" — пакет mariadb-server
+// обслуживает оба исторических типа, см. databases.service.ts:281.
+interface DbTypeOption { value: 'MARIADB' | 'POSTGRESQL'; label: string; engineKey: 'mariadb' | 'postgresql' }
+const ALL_DB_TYPES: DbTypeOption[] = [
+  { value: 'MARIADB',    label: 'MySQL / MariaDB', engineKey: 'mariadb' },
+  { value: 'POSTGRESQL', label: 'PostgreSQL',      engineKey: 'postgresql' },
+];
+const installedDbEngines = ref<Set<string>>(new Set());
+const availableDbTypes = computed<DbTypeOption[]>(() =>
+  ALL_DB_TYPES.filter((t) => installedDbEngines.value.has(t.engineKey)),
+);
+
+async function loadInstalledDbEngines() {
+  try {
+    const list = await api.get<Array<{ key: string; installed: boolean }>>('/services');
+    installedDbEngines.value = new Set(
+      list.filter((s) => s.installed).map((s) => s.key),
+    );
+    // Сохранённый дефолт может быть legacy 'MYSQL' (от старых версий панели —
+    // мы такую опцию больше не показываем) или движком, которого нет на этом
+    // сервере. В обоих случаях — переключаем на первый доступный.
+    const isMysqlLegacy = (siteDefaultsForm.defaultDbType as string) === 'MYSQL';
+    const stillOk = availableDbTypes.value.some((t) => t.value === siteDefaultsForm.defaultDbType);
+    if (isMysqlLegacy || !stillOk) {
+      const first = availableDbTypes.value[0];
+      if (first) siteDefaultsForm.defaultDbType = first.value;
+    }
+  } catch {
+    // /services недоступен — не показываем фильтр (пустой computed → hint).
+    installedDbEngines.value = new Set();
+  }
+}
+
 async function loadSiteDefaults() {
   siteDefaultsLoading.value = true;
   try {
@@ -684,6 +760,8 @@ async function loadSiteDefaults() {
   } finally {
     siteDefaultsLoading.value = false;
   }
+  // Грузим списки параллельно, не блокируем форму.
+  await Promise.all([loadInstalledPhpVersions(), loadInstalledDbEngines()]);
 }
 
 async function saveSiteDefaults() {

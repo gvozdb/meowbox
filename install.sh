@@ -1107,12 +1107,40 @@ fi
 # Done!
 # =============================================================================
 
+# -----------------------------------------------------------------------------
+# Определяем хост для Panel URL.
+# Если оператор задал кастомный PANEL_DOMAIN — используем его.
+# Иначе (по умолчанию = "localhost") выводим публичный IPv4 — оператор
+# обычно ставит панель на VPS и подключается извне, "localhost" в финальном
+# сообщении бесполезен.
+# Источники IP по убыванию надёжности:
+#   1) api.ipify.org через https — публичный IP (видим даже за NAT в датацентре)
+#   2) `ip route get 1.1.1.1` — IP интерфейса, через который роутится наружу
+#   3) `hostname -I` — первый интерфейс (может быть приватным)
+# -----------------------------------------------------------------------------
+DETECTED_IP=""
+if [[ -z "$DETECTED_IP" ]]; then
+  DETECTED_IP=$(curl -4 -fsSL --max-time 5 https://api.ipify.org 2>/dev/null || echo "")
+fi
+if [[ -z "$DETECTED_IP" ]]; then
+  DETECTED_IP=$(ip -4 -o route get 1.1.1.1 2>/dev/null | awk '{print $7; exit}' || echo "")
+fi
+if [[ -z "$DETECTED_IP" ]]; then
+  DETECTED_IP=$(hostname -I 2>/dev/null | awk '{print $1}' || echo "")
+fi
+
+if [[ "$PANEL_DOMAIN" == "localhost" || -z "$PANEL_DOMAIN" ]]; then
+  DISPLAY_HOST="${DETECTED_IP:-localhost}"
+else
+  DISPLAY_HOST="$PANEL_DOMAIN"
+fi
+
 echo ""
 echo -e "${GREEN}╔══════════════════════════════════════════╗${NC}"
 echo -e "${GREEN}║     ${AMBER}Meowbox installed successfully! 🐱${GREEN}     ║${NC}"
 echo -e "${GREEN}╚══════════════════════════════════════════╝${NC}"
 echo ""
-echo -e "  Panel URL:     ${AMBER}http://${PANEL_DOMAIN}:${PANEL_PORT}${NC}"
+echo -e "  Panel URL:     ${AMBER}http://${DISPLAY_HOST}:${PANEL_PORT}${NC}"
 echo -e "  API:           ${AMBER}http://127.0.0.1:${API_PORT}${NC} (internal)"
 echo -e "  Web:           ${AMBER}http://127.0.0.1:${WEB_PORT}${NC} (internal)"
 if [[ "$RELEASE_MODE" == "release" ]]; then
