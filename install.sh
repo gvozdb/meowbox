@@ -752,6 +752,30 @@ if [[ ! -f "${ADMINER_BIN}" ]] || ! grep -q "v${ADMINER_VERSION}" "${ADMINER_BIN
 fi
 
 # -----------------------------------------------------------------------------
+# Копируем наши SSO-обёртки (sso.php, index.php, lib/*) в ADMINER_DIR.
+# Раньше эти файлы лежали в tools/adminer/ и попадали в release tarball, но
+# после переезда на release-mode tools/adminer стал симлинком на state/adminer
+# и реальные исходники потерялись. Источник правды теперь — tools/adminer-src/.
+# Без них nginx отдаёт 404 на /adminer/sso.php (try_files /sso.php =404).
+# -----------------------------------------------------------------------------
+ADMINER_SRC="${CODE_DIR}/tools/adminer-src"
+if [[ -d "${ADMINER_SRC}" ]]; then
+  # cp -an: archive (perms+symlinks) + no-clobber (не перезаписывать локальные правки).
+  # Для гарантии актуальности sso.php / index.php / lib/* — сначала удаляем
+  # предыдущие копии нашего origin'а (только конкретные файлы, не весь каталог,
+  # чтобы не задеть adminer.php).
+  rm -f "${ADMINER_DIR}/sso.php" "${ADMINER_DIR}/index.php"
+  rm -rf "${ADMINER_DIR}/lib"
+  mkdir -p "${ADMINER_DIR}/lib"
+  cp -a "${ADMINER_SRC}/sso.php"   "${ADMINER_DIR}/sso.php"
+  cp -a "${ADMINER_SRC}/index.php" "${ADMINER_DIR}/index.php"
+  cp -a "${ADMINER_SRC}/lib/."     "${ADMINER_DIR}/lib/"
+  log "Adminer SSO-обёртки скопированы из ${ADMINER_SRC}"
+else
+  warn "${ADMINER_SRC} отсутствует — sso.php не будет установлен (Adminer SSO не заработает)"
+fi
+
+# -----------------------------------------------------------------------------
 # Изолированный системный юзер для PHP-FPM пула Adminer'а.
 # Не имеет доступа к файлам сайтов, не может ssh, без shell.
 # -----------------------------------------------------------------------------
