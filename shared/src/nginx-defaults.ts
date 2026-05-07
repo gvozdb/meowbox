@@ -171,8 +171,10 @@ location / {
 location @modx_rewrite {
     rewrite ^/(.*)$ /index.php?q=$1 last;
 }
-# /core/*.php — лезть из браузера нельзя
-location ~ /core/.*\\.php$ { deny all; }
+# /core/ — наружу не отдаём ничего (^~ важнее regex-локейшнов с .php)
+location ^~ /core/ {
+    return 404;
+}
 `,
   MODX_3: `# MODX 3 — friendly URLs + защита core. Connectors открыты — manager их дёргает.
 location / {
@@ -181,7 +183,9 @@ location / {
 location @modx_rewrite {
     rewrite ^/(.*)$ /index.php?q=$1 last;
 }
-location ~ /core/.*\\.php$ { deny all; }
+location ^~ /core/ {
+    return 404;
+}
 `,
   WORDPRESS: `# WordPress
 location / {
