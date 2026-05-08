@@ -915,3 +915,92 @@ model HostpanelMigrationSource {
   @@index([lastUsedAt])
   @@map("hostpanel_migration_sources")
 }
+
+// =============================================================================
+// VPN Management
+// См. docs/specs/2026-05-09-vpn-management.md
+//
+// Архитектурные пометки:
+//   - Один сервис = одна VPN-инсталляция конкретного протокола на этом сервере
+//     (на одном сервере может быть несколько сервисов разных протоколов и
+//     разных портов одновременно).
+//   - VpnUser — глобальная сущность панели; имеет subToken (per-user URL
+//     подписки) и может состоять в N сервисах через VpnUserCreds (M:N).
+//   - configBlob/credsBlob — base64 AES-256-GCM (vpn-cipher.ts).
+// =============================================================================
+
+model VpnService {
+  id        String   @id @default(uuid())
+  /// Произвольное имя сервиса для UI ("Reality Main", "Резервный WG", ...).
+  /// Если null — UI рендерит "<protocol>:<port>".
+  label     String?
+  /// VpnProtocol enum: VLESS_REALITY | AMNEZIA_WG.
+  protocol  String
+  port      Int
+  /// VpnServiceStatus enum: RUNNING | STOPPED | ERROR | DEPLOYING.
+  status    String   @default("DEPLOYING")
+  /// Сообщение об ошибке для статуса ERROR (показывается в UI).
+  errorMessage     String?  @map("error_message")
+  /// Зашифрованный JSON: VpnRealityServiceConfig | VpnAmneziaWgServiceConfig.
+  /// Включает приватный ключ сервера + детали обфускации.
+  configBlob       String   @map("config_blob")
+  /// Только для VLESS_REALITY: SNI-маска отдельным полем для индексации
+  /// и быстрого UI-рендера без дешифровки.
+  sniMask          String?  @map("sni_mask")
+  /// Результат последней автоматической проверки SNI (cron раз в 6 ч).
+  sniLastCheckOk   Boolean? @map("sni_last_check_ok")
+  sniLastCheckedAt DateTime? @map("sni_last_checked_at")
+  sniLastError     String?  @map("sni_last_error")
+  /// Имя egress-интерфейса для AmneziaWG (eth0/ens3) — кешируем чтобы при
+  /// рестарте/обновлении не считать заново.
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  userCreds VpnUserCreds[]
+
+  @@unique([protocol, port])
+  @@index([protocol])
+  @@map("vpn_services")
+}
+
+model VpnUser {
+  id        String   @id @default(uuid())
+  /// Произвольное имя для UI и в комменте VLESS-URL/WG-конфига.
+  /// Уникально per-panel (не per-service), так как юзер глобальный.
+  name      String   @unique
+  /// Random 32 bytes hex — токен для GET /api/vpn/sub/:token endpoint.
+  /// Регенерируется по запросу (для отзыва доступа).
+  subToken  String   @unique @map("sub_token")
+  /// Глобальный enable/disable. Если false — все creds в свяках с сервисами
+  /// удаляются из inbounds (xray) и peer'ов (wg) — но остаются в БД для
+  /// возможного re-enable.
+  enabled   Boolean  @default(true)
+  notes     String?
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  creds     VpnUserCreds[]
+
+  @@map("vpn_users")
+}
+
+/// Связка юзер-сервис: один юзер может быть в N сервисах одновременно
+/// (например VLESS+Reality на 443/TCP и AmneziaWG на 51820/UDP).
+/// При создании юзера в UI чек-боксами выбираем, в какие сервисы его положить.
+model VpnUserCreds {
+  id        String   @id @default(uuid())
+  userId    String   @map("user_id")
+  serviceId String   @map("service_id")
+  /// Зашифрованный JSON: VpnRealityUserCreds | VpnAmneziaWgUserCreds.
+  credsBlob String   @map("creds_blob")
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  user    VpnUser    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  service VpnService @relation(fields: [serviceId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, serviceId])
+  @@index([userId])
+  @@index([serviceId])
+  @@map("vpn_user_creds")
+}

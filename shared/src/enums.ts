@@ -123,6 +123,8 @@ export enum NotificationEvent {
   DEPLOY_SUCCESS = 'DEPLOY_SUCCESS',
   DEPLOY_FAILED = 'DEPLOY_FAILED',
   HIGH_LOAD = 'HIGH_LOAD',
+  /** SNI-маска VLESS+Reality сервиса перестала отдавать TLS 1.3 + X25519. */
+  VPN_SNI_FAILED = 'VPN_SNI_FAILED',
 }
 
 // =============================================================================

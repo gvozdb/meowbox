@@ -120,6 +120,13 @@
         <polyline points="3.27,6.96 12,12.01 20.73,6.96" />
         <line x1="12" y1="22.08" x2="12" y2="12" />
       </svg>
+      <!-- VPN-key (Reality + AmneziaWG): щит с ключом -->
+      <svg v-else-if="icon === 'vpn-key'" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M12 22s7-3.5 7-9V5l-7-3-7 3v8c0 5.5 7 9 7 9z" />
+        <circle cx="10" cy="11" r="2.2" />
+        <path d="M12 11h4" />
+        <path d="M15 11v2" />
+      </svg>
       <!-- Settings -->
       <svg v-else-if="icon === 'settings'" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
         <circle cx="12" cy="12" r="3" />

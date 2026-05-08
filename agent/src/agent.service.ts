@@ -25,6 +25,9 @@ import { LogTailManager } from './logs/log.tail';
 import { ManticoreExecutor } from './services/manticore.executor';
 import { RedisExecutor } from './services/redis.executor';
 import { MariadbEngineExecutor, PostgresqlEngineExecutor } from './database/db-engine.executor';
+import { XrayManager } from './vpn/xray.manager';
+import { AmneziaWgManager } from './vpn/amnezia-wg.manager';
+import { VpnInstaller } from './vpn/installer';
 import * as fs from 'fs';
 import * as fsp from 'fs/promises';
 import * as path from 'path';
@@ -93,6 +96,9 @@ export class AgentService {
   private redisSvc: RedisExecutor;
   private mariadbEngine: MariadbEngineExecutor;
   private postgresqlEngine: PostgresqlEngineExecutor;
+  private xrayMgr: XrayManager;
+  private amneziaMgr: AmneziaWgManager;
+  private vpnInstaller: VpnInstaller;
   private metricsInterval: ReturnType<typeof setInterval> | null = null;
   /**
    * Single-flight для hostpanel-миграции (см. spec §17.5: 1 одновременная
@@ -131,6 +137,9 @@ export class AgentService {
     this.redisSvc = new RedisExecutor(this.cmdExec);
     this.mariadbEngine = new MariadbEngineExecutor(this.cmdExec);
     this.postgresqlEngine = new PostgresqlEngineExecutor(this.cmdExec);
+    this.xrayMgr = new XrayManager(this.cmdExec);
+    this.amneziaMgr = new AmneziaWgManager(this.cmdExec);
+    this.vpnInstaller = new VpnInstaller(this.cmdExec);
   }
 
   start() {
@@ -2401,6 +2410,149 @@ export class AgentService {
       } catch {
         cb({ success: true, data: { reachable: false, statusCode: null, responseTimeMs: 0 } });
       }
+    });
+
+    // -- VPN: VLESS+Reality (Xray) --
+    // См. docs/specs/2026-05-09-vpn-management.md.
+    this.safeOn(s, 'vpn:reality:install', async (params: { serviceId: string; port: number; sniMask: string }, cb: Callback) => {
+      const result = await this.xrayMgr.install(params);
+      cb({ success: true, data: result });
+    });
+    this.safeOn(s, 'vpn:reality:uninstall', async (params: { serviceId: string; port: number }, cb: Callback) => {
+      await this.xrayMgr.uninstall(params.serviceId, params.port);
+      cb({ success: true });
+    });
+    this.safeOn(s, 'vpn:reality:start', async (params: { serviceId: string }, cb: Callback) => {
+      await this.xrayMgr.start(params.serviceId);
+      cb({ success: true });
+    });
+    this.safeOn(s, 'vpn:reality:stop', async (params: { serviceId: string }, cb: Callback) => {
+      await this.xrayMgr.stop(params.serviceId);
+      cb({ success: true });
+    });
+    this.safeOn(s, 'vpn:reality:status', async (params: { serviceId: string }, cb: Callback) => {
+      const active = await this.xrayMgr.statusActive(params.serviceId);
+      cb({ success: true, data: { active } });
+    });
+    this.safeOn(s, 'vpn:reality:add-user', async (params: { serviceId: string; uuid: string; name: string }, cb: Callback) => {
+      // XrayManager сам мержит config.json (читается с диска), отдельный
+      // config в params не нужен.
+      await this.xrayMgr.addUser(params);
+      cb({ success: true });
+    });
+    this.safeOn(s, 'vpn:reality:remove-user', async (params: { serviceId: string; uuid: string }, cb: Callback) => {
+      await this.xrayMgr.removeUser(params);
+      cb({ success: true });
+    });
+    this.safeOn(s, 'vpn:reality:rotate-sni', async (params: { serviceId: string; newSni: string }, cb: Callback) => {
+      await this.xrayMgr.rotateSni(params.serviceId, params.newSni);
+      cb({ success: true });
+    });
+    this.safeOn(s, 'vpn:reality:rotate-keys', async (params: { serviceId: string }, cb: Callback) => {
+      const data = await this.xrayMgr.rotateKeys(params.serviceId);
+      cb({ success: true, data });
+    });
+    this.safeOn(s, 'vpn:reality:validate-sni', async (params: { sniMask: string }, cb: Callback) => {
+      const result = await this.xrayMgr.validateSni(params.sniMask);
+      cb({ success: true, data: result });
+    });
+
+    // -- VPN: AmneziaWG --
+    this.safeOn(s, 'vpn:awg:install', async (params: { serviceId: string; port: number; network: string; dns: string[]; mtu: number }, cb: Callback) => {
+      const result = await this.amneziaMgr.install(params);
+      cb({ success: true, data: result });
+    });
+    this.safeOn(s, 'vpn:awg:uninstall', async (params: { serviceId: string; port: number }, cb: Callback) => {
+      await this.amneziaMgr.uninstall(params.serviceId, params.port);
+      cb({ success: true });
+    });
+    this.safeOn(s, 'vpn:awg:start', async (params: { serviceId: string }, cb: Callback) => {
+      await this.amneziaMgr.start(params.serviceId);
+      cb({ success: true });
+    });
+    this.safeOn(s, 'vpn:awg:stop', async (params: { serviceId: string }, cb: Callback) => {
+      await this.amneziaMgr.stop(params.serviceId);
+      cb({ success: true });
+    });
+    this.safeOn(s, 'vpn:awg:status', async (params: { serviceId: string }, cb: Callback) => {
+      const active = await this.amneziaMgr.statusActive(params.serviceId);
+      cb({ success: true, data: { active } });
+    });
+    this.safeOn(s, 'vpn:awg:gen-peer', async (_params: Record<string, never>, cb: Callback) => {
+      // Сгенерим peer keypair + psk на агенте — приватный ключ peer'а
+      // никогда не должен лежать на API в plaintext, но т.к. БД API
+      // всё равно его хранит зашифрованным — генерим тут и возвращаем.
+      const kp = await this.amneziaMgr.generateKeypair();
+      const psk = await this.amneziaMgr.generatePsk();
+      cb({ success: true, data: { peerPriv: kp.priv, peerPub: kp.pub, peerPsk: psk } });
+    });
+    this.safeOn(s, 'vpn:awg:add-user', async (params: { serviceId: string; peerPub: string; peerPsk: string; peerIp: string; name: string }, cb: Callback) => {
+      await this.amneziaMgr.addUser(params);
+      cb({ success: true });
+    });
+    this.safeOn(s, 'vpn:awg:remove-user', async (params: { serviceId: string; peerPub: string }, cb: Callback) => {
+      await this.amneziaMgr.removeUser(params);
+      cb({ success: true });
+    });
+    this.safeOn(s, 'vpn:awg:rotate-keys', async (params: { serviceId: string }, cb: Callback) => {
+      const data = await this.amneziaMgr.rotateKeys(params.serviceId);
+      cb({ success: true, data });
+    });
+
+    // -- VPN: установка runtime'ов (по кнопке на /vpn) --
+    this.safeOn(s, 'vpn:installer:status', async (_p: Record<string, never>, cb: Callback) => {
+      const [xray, amnezia] = await Promise.all([
+        this.vpnInstaller.getXrayStatus(),
+        this.vpnInstaller.getAmneziaStatus(),
+      ]);
+      cb({ success: true, data: { xray, amnezia } });
+    });
+    this.safeOn(s, 'vpn:installer:install-xray', async (_p: Record<string, never>, cb: Callback) => {
+      const data = await this.vpnInstaller.installXray();
+      cb({ success: true, data });
+    }, 600_000);
+    this.safeOn(s, 'vpn:installer:uninstall-xray', async (_p: Record<string, never>, cb: Callback) => {
+      await this.vpnInstaller.uninstallXray();
+      cb({ success: true });
+    }, 60_000);
+    this.safeOn(s, 'vpn:installer:install-amnezia', async (_p: Record<string, never>, cb: Callback) => {
+      const data = await this.vpnInstaller.installAmnezia();
+      cb({ success: true, data });
+    }, 600_000);
+    this.safeOn(s, 'vpn:installer:uninstall-amnezia', async (_p: Record<string, never>, cb: Callback) => {
+      await this.vpnInstaller.uninstallAmnezia();
+      cb({ success: true });
+    }, 600_000);
+
+    // -- Общие порты-проверки и host detect для UI --
+    this.safeOn(s, 'vpn:port-busy', async (params: { port: number; proto: 'tcp' | 'udp' }, cb: Callback) => {
+      try {
+        const flag = params.proto === 'tcp' ? '-ltn' : '-lun';
+        const { stdout } = await this.cmdExec.execute('ss', [flag]);
+        const re = new RegExp(`:${params.port}\\s`);
+        cb({ success: true, data: { busy: re.test(stdout) } });
+      } catch {
+        cb({ success: true, data: { busy: false } });
+      }
+    });
+    this.safeOn(s, 'vpn:host-info', async (_params: Record<string, never>, cb: Callback) => {
+      // Возвращает публичный IP сервера (через первичный default-route IPv4 + curl).
+      // Для VLESS/WG нам нужен IP/DNS, что бы клиент смог подключаться.
+      let publicIp: string | null = null;
+      try {
+        const { stdout } = await this.cmdExec.execute('curl', ['-fsS', '-4', '-m', '5', 'https://api.ipify.org']);
+        publicIp = stdout.trim() || null;
+      } catch {
+        // fallback — local primary IPv4
+        try {
+          const { stdout } = await this.cmdExec.execute('ip', ['route', 'get', '1.1.1.1']);
+          const m = stdout.match(/src\s+(\d+\.\d+\.\d+\.\d+)/);
+          publicIp = m ? m[1] : null;
+        } catch {
+          /* noop */
+        }
+      }
+      cb({ success: true, data: { publicIp } });
     });
   }
 

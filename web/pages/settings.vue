@@ -1123,6 +1123,7 @@ const availableEvents = [
   'HIGH_LOAD',
   'DISK_FULL',
   'LOGIN_FAILED',
+  'VPN_SNI_FAILED',
 ];
 
 const eventLabels: Record<string, string> = {
@@ -1135,6 +1136,7 @@ const eventLabels: Record<string, string> = {
   HIGH_LOAD: 'Высокая нагрузка',
   DISK_FULL: 'Диск заполнен',
   LOGIN_FAILED: 'Неудачный вход',
+  VPN_SNI_FAILED: 'VPN: SNI-маска недоступна',
 };
 
 function eventLabel(ev: string): string {

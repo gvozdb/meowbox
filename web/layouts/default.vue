@@ -154,6 +154,7 @@
           <!-- Скрыто до реализации (см. BACKLOG.md):
                /processes, /terminal, /updates, /servers, /ai -->
           <SidebarLink to="/firewall" icon="shield" label="Файрвол" />
+          <SidebarLink to="/vpn" icon="vpn-key" label="VPN" />
           <SidebarLink to="/users" icon="users" label="Пользователи" />
           <SidebarLink to="/settings" icon="settings" label="Настройки" />
         </div>

@@ -137,6 +137,36 @@ export type {
   LogQuery,
 } from './api';
 
+// VPN management
+export { VpnProtocol, VpnServiceStatus } from './vpn-types';
+export type {
+  VpnInstallOptions,
+  VpnRealityServiceConfig,
+  VpnAmneziaWgServiceConfig,
+  VpnServiceConfig,
+  VpnRealityUserCreds,
+  VpnAmneziaWgUserCreds,
+  VpnUserCreds,
+  VpnUserCredsView,
+  SniValidationResult,
+} from './vpn-types';
+export {
+  DEFAULT_SNI_MASKS,
+  DEFAULT_VPN_PORTS,
+  DEFAULT_AMNEZIA_NETWORK,
+  DEFAULT_AMNEZIA_DNS,
+  DEFAULT_AMNEZIA_MTU,
+  DEFAULT_REALITY_FINGERPRINT,
+  VPN_STATE_DIR,
+  VPN_RUNTIME_USER,
+  XRAY_SYSTEMD_PREFIX,
+  AMNEZIAWG_IFACE_PREFIX,
+  XRAY_BINARY_PATH,
+  VPN_CLIENT_LINKS,
+  VPN_USER_NAME_REGEX,
+  IPV4_CIDR_REGEX,
+} from './vpn-defaults';
+
 // WebSocket types
 export { WsEvents } from './ws';
 

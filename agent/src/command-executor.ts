@@ -93,6 +93,17 @@ export class CommandExecutor {
     'sed',
     // realpath — резолв симлинков перед безопасными rm/chown в миграции.
     'realpath',
+    // VPN: xray-core (VLESS+Reality) и AmneziaWG.
+    // См. docs/specs/2026-05-09-vpn-management.md.
+    'xray',
+    'awg',
+    'awg-quick',
+    // sysctl нужен для apply ip_forward после смены /etc/sysctl.d/.
+    'sysctl',
+    // ip — для определения egress-интерфейса при NAT MASQUERADE в AmneziaWG.
+    'ip',
+    // ss — проверка занятости порта перед install сервиса.
+    'ss',
   ]);
 
   // Accept versioned binaries like php8.2, php8.3, composer2

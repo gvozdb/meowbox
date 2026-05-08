@@ -71,6 +71,22 @@ if [[ -f "$PANEL_DIR/ecosystem.config.js" ]]; then
   say "✓ ecosystem.config.js"
 fi
 
+# 6. VPN state (.vpn-key + конфиги сервисов).
+# /opt/meowbox/state/vpn/ содержит:
+#   - .vpn-key (мастер-ключ для шифрования blob'ов в БД — без него никакой
+#     restore VPN-сервисов не возможен)
+#   - <serviceId>/{config.json,srv.key,srv.pub,...} — конфиги Xray/AmneziaWG
+# Размер обычно <1 МБ.
+VPN_DIR="$STATE_DIR/vpn"
+if [[ -d "$VPN_DIR" ]]; then
+  # Пакуем только .vpn-key + любые подкаталоги сервисов.
+  # tar сохраняет permissions (важно для приватных ключей: 600).
+  tar -C "$STATE_DIR" -czf "$SNAP_DIR/vpn.tgz" --warning=no-file-changed vpn 2>/dev/null || \
+    tar -C "$STATE_DIR" -czf "$SNAP_DIR/vpn.tgz" vpn
+  chmod 600 "$SNAP_DIR/vpn.tgz"
+  say "✓ vpn (state/vpn → vpn.tgz)"
+fi
+
 # Ротация: оставляем последние 20 snapshot'ов
 SNAPSHOTS_ROOT="$DATA_DIR/snapshots"
 KEEP=20
