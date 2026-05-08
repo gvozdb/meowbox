@@ -48,57 +48,80 @@
         </div>
       </div>
 
-      <!-- Server selector (only when multiple servers) — кастомный dropdown,
-           чтобы кругляш слева (статус) подсвечивался цветом палитры сервера.
-           Native <select> отказали: в <option> нельзя стилизовать псевдо-элементы. -->
+      <!-- Server selector — всегда виден. При нескольких серверах — кастомный
+           dropdown (кругляш = цвет палитры сервера). При одном — статичная
+           плашка с именем. Справа всегда иконка-ссылка на /servers (управление). -->
       <div
-        v-if="serverStore.hasMultipleServers"
         ref="serverDropdownRef"
         class="sidebar__server"
         :class="{ 'sidebar__server--open': serverMenuOpen }"
       >
-        <button
-          type="button"
-          class="sidebar__server-trigger"
-          @click="serverMenuOpen = !serverMenuOpen"
-        >
-          <span
-            class="sidebar__server-dot"
-            :class="{ 'sidebar__server-dot--offline': !currentServerInfo?.online }"
-            :style="{ '--server-dot-color': currentServerSwatch }"
-          />
-          <span class="sidebar__server-name">{{ currentServerInfo?.name || '—' }}</span>
-          <svg class="sidebar__server-chevron" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
-            <polyline points="6,9 12,15 18,9" />
-          </svg>
-        </button>
-        <Transition name="dropdown">
-          <div v-if="serverMenuOpen" class="sidebar__server-menu" role="listbox">
-            <button
-              v-for="s in serverStore.servers"
-              :key="s.id"
-              type="button"
-              class="sidebar__server-option"
-              :class="{ 'sidebar__server-option--active': s.id === serverStore.currentServerId }"
-              role="option"
-              :aria-selected="s.id === serverStore.currentServerId"
-              @click="selectServerFromMenu(s.id)"
-            >
-              <span
-                class="sidebar__server-dot"
-                :class="{ 'sidebar__server-dot--offline': !s.online }"
-                :style="{ '--server-dot-color': swatchForServer(s.id) }"
-              />
-              <span class="sidebar__server-name">{{ s.name }}</span>
-              <svg
-                v-if="s.id === serverStore.currentServerId"
-                class="sidebar__server-check"
-                width="13" height="13" viewBox="0 0 24 24" fill="none"
-                stroke="currentColor" stroke-width="2.5" stroke-linecap="round"
-              ><polyline points="20 6 9 17 4 12" /></svg>
-            </button>
+        <div class="sidebar__server-main">
+          <button
+            v-if="serverStore.hasMultipleServers"
+            type="button"
+            class="sidebar__server-trigger"
+            @click="serverMenuOpen = !serverMenuOpen"
+          >
+            <span
+              class="sidebar__server-dot"
+              :class="{ 'sidebar__server-dot--offline': !currentServerInfo?.online }"
+              :style="{ '--server-dot-color': currentServerSwatch }"
+            />
+            <span class="sidebar__server-name">{{ currentServerInfo?.name || '—' }}</span>
+            <svg class="sidebar__server-chevron" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+              <polyline points="6,9 12,15 18,9" />
+            </svg>
+          </button>
+          <div v-else class="sidebar__server-trigger sidebar__server-trigger--static">
+            <span
+              class="sidebar__server-dot"
+              :class="{ 'sidebar__server-dot--offline': !currentServerInfo?.online }"
+              :style="{ '--server-dot-color': currentServerSwatch }"
+            />
+            <span class="sidebar__server-name">{{ currentServerInfo?.name || 'Сервер' }}</span>
           </div>
-        </Transition>
+          <Transition name="dropdown">
+            <div v-if="serverMenuOpen" class="sidebar__server-menu" role="listbox">
+              <button
+                v-for="s in serverStore.servers"
+                :key="s.id"
+                type="button"
+                class="sidebar__server-option"
+                :class="{ 'sidebar__server-option--active': s.id === serverStore.currentServerId }"
+                role="option"
+                :aria-selected="s.id === serverStore.currentServerId"
+                @click="selectServerFromMenu(s.id)"
+              >
+                <span
+                  class="sidebar__server-dot"
+                  :class="{ 'sidebar__server-dot--offline': !s.online }"
+                  :style="{ '--server-dot-color': swatchForServer(s.id) }"
+                />
+                <span class="sidebar__server-name">{{ s.name }}</span>
+                <svg
+                  v-if="s.id === serverStore.currentServerId"
+                  class="sidebar__server-check"
+                  width="13" height="13" viewBox="0 0 24 24" fill="none"
+                  stroke="currentColor" stroke-width="2.5" stroke-linecap="round"
+                ><polyline points="20 6 9 17 4 12" /></svg>
+              </button>
+            </div>
+          </Transition>
+        </div>
+        <NuxtLink
+          to="/servers"
+          class="sidebar__server-manage"
+          title="Управление серверами"
+          @click="sidebarOpen = false"
+        >
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <rect x="2" y="3" width="20" height="6" rx="1.5" />
+            <rect x="2" y="15" width="20" height="6" rx="1.5" />
+            <line x1="6" y1="6" x2="6.01" y2="6" />
+            <line x1="6" y1="18" x2="6.01" y2="18" />
+          </svg>
+        </NuxtLink>
       </div>
 
       <!-- Navigation -->
@@ -445,6 +468,17 @@ onUnmounted(() => {
   position: relative;
   padding: 0.6rem 0.75rem;
   border-bottom: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+/* Левая часть — селект/статика; занимает всё свободное место.
+   НЕ ставим position:relative — пусть absolute-меню привязывается к
+   `.sidebar__server` (она relative), чтобы меню было на всю ширину блока. */
+.sidebar__server-main {
+  flex: 1;
+  min-width: 0;
 }
 
 .sidebar__server-trigger {
@@ -470,6 +504,40 @@ onUnmounted(() => {
 .sidebar__server--open .sidebar__server-trigger {
   border-color: var(--primary);
   box-shadow: var(--focus-ring);
+}
+/* Статичный (один сервер) — без интеракции */
+.sidebar__server-trigger--static {
+  cursor: default;
+}
+.sidebar__server-trigger--static:hover {
+  border-color: var(--border-secondary);
+}
+
+/* Кнопка-ссылка "управление серверами" (справа от селекта) */
+.sidebar__server-manage {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  border-radius: 8px;
+  border: 1px solid var(--border-secondary);
+  background: var(--bg-elevated);
+  color: var(--text-muted);
+  text-decoration: none;
+  transition: border-color 0.15s, color 0.15s, background 0.15s;
+}
+.sidebar__server-manage:hover {
+  border-color: var(--primary);
+  color: var(--primary);
+  background: var(--primary-bg, var(--bg-elevated));
+}
+.sidebar__server-manage.router-link-active,
+.sidebar__server-manage.router-link-exact-active {
+  border-color: var(--primary);
+  color: var(--primary);
+  background: var(--primary-bg, var(--bg-elevated));
 }
 
 /* Цветной кругляш = цвет палитры сервера. Берём через CSS-переменную
