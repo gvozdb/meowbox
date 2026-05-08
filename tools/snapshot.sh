@@ -71,15 +71,23 @@ if [[ -f "$PANEL_DIR/ecosystem.config.js" ]]; then
   say "✓ ecosystem.config.js"
 fi
 
-# 6. VPN state (.vpn-key + конфиги сервисов).
-# /opt/meowbox/state/vpn/ содержит:
-#   - .vpn-key (мастер-ключ для шифрования blob'ов в БД — без него никакой
-#     restore VPN-сервисов не возможен)
-#   - <serviceId>/{config.json,srv.key,srv.pub,...} — конфиги Xray/AmneziaWG
-# Размер обычно <1 МБ.
+# 6. VPN state — критично для восстановления VPN-сервисов.
+# Два разных места:
+#   - $DATA_DIR/.vpn-key — мастер-ключ AES-256-GCM (32 байта).
+#     Без него зашифрованные configBlob/credsBlob в БД нечитаемы =
+#     все VPN-сервисы и юзеры мертвы. Создаётся system-миграцией
+#     2026-05-09-001-vpn-secret-bootstrap. См. api/src/common/crypto/vpn-cipher.ts.
+#   - $STATE_DIR/vpn/<serviceId>/{config.json, ...} — Xray-конфиги.
+#     AmneziaWG конфиги живут в /etc/amneziawg/ — их регенерим из БД при restore.
+VPN_KEY="$DATA_DIR/.vpn-key"
+if [[ -f "$VPN_KEY" ]]; then
+  cp "$VPN_KEY" "$SNAP_DIR/.vpn-key"
+  chmod 600 "$SNAP_DIR/.vpn-key"
+  say "✓ .vpn-key (master-key)"
+fi
+
 VPN_DIR="$STATE_DIR/vpn"
 if [[ -d "$VPN_DIR" ]]; then
-  # Пакуем только .vpn-key + любые подкаталоги сервисов.
   # tar сохраняет permissions (важно для приватных ключей: 600).
   tar -C "$STATE_DIR" -czf "$SNAP_DIR/vpn.tgz" --warning=no-file-changed vpn 2>/dev/null || \
     tar -C "$STATE_DIR" -czf "$SNAP_DIR/vpn.tgz" vpn

@@ -296,7 +296,7 @@
                   >{{ u.enabled ? 'enabled' : 'disabled' }}</span>
                 </td>
                 <td>
-                  <button class="btn btn--ghost btn--xs" @click="copySubLink(u)">Скопировать URL</button>
+                  <button class="btn btn--ghost btn--xs" @click="openSubscription(u)">QR / URL</button>
                 </td>
                 <td class="table__actions-cell">
                   <button class="btn btn--ghost btn--xs" @click="openAddToService(u)">+ Сервис</button>
@@ -308,6 +308,12 @@
           </table>
         </div>
       </section>
+
+      <!-- ======== Юридический disclaimer ======== -->
+      <p class="vpn__disclaimer">
+        Сервис VPN предоставляется исключительно для личных нужд администратора.
+        За использование третьими лицами ответственность несёт администратор сервера.
+      </p>
     </template>
 
     <!-- ======== Modals ======== -->
@@ -483,6 +489,65 @@
     </div>
 
     <div
+      v-if="modal.kind === 'subscription'"
+      class="modal-overlay"
+      @mousedown.self="closeModal()"
+    >
+      <div class="modal modal--wide">
+        <h3 class="modal__title">Subscription · {{ modal.userName }}</h3>
+        <p class="modal__desc">
+          Один URL = все VPN-сервисы юзера в одном subscription.
+          В клиенте (Streisand / FoXray / NekoBox) добавь как <strong>Subscribe URL</strong> —
+          конфиги подтянутся автоматически и обновятся после ротации SNI/ключей.
+        </p>
+        <div v-if="subscriptionUrl" class="qr">
+          <img :src="`data:image/png;base64,${subQr}`" alt="QR" />
+        </div>
+        <input
+          v-if="subscriptionUrl"
+          readonly
+          :value="subscriptionUrl"
+          class="field__input mono"
+          @focus="($event.target as HTMLInputElement).select()"
+        />
+        <div class="vpn__clients">
+          <div class="vpn__clients-title">Клиенты:</div>
+          <div class="vpn__clients-grid">
+            <div class="vpn__clients-platform">
+              <strong>iOS</strong>
+              <a href="https://apps.apple.com/app/streisand/id6450534064" target="_blank" rel="noopener">Streisand</a>
+              <a href="https://apps.apple.com/app/amneziavpn/id1600529900" target="_blank" rel="noopener">Amnezia</a>
+            </div>
+            <div class="vpn__clients-platform">
+              <strong>Android</strong>
+              <a href="https://github.com/2dust/v2rayNG/releases/latest" target="_blank" rel="noopener">v2rayNG</a>
+              <a href="https://amnezia.org/downloads" target="_blank" rel="noopener">Amnezia</a>
+            </div>
+            <div class="vpn__clients-platform">
+              <strong>macOS</strong>
+              <a href="https://apps.apple.com/app/v2box-v2ray-client/id6446814690" target="_blank" rel="noopener">V2Box</a>
+              <a href="https://amnezia.org/downloads" target="_blank" rel="noopener">Amnezia</a>
+            </div>
+            <div class="vpn__clients-platform">
+              <strong>Windows / Linux</strong>
+              <a href="https://github.com/MatsuriDayo/nekoray/releases/latest" target="_blank" rel="noopener">NekoRay</a>
+              <a href="https://amnezia.org/downloads" target="_blank" rel="noopener">Amnezia</a>
+            </div>
+          </div>
+        </div>
+        <div v-if="modalError" class="modal__error">{{ modalError }}</div>
+        <div class="modal__actions">
+          <button class="btn btn--ghost btn--sm" @click="copyText(subscriptionUrl)">Скопировать URL</button>
+          <button class="btn btn--danger btn--sm" :disabled="creating" @click="regenerateSubToken">
+            <span v-if="creating" class="btn__spinner" />
+            Перегенерировать токен
+          </button>
+          <button class="btn btn--primary btn--sm" @click="closeModal()">Закрыть</button>
+        </div>
+      </div>
+    </div>
+
+    <div
       v-if="modal.kind === 'rotateSni'"
       class="modal-overlay"
       @mousedown.self="closeModal()"
@@ -593,7 +658,7 @@ const busy = reactive({
 });
 
 const modal = reactive<{
-  kind: '' | 'createService' | 'createUser' | 'creds' | 'addToService' | 'rotateSni';
+  kind: '' | 'createService' | 'createUser' | 'creds' | 'addToService' | 'rotateSni' | 'subscription';
   serviceId?: string;
   userId?: string;
   userName?: string;
@@ -622,6 +687,8 @@ const sniValidationResult = ref<{ ok: boolean; tlsVersion?: string; group?: stri
 const newSni = ref('www.google.com');
 const newSniCustom = ref('');
 const addToServiceId = ref('');
+const subscriptionUrl = ref('');
+const subQr = ref('');
 
 const servicesByProto = computed(() => {
   const acc: Record<string, VpnServiceListItem[]> = { VLESS_REALITY: [], AMNEZIA_WG: [] };
@@ -732,6 +799,8 @@ function closeModal() {
   sniValidationResult.value = null;
   addToServiceId.value = '';
   modalError.value = null;
+  subscriptionUrl.value = '';
+  subQr.value = '';
 }
 
 function openCreateService() {
@@ -961,10 +1030,52 @@ async function copyText(t: string) {
     toast.error('Буфер обмена недоступен');
   }
 }
-async function copySubLink(u: VpnUserListItem) {
-  const baseUrl = window.location.origin;
-  const url = `${baseUrl}/api/vpn/sub/${u.subToken}`;
-  await copyText(url);
+async function openSubscription(u: VpnUserListItem) {
+  modal.userId = u.id;
+  modal.userName = u.name;
+  modal.kind = 'subscription';
+  subscriptionUrl.value = `${window.location.origin}/api/vpn/sub/${u.subToken}`;
+  subQr.value = '';
+  try {
+    const QRCode = (await import('qrcode')).default;
+    const dataUrl = await QRCode.toDataURL(subscriptionUrl.value, {
+      errorCorrectionLevel: 'M',
+      margin: 2,
+      width: 320,
+    });
+    // dataUrl формата 'data:image/png;base64,XXX' — отрезаем префикс
+    subQr.value = dataUrl.split(',')[1] || '';
+  } catch (err: unknown) {
+    toast.error(`QR: ${(err as Error).message}`);
+  }
+}
+async function regenerateSubToken() {
+  if (!modal.userId) return;
+  const ok = await confirm.ask({
+    title: 'Перегенерировать токен subscription?',
+    message: 'Старый URL перестанет работать. Юзеру нужно будет загрузить новый subscription в клиенте.',
+    confirmText: 'Перегенерировать',
+    danger: true,
+  });
+  if (!ok) return;
+  creating.value = true;
+  try {
+    const r = await api.post<{ subToken: string }>(`/vpn/users/${modal.userId}/regenerate-sub-token`);
+    toast.success('Токен пересоздан');
+    // Обновим локально и перерисуем QR
+    const u = users.value.find((x) => x.id === modal.userId);
+    if (u) u.subToken = r.subToken;
+    subscriptionUrl.value = `${window.location.origin}/api/vpn/sub/${r.subToken}`;
+    const QRCode = (await import('qrcode')).default;
+    const dataUrl = await QRCode.toDataURL(subscriptionUrl.value, {
+      errorCorrectionLevel: 'M', margin: 2, width: 320,
+    });
+    subQr.value = dataUrl.split(',')[1] || '';
+  } catch (err: unknown) {
+    toast.error((err as Error).message);
+  } finally {
+    creating.value = false;
+  }
 }
 function downloadConf() {
   if (!credsView.value) return;
@@ -1246,6 +1357,34 @@ onMounted(loadAll);
   font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
   font-size: 0.78rem;
 }
+
+/* ===== legal disclaimer ===== */
+.vpn__disclaimer {
+  font-size: 0.7rem; color: var(--text-muted); line-height: 1.5;
+  border-top: 1px solid var(--border); padding-top: 1rem; margin: 1.5rem 0 0;
+  max-width: 800px;
+}
+
+/* ===== clients grid in subscription modal ===== */
+.vpn__clients {
+  margin-top: 1rem; padding: 0.75rem; background: var(--bg-input);
+  border: 1px solid var(--border); border-radius: 8px;
+}
+.vpn__clients-title {
+  font-size: 0.7rem; color: var(--text-tertiary); text-transform: uppercase;
+  letter-spacing: 0.04em; font-weight: 600; margin-bottom: 0.5rem;
+}
+.vpn__clients-grid {
+  display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+  gap: 0.5rem;
+}
+.vpn__clients-platform {
+  display: flex; flex-direction: column; gap: 0.15rem;
+  font-size: 0.78rem;
+}
+.vpn__clients-platform strong { color: var(--text-secondary); font-size: 0.7rem; text-transform: uppercase; }
+.vpn__clients-platform a { color: var(--primary-light); text-decoration: none; }
+.vpn__clients-platform a:hover { text-decoration: underline; }
 
 @media (max-width: 768px) {
   .vpn { padding: 1rem 0.85rem 2rem; }
