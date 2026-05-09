@@ -70,7 +70,8 @@ export class CronManager {
   }
 
   private async readUserCrontab(user: string): Promise<string[]> {
-    const r = await this.executor.execute('crontab', ['-u', user, '-l']);
+    // `crontab -l` возвращает 1 если crontab пустой — это норма, не ошибка.
+    const r = await this.executor.execute('crontab', ['-u', user, '-l'], { allowFailure: true });
     if (r.exitCode !== 0) return [];
     return r.stdout.split('\n');
   }
@@ -83,7 +84,8 @@ export class CronManager {
     );
     await fs.writeFile(tmpFile, content, { mode: 0o600 });
     try {
-      const r = await this.executor.execute('crontab', ['-u', user, tmpFile]);
+      // Хотим контекстную ошибку (включая stderr crontab) — allowFailure + throw.
+      const r = await this.executor.execute('crontab', ['-u', user, tmpFile], { allowFailure: true });
       if (r.exitCode !== 0) {
         throw new Error(r.stderr || 'crontab install failed');
       }

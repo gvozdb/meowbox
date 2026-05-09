@@ -5,11 +5,70 @@ import * as path from 'path';
 const execFileAsync = promisify(execFile);
 
 /**
+ * Ошибка от внешней команды: непустой `exitCode`, плюс stdout/stderr и
+ * имя команды для диагностики. Бросается из `execute()` / `executeStreaming()`
+ * по умолчанию — чтобы `try/catch` ловил реальные ошибки, а callsite'ы
+ * не забывали проверять `exitCode` руками. Если экспонента ошибки не нужна
+ * (например, для `dpkg-query`, `which`, `is-active`) — передавай
+ * `{ allowFailure: true }`, тогда метод вернёт результат с `exitCode`
+ * вместо throw.
+ */
+export class CommandError extends Error {
+  readonly command: string;
+  readonly args: string[];
+  readonly exitCode: number;
+  readonly stdout: string;
+  readonly stderr: string;
+  readonly timedOut: boolean;
+  /**
+   * Совместимость со старыми callsite'ами, которые читали `err.code` (числовой
+   * или 'ETIMEDOUT'). Заполняется тем же значением, что и `exitCode`.
+   */
+  readonly code: number;
+
+  constructor(params: {
+    command: string;
+    args: string[];
+    exitCode: number;
+    stdout: string;
+    stderr: string;
+    timedOut?: boolean;
+  }) {
+    const head = (params.stderr || params.stdout || '').slice(0, 500).trim();
+    const suffix = head ? `: ${head}` : '';
+    super(
+      `Command '${path.basename(params.command)}' exited with code ${params.exitCode}${suffix}`,
+    );
+    this.name = 'CommandError';
+    this.command = params.command;
+    this.args = params.args;
+    this.exitCode = params.exitCode;
+    this.stdout = params.stdout;
+    this.stderr = params.stderr;
+    this.timedOut = params.timedOut === true;
+    this.code = params.exitCode;
+  }
+}
+
+export interface CommandResult {
+  stdout: string;
+  stderr: string;
+  exitCode: number;
+}
+
+/**
  * Secure command executor.
  * - Uses execFile (not exec/shell) to prevent command injection
  * - Validates all commands against an allowlist
  * - Enforces timeouts on all operations
  * - Runs with minimal privileges where possible
+ *
+ * **Контракт:** методы `execute` и `executeStreaming` бросают `CommandError`
+ * при non-zero exit code (как обычно делает `child_process.execFile`).
+ * Если код ожидает ненулевой exit как валидный результат (`which`,
+ * `dpkg-query`, `systemctl is-active`, `id` и т.п.) — нужно передать
+ * `{ allowFailure: true }`, тогда метод вернёт `{ stdout, stderr, exitCode }`
+ * без исключения.
  */
 export class CommandExecutor {
   private static readonly ALLOWED_COMMANDS: ReadonlySet<string> = new Set([
@@ -219,8 +278,16 @@ export class CommandExecutor {
        * символы (NUL/CR/LF) блокируются всегда, без исключений.
        */
       unsafeShellMetaArgs?: number[];
+      /**
+       * По умолчанию `execute` бросает `CommandError` при non-zero exit.
+       * Если эта команда **ожидает** ненулевой exit как валидный сигнал
+       * (например `which`, `dpkg-query`, `systemctl is-active`, `id`, `pgrep`),
+       * передай `allowFailure: true` — тогда вернётся `{stdout,stderr,exitCode}`
+       * вместо исключения.
+       */
+      allowFailure?: boolean;
     } = {},
-  ): Promise<{ stdout: string; stderr: string; exitCode: number }> {
+  ): Promise<CommandResult> {
     // Validate command against allowlist
     const basename = path.basename(command);
     if (
@@ -285,12 +352,35 @@ export class CommandExecutor {
 
       return { stdout, stderr, exitCode: 0 };
     } catch (err: unknown) {
-      const error = err as { stdout?: string; stderr?: string; code?: number | string };
-      return {
-        stdout: error.stdout || '',
-        stderr: error.stderr || (err as Error).message,
-        exitCode: typeof error.code === 'number' ? error.code : 1,
+      const error = err as {
+        stdout?: string;
+        stderr?: string;
+        code?: number | string;
+        killed?: boolean;
+        signal?: string;
+        message?: string;
       };
+      const stdout = error.stdout || '';
+      const stderr = error.stderr || error.message || '';
+      const exitCode =
+        typeof error.code === 'number'
+          ? error.code
+          : error.code === 'ETIMEDOUT' || error.killed
+            ? 124 // как у coreutils `timeout(1)`
+            : 1;
+      const timedOut = error.code === 'ETIMEDOUT' || error.signal === 'SIGTERM' || error.killed === true;
+
+      if (options.allowFailure) {
+        return { stdout, stderr, exitCode };
+      }
+      throw new CommandError({
+        command,
+        args,
+        exitCode,
+        stdout,
+        stderr,
+        timedOut,
+      });
     }
   }
 
@@ -321,8 +411,15 @@ export class CommandExecutor {
       // вызывающий парсит строки в onLine и держит только то, что ему реально надо.
       // Возвращаемые stdout/stderr тогда будут пустыми строками.
       discardOutputBuffer?: boolean;
+      /**
+       * По умолчанию `executeStreaming` бросает `CommandError` при non-zero
+       * exit (как и `execute`). Если caller хочет получить ненулевой код
+       * без исключения (например, чтобы продолжить cleanup) — передай
+       * `allowFailure: true`.
+       */
+      allowFailure?: boolean;
     } = {},
-  ): Promise<{ stdout: string; stderr: string; exitCode: number }> {
+  ): Promise<CommandResult> {
     const basename = path.basename(command);
     if (
       !CommandExecutor.ALLOWED_COMMANDS.has(basename) &&
@@ -354,7 +451,8 @@ export class CommandExecutor {
     // По умолчанию оставляем прежнее поведение (stdin наследуется), но
     // для долгих скриптов, где нельзя допустить hang на readline, ставим ignore.
     const stdinMode = options.stdin || 'inherit';
-    return new Promise((resolve) => {
+    const allowFailure = options.allowFailure === true;
+    return new Promise<CommandResult>((resolve, reject) => {
       const mergedEnv: NodeJS.ProcessEnv = {
         ...process.env,
         ...options.env,
@@ -409,31 +507,44 @@ export class CommandExecutor {
         stderrTail = flushChunk(s, stderrTail, 'stderr');
       });
 
+      let timedOut = false;
       const timer = setTimeout(() => {
+        timedOut = true;
         try { child.kill('SIGKILL'); } catch { /* ignore */ }
       }, timeout);
+
+      const finish = (
+        exitCode: number,
+        extraStderr = '',
+      ) => {
+        const stderr = stderrBuf + extraStderr;
+        if (exitCode === 0 || allowFailure) {
+          resolve({ stdout: stdoutBuf, stderr, exitCode });
+          return;
+        }
+        reject(new CommandError({
+          command,
+          args,
+          exitCode: timedOut ? 124 : exitCode,
+          stdout: stdoutBuf,
+          stderr,
+          timedOut,
+        }));
+      };
 
       child.on('error', (err) => {
         clearTimeout(timer);
         // Сбрасываем остатки.
         if (stdoutTail.trim()) onLine(stdoutTail.trim(), 'stdout');
         if (stderrTail.trim()) onLine(stderrTail.trim(), 'stderr');
-        resolve({
-          stdout: stdoutBuf,
-          stderr: stderrBuf + (err as Error).message,
-          exitCode: 1,
-        });
+        finish(1, (err as Error).message);
       });
 
       child.on('close', (code) => {
         clearTimeout(timer);
         if (stdoutTail.trim()) onLine(stdoutTail.trim(), 'stdout');
         if (stderrTail.trim()) onLine(stderrTail.trim(), 'stderr');
-        resolve({
-          stdout: stdoutBuf,
-          stderr: stderrBuf,
-          exitCode: typeof code === 'number' ? code : 1,
-        });
+        finish(typeof code === 'number' ? code : 1);
       });
     });
   }

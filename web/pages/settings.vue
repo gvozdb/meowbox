@@ -480,7 +480,8 @@
             </div>
             <div class="form-group">
               <label class="form-label">Chat ID</label>
-              <input v-model="(notifForm.config as Record<string, string>).chatId" type="text" class="form-input" placeholder="-1001234567890" />
+              <input v-model="(notifForm.config as Record<string, string>).chatId" type="text" class="form-input" placeholder="-1001234567890 или -1001234567890:3 (топик)" />
+              <p class="form-hint">Личка/группа/канал: <code>123456</code>, <code>-1001234567890</code>, <code>@channel</code>. Для топика в форум-группе: <code>-1001234567890:3</code> или <code>-1001234567890/3</code>.</p>
             </div>
           </template>
           <template v-else-if="notifForm.channel === 'EMAIL'">

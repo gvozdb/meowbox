@@ -199,7 +199,7 @@ export class ModxAdminPassChanger {
     }
 
     const phpBin = `php${params.phpVersion || DEFAULT_PHP_VERSION}`;
-    const phpProbe = await this.executor.execute('which', [phpBin]);
+    const phpProbe = await this.executor.execute('which', [phpBin], { allowFailure: true });
     if (phpProbe.exitCode !== 0) {
       return {
         success: false,

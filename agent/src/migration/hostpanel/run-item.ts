@@ -374,14 +374,15 @@ async function preflightStage(ctx: RunCtx) {
     const dbCheck = await ctx.exec.execute('mariadb', [
       '-N', '-B', '-e',
       `SELECT 1 FROM information_schema.schemata WHERE schema_name='${ctx.plan.newName}'`,
-    ]);
+    ], { allowFailure: true });
     if (dbCheck.exitCode === 0 && dbCheck.stdout.trim() === '1') {
       throw new Error(`БД '${ctx.plan.newName}' уже существует на slave`);
     }
   }
 
-  // df / -B M на webroot — нужно >= 1.5 × fsBytes
-  const r = await ctx.exec.execute('df', ['-B1', '--output=avail', SITES_BASE_PATH]);
+  // df / -B M на webroot — нужно >= 1.5 × fsBytes. df может вернуть >0 если
+  // путь не существует — это валидный сценарий «пропускаем проверку».
+  const r = await ctx.exec.execute('df', ['-B1', '--output=avail', SITES_BASE_PATH], { allowFailure: true });
   if (r.exitCode === 0) {
     const lines = r.stdout.split('\n').filter(Boolean);
     const avail = Number(lines[1] || 0);
@@ -1134,12 +1135,12 @@ async function copySslStageImpl(
 
   await ctx.exec.execute('chown', ['-R', 'root:root', live, archive, renewal]);
 
-  // nginx -t — проверка синтаксиса перед reload
-  const nt = await ctx.exec.execute('nginx', ['-t']);
+  // nginx -t — проверка синтаксиса перед reload (валидный non-zero на ошибках).
+  const nt = await ctx.exec.execute('nginx', ['-t'], { allowFailure: true });
   if (nt.exitCode !== 0) {
     log(ctx, `  WARN: nginx -t failed: ${nt.stderr.slice(0, 300)} (SSL-серт скопирован, но reload не делаю)`);
   } else {
-    await ctx.exec.execute('systemctl', ['reload', 'nginx']).catch(() => {});
+    await ctx.exec.execute('systemctl', ['reload', 'nginx'], { allowFailure: true }).catch(() => {});
     log(ctx, `  nginx -t OK + reload`);
   }
   ctx.created.ssl = true;
@@ -1153,7 +1154,7 @@ async function copySslStageImpl(
     const certPath = `${live}/cert.pem`;
     const r = await ctx.exec.execute('openssl', [
       'x509', '-in', certPath, '-noout', '-startdate', '-enddate',
-    ]);
+    ], { allowFailure: true });
     if (r.exitCode === 0) {
       const nbMatch = r.stdout.match(/notBefore=(.+)/);
       const naMatch = r.stdout.match(/notAfter=(.+)/);
@@ -1554,8 +1555,8 @@ async function fetchHostpanelDbCreds(
 }
 
 async function detectSlaveIp(ctx: RunCtx): Promise<string | null> {
-  // Простейший detect — `hostname -I | awk '{print $1}'`
-  const r = await ctx.exec.execute('curl', ['-s', '--max-time', '5', 'https://api.ipify.org']);
+  // curl может фейлиться без сети — это валидный сценарий «не определили».
+  const r = await ctx.exec.execute('curl', ['-s', '--max-time', '5', 'https://api.ipify.org'], { allowFailure: true });
   if (r.exitCode === 0 && r.stdout.trim()) return r.stdout.trim();
   return null;
 }

@@ -99,7 +99,7 @@ export class SiteInstaller {
     // вечный 502 от nginx. cli-install.php спавнит php напрямую — `which`
     // быстрее и надёжнее, чем падение через ENOENT посередине composer'а.
     const phpBinForComposer = `php${params.phpVersion || DEFAULT_PHP_VERSION}`;
-    const phpCheck = await this.executor.execute('which', [phpBinForComposer]);
+    const phpCheck = await this.executor.execute('which', [phpBinForComposer], { allowFailure: true });
     if (phpCheck.exitCode !== 0) {
       const msg = `${phpBinForComposer} не установлен на сервере. Установи "apt install ${phpBinForComposer}-cli ${phpBinForComposer}-fpm" (на Ubuntu/Debian подключи ondrej/php PPA или sury.org), либо выбери другую версию PHP при создании сайта.`;
       log(`[install] ✗ ${msg}`);
@@ -117,7 +117,7 @@ export class SiteInstaller {
       log('[install] composer не найден на сервере — fallback на ZIP-архив');
       return this.installModxFromZip(params, modxZipUrl(version), '3', version, onLog);
     }
-    const composerCheck = await this.executor.execute(phpBinForComposer, [composerPath, '--version']);
+    const composerCheck = await this.executor.execute(phpBinForComposer, [composerPath, '--version'], { allowFailure: true });
     if (composerCheck.exitCode !== 0) {
       log(`[install] ${phpBinForComposer} + composer недоступен — fallback на ZIP-архив`);
       return this.installModxFromZip(params, modxZipUrl(version), '3', version, onLog);
@@ -150,6 +150,7 @@ export class SiteInstaller {
         {
           timeout: 600_000,
           cwd: params.rootPath,
+          allowFailure: true,
           onLine: (line, stream) => {
             const prefix = stream === 'stderr' ? '[composer!] ' : '[composer] ';
             log(prefix + line);
@@ -266,7 +267,7 @@ export class SiteInstaller {
         '--connect-timeout', String(HTTP_CHECK.CONNECT),
         '--max-time', String(HTTP_CHECK.MAX_TIME),
         '-L', modxZipUrl(version),
-      ], { timeout: TIMEOUTS.MEDIUM });
+      ], { timeout: TIMEOUTS.MEDIUM, allowFailure: true });
       if (dl.exitCode !== 0) {
         return { success: false, error: `download failed (${dl.exitCode}): ${dl.stderr.substring(0, 300)}` };
       }
@@ -354,7 +355,7 @@ export class SiteInstaller {
       const phpBinForComposer = `php${params.phpVersion || DEFAULT_PHP_VERSION}`;
       const composerPath = await this.resolveComposerPath();
       const composerCheck = composerPath
-        ? await this.executor.execute(phpBinForComposer, [composerPath, '--version'])
+        ? await this.executor.execute(phpBinForComposer, [composerPath, '--version'], { allowFailure: true })
         : { exitCode: 1 } as { exitCode: number };
       if (!hasComposer || !composerPath || composerCheck.exitCode !== 0) {
         log(`[update] composer.json нет или composer недоступен — fallback на ZIP overlay`);
@@ -377,6 +378,7 @@ export class SiteInstaller {
         {
           cwd: wwwDir,
           timeout: 600_000,
+          allowFailure: true,
           onLine: (line, stream) => {
             const prefix = stream === 'stderr' ? '[composer!] ' : '[composer] ';
             log(prefix + line);
@@ -458,7 +460,7 @@ export class SiteInstaller {
         '--max-time', String(HTTP_CHECK.MAX_TIME),
         '-L',
         downloadUrl,
-      ], { timeout: TIMEOUTS.MEDIUM });
+      ], { timeout: TIMEOUTS.MEDIUM, allowFailure: true });
 
       if (dlResult.exitCode !== 0) {
         log(`[install] Download failed (code ${dlResult.exitCode}), creating MODX-ready structure...`);
@@ -634,7 +636,7 @@ export class SiteInstaller {
     }
 
     // Проверяем, что такой php-бинарь вообще существует.
-    const probe = await this.executor.execute(phpBin, ['-v']);
+    const probe = await this.executor.execute(phpBin, ['-v'], { allowFailure: true });
     if (probe.exitCode !== 0) {
       return { success: false, error: `${phpBin} не установлен` };
     }
@@ -646,6 +648,7 @@ export class SiteInstaller {
       {
         cwd: wwwDir,
         timeout: 180_000,
+        allowFailure: true,
         onLine: (line, stream) => {
           const prefix = stream === 'stderr' ? '[composer!] ' : '[composer] ';
           log(prefix + line);
@@ -689,7 +692,7 @@ export class SiteInstaller {
       } catch { /* next */ }
     }
     // fallback: которое `which composer` вернёт
-    const which = await this.executor.execute('which', ['composer']);
+    const which = await this.executor.execute('which', ['composer'], { allowFailure: true });
     if (which.exitCode === 0) {
       const p = which.stdout.trim();
       if (p) {
@@ -759,7 +762,7 @@ export class SiteInstaller {
         const msg = (err as NodeJS.ErrnoException).code || (err as Error).message;
         // Fallback: если Node fs.rm обломался (ACL, immutable bit, что-то ещё) —
         // пробуем через `rm -rf`. Логируем оба результата.
-        const res = await this.executor.execute('rm', ['-rf', full]);
+        const res = await this.executor.execute('rm', ['-rf', full], { allowFailure: true });
         if (res.exitCode === 0) {
           removed.push(`${name} (rm fallback)`);
         } else {
@@ -867,7 +870,7 @@ export class SiteInstaller {
       try {
         await fs.access(src);
         await this.executor.execute('rm', ['-rf', dst]);
-        const r = await this.executor.execute('mv', [src, dst]);
+        const r = await this.executor.execute('mv', [src, dst], { allowFailure: true });
         if (r.exitCode === 0) log(`[update] srcDir: renamed manager/ → ${mgr}/`);
         else log(`[update!] mv srcDir manager→${mgr} failed: ${r.stderr.substring(0, 200)}`);
       } catch { /* в архиве нет manager/ — ничего не делаем */ }
@@ -878,7 +881,7 @@ export class SiteInstaller {
       try {
         await fs.access(src);
         await this.executor.execute('rm', ['-rf', dst]);
-        const r = await this.executor.execute('mv', [src, dst]);
+        const r = await this.executor.execute('mv', [src, dst], { allowFailure: true });
         if (r.exitCode === 0) log(`[update] srcDir: renamed connectors/ → ${cnn}/`);
         else log(`[update!] mv srcDir connectors→${cnn} failed: ${r.stderr.substring(0, 200)}`);
       } catch { /* ignore */ }
@@ -911,7 +914,7 @@ export class SiteInstaller {
         await fs.access(defaultDir);
         // Кастомную директорию гарантируем (на случай первого апгрейда после миграции).
         await this.executor.execute('mkdir', ['-p', customDir]);
-        const cp = await this.executor.execute('cp', ['-rT', defaultDir, customDir]);
+        const cp = await this.executor.execute('cp', ['-rT', defaultDir, customDir], { allowFailure: true });
         if (cp.exitCode !== 0) {
           log(`[update!] cp manager→${mgr} failed: ${cp.stderr.substring(0, 200)}`);
           return;
@@ -926,7 +929,7 @@ export class SiteInstaller {
       try {
         await fs.access(defaultDir);
         await this.executor.execute('mkdir', ['-p', customDir]);
-        const cp = await this.executor.execute('cp', ['-rT', defaultDir, customDir]);
+        const cp = await this.executor.execute('cp', ['-rT', defaultDir, customDir], { allowFailure: true });
         if (cp.exitCode !== 0) {
           log(`[update!] cp connectors→${cnn} failed: ${cp.stderr.substring(0, 200)}`);
           return;
@@ -1080,6 +1083,7 @@ export class SiteInstaller {
       cwd: wwwDir,
       timeout: 900_000, // 15 минут — с запасом на слабые VPS
       stdin: 'ignore',
+      allowFailure: true,
       onLine: (line, stream) => {
         const prefix = stream === 'stderr' ? '[setup!] ' : '[setup] ';
         log(prefix + line);
@@ -1121,6 +1125,7 @@ export class SiteInstaller {
     ], {
       cwd: wwwDir,
       timeout: 300_000,
+      allowFailure: true,
       onLine: (line, stream) => {
         const prefix = stream === 'stderr' ? '[setup!] ' : '[setup] ';
         log(prefix + line);
@@ -1199,6 +1204,7 @@ export class SiteInstaller {
     ], {
       cwd: wwwDir,
       timeout: 300_000,
+      allowFailure: true,
       onLine: (line, stream) => {
         const prefix = stream === 'stderr' ? '[setup!] ' : '[setup] ';
         log(prefix + line);
@@ -1237,7 +1243,7 @@ export class SiteInstaller {
       '-o', '-q',
       zipPath,
       '-d', destDir,
-    ], { timeout: 60_000 });
+    ], { timeout: 60_000, allowFailure: true });
 
     if (unzipResult.exitCode === 0) {
       return true;
@@ -1337,6 +1343,7 @@ console.log(\`Extracted \${count} files (skipped unsafe: \${skipped})\`);
       await fs.writeFile(extractScript, scriptContent, 'utf-8');
       const result = await this.executor.execute('node', [extractScript, zipPath, destDir], {
         timeout: 120_000,
+        allowFailure: true,
       });
       await fs.unlink(extractScript).catch(() => {});
 

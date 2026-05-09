@@ -123,7 +123,7 @@ export class DeployExecutor {
       // Git checkout to specified commit
       const checkout = await this.executor.execute(
         'git', ['checkout', '--', params.commitSha],
-        { cwd: params.rootPath },
+        { cwd: params.rootPath, allowFailure: true },
       );
       if (checkout.exitCode !== 0) {
         throw new Error(`Git checkout failed: ${checkout.stderr}`);
@@ -174,6 +174,7 @@ export class DeployExecutor {
       const fetch = await this.executor.execute('git', ['fetch', 'origin', '--', branch], {
         cwd: rootPath,
         timeout: 120_000,
+        allowFailure: true,
       });
       if (fetch.exitCode !== 0) {
         throw new Error(`Git fetch failed: ${fetch.stderr}`);
@@ -183,7 +184,7 @@ export class DeployExecutor {
       const checkout = await this.executor.execute(
         'git',
         ['checkout', '--', branch],
-        { cwd: rootPath },
+        { cwd: rootPath, allowFailure: true },
       );
       if (checkout.exitCode !== 0) {
         throw new Error(`Git checkout failed: ${checkout.stderr}`);
@@ -192,7 +193,7 @@ export class DeployExecutor {
       const reset = await this.executor.execute(
         'git',
         ['reset', '--hard', `origin/${branch}`],
-        { cwd: rootPath },
+        { cwd: rootPath, allowFailure: true },
       );
       if (reset.exitCode !== 0) {
         throw new Error(`Git reset failed: ${reset.stderr}`);
@@ -214,7 +215,7 @@ export class DeployExecutor {
       const clone = await this.executor.execute(
         'git',
         ['clone', '--branch', branch, '--single-branch', '--depth', '1', '--', gitRepository, rootPath],
-        { timeout: 300_000 }, // 5 min for large repos
+        { timeout: 300_000, allowFailure: true }, // 5 min for large repos
       );
       if (clone.exitCode !== 0) {
         throw new Error(`Git clone failed: ${clone.stderr}`);
@@ -227,15 +228,17 @@ export class DeployExecutor {
   private async getCommitInfo(
     rootPath: string,
   ): Promise<{ sha?: string; message?: string }> {
+    // Если репа без HEAD (свежий clone --depth=1 в edge-кейсах) или git
+    // не отвечает — возвращаем undefined вместо throw'а.
     const shaResult = await this.executor.execute(
       'git',
       ['rev-parse', 'HEAD'],
-      { cwd: rootPath },
+      { cwd: rootPath, allowFailure: true },
     );
     const msgResult = await this.executor.execute(
       'git',
       ['log', '-1', '--format=%s'],
-      { cwd: rootPath },
+      { cwd: rootPath, allowFailure: true },
     );
 
     return {
@@ -301,6 +304,7 @@ export class DeployExecutor {
       {
         cwd: rootPath,
         timeout: 300_000, // 5 min
+        allowFailure: true,
       },
     );
 
@@ -349,6 +353,7 @@ export class DeployExecutor {
         cwd: rootPath,
         timeout: 300_000,
         env: envVars,
+        allowFailure: true,
       },
     );
 
@@ -367,6 +372,7 @@ export class DeployExecutor {
         cwd: rootPath,
         timeout: 600_000, // 10 min for builds
         env: envVars,
+        allowFailure: true,
       },
     );
 
@@ -388,6 +394,7 @@ export class DeployExecutor {
         const result = await this.executor.execute(
           'systemctl',
           ['reload', `php${version}-fpm`],
+          { allowFailure: true },
         );
         if (result.exitCode !== 0) {
           log(`[restart] Warning: PHP-FPM reload failed: ${result.stderr}`);
@@ -401,7 +408,7 @@ export class DeployExecutor {
         // Restart PM2 process
         const pmName = `site-${domain}`;
         log(`[restart] Restarting PM2 process ${pmName}...`);
-        const result = await this.executor.execute('pm2', ['restart', pmName]);
+        const result = await this.executor.execute('pm2', ['restart', pmName], { allowFailure: true });
         if (result.exitCode !== 0) {
           // Process might not exist yet — try to start it
           log('[restart] PM2 process not found, starting...');
@@ -412,7 +419,7 @@ export class DeployExecutor {
             pmName,
             '--',
             'start',
-          ], { cwd: params.rootPath });
+          ], { cwd: params.rootPath, allowFailure: true });
           if (startResult.exitCode !== 0) {
             log(`[restart] Warning: PM2 start failed: ${startResult.stderr}`);
           }

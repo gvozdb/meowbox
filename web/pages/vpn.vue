@@ -267,8 +267,8 @@
               <tr>
                 <th>Имя</th>
                 <th>Сервисы</th>
+                <th>Подписка</th>
                 <th>Состояние</th>
-                <th>Subscription</th>
                 <th class="table__actions-th"></th>
               </tr>
             </thead>
@@ -282,21 +282,26 @@
                       v-for="svc in u.services"
                       :key="svc.credId"
                       class="chip"
-                      :title="`Показать конфиг для ${protocolLabel(svc.protocol)}:${svc.port}`"
-                      @click="showCreds(u, svc)"
+                      :title="`Конфиг для ${protocolLabel(svc.protocol)}:${svc.port}`"
+                      @click="openAccess(u, svc.serviceId)"
                     >
                       {{ protocolShort(svc.protocol) }}:{{ svc.port }}
                     </button>
                   </div>
                 </td>
                 <td>
+                  <button
+                    class="btn btn--ghost btn--xs"
+                    :disabled="u.services.length === 0"
+                    :title="u.services.length === 0 ? 'У юзера нет сервисов' : 'Показать конфиги и subscription'"
+                    @click="openAccess(u)"
+                  >Доступ</button>
+                </td>
+                <td>
                   <span
                     class="badge"
                     :class="u.enabled ? 'badge--ok' : 'badge--idle'"
                   >{{ u.enabled ? 'enabled' : 'disabled' }}</span>
-                </td>
-                <td>
-                  <button class="btn btn--ghost btn--xs" @click="openSubscription(u)">QR / URL</button>
                 </td>
                 <td class="table__actions-cell">
                   <button class="btn btn--ghost btn--xs" @click="openAddToService(u)">+ Сервис</button>
@@ -323,7 +328,12 @@
       @mousedown.self="closeModal()"
     >
       <div class="modal">
-        <h3 class="modal__title">Развернуть VPN</h3>
+        <header class="modal__head">
+          <h3 class="modal__title">Развернуть VPN</h3>
+          <button class="modal__close" aria-label="Закрыть" title="Закрыть" @click="closeModal()">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="6" y1="6" x2="18" y2="18" /><line x1="18" y1="6" x2="6" y2="18" /></svg>
+          </button>
+        </header>
         <div class="modal__fields">
           <label class="field">
             <span class="field__label">Протокол</span>
@@ -403,7 +413,12 @@
       @mousedown.self="closeModal()"
     >
       <div class="modal">
-        <h3 class="modal__title">Создать VPN-юзера</h3>
+        <header class="modal__head">
+          <h3 class="modal__title">Создать VPN-юзера</h3>
+          <button class="modal__close" aria-label="Закрыть" title="Закрыть" @click="closeModal()">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="6" y1="6" x2="18" y2="18" /><line x1="18" y1="6" x2="6" y2="18" /></svg>
+          </button>
+        </header>
         <div class="modal__fields">
           <label class="field">
             <span class="field__label">Имя</span>
@@ -435,24 +450,115 @@
       </div>
     </div>
 
+    <!-- ====== Объединённая модалка «Доступ»: Subscription + per-service конфиги ====== -->
     <div
-      v-if="modal.kind === 'creds'"
+      v-if="modal.kind === 'access'"
       class="modal-overlay"
       @mousedown.self="closeModal()"
     >
       <div class="modal modal--wide">
-        <h3 class="modal__title">{{ modal.userName }} → {{ modal.serviceLabel }}</h3>
-        <div v-if="!credsView" class="vpn__loading"><div class="spinner" /></div>
-        <template v-else>
-          <div class="qr">
-            <img :src="`data:image/png;base64,${credsView.qrPng}`" alt="QR" />
+        <header class="modal__head">
+          <h3 class="modal__title">Доступ · {{ modal.userName }}</h3>
+          <button class="modal__close" aria-label="Закрыть" title="Закрыть" @click="closeModal()">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="6" y1="6" x2="18" y2="18" /><line x1="18" y1="6" x2="6" y2="18" /></svg>
+          </button>
+        </header>
+
+        <!-- Tabs -->
+        <div class="tabs">
+          <button
+            v-if="hasVlessService"
+            class="tab"
+            :class="{ 'tab--active': accessTab === 'sub' }"
+            @click="accessTab = 'sub'"
+          >Подписка</button>
+          <button
+            v-for="svc in (modal.userId ? users.find((x) => x.id === modal.userId)?.services || [] : [])"
+            :key="svc.credId"
+            class="tab"
+            :class="{ 'tab--active': accessTab === svc.serviceId }"
+            @click="selectServiceTab(svc.serviceId)"
+          >
+            {{ protocolShort(svc.protocol) }}:{{ svc.port }}
+          </button>
+        </div>
+
+        <!-- ===== Subscription tab ===== -->
+        <template v-if="accessTab === 'sub'">
+          <p class="modal__desc">
+            Один URL = все <strong>VLESS+Reality</strong> сервисы юзера в одном subscription.
+            В клиенте (Streisand / FoXray / NekoBox / v2rayNG) добавь как <strong>Subscribe URL</strong> —
+            конфиги подтянутся автоматически и обновятся после ротации SNI/ключей.
+            Для <strong>AmneziaWG</strong> подписка не работает — открой соответствующий таб и скачай <code>.conf</code>.
+          </p>
+          <div v-if="subQr" class="qr">
+            <img :src="`data:image/png;base64,${subQr}`" alt="QR" />
           </div>
-          <textarea readonly class="creds-text mono" rows="8">{{ credsView.raw }}</textarea>
+          <input
+            v-if="subscriptionUrl"
+            readonly
+            :value="subscriptionUrl"
+            class="field__input mono full-width"
+            @focus="($event.target as HTMLInputElement).select()"
+          />
+          <div class="vpn__clients">
+            <div class="vpn__clients-title">Клиенты:</div>
+            <div class="vpn__clients-grid">
+              <div class="vpn__clients-platform">
+                <strong>iOS</strong>
+                <a href="https://apps.apple.com/app/streisand/id6450534064" target="_blank" rel="noopener">Streisand</a>
+                <a href="https://apps.apple.com/app/amneziavpn/id1600529900" target="_blank" rel="noopener">Amnezia</a>
+              </div>
+              <div class="vpn__clients-platform">
+                <strong>Android</strong>
+                <a href="https://github.com/2dust/v2rayNG/releases/latest" target="_blank" rel="noopener">v2rayNG</a>
+                <a href="https://amnezia.org/downloads" target="_blank" rel="noopener">Amnezia</a>
+              </div>
+              <div class="vpn__clients-platform">
+                <strong>macOS</strong>
+                <a href="https://apps.apple.com/app/v2box-v2ray-client/id6446814690" target="_blank" rel="noopener">V2Box</a>
+                <a href="https://amnezia.org/downloads" target="_blank" rel="noopener">Amnezia</a>
+              </div>
+              <div class="vpn__clients-platform">
+                <strong>Windows / Linux</strong>
+                <a href="https://github.com/MatsuriDayo/nekoray/releases/latest" target="_blank" rel="noopener">NekoRay</a>
+                <a href="https://amnezia.org/downloads" target="_blank" rel="noopener">Amnezia</a>
+              </div>
+            </div>
+          </div>
+          <div v-if="modalError" class="modal__error">{{ modalError }}</div>
           <div class="modal__actions">
-            <button class="btn btn--ghost btn--sm" @click="copyText(credsView.configUrl)">Скопировать</button>
-            <button class="btn btn--ghost btn--sm" @click="downloadConf()">Скачать .conf</button>
-            <button class="btn btn--primary btn--sm" @click="closeModal()">Закрыть</button>
+            <button class="btn btn--ghost btn--sm" :disabled="!subscriptionUrl" @click="copyText(subscriptionUrl)">Скопировать URL</button>
+            <button class="btn btn--danger btn--sm" :disabled="creating" @click="regenerateSubToken">
+              <span v-if="creating" class="btn__spinner" />
+              Перегенерировать токен
+            </button>
           </div>
+        </template>
+
+        <!-- ===== Per-service tab ===== -->
+        <template v-else>
+          <p v-if="currentServiceMeta" class="modal__desc">
+            <strong>{{ protocolLabel(currentServiceMeta.protocol) }}</strong> · порт <code>{{ currentServiceMeta.port }}</code>
+            <template v-if="currentServiceMeta.protocol === 'AMNEZIA_WG'">
+              · импортируй <code>.conf</code> в <strong>Amnezia</strong> или <strong>wg-quick</strong> (<code>awg-quick up ./{{ modal.userName }}.conf</code>).
+            </template>
+            <template v-else>
+              · скан QR в любом клиенте (Streisand / v2rayNG / NekoBox / V2Box) или вставь <code>vless://</code> URL.
+            </template>
+          </p>
+          <div v-if="!credsView" class="vpn__loading"><div class="spinner" /></div>
+          <template v-else>
+            <div class="qr">
+              <img :src="`data:image/png;base64,${credsView.qrPng}`" alt="QR" />
+            </div>
+            <textarea readonly class="creds-text mono full-width" rows="8">{{ credsView.raw }}</textarea>
+            <div class="modal__actions">
+              <button class="btn btn--ghost btn--sm" @click="copyText(credsView.raw)">Скопировать конфиг</button>
+              <button class="btn btn--ghost btn--sm" @click="copyText(credsView.configUrl)">Скопировать URL</button>
+              <button class="btn btn--primary btn--sm" @click="downloadConf()">Скачать .conf</button>
+            </div>
+          </template>
         </template>
       </div>
     </div>
@@ -463,7 +569,12 @@
       @mousedown.self="closeModal()"
     >
       <div class="modal">
-        <h3 class="modal__title">Добавить «{{ modal.userName }}» в сервис</h3>
+        <header class="modal__head">
+          <h3 class="modal__title">Добавить «{{ modal.userName }}» в сервис</h3>
+          <button class="modal__close" aria-label="Закрыть" title="Закрыть" @click="closeModal()">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="6" y1="6" x2="18" y2="18" /><line x1="18" y1="6" x2="6" y2="18" /></svg>
+          </button>
+        </header>
         <div class="modal__fields">
           <label class="field">
             <span class="field__label">Сервис</span>
@@ -489,71 +600,17 @@
     </div>
 
     <div
-      v-if="modal.kind === 'subscription'"
-      class="modal-overlay"
-      @mousedown.self="closeModal()"
-    >
-      <div class="modal modal--wide">
-        <h3 class="modal__title">Subscription · {{ modal.userName }}</h3>
-        <p class="modal__desc">
-          Один URL = все VPN-сервисы юзера в одном subscription.
-          В клиенте (Streisand / FoXray / NekoBox) добавь как <strong>Subscribe URL</strong> —
-          конфиги подтянутся автоматически и обновятся после ротации SNI/ключей.
-        </p>
-        <div v-if="subscriptionUrl" class="qr">
-          <img :src="`data:image/png;base64,${subQr}`" alt="QR" />
-        </div>
-        <input
-          v-if="subscriptionUrl"
-          readonly
-          :value="subscriptionUrl"
-          class="field__input mono"
-          @focus="($event.target as HTMLInputElement).select()"
-        />
-        <div class="vpn__clients">
-          <div class="vpn__clients-title">Клиенты:</div>
-          <div class="vpn__clients-grid">
-            <div class="vpn__clients-platform">
-              <strong>iOS</strong>
-              <a href="https://apps.apple.com/app/streisand/id6450534064" target="_blank" rel="noopener">Streisand</a>
-              <a href="https://apps.apple.com/app/amneziavpn/id1600529900" target="_blank" rel="noopener">Amnezia</a>
-            </div>
-            <div class="vpn__clients-platform">
-              <strong>Android</strong>
-              <a href="https://github.com/2dust/v2rayNG/releases/latest" target="_blank" rel="noopener">v2rayNG</a>
-              <a href="https://amnezia.org/downloads" target="_blank" rel="noopener">Amnezia</a>
-            </div>
-            <div class="vpn__clients-platform">
-              <strong>macOS</strong>
-              <a href="https://apps.apple.com/app/v2box-v2ray-client/id6446814690" target="_blank" rel="noopener">V2Box</a>
-              <a href="https://amnezia.org/downloads" target="_blank" rel="noopener">Amnezia</a>
-            </div>
-            <div class="vpn__clients-platform">
-              <strong>Windows / Linux</strong>
-              <a href="https://github.com/MatsuriDayo/nekoray/releases/latest" target="_blank" rel="noopener">NekoRay</a>
-              <a href="https://amnezia.org/downloads" target="_blank" rel="noopener">Amnezia</a>
-            </div>
-          </div>
-        </div>
-        <div v-if="modalError" class="modal__error">{{ modalError }}</div>
-        <div class="modal__actions">
-          <button class="btn btn--ghost btn--sm" @click="copyText(subscriptionUrl)">Скопировать URL</button>
-          <button class="btn btn--danger btn--sm" :disabled="creating" @click="regenerateSubToken">
-            <span v-if="creating" class="btn__spinner" />
-            Перегенерировать токен
-          </button>
-          <button class="btn btn--primary btn--sm" @click="closeModal()">Закрыть</button>
-        </div>
-      </div>
-    </div>
-
-    <div
       v-if="modal.kind === 'rotateSni'"
       class="modal-overlay"
       @mousedown.self="closeModal()"
     >
       <div class="modal">
-        <h3 class="modal__title">Сменить SNI-маску</h3>
+        <header class="modal__head">
+          <h3 class="modal__title">Сменить SNI-маску</h3>
+          <button class="modal__close" aria-label="Закрыть" title="Закрыть" @click="closeModal()">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="6" y1="6" x2="18" y2="18" /><line x1="18" y1="6" x2="6" y2="18" /></svg>
+          </button>
+        </header>
         <p class="modal__desc">Текущая: <strong class="mono">{{ modal.currentSni }}</strong></p>
         <div class="modal__fields">
           <label class="field">
@@ -658,13 +715,18 @@ const busy = reactive({
 });
 
 const modal = reactive<{
-  kind: '' | 'createService' | 'createUser' | 'creds' | 'addToService' | 'rotateSni' | 'subscription';
+  kind: '' | 'createService' | 'createUser' | 'access' | 'addToService' | 'rotateSni';
   serviceId?: string;
   userId?: string;
   userName?: string;
-  serviceLabel?: string;
   currentSni?: string;
 }>({ kind: '' });
+
+/**
+ * Активный таб в модалке «Доступ»: 'sub' либо serviceId конкретного сервиса.
+ * Существует пока модалка открыта.
+ */
+const accessTab = ref<string>('sub');
 
 const form = reactive({
   protocol: 'VLESS_REALITY',
@@ -706,6 +768,21 @@ const availableServices = computed(() => {
   if (!u) return [];
   const taken = new Set(u.services.map((s) => s.serviceId));
   return services.value.filter((s) => !taken.has(s.id));
+});
+
+/** Юзер из текущей модалки. */
+const currentUser = computed<VpnUserListItem | null>(() => {
+  if (!modal.userId) return null;
+  return users.value.find((x) => x.id === modal.userId) || null;
+});
+/** Есть ли у юзера хотя бы один VLESS+Reality сервис (нужно ли показывать таб «Подписка»). */
+const hasVlessService = computed(() => {
+  return (currentUser.value?.services || []).some((s) => s.protocol === 'VLESS_REALITY');
+});
+/** Метаданные сервиса, выбранного активным табом (для шапки секции). */
+const currentServiceMeta = computed<VpnUserListItem['services'][number] | null>(() => {
+  if (accessTab.value === 'sub' || !currentUser.value) return null;
+  return currentUser.value.services.find((s) => s.serviceId === accessTab.value) || null;
 });
 
 function protocolLabel(p: string): string {
@@ -793,7 +870,6 @@ function closeModal() {
   modal.serviceId = undefined;
   modal.userId = undefined;
   modal.userName = undefined;
-  modal.serviceLabel = undefined;
   modal.currentSni = undefined;
   credsView.value = null;
   sniValidationResult.value = null;
@@ -801,6 +877,7 @@ function closeModal() {
   modalError.value = null;
   subscriptionUrl.value = '';
   subQr.value = '';
+  accessTab.value = 'sub';
 }
 
 function openCreateService() {
@@ -1009,33 +1086,58 @@ async function toggleUser(u: VpnUserListItem) {
     await loadAll();
   } catch (err: unknown) { toast.error((err as Error).message); }
 }
-async function showCreds(u: VpnUserListItem, svc: VpnUserListItem['services'][number]) {
+/**
+ * Открыть унифицированную модалку «Доступ».
+ *
+ * Если передан `preselectServiceId` — открывается с табом конкретного сервиса
+ * (по клику на чип в таблице). Иначе — таб «Подписка» (если есть VLESS-сервисы),
+ * или первый сервис юзера (если все WG).
+ */
+async function openAccess(u: VpnUserListItem, preselectServiceId?: string) {
+  modal.userId = u.id;
   modal.userName = u.name;
-  modal.serviceLabel = `${protocolLabel(svc.protocol)} :${svc.port}${svc.label ? ' — ' + svc.label : ''}`;
-  modal.kind = 'creds';
+  modal.kind = 'access';
+  credsView.value = null;
+  modalError.value = null;
+
+  // Предзагрузим subscription URL + QR — даже если юзер сразу откроет таб сервиса,
+  // переключение на «Подписка» не должно упираться в загрузку.
+  subscriptionUrl.value = `${window.location.origin}/api/vpn/sub/${u.subToken}`;
+  subQr.value = '';
+  void renderSubQr();
+
+  // Выбор активного таба.
+  const hasVless = u.services.some((s) => s.protocol === 'VLESS_REALITY');
+  if (preselectServiceId) {
+    accessTab.value = preselectServiceId;
+    void loadCredsForTab(preselectServiceId);
+  } else if (hasVless) {
+    accessTab.value = 'sub';
+  } else if (u.services.length > 0) {
+    accessTab.value = u.services[0].serviceId;
+    void loadCredsForTab(u.services[0].serviceId);
+  } else {
+    accessTab.value = 'sub';
+  }
+}
+
+async function selectServiceTab(serviceId: string) {
+  accessTab.value = serviceId;
+  await loadCredsForTab(serviceId);
+}
+
+async function loadCredsForTab(serviceId: string) {
+  if (!modal.userId) return;
   credsView.value = null;
   try {
-    const data = await api.get<VpnCredsView>(`/vpn/users/${u.id}/services/${svc.serviceId}/creds`);
+    const data = await api.get<VpnCredsView>(`/vpn/users/${modal.userId}/services/${serviceId}/creds`);
     credsView.value = data;
   } catch (err: unknown) {
     toast.error((err as Error).message);
-    closeModal();
   }
 }
-async function copyText(t: string) {
-  try {
-    await navigator.clipboard.writeText(t);
-    toast.success('Скопировано');
-  } catch {
-    toast.error('Буфер обмена недоступен');
-  }
-}
-async function openSubscription(u: VpnUserListItem) {
-  modal.userId = u.id;
-  modal.userName = u.name;
-  modal.kind = 'subscription';
-  subscriptionUrl.value = `${window.location.origin}/api/vpn/sub/${u.subToken}`;
-  subQr.value = '';
+
+async function renderSubQr() {
   try {
     const QRCode = (await import('qrcode')).default;
     const dataUrl = await QRCode.toDataURL(subscriptionUrl.value, {
@@ -1043,10 +1145,44 @@ async function openSubscription(u: VpnUserListItem) {
       margin: 2,
       width: 320,
     });
-    // dataUrl формата 'data:image/png;base64,XXX' — отрезаем префикс
     subQr.value = dataUrl.split(',')[1] || '';
   } catch (err: unknown) {
     toast.error(`QR: ${(err as Error).message}`);
+  }
+}
+
+/**
+ * Скопировать текст. Использует Clipboard API когда secure context (https/localhost),
+ * иначе fallback через скрытый <textarea> + execCommand — нужно для http/IP-адресов
+ * без TLS, где navigator.clipboard заблокирован браузером.
+ */
+async function copyText(t: string) {
+  if (!t) return;
+  try {
+    if (typeof navigator !== 'undefined' && navigator.clipboard && window.isSecureContext) {
+      await navigator.clipboard.writeText(t);
+      toast.success('Скопировано');
+      return;
+    }
+  } catch {
+    /* ниже fallback */
+  }
+  try {
+    const ta = document.createElement('textarea');
+    ta.value = t;
+    ta.setAttribute('readonly', '');
+    ta.style.position = 'fixed';
+    ta.style.left = '-9999px';
+    ta.style.top = '0';
+    document.body.appendChild(ta);
+    ta.focus();
+    ta.select();
+    const ok = document.execCommand('copy');
+    document.body.removeChild(ta);
+    if (!ok) throw new Error('execCommand вернул false');
+    toast.success('Скопировано');
+  } catch {
+    toast.error('Не получилось скопировать — выдели текст и нажми ⌘/Ctrl+C');
   }
 }
 async function regenerateSubToken() {
@@ -1066,11 +1202,7 @@ async function regenerateSubToken() {
     const u = users.value.find((x) => x.id === modal.userId);
     if (u) u.subToken = r.subToken;
     subscriptionUrl.value = `${window.location.origin}/api/vpn/sub/${r.subToken}`;
-    const QRCode = (await import('qrcode')).default;
-    const dataUrl = await QRCode.toDataURL(subscriptionUrl.value, {
-      errorCorrectionLevel: 'M', margin: 2, width: 320,
-    });
-    subQr.value = dataUrl.split(',')[1] || '';
+    await renderSubQr();
   } catch (err: unknown) {
     toast.error((err as Error).message);
   } finally {
@@ -1079,11 +1211,17 @@ async function regenerateSubToken() {
 }
 function downloadConf() {
   if (!credsView.value) return;
+  // Расширение зависит от протокола: WG-конфиг — .conf; vless:// URL — .txt
+  // (для VLESS «скачать» это про raw текст, никакой клиент не импортит файл).
+  const meta = currentServiceMeta.value;
+  const isWg = meta?.protocol === 'AMNEZIA_WG';
+  const ext = isWg ? 'conf' : 'txt';
+  const portTag = meta ? `-${meta.port}` : '';
   const blob = new Blob([credsView.value.raw], { type: 'text/plain' });
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
   a.href = url;
-  a.download = `${modal.userName || 'vpn'}.conf`;
+  a.download = `${modal.userName || 'vpn'}${portTag}.${ext}`;
   a.click();
   setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
@@ -1248,7 +1386,11 @@ onMounted(loadAll);
 .table tbody tr:last-child td { border-bottom: 0; }
 .table tbody tr:hover { background: var(--bg-surface-hover); }
 .table__actions-th { width: 1px; }
-.table__actions-cell { display: flex; gap: 0.35rem; flex-wrap: wrap; justify-content: flex-end; }
+.table__actions-cell {
+  display: flex; gap: 0.35rem; flex-wrap: nowrap;
+  justify-content: flex-end; white-space: nowrap;
+}
+.table__actions-cell .btn { flex: 0 0 auto; }
 
 .user-services { display: flex; gap: 0.35rem; flex-wrap: wrap; }
 .chip {
@@ -1308,7 +1450,39 @@ onMounted(loadAll);
   box-shadow: var(--shadow-modal); animation: modalIn 0.25s ease;
 }
 .modal--wide { max-width: 600px; }
-.modal__title { font-size: 1.05rem; font-weight: 700; color: var(--text-heading); margin: 0 0 1rem; }
+.modal__head {
+  display: flex; align-items: flex-start; justify-content: space-between;
+  gap: 0.75rem; margin: 0 0 1rem;
+}
+.modal__title { font-size: 1.05rem; font-weight: 700; color: var(--text-heading); margin: 0; flex: 1; }
+.modal__close {
+  flex: 0 0 auto; width: 28px; height: 28px;
+  display: inline-flex; align-items: center; justify-content: center;
+  background: transparent; border: 1px solid transparent; border-radius: 8px;
+  color: var(--text-tertiary); cursor: pointer; padding: 0; transition: all 0.15s;
+}
+.modal__close:hover {
+  color: var(--text-primary); background: var(--bg-input); border-color: var(--border-strong);
+}
+
+/* tabs (внутри модалки «Доступ») */
+.tabs {
+  display: flex; flex-wrap: wrap; gap: 0.25rem;
+  border-bottom: 1px solid var(--border); margin-bottom: 0.85rem;
+}
+.tab {
+  background: transparent; border: 0; padding: 0.5rem 0.85rem;
+  font-size: 0.78rem; font-weight: 500; color: var(--text-tertiary);
+  cursor: pointer; border-bottom: 2px solid transparent; margin-bottom: -1px;
+  font-family: inherit; transition: all 0.15s;
+}
+.tab:hover { color: var(--text-secondary); }
+.tab--active {
+  color: var(--text-primary); border-bottom-color: var(--primary);
+}
+
+/* full-width вход (URL/textarea в модалках) */
+.full-width { width: 100%; box-sizing: border-box; display: block; }
 .modal__desc { font-size: 0.82rem; color: var(--text-tertiary); margin: 0.5rem 0 0; line-height: 1.5; }
 .modal__desc strong { color: var(--text-secondary); }
 .modal__fields { display: flex; flex-direction: column; gap: 0.85rem; margin-bottom: 1rem; }

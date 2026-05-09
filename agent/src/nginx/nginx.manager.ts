@@ -387,7 +387,9 @@ limit_req_zone $binary_remote_addr zone=site_limit:10m rate=30r/s;
 
   async testConfig(): Promise<{ success: boolean; error?: string }> {
     try {
-      const r = await this.executor.execute('nginx', ['-t']);
+      // nginx -t возвращает >0 при ошибке конфига — это валидный сигнал,
+      // не throw'абельная катастрофа.
+      const r = await this.executor.execute('nginx', ['-t'], { allowFailure: true });
       if (r.stderr && (r.stderr.includes('ENOENT') || r.stderr.includes('not found'))) {
         return { success: true }; // nginx не установлен — пропускаем тест
       }
@@ -404,7 +406,7 @@ limit_req_zone $binary_remote_addr zone=site_limit:10m rate=30r/s;
 
   async reload(): Promise<{ success: boolean; error?: string }> {
     try {
-      const r = await this.executor.execute('systemctl', ['reload', 'nginx']);
+      const r = await this.executor.execute('systemctl', ['reload', 'nginx'], { allowFailure: true });
       if (r.exitCode === 0) return { success: true };
       return { success: false, error: r.stderr };
     } catch {
@@ -413,17 +415,18 @@ limit_req_zone $binary_remote_addr zone=site_limit:10m rate=30r/s;
   }
 
   async restart(): Promise<{ success: boolean; error?: string }> {
-    const r = await this.executor.execute('systemctl', ['restart', 'nginx']);
+    const r = await this.executor.execute('systemctl', ['restart', 'nginx'], { allowFailure: true });
     if (r.exitCode === 0) return { success: true };
     return { success: false, error: r.stderr };
   }
 
   async status(): Promise<{ running: boolean; version: string | null }> {
-    const s = await this.executor.execute('systemctl', ['is-active', 'nginx']);
+    // is-active возвращает 3 если не активен — валидно.
+    const s = await this.executor.execute('systemctl', ['is-active', 'nginx'], { allowFailure: true });
     const running = s.stdout.trim() === 'active';
     let version: string | null = null;
     if (running) {
-      const v = await this.executor.execute('nginx', ['-v']);
+      const v = await this.executor.execute('nginx', ['-v'], { allowFailure: true });
       const m = v.stderr.match(/nginx\/([\d.]+)/);
       if (m) version = m[1];
     }

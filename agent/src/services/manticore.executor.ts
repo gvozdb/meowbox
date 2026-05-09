@@ -66,8 +66,7 @@ export class ManticoreExecutor {
     // ВАЖНО: НЕ использовать `-f=${...}` — CommandExecutor блокирует `{` и `}`
     // в аргументах (validateArgs forbidden chars). Используем `-s` — печатает
     // полный control-блок, парсим Status: и Version: построчно.
-    const r = await this.cmd.execute('dpkg-query', ['-s', 'manticore'])
-      .catch(() => ({ stdout: '', stderr: '', exitCode: 1 }));
+    const r = await this.cmd.execute('dpkg-query', ['-s', 'manticore'], { allowFailure: true });
 
     if (r.exitCode !== 0 || !r.stdout) return { installed: false, version: null };
 
@@ -84,8 +83,7 @@ export class ManticoreExecutor {
     // https://manticoresearch.com/install/
 
     // 1) Если репо ещё не стоит — поставить.
-    const repoCheck = await this.cmd.execute('dpkg-query', ['-s', 'manticore-repo'])
-      .catch(() => ({ stdout: '', stderr: '', exitCode: 1 }));
+    const repoCheck = await this.cmd.execute('dpkg-query', ['-s', 'manticore-repo'], { allowFailure: true });
     const repoInstalled = repoCheck.exitCode === 0
       && /^Status:\s*install ok installed/m.test(repoCheck.stdout);
 
@@ -99,7 +97,7 @@ export class ManticoreExecutor {
           '-O', repoDeb,
           'https://repo.manticoresearch.com/manticore-repo.noarch.deb',
         ],
-        { timeout: 120_000 },
+        { timeout: 120_000, allowFailure: true },
       );
       if (dl.exitCode !== 0) {
         throw new Error(`Не удалось скачать manticore-repo: ${dl.stderr || dl.stdout || 'wget failed'}`);
@@ -109,21 +107,21 @@ export class ManticoreExecutor {
       const repoInstall = await this.cmd.execute(
         'dpkg',
         ['-i', repoDeb],
-        { timeout: 60_000, env: { DEBIAN_FRONTEND: 'noninteractive' } },
+        { timeout: 60_000, env: { DEBIAN_FRONTEND: 'noninteractive' }, allowFailure: true },
       );
       if (repoInstall.exitCode !== 0) {
         throw new Error(`dpkg -i manticore-repo failed: ${repoInstall.stderr || repoInstall.stdout}`);
       }
 
       // Подчистим скачанный .deb — он больше не нужен.
-      await this.cmd.execute('rm', ['-f', repoDeb]).catch(() => {});
+      await this.cmd.execute('rm', ['-f', repoDeb], { allowFailure: true }).catch(() => {});
     }
 
     // 2) apt-get update — теперь с подключённым manticore-репо
     const update = await this.cmd.execute(
       'apt-get',
       ['-o', 'Acquire::Retries=3', 'update'],
-      { timeout: 180_000, env: { DEBIAN_FRONTEND: 'noninteractive' } },
+      { timeout: 180_000, env: { DEBIAN_FRONTEND: 'noninteractive' }, allowFailure: true },
     );
     if (update.exitCode !== 0) {
       throw new Error(`apt-get update failed: ${update.stderr || update.stdout}`);
@@ -133,14 +131,15 @@ export class ManticoreExecutor {
     const install = await this.cmd.execute(
       'apt-get',
       ['install', '-y', '--no-install-recommends', 'manticore'],
-      { timeout: 600_000, env: { DEBIAN_FRONTEND: 'noninteractive' } },
+      { timeout: 600_000, env: { DEBIAN_FRONTEND: 'noninteractive' }, allowFailure: true },
     );
     if (install.exitCode !== 0) {
       throw new Error(`apt-get install manticore failed: ${install.stderr || install.stdout}`);
     }
 
     // 4) Disable global manticore daemon — мы крутим per-site инстансы.
-    await this.cmd.execute('systemctl', ['disable', '--now', 'manticore']).catch(() => {});
+    await this.cmd.execute('systemctl', ['disable', '--now', 'manticore'], { allowFailure: true })
+      .catch(() => {});
 
     // 5) Установить template-unit
     await this.installTemplateUnit();
@@ -154,14 +153,15 @@ export class ManticoreExecutor {
   async serverUninstall(): Promise<void> {
     // Не удаляем data_dir сайтов — disable должен был это сделать.
     // Не делаем purge, чтобы конфиги пакета остались на случай повторной установки.
-    await this.cmd.execute('systemctl', ['disable', '--now', 'manticore']).catch(() => {});
+    await this.cmd.execute('systemctl', ['disable', '--now', 'manticore'], { allowFailure: true })
+      .catch(() => {});
     await fs.unlink(TEMPLATE_UNIT_PATH).catch(() => {});
-    await this.cmd.execute('systemctl', ['daemon-reload']).catch(() => {});
+    await this.cmd.execute('systemctl', ['daemon-reload'], { allowFailure: true }).catch(() => {});
 
     const r = await this.cmd.execute(
       'apt-get',
       ['remove', '-y', 'manticore'],
-      { timeout: 300_000, env: { DEBIAN_FRONTEND: 'noninteractive' } },
+      { timeout: 300_000, env: { DEBIAN_FRONTEND: 'noninteractive' }, allowFailure: true },
     );
     if (r.exitCode !== 0) {
       throw new Error(`apt-get remove manticore failed: ${r.stderr || r.stdout}`);
@@ -215,9 +215,10 @@ export class ManticoreExecutor {
     //
     //   Если юзер meowbox-adminer ещё не создан (свежая инсталляция без adminer-пула) —
     //   просто пропускаем; ошибки `id` ловим и не валим siteEnable.
-    const adminerUser = await this.cmd.execute('id', ['-u', 'meowbox-adminer']).catch(() => ({ exitCode: 1, stdout: '', stderr: '' }));
+    const adminerUser = await this.cmd.execute('id', ['-u', 'meowbox-adminer'], { allowFailure: true });
     if (adminerUser.exitCode === 0) {
-      await this.cmd.execute('usermod', ['-aG', p.systemUser, 'meowbox-adminer']).catch(() => {});
+      await this.cmd.execute('usermod', ['-aG', p.systemUser, 'meowbox-adminer'], { allowFailure: true })
+        .catch(() => {});
     }
     await this.cmd.execute('chmod', ['750', tmpDir]);
 
@@ -242,7 +243,10 @@ export class ManticoreExecutor {
 
     // 7) Daemon-reload + enable+start
     await this.cmd.execute('systemctl', ['daemon-reload']);
-    const r = await this.cmd.execute('systemctl', ['enable', '--now', `manticore@${p.siteName}.service`]);
+    const r = await this.cmd.execute(
+      'systemctl', ['enable', '--now', `manticore@${p.siteName}.service`],
+      { allowFailure: true },
+    );
     if (r.exitCode !== 0) {
       throw new Error(`systemctl enable manticore@${p.siteName} failed: ${r.stderr || r.stdout}`);
     }
@@ -250,26 +254,32 @@ export class ManticoreExecutor {
 
   async siteDisable(p: SiteContextParams): Promise<void> {
     this.assertSafeName(p.siteName);
-    await this.cmd.execute('systemctl', ['disable', '--now', `manticore@${p.siteName}.service`]).catch(() => {});
+    await this.cmd.execute(
+      'systemctl', ['disable', '--now', `manticore@${p.siteName}.service`],
+      { allowFailure: true },
+    ).catch(() => {});
 
     const dataDir = path.join(DATA_BASE, p.siteName);
-    await this.cmd.execute('rm', ['-rf', dataDir]).catch(() => {});
+    await this.cmd.execute('rm', ['-rf', dataDir], { allowFailure: true }).catch(() => {});
 
     // override drop-in
     const overrideDir = `/etc/systemd/system/manticore@${p.siteName}.service.d`;
-    await this.cmd.execute('rm', ['-rf', overrideDir]).catch(() => {});
-    await this.cmd.execute('systemctl', ['daemon-reload']).catch(() => {});
+    await this.cmd.execute('rm', ['-rf', overrideDir], { allowFailure: true }).catch(() => {});
+    await this.cmd.execute('systemctl', ['daemon-reload'], { allowFailure: true }).catch(() => {});
 
     // .env-файл сайта
     if (p.rootPath) {
       const envDir = path.join(p.rootPath, '.meowbox', 'manticore');
-      await this.cmd.execute('rm', ['-rf', envDir]).catch(() => {});
+      await this.cmd.execute('rm', ['-rf', envDir], { allowFailure: true }).catch(() => {});
     }
   }
 
   async siteStart(p: SiteContextParams): Promise<void> {
     this.assertSafeName(p.siteName);
-    const r = await this.cmd.execute('systemctl', ['start', `manticore@${p.siteName}.service`]);
+    const r = await this.cmd.execute(
+      'systemctl', ['start', `manticore@${p.siteName}.service`],
+      { allowFailure: true },
+    );
     if (r.exitCode !== 0) {
       throw new Error(`systemctl start manticore@${p.siteName} failed: ${r.stderr || r.stdout}`);
     }
@@ -277,7 +287,10 @@ export class ManticoreExecutor {
 
   async siteStop(p: SiteContextParams): Promise<void> {
     this.assertSafeName(p.siteName);
-    const r = await this.cmd.execute('systemctl', ['stop', `manticore@${p.siteName}.service`]);
+    const r = await this.cmd.execute(
+      'systemctl', ['stop', `manticore@${p.siteName}.service`],
+      { allowFailure: true },
+    );
     if (r.exitCode !== 0) {
       throw new Error(`systemctl stop manticore@${p.siteName} failed: ${r.stderr || r.stdout}`);
     }
@@ -285,8 +298,11 @@ export class ManticoreExecutor {
 
   async siteStatus(p: SiteContextParams): Promise<{ status: 'RUNNING' | 'STOPPED' | 'ERROR' }> {
     this.assertSafeName(p.siteName);
-    const r = await this.cmd.execute('systemctl', ['is-active', `manticore@${p.siteName}.service`])
-      .catch((err: any) => ({ stdout: 'inactive', stderr: String(err?.message || err), exitCode: 3 }));
+    // is-active возвращает 3 если сервис не активен — это валидный ответ.
+    const r = await this.cmd.execute(
+      'systemctl', ['is-active', `manticore@${p.siteName}.service`],
+      { allowFailure: true },
+    );
     const out = r.stdout.trim();
     if (out === 'active') return { status: 'RUNNING' };
     if (out === 'inactive' || out === 'deactivating') return { status: 'STOPPED' };
@@ -323,7 +339,7 @@ export class ManticoreExecutor {
         const t = await this.cmd.execute(
           'mysql',
           ['--protocol=socket', '-S', sock, '-e', 'SHOW TABLES;', '--batch', '--skip-column-names'],
-          { timeout: 10_000 },
+          { timeout: 10_000, allowFailure: true },
         );
         if (t.exitCode === 0) {
           const lines = t.stdout.split('\n').map((l) => l.trim()).filter(Boolean);
@@ -335,8 +351,8 @@ export class ManticoreExecutor {
             const c = await this.cmd.execute(
               'mysql',
               ['--protocol=socket', '-S', sock, '-e', `SELECT COUNT(*) FROM \`${tableName}\`;`, '--batch', '--skip-column-names'],
-              { timeout: 10_000 },
-            ).catch(() => ({ stdout: '0', stderr: '', exitCode: 1 }));
+              { timeout: 10_000, allowFailure: true },
+            );
             const n = parseInt(c.stdout.trim(), 10);
             if (Number.isFinite(n)) documents += n;
           }
@@ -345,8 +361,8 @@ export class ManticoreExecutor {
         const u = await this.cmd.execute(
           'mysql',
           ['--protocol=socket', '-S', sock, '-e', "SHOW STATUS LIKE 'uptime';", '--batch', '--skip-column-names'],
-          { timeout: 10_000 },
-        ).catch(() => ({ stdout: '', stderr: '', exitCode: 1 }));
+          { timeout: 10_000, allowFailure: true },
+        );
         if (u.exitCode === 0) {
           const m = u.stdout.match(/uptime\s+(\d+)/i);
           if (m) uptimeSec = parseInt(m[1], 10);
@@ -356,9 +372,9 @@ export class ManticoreExecutor {
       }
     }
 
-    // disk usage data_dir
+    // disk usage data_dir — du может вернуть >0 при permission denied на отдельных файлах.
     let diskBytes = 0;
-    const du = await this.cmd.execute('du', ['-sb', dataDir]).catch(() => ({ stdout: '0', stderr: '', exitCode: 1 }));
+    const du = await this.cmd.execute('du', ['-sb', dataDir], { allowFailure: true });
     if (du.exitCode === 0) {
       const m = du.stdout.match(/^(\d+)/);
       if (m) diskBytes = parseInt(m[1], 10);
@@ -377,8 +393,8 @@ export class ManticoreExecutor {
         '-u', `manticore@${p.siteName}.service`,
         '-n', String(Math.max(1, Math.min(5000, p.lines))),
         '--no-pager',
-      ]).catch(() => ({ stdout: '(нет логов)', stderr: '', exitCode: 1 }));
-      return { content: r.stdout };
+      ], { allowFailure: true });
+      return { content: r.stdout || '(нет логов)' };
     }
     const r = await this.cmd.execute('tail', ['-n', String(Math.max(1, Math.min(5000, p.lines))), logFile]);
     return { content: r.stdout || '' };

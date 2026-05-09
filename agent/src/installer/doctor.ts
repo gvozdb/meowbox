@@ -253,7 +253,7 @@ export class ModxDoctor {
    */
   private async resolveUid(user: string): Promise<number | null> {
     if (!/^[a-z_][a-z0-9_-]*$/i.test(user)) return null;
-    const r = await this.executor.execute('id', ['-u', user]);
+    const r = await this.executor.execute('id', ['-u', user], { allowFailure: true });
     if (r.exitCode !== 0) return null;
     const uid = parseInt(r.stdout.trim(), 10);
     return Number.isFinite(uid) ? uid : null;

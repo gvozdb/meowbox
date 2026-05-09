@@ -121,24 +121,63 @@ export class NotificationDispatcherService {
       .filter(Boolean)
       .join('\n');
 
+    // Поддержка топиков (forum threads) в групповых чатах:
+    //   "-1003803183992"        → обычный чат
+    //   "-1003803183992:3"      → чат -1003803183992, топик 3
+    //   "-1003803183992/3"      → то же самое
+    //   "@channelname"          → канал по username
+    const { chatId, messageThreadId } = this.parseTelegramChatId(cfg.chatId);
+
     const url = `https://api.telegram.org/bot${cfg.botToken}/sendMessage`;
+    const body: Record<string, unknown> = {
+      chat_id: chatId,
+      text,
+      parse_mode: 'MarkdownV2',
+      disable_web_page_preview: true,
+    };
+    if (messageThreadId !== undefined) {
+      body.message_thread_id = messageThreadId;
+    }
+
     const response = await fetch(url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        chat_id: cfg.chatId,
-        text,
-        parse_mode: 'MarkdownV2',
-        disable_web_page_preview: true,
-      }),
+      body: JSON.stringify(body),
     });
 
     if (!response.ok) {
-      const body = await response.text();
-      throw new Error(`Telegram API error ${response.status}: ${body}`);
+      const apiBody = await response.text();
+      throw new Error(`Telegram API error ${response.status}: ${apiBody}`);
     }
 
-    this.logger.debug(`Telegram notification sent to ${cfg.chatId}`);
+    this.logger.debug(
+      `Telegram notification sent to ${chatId}` +
+        (messageThreadId !== undefined ? ` (topic ${messageThreadId})` : ''),
+    );
+  }
+
+  /**
+   * Парсит Telegram chatId с опциональным указанием топика.
+   * Допустимые форматы:
+   *   "133652371"                 → личка
+   *   "-1003803183992"            → группа/канал
+   *   "-1003803183992:3"          → топик 3 в группе
+   *   "-1003803183992/3"          → то же
+   *   "@channel"                  → username канала
+   */
+  private parseTelegramChatId(raw: string): {
+    chatId: string;
+    messageThreadId?: number;
+  } {
+    const trimmed = String(raw).trim();
+    const m = trimmed.match(/^(-?\d+|@[A-Za-z0-9_]+)[:/](\d+)$/);
+    if (m) {
+      const threadId = Number(m[2]);
+      if (Number.isFinite(threadId) && threadId > 0) {
+        return { chatId: m[1], messageThreadId: threadId };
+      }
+    }
+    return { chatId: trimmed };
   }
 
   // =========================================================================

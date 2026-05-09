@@ -192,11 +192,12 @@ export class PhpFpmManager {
       // Ensure log directory exists
       await this.executor.execute('mkdir', ['-p', PHP_LOG_DIR]);
 
-      // Restart PHP-FPM for this version
+      // Restart PHP-FPM for this version. Может фейлиться при «нет такого юнита»
+      // (PHP-версия не установлена) — обрабатываем явно.
       const result = await this.executor.execute('systemctl', [
         'restart',
         `php${phpVersion}-fpm`,
-      ]);
+      ], { allowFailure: true });
 
       if (result.exitCode !== 0) {
         const errMsg = result.stderr || '';
@@ -354,9 +355,11 @@ ${s}
       await this.ensurePhpRepository(onLog);
 
       log(`→ apt-get update`);
+      // apt-get update иногда выдаёт warnings + non-zero — продолжаем,
+      // главное чтобы install прошёл; allowFailure: true.
       await this.executor.executeStreaming(
         'apt-get', ['update'],
-        { timeout: 120_000, onLine: log, stdin: 'ignore' },
+        { timeout: 120_000, onLine: log, stdin: 'ignore', allowFailure: true },
       );
 
       const packages = [
@@ -385,6 +388,7 @@ ${s}
           onLine: log,
           stdin: 'ignore',
           env: { DEBIAN_FRONTEND: 'noninteractive' },
+          allowFailure: true,
         },
       );
 
@@ -425,7 +429,7 @@ ${s}
       const deps = await this.executor.executeStreaming(
         'apt-get',
         ['install', '-y', 'software-properties-common', 'ca-certificates', 'curl'],
-        { timeout: 120_000, onLine: log, stdin: 'ignore', env: { DEBIAN_FRONTEND: 'noninteractive' } },
+        { timeout: 120_000, onLine: log, stdin: 'ignore', env: { DEBIAN_FRONTEND: 'noninteractive' }, allowFailure: true },
       );
       if (deps.exitCode !== 0) throw new Error(deps.stderr || 'Failed to install PPA dependencies');
 
@@ -433,7 +437,7 @@ ${s}
       const add = await this.executor.executeStreaming(
         'add-apt-repository',
         ['-y', 'ppa:ondrej/php'],
-        { timeout: 120_000, onLine: log, stdin: 'ignore' },
+        { timeout: 120_000, onLine: log, stdin: 'ignore', allowFailure: true },
       );
       if (add.exitCode !== 0) throw new Error(add.stderr || 'Failed to add ondrej/php PPA');
       return;
@@ -448,7 +452,7 @@ ${s}
       const deps = await this.executor.execute(
         'apt-get',
         ['install', '-y', '-qq', 'ca-certificates', 'curl'],
-        { timeout: 120_000 },
+        { timeout: 120_000, allowFailure: true },
       );
       if (deps.exitCode !== 0) throw new Error(deps.stderr || 'Failed to install sury.org dependencies');
 
@@ -456,7 +460,7 @@ ${s}
       const key = await this.executor.execute(
         'curl',
         ['-fsSL', 'https://packages.sury.org/php/apt.gpg', '-o', '/etc/apt/keyrings/sury-php.gpg'],
-        { timeout: 120_000 },
+        { timeout: 120_000, allowFailure: true },
       );
       if (key.exitCode !== 0) throw new Error(key.stderr || 'Failed to download sury.org apt key');
 
@@ -527,7 +531,8 @@ ${s}
       };
       log(`▶ Uninstalling PHP ${version}`);
       log(`→ systemctl stop php${version}-fpm`);
-      await this.executor.execute('systemctl', ['stop', `php${version}-fpm`]);
+      // stop может фейлиться если юнит не существует — best-effort.
+      await this.executor.execute('systemctl', ['stop', `php${version}-fpm`], { allowFailure: true });
       log(`→ apt-get remove --purge php${version}-*`);
       const result = await this.executor.executeStreaming(
         'apt-get', ['remove', '-y', '--purge', `php${version}-*`],
@@ -536,6 +541,7 @@ ${s}
           onLine: log,
           stdin: 'ignore',
           env: { DEBIAN_FRONTEND: 'noninteractive' },
+          allowFailure: true,
         },
       );
       if (result.exitCode !== 0) {
@@ -544,7 +550,7 @@ ${s}
       log(`→ apt-get autoremove --purge`);
       await this.executor.executeStreaming(
         'apt-get', ['autoremove', '-y', '--purge'],
-        { timeout: 120_000, onLine: log, stdin: 'ignore', env: { DEBIAN_FRONTEND: 'noninteractive' } },
+        { timeout: 120_000, onLine: log, stdin: 'ignore', env: { DEBIAN_FRONTEND: 'noninteractive' }, allowFailure: true },
       );
       // apt-get --purge не всегда подчищает /etc/php/{version}/ (если внутри
       // лежат файлы, не зарегистрированные dpkg, например пользовательские
@@ -592,7 +598,8 @@ ${s}
   async listExtensions(version: string): Promise<{ success: boolean; data?: Array<{ name: string; enabled: boolean }>; error?: string }> {
     try {
       // List all installed extensions
-      const result = await this.executor.execute('dpkg', ['--list', `php${version}-*`]);
+      // dpkg --list возвращает >0 если ничего не найдено — это валидный сценарий.
+      const result = await this.executor.execute('dpkg', ['--list', `php${version}-*`], { allowFailure: true });
       const installed: Array<{ name: string; enabled: boolean }> = [];
 
       if (result.exitCode === 0) {
@@ -600,8 +607,8 @@ ${s}
         for (const line of lines) {
           const match = line.match(/^ii\s+php[\d.]+-(\S+)/);
           if (match && !['fpm', 'cli', 'common'].includes(match[1])) {
-            // Check if module is enabled
-            const modCheck = await this.executor.execute(`php${version}`, ['-m']);
+            // Check if module is enabled — `php -m` может фейлиться если расширение битое.
+            const modCheck = await this.executor.execute(`php${version}`, ['-m'], { allowFailure: true });
             const modName = match[1].replace(/-/g, '');
             const enabled = modCheck.stdout.toLowerCase().includes(modName.toLowerCase());
             installed.push({ name: match[1], enabled });
@@ -634,6 +641,7 @@ ${s}
           onLine: log,
           stdin: 'ignore',
           env: { DEBIAN_FRONTEND: 'noninteractive' },
+          allowFailure: true,
         },
       );
       if (result.exitCode !== 0) {
@@ -656,7 +664,7 @@ ${s}
       assertRegex('phpVersion', version, RE_PHP_VERSION);
       assertRegex('extensionName', name, RE_PHP_EXT);
       const cmd = enable ? 'phpenmod' : 'phpdismod';
-      const result = await this.executor.execute(cmd, ['-v', version, name]);
+      const result = await this.executor.execute(cmd, ['-v', version, name], { allowFailure: true });
       if (result.exitCode !== 0) {
         return { success: false, error: result.stderr };
       }

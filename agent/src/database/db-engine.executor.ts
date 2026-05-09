@@ -41,10 +41,8 @@ abstract class DbEngineExecutor {
   constructor(protected readonly cmd: CommandExecutor) {}
 
   async status(): Promise<DbEngineStatus> {
-    // Сначала dpkg-query на пакет: видим ли его apt вообще.
-    const dpkg = await this.cmd
-      .execute('dpkg-query', ['-s', this.packageName])
-      .catch(() => ({ stdout: '', stderr: '', exitCode: 1 }));
+    // dpkg-query возвращает 1 если пакет неизвестен — это валидно.
+    const dpkg = await this.cmd.execute('dpkg-query', ['-s', this.packageName], { allowFailure: true });
     if (dpkg.exitCode !== 0 || !dpkg.stdout) return { installed: false, version: null };
 
     const status = /^Status:\s*(.+)$/m.exec(dpkg.stdout)?.[1]?.trim() || '';
@@ -56,9 +54,8 @@ abstract class DbEngineExecutor {
   }
 
   protected async detectVersion(): Promise<string | null> {
-    const r = await this.cmd
-      .execute(this.versionBinary, ['--version'])
-      .catch(() => ({ stdout: '', stderr: '', exitCode: 1 }));
+    // Бинаря может не быть на хосте — это валидный сценарий «не установлено».
+    const r = await this.cmd.execute(this.versionBinary, ['--version'], { allowFailure: true });
     if (r.exitCode !== 0) return null;
     const m = this.versionRegex.exec(r.stdout) || this.versionRegex.exec(r.stderr);
     return m?.[1]?.trim() || null;
@@ -68,7 +65,7 @@ abstract class DbEngineExecutor {
     const update = await this.cmd.execute(
       'apt-get',
       ['-o', 'Acquire::Retries=3', 'update'],
-      { timeout: 180_000, env: { DEBIAN_FRONTEND: 'noninteractive' } },
+      { timeout: 180_000, env: { DEBIAN_FRONTEND: 'noninteractive' }, allowFailure: true },
     );
     if (update.exitCode !== 0) {
       throw new Error(`apt-get update failed: ${update.stderr || update.stdout}`);
@@ -76,7 +73,7 @@ abstract class DbEngineExecutor {
     const install = await this.cmd.execute(
       'apt-get',
       ['install', '-y', '--no-install-recommends', this.packageName],
-      { timeout: 600_000, env: { DEBIAN_FRONTEND: 'noninteractive' } },
+      { timeout: 600_000, env: { DEBIAN_FRONTEND: 'noninteractive' }, allowFailure: true },
     );
     if (install.exitCode !== 0) {
       throw new Error(
@@ -87,7 +84,7 @@ abstract class DbEngineExecutor {
     // Включаем systemd-юнит. apt у Debian/Ubuntu обычно сам делает enable+start,
     // но на минимальных образах с policy-rc.d=101 этого может не произойти.
     await this.cmd
-      .execute('systemctl', ['enable', '--now', this.serviceUnit])
+      .execute('systemctl', ['enable', '--now', this.serviceUnit], { allowFailure: true })
       .catch(() => {});
 
     const after = await this.status();
@@ -96,15 +93,15 @@ abstract class DbEngineExecutor {
   }
 
   async uninstall(): Promise<void> {
-    // Останавливаем демон (best-effort).
+    // Останавливаем демон (best-effort) — может не быть запущен / не быть установлен.
     await this.cmd
-      .execute('systemctl', ['disable', '--now', this.serviceUnit])
+      .execute('systemctl', ['disable', '--now', this.serviceUnit], { allowFailure: true })
       .catch(() => {});
 
     const r = await this.cmd.execute(
       'apt-get',
       ['remove', '-y', this.packageName],
-      { timeout: 300_000, env: { DEBIAN_FRONTEND: 'noninteractive' } },
+      { timeout: 300_000, env: { DEBIAN_FRONTEND: 'noninteractive' }, allowFailure: true },
     );
     if (r.exitCode !== 0) {
       throw new Error(

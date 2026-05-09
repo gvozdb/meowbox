@@ -428,7 +428,7 @@ export class AgentService {
 
     this.safeOn(s, 'php:restart', async (params: { phpVersion: string }, cb: Callback) => {
       try {
-        const result = await this.cmdExec.execute('systemctl', ['restart', `php${params.phpVersion}-fpm`]);
+        const result = await this.cmdExec.execute('systemctl', ['restart', `php${params.phpVersion}-fpm`], { allowFailure: true });
         cb({ success: result.exitCode === 0, error: result.exitCode !== 0 ? result.stderr : undefined });
       } catch (err) {
         cb({ success: false, error: (err as Error).message });
@@ -1361,10 +1361,12 @@ export class AgentService {
         } catch { /* нет — нормально */ }
 
         let dbExists = false;
+        // mariadb может фейлиться (DB не доступна / не запущена) — для проверки
+        // существования это валидный сценарий «не существует».
         const dbCheck = await exec.execute('mariadb', [
           '-N', '-B', '-e',
           `SELECT 1 FROM information_schema.schemata WHERE schema_name='${params.name.replace(/'/g, '')}'`,
-        ]);
+        ], { allowFailure: true });
         if (dbCheck.exitCode === 0 && dbCheck.stdout.trim() === '1') {
           dbExists = true;
         }
@@ -1527,7 +1529,7 @@ export class AgentService {
         const rsync = await this.cmdExec.execute(
           'rsync',
           ['-a', '--delete', `${srcAbs}/`, `${dstAbs}/`],
-          { timeout: 600_000 },
+          { timeout: 600_000, allowFailure: true },
         );
         if (rsync.exitCode !== 0) {
           cb({ success: false, error: rsync.stderr || 'rsync failed' });
@@ -1578,7 +1580,7 @@ export class AgentService {
             const dump = await this.cmdExec.execute(
               'pg_dump',
               ['-U', 'postgres', '--no-owner', '--no-privileges', '-Fp', '-f', tmpFile, params.srcName],
-              { timeout: 600_000 },
+              { timeout: 600_000, allowFailure: true },
             );
             if (dump.exitCode !== 0) {
               cb({ success: false, error: dump.stderr || 'pg_dump failed' });
@@ -1588,7 +1590,7 @@ export class AgentService {
             const restore = await this.cmdExec.execute(
               'psql',
               ['-U', 'postgres', '-d', params.dstName, '-v', 'ON_ERROR_STOP=1', '-f', tmpFile],
-              { timeout: 600_000 },
+              { timeout: 600_000, allowFailure: true },
             );
             if (restore.exitCode !== 0) {
               cb({ success: false, error: restore.stderr || 'psql restore failed' });
@@ -1607,7 +1609,7 @@ export class AgentService {
                 `--result-file=${tmpFile}`,
                 params.srcName,
               ],
-              { timeout: 600_000 },
+              { timeout: 600_000, allowFailure: true },
             );
             if (dump.exitCode !== 0) {
               cb({ success: false, error: dump.stderr || 'mysqldump failed' });
@@ -1616,7 +1618,7 @@ export class AgentService {
             const restore = await this.cmdExec.execute(
               clientCmd,
               ['-u', 'root', '--execute=source ' + tmpFile, params.dstName],
-              { timeout: 600_000 },
+              { timeout: 600_000, allowFailure: true },
             );
             if (restore.exitCode !== 0) {
               cb({ success: false, error: restore.stderr || 'mysql restore failed' });
@@ -2072,8 +2074,9 @@ export class AgentService {
           // `git clone … rootPath`, проверка `path.join(rootPath, '.git')`).
           // НЕ в `${rootPath}/www` — это был ошибочный хардкод, который ломал
           // reconcile у любого сайта с filesRelPath != 'www'.
-          const shaRes = await this.cmdExec.execute('git', ['rev-parse', 'HEAD'], { cwd: d.rootPath });
-          const msgRes = await this.cmdExec.execute('git', ['log', '-1', '--format=%s'], { cwd: d.rootPath });
+          // git может фейлиться (нет .git, нет HEAD на свежем clone) — для reconcile это валидно.
+          const shaRes = await this.cmdExec.execute('git', ['rev-parse', 'HEAD'], { cwd: d.rootPath, allowFailure: true });
+          const msgRes = await this.cmdExec.execute('git', ['log', '-1', '--format=%s'], { cwd: d.rootPath, allowFailure: true });
           if (shaRes.exitCode === 0) {
             deployResults.push({
               deployId: d.deployId,

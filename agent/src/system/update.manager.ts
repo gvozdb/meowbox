@@ -45,19 +45,19 @@ export class UpdateManager {
   async check(): Promise<{ success: boolean; data?: UpdateCheckResult; error?: string }> {
     try {
       // Update package index
-      const aptUpdate = await this.cmd.execute('apt-get', ['update', '-qq'], { timeout: 120_000 });
+      const aptUpdate = await this.cmd.execute('apt-get', ['update', '-qq'], { timeout: 120_000, allowFailure: true });
       if (aptUpdate.exitCode !== 0 && !aptUpdate.stderr.includes('WARNING')) {
         return { success: false, error: `apt-get update failed: ${aptUpdate.stderr}` };
       }
 
-      // List upgradable packages
-      const result = await this.cmd.execute('apt-cache', ['--generate', 'pkgnames'], { timeout: 30_000 });
+      // List upgradable packages — apt-cache может вернуть >0 если кэш ещё не сформирован.
+      const result = await this.cmd.execute('apt-cache', ['--generate', 'pkgnames'], { timeout: 30_000, allowFailure: true });
 
       // Use apt-get -s upgrade to simulate and get the list
       const simResult = await this.cmd.execute(
         'apt-get',
         ['--simulate', 'upgrade'],
-        { timeout: 60_000 },
+        { timeout: 60_000, allowFailure: true },
       );
 
       const packages: UpdatablePackage[] = [];
@@ -109,7 +109,7 @@ export class UpdateManager {
         ...packageNames,
       ];
 
-      const result = await this.cmd.execute('apt-get', args, { timeout: 300_000 });
+      const result = await this.cmd.execute('apt-get', args, { timeout: 300_000, allowFailure: true });
 
       const upgraded: string[] = [];
       const failed: string[] = [];
@@ -146,7 +146,7 @@ export class UpdateManager {
       const result = await this.cmd.execute(
         'apt-get',
         ['-y', 'upgrade'],
-        { timeout: 600_000 },
+        { timeout: 600_000, allowFailure: true },
       );
 
       const upgraded: string[] = [];
@@ -184,6 +184,7 @@ export class UpdateManager {
       const pull = await this.cmd.execute('git', ['pull', '--ff-only'], {
         cwd: meowboxDir,
         timeout: 60_000,
+        allowFailure: true,
       });
       if (pull.exitCode !== 0) {
         return { success: false, error: `Git pull failed: ${pull.stderr}`, output: output.join('\n') };
@@ -195,6 +196,7 @@ export class UpdateManager {
       const npmInstall = await this.cmd.execute('npm', ['install'], {
         cwd: meowboxDir,
         timeout: 300_000,
+        allowFailure: true,
       });
       if (npmInstall.exitCode !== 0) {
         log(`[update] Warning: npm install: ${npmInstall.stderr}`);
@@ -212,6 +214,7 @@ export class UpdateManager {
       const apiBuild = await this.cmd.execute('npx', ['tsc', '-p', 'tsconfig.build.json', '--incremental', 'false'], {
         cwd: `${meowboxDir}/api`,
         timeout: 120_000,
+        allowFailure: true,
       });
       if (apiBuild.exitCode !== 0) {
         log(`[update] API build warning: ${apiBuild.stderr}`);
@@ -222,6 +225,7 @@ export class UpdateManager {
       const agentBuild = await this.cmd.execute('npx', ['tsc'], {
         cwd: `${meowboxDir}/agent`,
         timeout: 120_000,
+        allowFailure: true,
       });
       if (agentBuild.exitCode !== 0) {
         log(`[update] Agent build warning: ${agentBuild.stderr}`);
@@ -232,6 +236,7 @@ export class UpdateManager {
       const webBuild = await this.cmd.execute('npx', ['nuxt', 'build'], {
         cwd: `${meowboxDir}/web`,
         timeout: 300_000,
+        allowFailure: true,
       });
       if (webBuild.exitCode !== 0) {
         log(`[update] Web build warning: ${webBuild.stderr}`);
@@ -239,7 +244,7 @@ export class UpdateManager {
 
       // Step 7: Restart PM2 processes
       log('[update] Restarting services...');
-      await this.cmd.execute('pm2', ['restart', 'all'], { timeout: 30_000 });
+      await this.cmd.execute('pm2', ['restart', 'all'], { timeout: 30_000, allowFailure: true });
 
       log('[update] Self-update completed successfully');
       return { success: true, output: output.join('\n') };
@@ -258,34 +263,33 @@ export class UpdateManager {
       // Node.js
       versions.nodejs = process.version;
 
-      // Nginx
-      const nginx = await this.cmd.execute('nginx', ['-v'], { timeout: 5000 });
+      // Все version-пробы могут падать на хостах где софт не установлен —
+      // это валидный сценарий «версия не известна», не ошибка → allowFailure.
+      const nginx = await this.cmd.execute('nginx', ['-v'], { timeout: 5000, allowFailure: true });
       const nginxMatch = (nginx.stderr || nginx.stdout).match(/nginx\/(\S+)/);
       if (nginxMatch) versions.nginx = nginxMatch[1];
 
       // PHP (check multiple versions — список из config.ts / env SUPPORTED_PHP_VERSIONS)
       for (const ver of SUPPORTED_PHP_VERSIONS) {
-        try {
-          const php = await this.cmd.execute(`php${ver}`, ['-v'], { timeout: 5000 });
+        const php = await this.cmd.execute(`php${ver}`, ['-v'], { timeout: 5000, allowFailure: true });
+        if (php.exitCode === 0) {
           const phpMatch = php.stdout.match(/PHP\s+(\S+)/);
           if (phpMatch) versions[`php${ver}`] = phpMatch[1];
-        } catch {
-          // Version not installed
         }
       }
 
       // MariaDB
-      const maria = await this.cmd.execute('mariadb', ['--version'], { timeout: 5000 });
+      const maria = await this.cmd.execute('mariadb', ['--version'], { timeout: 5000, allowFailure: true });
       const mariaMatch = maria.stdout.match(/(\d+\.\d+\.\d+)/);
       if (mariaMatch) versions.mariadb = mariaMatch[1];
 
       // PostgreSQL
-      const pg = await this.cmd.execute('psql', ['--version'], { timeout: 5000 });
+      const pg = await this.cmd.execute('psql', ['--version'], { timeout: 5000, allowFailure: true });
       const pgMatch = pg.stdout.match(/(\d+\.\d+)/);
       if (pgMatch) versions.postgresql = pgMatch[1];
 
       // PM2
-      const pm2 = await this.cmd.execute('pm2', ['--version'], { timeout: 5000 });
+      const pm2 = await this.cmd.execute('pm2', ['--version'], { timeout: 5000, allowFailure: true });
       versions.pm2 = pm2.stdout.trim();
 
       return { success: true, data: versions };

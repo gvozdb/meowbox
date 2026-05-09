@@ -38,12 +38,15 @@ export class VpnInstaller {
 
   async getXrayStatus(): Promise<InstallStatus> {
     try {
-      const { stdout } = await this.cmd.execute(XRAY_BINARY_PATH, ['version']);
-      const ver = parseSemver(stdout);
+      const res = await this.cmd.execute(XRAY_BINARY_PATH, ['version'], { allowFailure: true });
+      if (res.exitCode !== 0) {
+        return { installed: false, version: null };
+      }
+      const ver = parseSemver(res.stdout);
       return {
         installed: !!ver && gte(ver, XRAY_MIN_VERSION),
         version: ver ? ver.join('.') : null,
-        details: stdout.split('\n')[0].trim(),
+        details: res.stdout.split('\n')[0].trim(),
       };
     } catch {
       return { installed: false, version: null };
@@ -106,13 +109,49 @@ export class VpnInstaller {
   // ============= AmneziaWG =============
 
   async getAmneziaStatus(): Promise<InstallStatus> {
+    // 1) Самый надёжный способ — dpkg. PPA `ppa:amnezia/ppa` ставит
+    //    `amneziawg-tools`, бинарь приходит вместе с пакетом.
     try {
-      const { stdout } = await this.cmd.execute('awg', ['--version']);
-      const m = stdout.match(/v?([\d.]+)/);
+      const dpkg = await this.cmd.execute('dpkg-query', [
+        '-W',
+        '-f=${Status}|${Version}\n',
+        'amneziawg-tools',
+      ], { allowFailure: true });
+      if (dpkg.exitCode === 0) {
+        const line = dpkg.stdout.split('\n')[0].trim();
+        const [status, version] = line.split('|');
+        if (status && status.includes('install ok installed')) {
+          return {
+            installed: true,
+            version: version || 'unknown',
+            details: 'amneziawg-tools (dpkg)',
+          };
+        }
+      }
+    } catch {
+      /* dpkg отсутствует — не Debian/Ubuntu, fallback ниже */
+    }
+
+    // 2) Fallback: бинарь awg. CommandExecutor НЕ кидает исключение при
+    //    ENOENT — возвращает exitCode=1. Раньше тут был вечный installed:true
+    //    из-за этой разницы в контракте. Теперь проверяем exitCode явно
+    //    и плюс — что вывод реально от AmneziaWG, а не симлинк/wrapper на wg.
+    try {
+      const res = await this.cmd.execute('awg', ['--version'], { allowFailure: true });
+      if (res.exitCode !== 0) {
+        return { installed: false, version: null };
+      }
+      const out = `${res.stdout}\n${res.stderr}`;
+      const isAmnezia = /amnezia/i.test(out);
+      if (!isAmnezia) {
+        // Бинарь awg есть, но это не AmneziaWG (например симлинк на wg).
+        return { installed: false, version: null, details: 'awg найден, но это не AmneziaWG' };
+      }
+      const m = out.match(/v?(\d+\.\d+(?:\.\d+)?)/);
       return {
         installed: true,
         version: m ? m[1] : 'unknown',
-        details: stdout.split('\n')[0].trim(),
+        details: out.split('\n')[0].trim(),
       };
     } catch {
       return { installed: false, version: null };
@@ -134,19 +173,19 @@ export class VpnInstaller {
     }
 
     // 1) Убедиться что есть add-apt-repository.
-    try {
-      await this.cmd.execute('which', ['add-apt-repository']);
-    } catch {
+    const whichRes = await this.cmd.execute('which', ['add-apt-repository'], { allowFailure: true });
+    if (whichRes.exitCode !== 0) {
       await this.aptInstall(['software-properties-common']);
     }
 
-    // 2) Подключить ppa.
-    try {
-      await this.cmd.execute('add-apt-repository', ['-y', 'ppa:amnezia/ppa']);
-    } catch (err) {
-      // PPA может быть уже подключён — продолжаем.
+    // 2) Подключить ppa. Может быть уже подключён — это не блокер.
+    const ppaRes = await this.cmd.execute('add-apt-repository', [
+      '-y',
+      'ppa:amnezia/ppa',
+    ], { allowFailure: true });
+    if (ppaRes.exitCode !== 0) {
       console.warn(
-        `[vpn-installer] add-apt-repository ppa:amnezia/ppa: ${(err as Error).message}`,
+        `[vpn-installer] add-apt-repository ppa:amnezia/ppa exit ${ppaRes.exitCode}: ${(ppaRes.stderr || ppaRes.stdout).slice(0, 200)}`,
       );
     }
 
@@ -204,12 +243,13 @@ export class VpnInstaller {
 
   /** Создаёт юзера meowbox-vpn (runtime user для Xray-systemd-юнитов). */
   private async ensureRuntimeUser(): Promise<void> {
-    try {
-      await this.cmd.execute('/usr/bin/id', [VPN_RUNTIME_USER]);
-      return;
-    } catch {
-      /* нет — создаём */
-    }
+    // `id` возвращает 1 если юзера нет — это нормальный сценарий проверки,
+    // поэтому allowFailure: true. Без него execute бросит CommandError, и
+    // мы попадём в "ловлю", вместо того чтобы спокойно создать юзера.
+    const idRes = await this.cmd.execute('/usr/bin/id', [VPN_RUNTIME_USER], { allowFailure: true });
+    if (idRes.exitCode === 0) return;
+
+    // useradd должен пройти — если упал, это реальная ошибка → throw сам.
     await this.cmd.execute('/usr/sbin/useradd', [
       '--system',
       '--no-create-home',

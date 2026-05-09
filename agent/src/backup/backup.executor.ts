@@ -228,21 +228,21 @@ export class BackupExecutor {
 
       if (isDifferential && localBasePath) {
         // Step 1: Extract base (full) backup
-        const r1 = await this.executor.execute('tar', ['-xzf', localBasePath, '-C', tempDir, ...TAR_RESTORE_FLAGS], { timeout: 600_000 });
+        const r1 = await this.executor.execute('tar', ['-xzf', localBasePath, '-C', tempDir, ...TAR_RESTORE_FLAGS], { timeout: 600_000, allowFailure: true });
         if (r1.exitCode !== 0) {
           return { success: false, error: `Base extract failed: ${r1.stderr}` };
         }
         onProgress(35);
 
         // Step 2: Extract diff on top — overwrites changed files
-        const r2 = await this.executor.execute('tar', ['-xzf', localDiffPath, '-C', tempDir, ...TAR_RESTORE_FLAGS], { timeout: 600_000 });
+        const r2 = await this.executor.execute('tar', ['-xzf', localDiffPath, '-C', tempDir, ...TAR_RESTORE_FLAGS], { timeout: 600_000, allowFailure: true });
         if (r2.exitCode !== 0) {
           return { success: false, error: `Diff extract failed: ${r2.stderr}` };
         }
         onProgress(50);
       } else {
         // Full / FILES_ONLY / DB_ONLY — single extraction
-        const extract = await this.executor.execute('tar', ['-xzf', localDiffPath, '-C', tempDir, ...TAR_RESTORE_FLAGS], { timeout: 600_000 });
+        const extract = await this.executor.execute('tar', ['-xzf', localDiffPath, '-C', tempDir, ...TAR_RESTORE_FLAGS], { timeout: 600_000, allowFailure: true });
         if (extract.exitCode !== 0) {
           return { success: false, error: `Extract failed: ${extract.stderr}` };
         }
@@ -527,7 +527,7 @@ export class BackupExecutor {
       }
       args.push(name);
 
-      const result = await this.executor.execute('pg_dump', args, { timeout: 600_000 });
+      const result = await this.executor.execute('pg_dump', args, { timeout: 600_000, allowFailure: true });
       if (result.exitCode !== 0) {
         throw new Error(`Database dump failed for ${name}: ${result.stderr}`);
       }
@@ -546,14 +546,14 @@ export class BackupExecutor {
         }
         args1.push(`--result-file=${outputPath}`, name);
 
-        const r1 = await this.executor.execute(cmd, args1, { timeout: 600_000 });
+        const r1 = await this.executor.execute(cmd, args1, { timeout: 600_000, allowFailure: true });
         if (r1.exitCode !== 0) {
           throw new Error(`Database dump failed for ${name}: ${r1.stderr}`);
         }
 
         // Pass 2: schema-only for excluded tables (append)
         const args2 = ['-u', 'root', '--no-data', name, ...excluded];
-        const r2 = await this.executor.execute(cmd, args2, { timeout: 600_000 });
+        const r2 = await this.executor.execute(cmd, args2, { timeout: 600_000, allowFailure: true });
         if (r2.exitCode !== 0) {
           throw new Error(`Schema dump failed for ${name}: ${r2.stderr}`);
         }
@@ -566,7 +566,7 @@ export class BackupExecutor {
           '--single-transaction', '--quick', '--routines', '--triggers',
           `--result-file=${outputPath}`, name,
         ];
-        const result = await this.executor.execute(cmd, args, { timeout: 600_000 });
+        const result = await this.executor.execute(cmd, args, { timeout: 600_000, allowFailure: true });
         if (result.exitCode !== 0) {
           throw new Error(`Database dump failed for ${name}: ${result.stderr}`);
         }
@@ -603,7 +603,7 @@ export class BackupExecutor {
       args.push(relative);
     }
 
-    const result = await this.executor.execute('tar', args, { timeout: 600_000 });
+    const result = await this.executor.execute('tar', args, { timeout: 600_000, allowFailure: true });
 
     if (result.exitCode !== 0) {
       throw new Error(`Archive creation failed: ${result.stderr}`);

@@ -83,6 +83,7 @@ export class SslManager {
 
     const result = await this.executor.execute('certbot', args, {
       timeout: 120_000,
+      allowFailure: true,
     });
 
     // Чистим .well-known/acme-challenge от мусора, оставшегося после валидации.
@@ -129,6 +130,7 @@ export class SslManager {
   async renewAll(): Promise<{ success: boolean; output: string }> {
     const result = await this.executor.execute('certbot', ['renew', '--quiet'], {
       timeout: 300_000,
+      allowFailure: true,
     });
 
     return {
@@ -160,7 +162,7 @@ export class SslManager {
     // Читаем notAfter через openssl.
     const openssl = await this.executor.execute('openssl', [
       'x509', '-in', certPath, '-noout', '-enddate',
-    ]);
+    ], { allowFailure: true });
     let expiresAt: string | undefined;
     if (openssl.exitCode === 0) {
       const match = openssl.stdout.match(/notAfter=(.+)/);
@@ -211,7 +213,7 @@ export class SslManager {
           '--cert-path', certPath,
           '--non-interactive',
           '--delete-after-revoke',
-        ], { timeout: 60_000 });
+        ], { timeout: 60_000, allowFailure: true });
         revokeOk = result.exitCode === 0;
       }
     } catch { /* проглатываем — переходим к force-cleanup */ }
@@ -265,7 +267,7 @@ export class SslManager {
       let expiresAt: string | undefined;
       const openssl = await this.executor.execute('openssl', [
         'x509', '-in', certPath, '-noout', '-enddate',
-      ]);
+      ], { allowFailure: true });
       if (openssl.exitCode === 0) {
         const match = openssl.stdout.match(/notAfter=(.+)/);
         if (match) {
@@ -295,7 +297,7 @@ export class SslManager {
     try {
       const r = await this.executor.execute('openssl', [
         'x509', '-in', certPath, '-noout', '-ext', 'subjectAltName',
-      ], { timeout: 10_000 });
+      ], { timeout: 10_000, allowFailure: true });
       if (r.exitCode !== 0) return undefined;
       // Вывод выглядит так:
       //   X509v3 Subject Alternative Name:
@@ -418,7 +420,7 @@ export class SslManager {
     const result = await this.executor.execute('certbot', [
       'certificates',
       '--cert-name', certPath.split('/')[4] || '',
-    ], { timeout: 30_000 });
+    ], { timeout: 30_000, allowFailure: true });
 
     if (result.exitCode !== 0) return undefined;
 

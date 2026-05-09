@@ -181,7 +181,7 @@ export class PermissionsManager {
   ): Promise<void> {
     const display = `${cmd} ${args.join(' ')}`;
     try {
-      const r = await this.executor.execute(cmd, args);
+      const r = await this.executor.execute(cmd, args, { allowFailure: true });
       if (r.exitCode === 0) {
         steps.push({ cmd: display, ok: true });
       } else {

@@ -104,11 +104,27 @@ export class XrayManager {
           `Запусти системную миграцию 2026-05-09-002-install-xray.`,
       );
     }
-    const { stdout } = await this.cmd.execute(XRAY_BINARY_PATH, ['x25519']);
-    const privMatch = stdout.match(/Private key:\s*([\w-]+)/i);
-    const pubMatch = stdout.match(/Public key:\s*([\w-]+)/i);
+    // allowFailure: true — кидаем СВОЙ контекстный Error с подсказкой,
+    // вместо generic CommandError.
+    const res = await this.cmd.execute(XRAY_BINARY_PATH, ['x25519'], { allowFailure: true });
+    if (res.exitCode !== 0) {
+      throw new Error(
+        `xray x25519 завершился с кодом ${res.exitCode}: ${(res.stderr || res.stdout).slice(0, 300)}`,
+      );
+    }
+    const out = res.stdout;
+    // Поддерживаем оба формата:
+    //   старый (Xray до v25.x):       "Private key: ..." / "Public key: ..."
+    //   новый (Xray v25.x+):           "PrivateKey: ..." / "Password (PublicKey): ..."
+    // Используем единый regex с alternation. base64url-алфавит: [A-Za-z0-9_-].
+    const privMatch =
+      out.match(/Private[\s_-]?[Kk]ey:\s*([A-Za-z0-9_-]+)/) ||
+      out.match(/PrivateKey:\s*([A-Za-z0-9_-]+)/);
+    const pubMatch =
+      out.match(/Public[\s_-]?[Kk]ey:\s*([A-Za-z0-9_-]+)/) ||
+      out.match(/Password\s*\(PublicKey\):\s*([A-Za-z0-9_-]+)/);
     if (!privMatch || !pubMatch) {
-      throw new Error(`Не смог распарсить вывод xray x25519: ${stdout.slice(0, 200)}`);
+      throw new Error(`Не смог распарсить вывод xray x25519: ${out.slice(0, 300)}`);
     }
     return { privKey: privMatch[1], pubKey: pubMatch[1] };
   }
@@ -259,15 +275,13 @@ export class XrayManager {
   }
 
   async statusActive(serviceId: string): Promise<boolean> {
-    try {
-      const { stdout } = await this.cmd.execute('systemctl', [
-        'is-active',
-        this.systemdUnit(serviceId),
-      ]);
-      return stdout.trim() === 'active';
-    } catch {
-      return false;
-    }
+    // `systemctl is-active` возвращает exit=3 если не активен — это валидный
+    // ответ, не ошибка. allowFailure: true.
+    const res = await this.cmd.execute('systemctl', [
+      'is-active',
+      this.systemdUnit(serviceId),
+    ], { allowFailure: true });
+    return res.stdout.trim() === 'active';
   }
 
   async addUser(params: XrayUserAddParams): Promise<void> {
@@ -424,30 +438,23 @@ WantedBy=multi-user.target
   }
 
   private async openFirewall(port: number, proto: 'tcp' | 'udp'): Promise<void> {
-    try {
-      await this.cmd.execute('which', ['ufw']);
-    } catch {
-      return; // ufw нет — пропускаем
-    }
-    try {
-      // ufw allow 443/tcp
-      await this.cmd.execute('ufw', ['allow', `${port}/${proto}`]);
-    } catch (err) {
-      // не критично, оператор разберётся
-      console.warn(`[xray] ufw allow ${port}/${proto} failed: ${(err as Error).message}`);
+    // `which ufw` валидно возвращает 1 если бинаря нет → allowFailure.
+    const which = await this.cmd.execute('which', ['ufw'], { allowFailure: true });
+    if (which.exitCode !== 0) return;
+
+    // `ufw allow` может ругаться (например уже есть rule) — не рушим деплой.
+    const allow = await this.cmd.execute('ufw', ['allow', `${port}/${proto}`], { allowFailure: true });
+    if (allow.exitCode !== 0) {
+      console.warn(
+        `[xray] ufw allow ${port}/${proto} exit ${allow.exitCode}: ${(allow.stderr || allow.stdout).slice(0, 200)}`,
+      );
     }
   }
 
   private async closeFirewall(port: number, proto: 'tcp' | 'udp'): Promise<void> {
-    try {
-      await this.cmd.execute('which', ['ufw']);
-    } catch {
-      return;
-    }
-    try {
-      await this.cmd.execute('ufw', ['delete', 'allow', `${port}/${proto}`]);
-    } catch {
-      /* noop */
-    }
+    const which = await this.cmd.execute('which', ['ufw'], { allowFailure: true });
+    if (which.exitCode !== 0) return;
+    // delete может не найти правило — это ок при cleanup.
+    await this.cmd.execute('ufw', ['delete', 'allow', `${port}/${proto}`], { allowFailure: true });
   }
 }

@@ -148,7 +148,7 @@ export class ResticExecutor {
     const check = await this.executor.execute(
       'restic',
       ['-r', repo, 'snapshots', '--json', '--no-lock'],
-      { env, timeout: 30_000 },
+      { env, timeout: 30_000, allowFailure: true },
     );
 
     if (check.exitCode === 0) {
@@ -168,7 +168,7 @@ export class ResticExecutor {
     const init = await this.executor.execute(
       'restic',
       ['-r', repo, 'init'],
-      { env, timeout: 60_000 },
+      { env, timeout: 60_000, allowFailure: true },
     );
     if (init.exitCode !== 0) {
       return {
@@ -292,7 +292,7 @@ export class ResticExecutor {
         const latest = await this.executor.execute(
           'restic',
           ['-r', repo, 'snapshots', '--json', '--tag', `site:${siteName}`, '--latest', '1'],
-          { env, timeout: 30_000 },
+          { env, timeout: 30_000, allowFailure: true },
         );
         if (latest.exitCode === 0) {
           try {
@@ -332,7 +332,7 @@ export class ResticExecutor {
       const r = await this.executor.execute(
         'restic',
         ['-r', repo, 'snapshots', '--json', '--tag', `site:${siteName}`],
-        { env, timeout: 60_000 },
+        { env, timeout: 60_000, allowFailure: true },
       );
       if (r.exitCode !== 0) {
         return { success: false, error: r.stderr.substring(0, 500) };
@@ -392,7 +392,7 @@ export class ResticExecutor {
       const result = await this.executor.execute(
         'restic',
         ['-r', repo, 'restore', snapshotId, '--target', restoreTemp],
-        { env, timeout: 1800_000 }, // 30 минут
+        { env, timeout: 1800_000, allowFailure: true }, // 30 минут
       );
 
       if (result.exitCode !== 0) {
@@ -418,10 +418,10 @@ export class ResticExecutor {
             }
 
             if (db.type === 'POSTGRESQL') {
-              await this.executor.execute('sudo', ['-u', 'postgres', 'psql', '-d', db.name, '-f', safeDump], { timeout: 600_000 });
+              await this.executor.execute('sudo', ['-u', 'postgres', 'psql', '-d', db.name, '-f', safeDump], { timeout: 600_000, allowFailure: true });
             } else {
               const cmd = db.type === 'MARIADB' ? 'mariadb' : 'mysql';
-              await this.executor.execute(cmd, ['-u', 'root', db.name, '-e', `source ${safeDump}`], { timeout: 600_000 });
+              await this.executor.execute(cmd, ['-u', 'root', db.name, '-e', `source ${safeDump}`], { timeout: 600_000, allowFailure: true });
             }
           }
         }
@@ -440,9 +440,9 @@ export class ResticExecutor {
                 '-a', '--delete',
                 `${extractedRoot}/`,
                 `${rootPath}/`,
-              ], { timeout: 600_000 });
+              ], { timeout: 600_000, allowFailure: true });
             } else {
-              await this.executor.execute('cp', ['-a', `${extractedRoot}/.`, rootPath], { timeout: 600_000 });
+              await this.executor.execute('cp', ['-a', `${extractedRoot}/.`, rootPath], { timeout: 600_000, allowFailure: true });
             }
           } else {
             // Selective: только указанные пути первого уровня (и дальше).
@@ -464,9 +464,9 @@ export class ResticExecutor {
               await this.executor.execute('mkdir', ['-p', path.dirname(dst)], { timeout: 30_000 });
               if (isDir) {
                 if (cleanup) {
-                  await this.executor.execute('rsync', ['-a', '--delete', `${src}/`, `${dst}/`], { timeout: 600_000 });
+                  await this.executor.execute('rsync', ['-a', '--delete', `${src}/`, `${dst}/`], { timeout: 600_000, allowFailure: true });
                 } else {
-                  await this.executor.execute('rsync', ['-a', `${src}/`, `${dst}/`], { timeout: 600_000 });
+                  await this.executor.execute('rsync', ['-a', `${src}/`, `${dst}/`], { timeout: 600_000, allowFailure: true });
                 }
               } else {
                 await this.executor.execute('cp', ['-a', src, dst], { timeout: 60_000 });
@@ -837,7 +837,7 @@ export class ResticExecutor {
         return { success: true };
       }
 
-      const r = await this.executor.execute('restic', args, { env, timeout: 600_000 });
+      const r = await this.executor.execute('restic', args, { env, timeout: 600_000, allowFailure: true });
       if (r.exitCode !== 0) {
         return { success: false, error: r.stderr.substring(0, 500) };
       }
@@ -866,7 +866,7 @@ export class ResticExecutor {
       const r = await this.executor.execute(
         'restic',
         ['-r', repo, 'forget', snapshotId, '--prune'],
-        { env, timeout: 600_000 },
+        { env, timeout: 600_000, allowFailure: true },
       );
       if (r.exitCode !== 0) {
         return { success: false, error: r.stderr.substring(0, 500) };
@@ -929,7 +929,7 @@ export class ResticExecutor {
       }
 
       // RESTIC_CHECK_TIMEOUT_MS — для огромных реп можно увеличить.
-      const r = await this.executor.execute('restic', args, { env, timeout: RESTIC_OPS.CHECK_TIMEOUT_MS });
+      const r = await this.executor.execute('restic', args, { env, timeout: RESTIC_OPS.CHECK_TIMEOUT_MS, allowFailure: true });
       const durationMs = Date.now() - start;
 
       if (r.exitCode === 0) {
@@ -1072,7 +1072,7 @@ export class ResticExecutor {
       const r = await this.executor.execute(
         'restic',
         ['-r', repo, 'diff', '--json', snapshotIdA, snapshotIdB],
-        { env, timeout: RESTIC_OPS.LS_TIMEOUT_MS },
+        { env, timeout: RESTIC_OPS.LS_TIMEOUT_MS, allowFailure: true },
       );
       if (r.exitCode !== 0) {
         return { success: false, error: `restic diff failed: ${r.stderr.substring(0, 500)}` };
@@ -1510,9 +1510,11 @@ export class ResticExecutor {
       return { success: true, binary: true, sizeA, sizeB, truncated };
     }
 
-    // diff -u: exit 0 = идентичны, 1 = разные, 2+ = ошибка
+    // diff -u: exit 0 = идентичны, 1 = разные (норма), 2+ = реальная ошибка.
+    // allowFailure обязателен — иначе CommandError бросится на любых различиях.
     const r = await this.executor.execute('diff', ['-u', pathA, pathB], {
       timeout: 30_000,
+      allowFailure: true,
     });
     if (r.exitCode > 1) {
       return {
@@ -1546,7 +1548,7 @@ export class ResticExecutor {
       const args = ['-U', 'postgres', '-Fp', '-f', outputPath];
       for (const t of excluded) args.push(`--exclude-table-data=${t}`);
       args.push(name);
-      const r = await this.executor.execute('pg_dump', args, { timeout: 600_000 });
+      const r = await this.executor.execute('pg_dump', args, { timeout: 600_000, allowFailure: true });
       if (r.exitCode !== 0) throw new Error(`pg_dump failed: ${r.stderr}`);
     } else {
       const cmd = type === 'MARIADB' ? 'mariadb-dump' : 'mysqldump';
@@ -1554,11 +1556,11 @@ export class ResticExecutor {
         const args1 = ['-u', 'root', '--single-transaction', '--quick', '--routines', '--triggers'];
         for (const t of excluded) args1.push(`--ignore-table=${name}.${t}`);
         args1.push(`--result-file=${outputPath}`, name);
-        const r1 = await this.executor.execute(cmd, args1, { timeout: 600_000 });
+        const r1 = await this.executor.execute(cmd, args1, { timeout: 600_000, allowFailure: true });
         if (r1.exitCode !== 0) throw new Error(`${cmd} failed: ${r1.stderr}`);
 
         const args2 = ['-u', 'root', '--no-data', name, ...excluded];
-        const r2 = await this.executor.execute(cmd, args2, { timeout: 600_000 });
+        const r2 = await this.executor.execute(cmd, args2, { timeout: 600_000, allowFailure: true });
         if (r2.exitCode === 0) fs.appendFileSync(outputPath, r2.stdout);
       } else {
         const args = [
@@ -1566,7 +1568,7 @@ export class ResticExecutor {
           '--single-transaction', '--quick', '--routines', '--triggers',
           `--result-file=${outputPath}`, name,
         ];
-        const r = await this.executor.execute(cmd, args, { timeout: 600_000 });
+        const r = await this.executor.execute(cmd, args, { timeout: 600_000, allowFailure: true });
         if (r.exitCode !== 0) throw new Error(`${cmd} failed: ${r.stderr}`);
       }
     }

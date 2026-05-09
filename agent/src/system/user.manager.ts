@@ -75,7 +75,7 @@ export class SystemUserManager {
       '--shell', '/bin/bash',
       '--user-group',
       username,
-    ]);
+    ], { allowFailure: true });
 
     if (result.exitCode !== 0) {
       return { success: false, error: result.stderr || `useradd failed (code ${result.exitCode})` };
@@ -133,7 +133,7 @@ export class SystemUserManager {
     // Generate SHA-512 password hash via openssl
     const hashResult = await this.executor.execute('openssl', [
       'passwd', '-6', '-salt', salt, password,
-    ]);
+    ], { allowFailure: true });
 
     if (hashResult.exitCode !== 0) {
       return { success: false, error: 'Failed to generate password hash' };
@@ -144,7 +144,7 @@ export class SystemUserManager {
     const result = await this.executor.execute('usermod', [
       '--password', hash,
       username,
-    ]);
+    ], { allowFailure: true });
 
     if (result.exitCode !== 0) {
       return { success: false, error: result.stderr || 'Failed to set password' };
@@ -162,7 +162,7 @@ export class SystemUserManager {
   ): Promise<{ success: boolean; error?: string }> {
     const result = await this.executor.execute('chown', [
       '-R', `${username}:${username}`, rootPath,
-    ]);
+    ], { allowFailure: true });
 
     if (result.exitCode !== 0) {
       return { success: false, error: result.stderr };
@@ -183,9 +183,10 @@ export class SystemUserManager {
       return { success: true };
     }
 
-    await this.executor.execute('gpasswd', ['-d', 'www-data', username]).catch(() => {});
+    // gpasswd может вернуть !=0 если юзер не в группе — это норма.
+    await this.executor.execute('gpasswd', ['-d', 'www-data', username], { allowFailure: true }).catch(() => {});
 
-    const result = await this.executor.execute('userdel', [username]);
+    const result = await this.executor.execute('userdel', [username], { allowFailure: true });
 
     if (result.exitCode !== 0) {
       return { success: false, error: result.stderr || `userdel failed (code ${result.exitCode})` };
@@ -198,7 +199,8 @@ export class SystemUserManager {
    * Check if a system user exists.
    */
   async userExists(username: string): Promise<boolean> {
-    const result = await this.executor.execute('id', ['-u', username]);
+    // `id -u` возвращает 1 если юзера нет — это нормальная проверка существования.
+    const result = await this.executor.execute('id', ['-u', username], { allowFailure: true });
     return result.exitCode === 0;
   }
 
@@ -322,8 +324,8 @@ export class SystemUserManager {
   private async lookupUserIds(
     username: string,
   ): Promise<{ uid: number; gid: number } | null> {
-    const u = await this.executor.execute('id', ['-u', username]);
-    const g = await this.executor.execute('id', ['-g', username]);
+    const u = await this.executor.execute('id', ['-u', username], { allowFailure: true });
+    const g = await this.executor.execute('id', ['-g', username], { allowFailure: true });
     if (u.exitCode !== 0 || g.exitCode !== 0) return null;
     const uid = parseInt(u.stdout.trim(), 10);
     const gid = parseInt(g.stdout.trim(), 10);

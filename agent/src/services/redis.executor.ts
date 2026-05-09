@@ -68,8 +68,8 @@ export class RedisExecutor {
     // ВАЖНО: НЕ использовать `-f=${...}` — CommandExecutor блокирует `{` и `}`
     // в аргументах (validateArgs forbidden chars). Используем `-s` — он печатает
     // полный control-блок, парсим Status: и Version: построчно.
-    const r = await this.cmd.execute('dpkg-query', ['-s', 'redis-server'])
-      .catch(() => ({ stdout: '', stderr: '', exitCode: 1 }));
+    // dpkg-query exit=1 если пакет не установлен — валидно.
+    const r = await this.cmd.execute('dpkg-query', ['-s', 'redis-server'], { allowFailure: true });
 
     if (r.exitCode !== 0 || !r.stdout) return { installed: false, version: null };
 
@@ -84,7 +84,7 @@ export class RedisExecutor {
     const update = await this.cmd.execute(
       'apt-get',
       ['-o', 'Acquire::Retries=3', 'update'],
-      { timeout: 180_000, env: { DEBIAN_FRONTEND: 'noninteractive' } },
+      { timeout: 180_000, env: { DEBIAN_FRONTEND: 'noninteractive' }, allowFailure: true },
     );
     if (update.exitCode !== 0) {
       throw new Error(`apt-get update failed: ${update.stderr || update.stdout}`);
@@ -92,14 +92,16 @@ export class RedisExecutor {
     const install = await this.cmd.execute(
       'apt-get',
       ['install', '-y', '--no-install-recommends', 'redis-server'],
-      { timeout: 600_000, env: { DEBIAN_FRONTEND: 'noninteractive' } },
+      { timeout: 600_000, env: { DEBIAN_FRONTEND: 'noninteractive' }, allowFailure: true },
     );
     if (install.exitCode !== 0) {
       throw new Error(`apt-get install redis-server failed: ${install.stderr || install.stdout}`);
     }
 
     // Системный redis-server демон не нужен — мы делаем per-site инстансы.
-    await this.cmd.execute('systemctl', ['disable', '--now', 'redis-server']).catch(() => {});
+    // disable может фейлиться на свежей установке (юнит ещё не загружен) — best-effort.
+    await this.cmd.execute('systemctl', ['disable', '--now', 'redis-server'], { allowFailure: true })
+      .catch(() => {});
 
     await this.installTemplateUnit();
 
@@ -109,14 +111,15 @@ export class RedisExecutor {
   }
 
   async serverUninstall(): Promise<void> {
-    await this.cmd.execute('systemctl', ['disable', '--now', 'redis-server']).catch(() => {});
+    await this.cmd.execute('systemctl', ['disable', '--now', 'redis-server'], { allowFailure: true })
+      .catch(() => {});
     await fs.unlink(TEMPLATE_UNIT_PATH).catch(() => {});
-    await this.cmd.execute('systemctl', ['daemon-reload']).catch(() => {});
+    await this.cmd.execute('systemctl', ['daemon-reload'], { allowFailure: true }).catch(() => {});
 
     const r = await this.cmd.execute(
       'apt-get',
       ['remove', '-y', 'redis-server'],
-      { timeout: 300_000, env: { DEBIAN_FRONTEND: 'noninteractive' } },
+      { timeout: 300_000, env: { DEBIAN_FRONTEND: 'noninteractive' }, allowFailure: true },
     );
     if (r.exitCode !== 0) {
       throw new Error(`apt-get remove redis-server failed: ${r.stderr || r.stdout}`);
@@ -163,7 +166,10 @@ export class RedisExecutor {
     await this.installTemplateUnit();
 
     await this.cmd.execute('systemctl', ['daemon-reload']);
-    const r = await this.cmd.execute('systemctl', ['enable', '--now', `redis@${p.siteName}.service`]);
+    const r = await this.cmd.execute(
+      'systemctl', ['enable', '--now', `redis@${p.siteName}.service`],
+      { allowFailure: true },
+    );
     if (r.exitCode !== 0) {
       throw new Error(`systemctl enable redis@${p.siteName} failed: ${r.stderr || r.stdout}`);
     }
@@ -171,28 +177,37 @@ export class RedisExecutor {
 
   async siteDisable(p: SiteContextParams): Promise<void> {
     this.assertSafeName(p.siteName);
-    await this.cmd.execute('systemctl', ['disable', '--now', `redis@${p.siteName}.service`]).catch(() => {});
+    await this.cmd.execute(
+      'systemctl', ['disable', '--now', `redis@${p.siteName}.service`],
+      { allowFailure: true },
+    ).catch(() => {});
 
     const dataDir = path.join(DATA_BASE, p.siteName);
-    await this.cmd.execute('rm', ['-rf', dataDir]).catch(() => {});
+    await this.cmd.execute('rm', ['-rf', dataDir], { allowFailure: true }).catch(() => {});
 
     const overrideDir = `/etc/systemd/system/redis@${p.siteName}.service.d`;
-    await this.cmd.execute('rm', ['-rf', overrideDir]).catch(() => {});
-    await this.cmd.execute('systemctl', ['daemon-reload']).catch(() => {});
+    await this.cmd.execute('rm', ['-rf', overrideDir], { allowFailure: true }).catch(() => {});
+    await this.cmd.execute('systemctl', ['daemon-reload'], { allowFailure: true }).catch(() => {});
 
     if (p.rootPath) {
       const envDir = path.join(p.rootPath, '.meowbox', 'redis');
-      await this.cmd.execute('rm', ['-rf', envDir]).catch(() => {});
+      await this.cmd.execute('rm', ['-rf', envDir], { allowFailure: true }).catch(() => {});
 
       // Чистим socket/pid файлы — они в tmp сайта
       const tmp = path.join(p.rootPath, 'tmp');
-      await this.cmd.execute('rm', ['-f', path.join(tmp, 'redis.sock'), path.join(tmp, 'redis.pid')]).catch(() => {});
+      await this.cmd.execute(
+        'rm', ['-f', path.join(tmp, 'redis.sock'), path.join(tmp, 'redis.pid')],
+        { allowFailure: true },
+      ).catch(() => {});
     }
   }
 
   async siteStart(p: SiteContextParams): Promise<void> {
     this.assertSafeName(p.siteName);
-    const r = await this.cmd.execute('systemctl', ['start', `redis@${p.siteName}.service`]);
+    const r = await this.cmd.execute(
+      'systemctl', ['start', `redis@${p.siteName}.service`],
+      { allowFailure: true },
+    );
     if (r.exitCode !== 0) {
       throw new Error(`systemctl start redis@${p.siteName} failed: ${r.stderr || r.stdout}`);
     }
@@ -200,7 +215,10 @@ export class RedisExecutor {
 
   async siteStop(p: SiteContextParams): Promise<void> {
     this.assertSafeName(p.siteName);
-    const r = await this.cmd.execute('systemctl', ['stop', `redis@${p.siteName}.service`]);
+    const r = await this.cmd.execute(
+      'systemctl', ['stop', `redis@${p.siteName}.service`],
+      { allowFailure: true },
+    );
     if (r.exitCode !== 0) {
       throw new Error(`systemctl stop redis@${p.siteName} failed: ${r.stderr || r.stdout}`);
     }
@@ -208,8 +226,11 @@ export class RedisExecutor {
 
   async siteStatus(p: SiteContextParams): Promise<{ status: 'RUNNING' | 'STOPPED' | 'ERROR' }> {
     this.assertSafeName(p.siteName);
-    const r = await this.cmd.execute('systemctl', ['is-active', `redis@${p.siteName}.service`])
-      .catch((err: any) => ({ stdout: 'inactive', stderr: String(err?.message || err), exitCode: 3 }));
+    // is-active возвращает 3 если inactive — это валидный ответ.
+    const r = await this.cmd.execute(
+      'systemctl', ['is-active', `redis@${p.siteName}.service`],
+      { allowFailure: true },
+    );
     const out = r.stdout.trim();
     if (out === 'active') return { status: 'RUNNING' };
     if (out === 'inactive' || out === 'deactivating') return { status: 'STOPPED' };
@@ -248,9 +269,10 @@ export class RedisExecutor {
       // Применить новый maxmemory без рестарта (CONFIG SET) — keep данные в памяти
       const sock = await this.findSocket(siteName);
       if (sock) {
+        // CONFIG SET может фейлиться (auth/AUTH, версия) — fallback на рестарт.
         await this.cmd.execute('redis-cli', [
           '-s', sock, 'CONFIG', 'SET', 'maxmemory', `${mem}mb`,
-        ]).catch(() => { /* fallback — рестарт ниже */ });
+        ], { allowFailure: true }).catch(() => { /* fallback — рестарт ниже */ });
       }
       // Если CONFIG SET не сработал — нужен рестарт; тут решает админ.
       // Делаем мягкий restart для гарантии полного применения override.
@@ -277,7 +299,7 @@ export class RedisExecutor {
       try {
         const r = await this.cmd.execute(
           'redis-cli', ['-s', sock, 'INFO'],
-          { timeout: 10_000 },
+          { timeout: 10_000, allowFailure: true },
         );
         if (r.exitCode === 0) {
           const lines = r.stdout.split('\n').map((l) => l.trim());
@@ -307,7 +329,8 @@ export class RedisExecutor {
     }
 
     let diskBytes = 0;
-    const du = await this.cmd.execute('du', ['-sb', dataDir]).catch(() => ({ stdout: '0', stderr: '', exitCode: 1 }));
+    // du может вернуть >0 при permission denied на отдельных файлах — это норма.
+    const du = await this.cmd.execute('du', ['-sb', dataDir], { allowFailure: true });
     if (du.exitCode === 0) {
       const m = du.stdout.match(/^(\d+)/);
       if (m) diskBytes = parseInt(m[1], 10);
@@ -325,8 +348,8 @@ export class RedisExecutor {
         '-u', `redis@${p.siteName}.service`,
         '-n', String(Math.max(1, Math.min(5000, p.lines))),
         '--no-pager',
-      ]).catch(() => ({ stdout: '(нет логов)', stderr: '', exitCode: 1 }));
-      return { content: r.stdout };
+      ], { allowFailure: true });
+      return { content: r.stdout || '(нет логов)' };
     }
     const r = await this.cmd.execute('tail', ['-n', String(Math.max(1, Math.min(5000, p.lines))), logFile]);
     return { content: r.stdout || '' };

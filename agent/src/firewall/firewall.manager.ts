@@ -60,7 +60,7 @@ export class FirewallManager {
   async addRule(rule: FirewallRule): Promise<FirewallResult> {
     try {
       const args = this.buildUfwArgs('add', rule);
-      const result = await this.executor.execute(UFW_BIN, args);
+      const result = await this.executor.execute(UFW_BIN, args, { allowFailure: true });
 
       if (result.exitCode !== 0) {
         return { success: false, error: result.stderr };
@@ -75,7 +75,7 @@ export class FirewallManager {
   async removeRule(rule: FirewallRule): Promise<FirewallResult> {
     try {
       const args = this.buildUfwArgs('delete', rule);
-      const result = await this.executor.execute(UFW_BIN, args);
+      const result = await this.executor.execute(UFW_BIN, args, { allowFailure: true });
 
       if (result.exitCode !== 0) {
         return { success: false, error: result.stderr };

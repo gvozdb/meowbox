@@ -45,8 +45,16 @@ function ifaceName(serviceId: string): string {
   return `awg-${short}`;
 }
 
+/**
+ * AmneziaWG-tools (пакет amneziawg-tools) ищет конфиги в
+ * `/etc/amnezia/amneziawg/`, а не в `/etc/amneziawg/`. Если положить файл
+ * в неправильное место — `awg-quick@<iface>` падает на старте с:
+ *   "awg-quick: '/etc/amnezia/amneziawg/<iface>.conf' does not exist".
+ */
+const AMNEZIA_CONF_DIR = '/etc/amnezia/amneziawg';
+
 function confPath(serviceId: string): string {
-  return `/etc/amneziawg/${ifaceName(serviceId)}.conf`;
+  return `${AMNEZIA_CONF_DIR}/${ifaceName(serviceId)}.conf`;
 }
 
 function unitName(serviceId: string): string {
@@ -167,18 +175,24 @@ export class AmneziaWgManager {
         h4: headers[3],
       };
 
-      // 2) Создать /etc/amneziawg, записать conf.
-      await this.cmd.execute('mkdir', ['-p', '/etc/amneziawg']);
-      await this.cmd.execute('chmod', ['0700', '/etc/amneziawg']);
+      // 2) Создать /etc/amnezia/amneziawg, записать conf.
+      await this.cmd.execute('mkdir', ['-p', AMNEZIA_CONF_DIR]);
+      await this.cmd.execute('chmod', ['0700', AMNEZIA_CONF_DIR]);
 
       const confText = this.renderInterfaceConf(cfg, params.port);
       await this.writeAtomic(confPath(params.serviceId), confText, 0o600);
 
       // 3) systemctl enable --now awg-quick@<iface>
       await this.cmd.execute('systemctl', ['daemon-reload']);
-      try {
-        await this.cmd.execute('systemctl', ['enable', '--now', unitName(params.serviceId)]);
-      } catch (err) {
+      // Хотим контекстную ошибку (с инструкцией про modprobe) — поэтому
+      // allowFailure: true и руками формируем throw. Иначе CommandError
+      // улетит без подсказки оператору.
+      const enableRes = await this.cmd.execute('systemctl', [
+        'enable',
+        '--now',
+        unitName(params.serviceId),
+      ], { allowFailure: true });
+      if (enableRes.exitCode !== 0) {
         // Уберём conf чтобы не оставлять полу-инсталляцию.
         try {
           await fsp.rm(confPath(params.serviceId), { force: true });
@@ -186,7 +200,8 @@ export class AmneziaWgManager {
           /* noop */
         }
         throw new Error(
-          `awg-quick@${iface} не стартовал: ${(err as Error).message}. ` +
+          `awg-quick@${iface} не стартовал (exit ${enableRes.exitCode}): ` +
+            `${(enableRes.stderr || enableRes.stdout).slice(0, 400)}. ` +
             `Проверь что kernel module amneziawg загружен (modprobe amneziawg).`,
         );
       }
@@ -223,15 +238,13 @@ export class AmneziaWgManager {
   }
 
   async statusActive(serviceId: string): Promise<boolean> {
-    try {
-      const { stdout } = await this.cmd.execute('systemctl', [
-        'is-active',
-        unitName(serviceId),
-      ]);
-      return stdout.trim() === 'active';
-    } catch {
-      return false;
-    }
+    // `systemctl is-active` возвращает exitCode=3 если сервис не active —
+    // это не ошибка, а валидный ответ. allowFailure: true.
+    const res = await this.cmd.execute('systemctl', [
+      'is-active',
+      unitName(serviceId),
+    ], { allowFailure: true });
+    return res.stdout.trim() === 'active';
   }
 
   /**

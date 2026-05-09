@@ -378,7 +378,14 @@ export class VpnService implements OnModuleInit {
       orderBy: { createdAt: 'asc' },
       include: {
         creds: {
-          select: { id: true, serviceId: true, createdAt: true },
+          select: {
+            id: true,
+            serviceId: true,
+            createdAt: true,
+            service: {
+              select: { protocol: true, port: true, label: true, status: true },
+            },
+          },
         },
       },
     });
@@ -391,6 +398,10 @@ export class VpnService implements OnModuleInit {
       services: u.creds.map((c) => ({
         credId: c.id,
         serviceId: c.serviceId,
+        protocol: c.service.protocol,
+        port: c.service.port,
+        label: c.service.label,
+        status: c.service.status,
         createdAt: c.createdAt,
       })),
       createdAt: u.createdAt,

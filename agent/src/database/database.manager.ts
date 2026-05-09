@@ -90,7 +90,7 @@ export class DatabaseManager {
       case 'MYSQL': {
         const cmd = await this.detectMysqlCmd();
         const sql = `ALTER USER '${this.escapeMysqlStr(params.dbUser)}'@'localhost' IDENTIFIED BY '${this.escapeMysqlStr(params.password)}'; FLUSH PRIVILEGES`;
-        const result = await this.executor.execute(cmd, ['-u', 'root', '-e', sql]);
+        const result = await this.executor.execute(cmd, ['-u', 'root', '-e', sql], { allowFailure: true });
         if (result.exitCode !== 0) return { success: false, error: result.stderr };
         return { success: true };
       }
@@ -132,7 +132,7 @@ export class DatabaseManager {
       const filePath = `${dumpDir}/${name}_${timestamp}.sql`;
       const result = await this.executor.execute('pg_dump', [
         '-U', 'postgres', '-f', filePath, name,
-      ], { timeout: 600_000 });
+      ], { timeout: 600_000, allowFailure: true });
       if (result.exitCode !== 0) return { success: false, error: result.stderr };
       return { success: true, filePath };
     } else {
@@ -141,7 +141,7 @@ export class DatabaseManager {
       const result = await this.executor.execute(cmd, [
         '-u', 'root', '--single-transaction', '--quick',
         '--routines', '--triggers', `--result-file=${filePath}`, name,
-      ], { timeout: 600_000 });
+      ], { timeout: 600_000, allowFailure: true });
       if (result.exitCode !== 0) return { success: false, error: result.stderr };
       return { success: true, filePath };
     }
@@ -157,14 +157,14 @@ export class DatabaseManager {
     if (type === 'POSTGRESQL') {
       const result = await this.executor.execute('sudo', [
         '-u', 'postgres', 'psql', '-d', name, '-f', safePath,
-      ], { timeout: 600_000 });
+      ], { timeout: 600_000, allowFailure: true });
       if (result.exitCode !== 0) return { success: false, error: result.stderr };
       return { success: true };
     } else {
       const cmd = type === 'MARIADB' ? 'mariadb' : 'mysql';
       const result = await this.executor.execute(cmd, [
         '-u', 'root', name, '-e', `source ${safePath}`,
-      ], { timeout: 600_000 });
+      ], { timeout: 600_000, allowFailure: true });
       if (result.exitCode !== 0) return { success: false, error: result.stderr };
       return { success: true };
     }
@@ -176,18 +176,20 @@ export class DatabaseManager {
   async detectAvailable(): Promise<{ available: string[]; preferred: string | null }> {
     const available: string[] = [];
 
-    // Check MariaDB
-    const mariadb = await this.executor.execute('mariadb', ['--version']);
+    // Все detect-команды могут упасть (нет бинаря, отключённый сервис) — это
+    // валидный сценарий «просто не доступно», не ошибка → allowFailure.
+    const mariadb = await this.executor.execute('mariadb', ['--version'], { allowFailure: true });
     if (mariadb.exitCode === 0) available.push('MARIADB');
 
-    // Check MySQL (only if no MariaDB)
     if (!available.includes('MARIADB')) {
-      const mysql = await this.executor.execute('mysql', ['--version']);
+      const mysql = await this.executor.execute('mysql', ['--version'], { allowFailure: true });
       if (mysql.exitCode === 0) available.push('MYSQL');
     }
 
-    // Check PostgreSQL (verify actual connectivity, not just binary)
-    const pgCheck = await this.executor.execute('sudo', ['-u', 'postgres', 'psql', '-c', 'SELECT 1']);
+    const pgCheck = await this.executor.execute(
+      'sudo', ['-u', 'postgres', 'psql', '-c', 'SELECT 1'],
+      { allowFailure: true },
+    );
     if (pgCheck.exitCode === 0) available.push('POSTGRESQL');
 
     return {
@@ -207,7 +209,7 @@ export class DatabaseManager {
     const createDb = await this.executor.execute(cmd, [
       '-u', 'root',
       '-e', `CREATE DATABASE IF NOT EXISTS \`${this.escapeMysqlId(params.name)}\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci`,
-    ]);
+    ], { allowFailure: true });
 
     if (createDb.exitCode !== 0) {
       return { success: false, error: createDb.stderr };
@@ -217,7 +219,7 @@ export class DatabaseManager {
     const createUser = await this.executor.execute(cmd, [
       '-u', 'root',
       '-e', `CREATE USER IF NOT EXISTS '${this.escapeMysqlStr(params.dbUser)}'@'localhost' IDENTIFIED BY '${this.escapeMysqlStr(params.password)}'`,
-    ]);
+    ], { allowFailure: true });
 
     if (createUser.exitCode !== 0) {
       return { success: false, error: createUser.stderr };
@@ -226,7 +228,7 @@ export class DatabaseManager {
     const grant = await this.executor.execute(cmd, [
       '-u', 'root',
       '-e', `GRANT ALL PRIVILEGES ON \`${this.escapeMysqlId(params.name)}\`.* TO '${this.escapeMysqlStr(params.dbUser)}'@'localhost'; FLUSH PRIVILEGES`,
-    ]);
+    ], { allowFailure: true });
 
     if (grant.exitCode !== 0) {
       return { success: false, error: grant.stderr };
@@ -242,17 +244,17 @@ export class DatabaseManager {
     const dropDb = await this.executor.execute(cmd, [
       '-u', 'root',
       '-e', `DROP DATABASE IF EXISTS \`${this.escapeMysqlId(name)}\``,
-    ]);
+    ], { allowFailure: true });
 
     if (dropDb.exitCode !== 0) {
       return { success: false, error: dropDb.stderr };
     }
 
-    // Drop user
+    // Drop user — `IF EXISTS` уже идемпотентно, но allowFailure на случай grant-конфликтов.
     await this.executor.execute(cmd, [
       '-u', 'root',
       '-e', `DROP USER IF EXISTS '${this.escapeMysqlStr(dbUser)}'@'localhost'`,
-    ]);
+    ], { allowFailure: true });
 
     return { success: true };
   }
@@ -264,14 +266,15 @@ export class DatabaseManager {
       '-u', 'root',
       '-N', '-B',
       '-e', `SELECT COALESCE(SUM(data_length + index_length), 0) FROM information_schema.TABLES WHERE table_schema = '${this.escapeMysqlStr(name)}'`,
-    ]);
+    ], { allowFailure: true });
 
     if (result.exitCode !== 0) return 0;
     return parseInt(result.stdout.trim(), 10) || 0;
   }
 
   private async detectMysqlCmd(): Promise<string> {
-    const check = await this.executor.execute('mariadb', ['--version']);
+    // Проверка наличия mariadb — `--version` падает на серверах без бинаря.
+    const check = await this.executor.execute('mariadb', ['--version'], { allowFailure: true });
     return check.exitCode === 0 ? 'mariadb' : 'mysql';
   }
 
@@ -350,7 +353,7 @@ export class DatabaseManager {
       '-u', 'postgres',
       'psql', '-t', '-A',
       '-c', `SELECT pg_database_size('${this.escapePgStr(name)}')`,
-    ]);
+    ], { allowFailure: true });
 
     if (result.exitCode !== 0) return 0;
     return parseInt(result.stdout.trim(), 10) || 0;
@@ -369,11 +372,12 @@ export class DatabaseManager {
 
   /**
    * Run psql as postgres user via sudo (peer auth).
+   * Все callsite'ы проверяют exitCode сами — поэтому allowFailure: true.
    */
   private psql(sql: string): Promise<{ stdout: string; stderr: string; exitCode: number }> {
     return this.executor.execute('sudo', [
       '-u', 'postgres',
       'psql', '-c', sql,
-    ]);
+    ], { allowFailure: true });
   }
 }
