@@ -374,7 +374,50 @@ const migration: SystemMigration = {
       }
     }
 
-    ctx.log('Rekey-secrets done. Legacy ключи переименованы в .legacy.<ts>, удалятся отдельной миграцией через 30 дней.');
+    // 9) DROP старых plain-колонок sites.ssh_password / sites.cms_admin_password
+    //
+    // КРИТИЧНО: UPDATE ... = NULL не очищает физические страницы SQLite — старый
+    // plain text остаётся в b-tree до VACUUM. Если кто-то снимет .db файл (через
+    // бэкап, дамп, кражу диска) — он может вытащить старые пароли из dead pages.
+    //
+    // Поэтому:
+    //   1. DROP COLUMN (SQLite 3.35+, у нас 3.45+) — структурно убираем колонки.
+    //   2. VACUUM — переписываем БД с нуля, dead pages уничтожаются.
+    //
+    // Идемпотентность: проверяем колонки через PRAGMA table_info, дропаем только
+    // если они ещё есть.
+    const sitesCols = await ctx.prisma.$queryRawUnsafe<Array<{ name: string }>>(
+      `PRAGMA table_info('sites')`,
+    );
+    const colNames = new Set(sitesCols.map((c) => c.name));
+    let droppedAny = false;
+    if (colNames.has('ssh_password')) {
+      await ctx.prisma.$executeRawUnsafe(`ALTER TABLE "sites" DROP COLUMN "ssh_password"`);
+      ctx.log('Dropped column sites.ssh_password (plain text)');
+      droppedAny = true;
+    }
+    if (colNames.has('cms_admin_password')) {
+      await ctx.prisma.$executeRawUnsafe(`ALTER TABLE "sites" DROP COLUMN "cms_admin_password"`);
+      ctx.log('Dropped column sites.cms_admin_password (plain text)');
+      droppedAny = true;
+    }
+
+    // 10) VACUUM — обязательно после DROP COLUMN, иначе dead pages с plain
+    // паролями остаются в файле. Делаем всегда (даже если не дропали колонки в
+    // этом проходе — defensive: возможно, в прошлом проходе только UPDATE
+    // прошёл, а VACUUM не успел).
+    try {
+      await ctx.prisma.$executeRawUnsafe(`VACUUM`);
+      ctx.log('VACUUM done — dead pages с plain паролями физически удалены из .db файла');
+    } catch (e) {
+      ctx.log(`WARN: VACUUM failed: ${(e as Error).message}. БД может содержать остатки plain паролей в dead pages.`);
+    }
+
+    if (droppedAny) {
+      ctx.log('Rekey-secrets done: plain-колонки удалены, БД vacuumed. Legacy ключи → .legacy.<ts>.');
+    } else {
+      ctx.log('Rekey-secrets done: plain-колонок уже не было. БД vacuumed.');
+    }
   },
 };
 

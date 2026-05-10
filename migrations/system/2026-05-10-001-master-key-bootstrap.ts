@@ -137,20 +137,25 @@ async function syncAdminerSsoKey(
   }
 
   if (foundIdx >= 0) {
-    // Проверяем, совпадает ли уже с derived
     const m = lines[foundIdx].match(/=\s*(?:"([^"]*)"|(.+?))\s*$/);
     const current = (m?.[1] ?? m?.[2] ?? '').trim();
     if (current === derived) {
       ctx.log('ADMINER_SSO_KEY уже синхронизирован с master-key');
       return;
     }
-    // НЕ переписываем — это инвалидирует существующие SSO-токены и сессии.
-    // Логируем warning, оставляем как есть. Отдельная миграция (rekey) этим займётся.
-    ctx.log(
-      'ADMINER_SSO_KEY в .env отличается от HKDF(master). ' +
-        'Не переписываю автоматически — может разрешать активные Adminer-сессии. ' +
-        'Если хочешь синхронизировать — запусти миграцию 2026-05-10-002-rekey-secrets.',
-    );
+    // Переписываем ВСЕГДА — единый источник правды это master-key.
+    // Активные Adminer-сессии инвалидируются, юзеры повторно залогинятся через
+    // основной аккаунт панели (Adminer SSO — короткоживущий ticket-based flow).
+    if (ctx.dryRun) {
+      ctx.log(`would rewrite ADMINER_SSO_KEY in ${envPath} (was: ${current.slice(0, 8)}..., new: ${derived.slice(0, 8)}...)`);
+      return;
+    }
+    lines[foundIdx] = `ADMINER_SSO_KEY="${derived}"`;
+    await ctx.writeFile(envPath, lines.join('\n'), 0o600);
+    ctx.log(`OK: переписал ADMINER_SSO_KEY в ${envPath} (synced from master-key). Активные Adminer-сессии инвалидированы.`);
+    // process.env обновим тоже, чтобы текущий рантайм (если миграция запускается
+    // в одном процессе с API) сразу подхватил новое значение.
+    process.env.ADMINER_SSO_KEY = derived;
     return;
   }
 
@@ -161,6 +166,7 @@ async function syncAdminerSsoKey(
   }
   const append = `\n# Adminer SSO key (derived from .master-key via HKDF)\nADMINER_SSO_KEY="${derived}"\n`;
   await ctx.writeFile(envPath, env + append, 0o600);
+  process.env.ADMINER_SSO_KEY = derived;
   ctx.log(`OK: добавил ADMINER_SSO_KEY в ${envPath} (derived из master-key)`);
 }
 

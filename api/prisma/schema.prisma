@@ -64,14 +64,9 @@ model Site {
   rootPath         String   @map("root_path")
   nginxConfigPath  String   @map("nginx_config_path")
   systemUser       String?  @map("site_user")
-  /// DEPRECATED — обнуляется миграцией 2026-05-10-002-rekey-secrets.
-  /// Не использовать в новом коде. Дропнем колонку через 30 дней после релиза.
-  sshPassword      String?  @map("ssh_password")
   /// AES-256-GCM, HKDF(master,'meowbox:ssh:v1'). См. spec master-key-unification.
   sshPasswordEnc   String?  @map("ssh_password_enc")
   cmsAdminUser     String?  @map("cms_admin_user")
-  /// DEPRECATED — обнуляется миграцией 2026-05-10-002-rekey-secrets.
-  cmsAdminPassword    String? @map("cms_admin_password")
   /// AES-256-GCM, HKDF(master,'meowbox:cms:v1').
   cmsAdminPasswordEnc String? @map("cms_admin_password_enc")
   managerPath      String?  @map("manager_path")

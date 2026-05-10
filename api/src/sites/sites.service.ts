@@ -471,10 +471,7 @@ export class SitesService implements OnModuleInit {
         orderBy: { createdAt: 'desc' },
         take,
         skip,
-        omit: {
-          sshPassword: true, sshPasswordEnc: true,
-          cmsAdminPassword: true, cmsAdminPasswordEnc: true,
-        },
+        omit: { sshPasswordEnc: true, cmsAdminPasswordEnc: true },
         include: {
           sslCertificate: { select: { status: true, expiresAt: true } },
           _count: { select: { databases: true, backups: true } },
@@ -497,10 +494,7 @@ export class SitesService implements OnModuleInit {
   async findById(id: string, userId?: string, role?: string) {
     const site = await this.prisma.site.findUnique({
       where: { id },
-      omit: {
-        sshPassword: true, sshPasswordEnc: true,
-        cmsAdminPassword: true, cmsAdminPasswordEnc: true,
-      },
+      omit: { sshPasswordEnc: true, cmsAdminPasswordEnc: true },
       include: {
         sslCertificate: true,
         databases: {
@@ -531,10 +525,9 @@ export class SitesService implements OnModuleInit {
       where: { id },
       select: {
         id: true, userId: true, systemUser: true,
-        sshPassword: true, sshPasswordEnc: true,
+        sshPasswordEnc: true,
         rootPath: true,
-        cmsAdminUser: true,
-        cmsAdminPassword: true, cmsAdminPasswordEnc: true,
+        cmsAdminUser: true, cmsAdminPasswordEnc: true,
         domain: true, managerPath: true,
       },
     });
@@ -547,13 +540,8 @@ export class SitesService implements OnModuleInit {
       throw new ForbiddenException('Access denied to this site');
     }
 
-    // Расшифровка с fallback на legacy plain (до прохода rekey-secrets миграции).
-    const sshPlain = site.sshPasswordEnc
-      ? this.tryDecryptSsh(site.sshPasswordEnc, id)
-      : site.sshPassword;
-    const cmsPlain = site.cmsAdminPasswordEnc
-      ? this.tryDecryptCms(site.cmsAdminPasswordEnc, id)
-      : site.cmsAdminPassword;
+    const sshPlain = site.sshPasswordEnc ? this.tryDecryptSsh(site.sshPasswordEnc, id) : null;
+    const cmsPlain = site.cmsAdminPasswordEnc ? this.tryDecryptCms(site.cmsAdminPasswordEnc, id) : null;
 
     return {
       username: site.systemUser,
@@ -640,10 +628,9 @@ export class SitesService implements OnModuleInit {
       );
     }
 
-    // Сохраняем в БД зашифрованным — old plain поле обнуляем.
     await this.prisma.site.update({
       where: { id },
-      data: { sshPasswordEnc: encryptSshPassword(password), sshPassword: null },
+      data: { sshPasswordEnc: encryptSshPassword(password) },
     });
 
     this.logger.log(`SSH password changed for site "${site.name}"`);
@@ -737,7 +724,7 @@ export class SitesService implements OnModuleInit {
 
     await this.prisma.site.update({
       where: { id },
-      data: { cmsAdminPasswordEnc: encryptCmsPassword(password), cmsAdminPassword: null },
+      data: { cmsAdminPasswordEnc: encryptCmsPassword(password) },
     });
 
     this.logger.log(`MODX admin password changed for site "${site.name}" (user "${site.cmsAdminUser}")`);
@@ -2004,7 +1991,7 @@ export class SitesService implements OnModuleInit {
 
     const updatedRaw = await this.prisma.site.update({
       where: { id },
-      omit: { sshPassword: true, sshPasswordEnc: true, cmsAdminPassword: true, cmsAdminPasswordEnc: true },
+      omit: { sshPasswordEnc: true, cmsAdminPasswordEnc: true },
       data: {
         ...(dto.name !== undefined && { name: dto.name }),
         ...(dto.domain !== undefined && { domain: dto.domain }),
