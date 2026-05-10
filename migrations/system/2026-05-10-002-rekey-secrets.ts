@@ -198,6 +198,24 @@ function encryptPlainPassword(plain: string, newKey: Buffer): string {
   return encGcm(newKey, Buffer.from(JSON.stringify({ password: plain }), 'utf8'));
 }
 
+/** PRAGMA table_info check — нужен для идемпотентности на панелях, где
+ * plain-колонки уже дропнуты (см. шаг 9), а также на свежих установках, где
+ * 0_init создавал колонки, но другие пути могли их удалить (ручной db push). */
+async function hasColumn(
+  ctx: Parameters<SystemMigration['up']>[0],
+  table: string,
+  col: string,
+): Promise<boolean> {
+  try {
+    const rows = await ctx.prisma.$queryRawUnsafe<Array<{ name: string }>>(
+      `PRAGMA table_info('${table}')`,
+    );
+    return rows.some((r) => r.name === col);
+  } catch {
+    return false;
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Основная миграция
 // ---------------------------------------------------------------------------
@@ -254,50 +272,66 @@ const migration: SystemMigration = {
     }
 
     // 2) Site.sshPassword (plain) → sshPasswordEnc
-    const sitesWithSsh = (await ctx.prisma.$queryRawUnsafe<
-      Array<{ id: string; ssh_password: string | null; ssh_password_enc: string | null }>
-    >(`SELECT id, ssh_password, ssh_password_enc FROM sites WHERE ssh_password IS NOT NULL`));
-    let sshMigrated = 0;
-    for (const row of sitesWithSsh) {
-      if (row.ssh_password_enc) {
-        // Уже мигрирован — просто обнулим plain
-        await ctx.prisma.$executeRawUnsafe(`UPDATE sites SET ssh_password = NULL WHERE id = ?`, row.id);
-        continue;
+    // Guard: на панелях, где plain-колонка уже дропнута (или никогда не было —
+    // фрешак, проинициализированный db push без 0_init), просто скипаем.
+    if (!(await hasColumn(ctx, 'sites', 'ssh_password'))) {
+      ctx.log('Sites: plain ssh_password column отсутствует — skip (уже мигрировано или схема без plain)');
+    } else {
+      const sitesWithSsh = (await ctx.prisma.$queryRawUnsafe<
+        Array<{ id: string; ssh_password: string | null; ssh_password_enc: string | null }>
+      >(`SELECT id, ssh_password, ssh_password_enc FROM sites WHERE ssh_password IS NOT NULL`));
+      let sshMigrated = 0;
+      for (const row of sitesWithSsh) {
+        if (row.ssh_password_enc) {
+          // Уже мигрирован — просто обнулим plain
+          await ctx.prisma.$executeRawUnsafe(`UPDATE sites SET ssh_password = NULL WHERE id = ?`, row.id);
+          continue;
+        }
+        const enc = encryptPlainPassword(row.ssh_password!, newKeys.ssh);
+        await ctx.prisma.$executeRawUnsafe(
+          `UPDATE sites SET ssh_password_enc = ?, ssh_password = NULL WHERE id = ?`,
+          enc,
+          row.id,
+        );
+        sshMigrated++;
       }
-      const enc = encryptPlainPassword(row.ssh_password!, newKeys.ssh);
-      await ctx.prisma.$executeRawUnsafe(
-        `UPDATE sites SET ssh_password_enc = ?, ssh_password = NULL WHERE id = ?`,
-        enc,
-        row.id,
-      );
-      sshMigrated++;
+      ctx.log(`Sites: migrated ${sshMigrated} plain sshPassword → sshPasswordEnc`);
     }
-    ctx.log(`Sites: migrated ${sshMigrated} plain sshPassword → sshPasswordEnc`);
 
     // 3) Site.cmsAdminPassword (plain) → cmsAdminPasswordEnc
-    const sitesWithCms = await ctx.prisma.$queryRawUnsafe<
-      Array<{ id: string; cms_admin_password: string | null; cms_admin_password_enc: string | null }>
-    >(`SELECT id, cms_admin_password, cms_admin_password_enc FROM sites WHERE cms_admin_password IS NOT NULL`);
-    let cmsMigrated = 0;
-    for (const row of sitesWithCms) {
-      if (row.cms_admin_password_enc) {
-        await ctx.prisma.$executeRawUnsafe(`UPDATE sites SET cms_admin_password = NULL WHERE id = ?`, row.id);
-        continue;
+    if (!(await hasColumn(ctx, 'sites', 'cms_admin_password'))) {
+      ctx.log('Sites: plain cms_admin_password column отсутствует — skip');
+    } else {
+      const sitesWithCms = await ctx.prisma.$queryRawUnsafe<
+        Array<{ id: string; cms_admin_password: string | null; cms_admin_password_enc: string | null }>
+      >(`SELECT id, cms_admin_password, cms_admin_password_enc FROM sites WHERE cms_admin_password IS NOT NULL`);
+      let cmsMigrated = 0;
+      for (const row of sitesWithCms) {
+        if (row.cms_admin_password_enc) {
+          await ctx.prisma.$executeRawUnsafe(`UPDATE sites SET cms_admin_password = NULL WHERE id = ?`, row.id);
+          continue;
+        }
+        const enc = encryptPlainPassword(row.cms_admin_password!, newKeys.cms);
+        await ctx.prisma.$executeRawUnsafe(
+          `UPDATE sites SET cms_admin_password_enc = ?, cms_admin_password = NULL WHERE id = ?`,
+          enc,
+          row.id,
+        );
+        cmsMigrated++;
       }
-      const enc = encryptPlainPassword(row.cms_admin_password!, newKeys.cms);
-      await ctx.prisma.$executeRawUnsafe(
-        `UPDATE sites SET cms_admin_password_enc = ?, cms_admin_password = NULL WHERE id = ?`,
-        enc,
-        row.id,
-      );
-      cmsMigrated++;
+      ctx.log(`Sites: migrated ${cmsMigrated} plain cmsAdminPassword → cmsAdminPasswordEnc`);
     }
-    ctx.log(`Sites: migrated ${cmsMigrated} plain cmsAdminPassword → cmsAdminPasswordEnc`);
 
     // 4) Databases.dbPasswordEnc — legacy .dns-key → new HKDF databases
-    const dbsWithEnc = await ctx.prisma.$queryRawUnsafe<
-      Array<{ id: string; db_password_enc: string | null }>
-    >(`SELECT id, db_password_enc FROM databases WHERE db_password_enc IS NOT NULL`);
+    if (!(await hasColumn(ctx, 'databases', 'db_password_enc'))) {
+      ctx.log('Databases: column db_password_enc отсутствует — skip (схема не доросла или таблицы нет)');
+      // продолжаем дальше, остальные таблицы могут существовать независимо
+    }
+    const dbsWithEnc = (await hasColumn(ctx, 'databases', 'db_password_enc'))
+      ? await ctx.prisma.$queryRawUnsafe<
+          Array<{ id: string; db_password_enc: string | null }>
+        >(`SELECT id, db_password_enc FROM databases WHERE db_password_enc IS NOT NULL`)
+      : [];
     let dbsRekeyed = 0;
     let dbsAlreadyNew = 0;
     let dbsFailed = 0;
