@@ -454,6 +454,83 @@ export class ResticExecutor {
   }
 
   // ---------------------------------------------------------------------------
+  // Backup произвольных путей (для SERVER_PATH и PANEL_DATA scope'ов).
+  //
+  // Не использует siteName, не дампит БД, не имеет рекапсии по type. Просто
+  // restic backup путей, которые передал API. repoName используется как
+  // идентификатор репозитория (под него создаётся отдельный sub-folder в S3/LOCAL),
+  // а также как тег `repo:<repoName>` для фильтрации снапшотов.
+  // ---------------------------------------------------------------------------
+
+  async backupPaths(
+    params: {
+      repoName: string;
+      paths: string[];
+      excludePaths: string[];
+      tags?: string[];
+      storage: ResticStorage;
+    },
+    onProgress: ProgressFn,
+  ): Promise<{ success: boolean; snapshotId?: string; sizeBytes?: number; error?: string }> {
+    const { repoName, paths, excludePaths, storage } = params;
+    const tags = params.tags || [`repo:${repoName}`];
+
+    try {
+      onProgress(5);
+
+      const ensure = await this.ensureRepoInit(repoName, storage);
+      if (!ensure.success) {
+        return { success: false, error: ensure.error };
+      }
+      const base = this.buildResticBaseArgs(repoName, storage);
+      const env = this.buildEnv(storage);
+
+      onProgress(15);
+
+      if (paths.length === 0) {
+        return { success: false, error: 'Нет путей для бэкапа' };
+      }
+
+      const args = [...base, 'backup', '--json'];
+      for (const t of tags) args.push('--tag', t);
+      for (const ex of excludePaths) args.push('--exclude', ex);
+      args.push(...paths);
+
+      let snapshotId: string | undefined;
+      let totalBytes = 0;
+
+      const result = await this.runResticStreaming(args, env, (line, stream) => {
+        if (stream !== 'stdout') return;
+        try {
+          const msg = JSON.parse(line) as {
+            message_type?: string;
+            percent_done?: number;
+            snapshot_id?: string;
+            total_bytes_processed?: number;
+          };
+          if (msg.message_type === 'status' && typeof msg.percent_done === 'number') {
+            onProgress(15 + Math.round(msg.percent_done * 80));
+          } else if (msg.message_type === 'summary') {
+            if (msg.snapshot_id) snapshotId = msg.snapshot_id;
+            if (msg.total_bytes_processed) totalBytes = msg.total_bytes_processed;
+          }
+        } catch {
+          /* не JSON */
+        }
+      });
+
+      if (result.exitCode !== 0) {
+        return { success: false, error: `restic backup failed: ${result.stderr.substring(0, 500)}` };
+      }
+
+      onProgress(100);
+      return { success: true, snapshotId, sizeBytes: totalBytes };
+    } catch (err) {
+      return { success: false, error: (err as Error).message };
+    }
+  }
+
+  // ---------------------------------------------------------------------------
   // Snapshots list
   // ---------------------------------------------------------------------------
 

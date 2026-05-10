@@ -2,6 +2,8 @@ import { Injectable, Logger } from '@nestjs/common';
 import { Cron, CronExpression } from '@nestjs/schedule';
 import { PrismaService } from '../common/prisma.service';
 import { BackupsService } from '../backups/backups.service';
+import { ServerPathBackupService } from '../backups/server-path-backup.service';
+import { PanelDataBackupService } from '../backups/panel-data-backup.service';
 import { ResticCheckService } from '../backups/restic-check.service';
 import { SslService } from '../ssl/ssl.service';
 import { AgentRelayService } from '../gateway/agent-relay.service';
@@ -42,6 +44,8 @@ export class SchedulerService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly backupsService: BackupsService,
+    private readonly serverPathBackupService: ServerPathBackupService,
+    private readonly panelDataBackupService: PanelDataBackupService,
     private readonly resticCheckService: ResticCheckService,
     private readonly sslService: SslService,
     private readonly agentRelay: AgentRelayService,
@@ -253,6 +257,36 @@ export class SchedulerService {
         this.logger.error(
           `Global scheduled backup failed for "${site.name}": ${(err as Error).message}`,
         );
+      }
+    }
+
+    // --- 3. Server-path backup configs ---
+    const serverPathConfigs = await this.prisma.serverPathBackupConfig.findMany({
+      where: { enabled: true, schedule: { not: null } },
+    });
+    for (const config of serverPathConfigs) {
+      if (!config.schedule) continue;
+      if (!this.shouldRunNow(config.schedule, now)) continue;
+      try {
+        await this.serverPathBackupService.triggerBackup(config.id);
+        this.logger.log(`Scheduled server-path backup triggered: "${config.name}" → ${config.path}`);
+      } catch (err) {
+        this.logger.error(`Server-path backup failed for "${config.name}": ${(err as Error).message}`);
+      }
+    }
+
+    // --- 4. Panel-data backup configs ---
+    const panelDataConfigs = await this.prisma.panelDataBackupConfig.findMany({
+      where: { enabled: true, schedule: { not: null } },
+    });
+    for (const config of panelDataConfigs) {
+      if (!config.schedule) continue;
+      if (!this.shouldRunNow(config.schedule, now)) continue;
+      try {
+        await this.panelDataBackupService.triggerBackup(config.id);
+        this.logger.log(`Scheduled panel-data backup triggered: "${config.name}"`);
+      } catch (err) {
+        this.logger.error(`Panel-data backup failed for "${config.name}": ${(err as Error).message}`);
       }
     }
   }

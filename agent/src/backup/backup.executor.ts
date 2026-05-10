@@ -144,6 +144,69 @@ export class BackupExecutor {
     }
   }
 
+  /**
+   * Бэкап произвольных путей (для SERVER_PATH / PANEL_DATA scope'ов).
+   * Создаёт tar.gz с указанными путями, загружает в storage по типу.
+   * Не дампит БД, не использует siteName.
+   */
+  async executePaths(
+    params: {
+      backupId: string;
+      scope: 'SERVER_PATH' | 'PANEL_DATA';
+      archiveName: string;
+      paths: string[];
+      excludePaths: string[];
+      storageType: 'LOCAL' | 'S3' | 'YANDEX_DISK' | 'CLOUD_MAIL_RU';
+      storageConfig: Record<string, string>;
+    },
+    onProgress: ProgressFn,
+  ): Promise<BackupResult> {
+    try {
+      await this.executor.execute('mkdir', ['-p', BACKUP_DIR]);
+
+      const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+      const safeArchive = params.archiveName.replace(/[^a-zA-Z0-9_-]+/g, '-').slice(0, 60);
+      const archiveFileName = `${safeArchive}_${params.scope.toLowerCase()}_${timestamp}.tar.gz`;
+      const archivePath = path.join(BACKUP_DIR, archiveFileName);
+
+      onProgress(10);
+
+      if (params.paths.length === 0) {
+        return { success: false, filePath: '', sizeBytes: 0, error: 'Нет путей для архива' };
+      }
+
+      // tar базируется от `/` — пути в архиве сохраняют свою абсолютную структуру.
+      await this.createArchive(archivePath, params.paths, '/', params.excludePaths);
+
+      onProgress(60);
+
+      if (!fs.existsSync(archivePath)) {
+        return { success: false, filePath: '', sizeBytes: 0, error: 'Archive was not created' };
+      }
+      const stats = fs.statSync(archivePath);
+      onProgress(70);
+
+      let remotePath = archivePath;
+      if (params.storageType === 'YANDEX_DISK') {
+        remotePath = await this.uploadToYandexDisk(archivePath, archiveFileName, params.storageConfig);
+        try { fs.unlinkSync(archivePath); } catch { /* */ }
+      } else if (params.storageType === 'CLOUD_MAIL_RU') {
+        remotePath = await this.uploadToCloudMailRu(archivePath, archiveFileName, params.storageConfig);
+        try { fs.unlinkSync(archivePath); } catch { /* */ }
+      }
+
+      onProgress(100);
+      return { success: true, filePath: remotePath, sizeBytes: Number(stats.size) };
+    } catch (err) {
+      return {
+        success: false,
+        filePath: '',
+        sizeBytes: 0,
+        error: (err as Error).message || 'Backup failed',
+      };
+    }
+  }
+
   async restore(
     params: {
       backupId: string;

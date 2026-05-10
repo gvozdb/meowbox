@@ -764,6 +764,76 @@ export class AgentService {
       cb({ success: result.success, data: result, error: result.error });
     });
 
+    // -- Restic backup произвольных путей (SERVER_PATH / PANEL_DATA) --
+    // Не привязан к сайту: repoName — имя репозитория-папки (из API).
+    this.safeOn(s, 'restic:backup-paths', async (params: {
+      backupId: string;
+      scope: 'SERVER_PATH' | 'PANEL_DATA';
+      repoName: string;
+      paths: string[];
+      excludePaths: string[];
+      storage: ResticStorage;
+    }, cb: Callback) => {
+      const result = await this.restic.backupPaths(
+        {
+          repoName: params.repoName,
+          paths: params.paths,
+          excludePaths: params.excludePaths,
+          tags: [`scope:${params.scope}`, `repo:${params.repoName}`],
+          storage: params.storage,
+        },
+        (percent) => {
+          if (s.connected) {
+            s.emit('backup:progress', { backupId: params.backupId, progress: percent });
+          }
+        },
+      );
+
+      // Отдельные complete-события для SERVER_PATH / PANEL_DATA
+      const completeEvent =
+        params.scope === 'PANEL_DATA' ? 'panel-data:complete' : 'server-path:complete';
+      this.emitOrQueue(completeEvent, {
+        backupId: params.backupId,
+        success: result.success,
+        filePath: result.snapshotId ? `restic:${result.snapshotId}` : '',
+        snapshotId: result.snapshotId,
+        sizeBytes: result.sizeBytes || 0,
+        error: result.error,
+      });
+
+      cb({ success: result.success, data: result, error: result.error });
+    });
+
+    // -- TAR backup произвольных путей (SERVER_PATH / PANEL_DATA) --
+    // Создаёт tar.gz архив с указанными путями и загружает в storage.
+    this.safeOn(s, 'backup:execute-paths', async (params: {
+      backupId: string;
+      scope: 'SERVER_PATH' | 'PANEL_DATA';
+      archiveName: string;
+      paths: string[];
+      excludePaths: string[];
+      storageType: 'LOCAL' | 'S3' | 'YANDEX_DISK' | 'CLOUD_MAIL_RU';
+      storageConfig: Record<string, string>;
+    }, cb: Callback) => {
+      const result = await this.backup.executePaths(params, (percent) => {
+        if (s.connected) {
+          s.emit('backup:progress', { backupId: params.backupId, progress: percent });
+        }
+      });
+
+      const completeEvent =
+        params.scope === 'PANEL_DATA' ? 'panel-data:complete' : 'server-path:complete';
+      this.emitOrQueue(completeEvent, {
+        backupId: params.backupId,
+        success: result.success,
+        filePath: result.filePath,
+        sizeBytes: result.sizeBytes,
+        error: result.error,
+      });
+
+      cb({ success: true, data: result });
+    });
+
     this.safeOn(s, 'restic:restore', async (params: {
       backupId: string;
       siteName: string;
