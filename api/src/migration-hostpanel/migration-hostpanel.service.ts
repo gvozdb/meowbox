@@ -23,6 +23,8 @@ import {
 } from '../common/crypto/migration-cipher';
 import { hashPassword } from '../common/crypto/argon2.helper';
 import { encryptJson } from '../common/crypto/credentials-cipher';
+import { encryptSshPassword } from '../common/crypto/ssh-cipher';
+import { encryptCmsPassword } from '../common/crypto/cms-cipher';
 import { stringifySiteAliases, stringifyStringArray } from '../common/json-array';
 import {
   CreateSavedSourceDto,
@@ -1545,18 +1547,22 @@ export class MigrationHostpanelService implements OnModuleInit {
         managerPath: modxManagerPath,
         connectorsPath: modxConnectorsPath,
         modxVersion,
-        // SSH-пароль = sftp_pass с источника (spec §6.2 «В Site.sshPassword
-        // тоже сохраняем sftp_pass»). Агент возвращает его в result.creds —
-        // храним как есть, иначе оператор не сможет посмотреть пароль в UI.
-        sshPassword: extras.creds?.sshPassword || null,
+        // SSH-пароль = sftp_pass с источника (spec §6.2). Шифруем перед
+        // записью в БД (master-key cipher, см. spec master-key-unification).
+        sshPasswordEnc: extras.creds?.sshPassword
+          ? encryptSshPassword(extras.creds.sshPassword)
+          : null,
         // CMS admin login/password = manager_user/manager_pass с источника
-        // (`modx_host_hostpanel_sites`). На hostpanel пароль в плейне → 1-в-1
-        // переезжает в Site.cmsAdminPassword. Без этого блок CMS на странице
-        // сайта показывал бы только «Версия» (условие `v-if=site.cmsAdminUser`
-        // в [id].vue ложное), и оператор не мог бы залогиниться через панель.
+        // (`modx_host_hostpanel_sites`). На hostpanel пароль в плейне → шифруем
+        // в Site.cmsAdminPasswordEnc. Без этого блок CMS на странице сайта
+        // показывал бы только «Версия» (условие `v-if=site.cmsAdminUser` в
+        // [id].vue ложное), и оператор не мог бы залогиниться через панель.
         // Применяется только для MODX-сайтов.
         cmsAdminUser: isModx ? extras.creds?.cmsAdminUser || null : null,
-        cmsAdminPassword: isModx ? extras.creds?.cmsAdminPassword || null : null,
+        cmsAdminPasswordEnc:
+          isModx && extras.creds?.cmsAdminPassword
+            ? encryptCmsPassword(extras.creds.cmsAdminPassword)
+            : null,
         dbEnabled: !!plan.dbExcludeDataTables?.length || plan.sourceCms === 'modx',
         httpsRedirect: !!plan.ssl?.transfer,
         // filesRelPath = webroot относительно rootPath. Парсится discover.ts из

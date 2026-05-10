@@ -71,20 +71,45 @@ if [[ -f "$PANEL_DIR/ecosystem.config.js" ]]; then
   say "✓ ecosystem.config.js"
 fi
 
-# 6. VPN state — критично для восстановления VPN-сервисов.
-# Два разных места:
-#   - $DATA_DIR/.vpn-key — мастер-ключ AES-256-GCM (32 байта).
-#     Без него зашифрованные configBlob/credsBlob в БД нечитаемы =
-#     все VPN-сервисы и юзеры мертвы. Создаётся system-миграцией
-#     2026-05-09-001-vpn-secret-bootstrap. См. api/src/common/crypto/vpn-cipher.ts.
-#   - $STATE_DIR/vpn/<serviceId>/{config.json, ...} — Xray-конфиги.
-#     AmneziaWG конфиги живут в /etc/amneziawg/ — их регенерим из БД при restore.
-VPN_KEY="$DATA_DIR/.vpn-key"
-if [[ -f "$VPN_KEY" ]]; then
-  cp "$VPN_KEY" "$SNAP_DIR/.vpn-key"
-  chmod 600 "$SNAP_DIR/.vpn-key"
-  say "✓ .vpn-key (master-key)"
-fi
+# 6. Master-key и legacy-ключи — критично для расшифровки всего в БД.
+#   - $DATA_DIR/.master-key — единый master-key AES-256-GCM (32 байта),
+#     HKDF-derived подключи для VPN/DNS/Databases/Migration/SSH/CMS.
+#     Создаётся system-миграцией 2026-05-10-001-master-key-bootstrap.
+#     БЕЗ НЕГО все секреты в БД нечитаемы — SSH-пароли, БД-пароли, VPN-конфиги.
+#   - Legacy ключи (`.vpn-key`, `.dns-key`, `.vpn-key.legacy.*`) — оставлены на
+#     30 дней после rekey-миграции для возможности отката.
+#   - $STATE_DIR/vpn/<serviceId>/ — Xray runtime configs. AmneziaWG в /etc/amneziawg/
+#     не бэкапим (регенерим из БД при restore).
+# Ключи могут лежать в двух местах:
+#   - $DATA_DIR ($STATE_DIR/data) — release-раскладка
+#   - $PANEL_DIR/data — legacy раскладка (до перехода на state/)
+# Проверяем обе директории.
+KEY_DIRS=("$DATA_DIR")
+[[ "$PANEL_DIR/data" != "$DATA_DIR" && -d "$PANEL_DIR/data" ]] && KEY_DIRS+=("$PANEL_DIR/data")
+
+for KEY_DIR in "${KEY_DIRS[@]}"; do
+  for KEY_NAME in .master-key .vpn-key .dns-key; do
+    KEY_FILE="$KEY_DIR/$KEY_NAME"
+    if [[ -f "$KEY_FILE" ]]; then
+      # Префиксуем имя источником, чтобы не было коллизий между state/data и data/
+      SUFFIX=""
+      [[ "$KEY_DIR" == "$PANEL_DIR/data" ]] && SUFFIX=".from-legacy-data"
+      cp "$KEY_FILE" "$SNAP_DIR/${KEY_NAME}${SUFFIX}"
+      chmod 600 "$SNAP_DIR/${KEY_NAME}${SUFFIX}"
+      say "✓ $KEY_NAME (from ${KEY_DIR})"
+    fi
+    # Legacy variants (после rekey-миграции файлы переименованы в .legacy.<ts>)
+    for legacy in "$KEY_DIR"/${KEY_NAME}.legacy.*; do
+      [[ -f "$legacy" ]] || continue
+      base="$(basename "$legacy")"
+      SUFFIX=""
+      [[ "$KEY_DIR" == "$PANEL_DIR/data" ]] && SUFFIX=".from-legacy-data"
+      cp "$legacy" "$SNAP_DIR/${base}${SUFFIX}"
+      chmod 600 "$SNAP_DIR/${base}${SUFFIX}"
+      say "✓ $base (from ${KEY_DIR})"
+    done
+  done
+done
 
 VPN_DIR="$STATE_DIR/vpn"
 if [[ -d "$VPN_DIR" ]]; then
