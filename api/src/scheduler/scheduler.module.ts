@@ -9,6 +9,7 @@ import { NotificationsModule } from '../notifications/notifications.module';
 import { AuthModule } from '../auth/auth.module';
 import { PanelSettingsModule } from '../panel-settings/panel-settings.module';
 import { DnsModule } from '../dns/dns.module';
+import { CountryBlockModule } from '../country-block/country-block.module';
 
 @Module({
   imports: [
@@ -21,6 +22,7 @@ import { DnsModule } from '../dns/dns.module';
     AuthModule,
     PanelSettingsModule,
     DnsModule,
+    CountryBlockModule,
   ],
   providers: [SchedulerService],
 })

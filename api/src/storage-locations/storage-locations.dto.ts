@@ -2,7 +2,7 @@ import {
   IsString, IsOptional, IsIn, IsObject, MinLength, MaxLength, Matches,
 } from 'class-validator';
 
-const STORAGE_TYPES = ['LOCAL', 'S3', 'YANDEX_DISK', 'CLOUD_MAIL_RU'] as const;
+const STORAGE_TYPES = ['LOCAL', 'S3', 'SFTP', 'YANDEX_DISK', 'CLOUD_MAIL_RU'] as const;
 
 export class CreateStorageLocationDto {
   @IsString()

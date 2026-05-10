@@ -8,7 +8,8 @@ import {
 } from './storage-locations.dto';
 
 // Хранилища, которые поддерживают движок Restic.
-const RESTIC_TYPES = new Set(['LOCAL', 'S3']);
+// SFTP добавлен — restic умеет sftp:user@host:/path репы нативно (через ssh).
+const RESTIC_TYPES = new Set(['LOCAL', 'S3', 'SFTP']);
 
 export interface StorageLocationView {
   id: string;
@@ -112,8 +113,24 @@ export class StorageLocationsService {
       data.name = dto.name.trim();
     }
     if (dto.config !== undefined) {
-      this.validateConfigForType(row.type, dto.config);
-      data.config = JSON.stringify(dto.config);
+      // Сохраняем существующие секреты при апдейте: если фронт пришлёт '***'
+      // (маркер из redactSecrets), это значит «не менять» — мерджим со старым.
+      const existing = this.safeParseConfig(row.config);
+      const merged: Record<string, string> = { ...existing };
+      const secretKeys = new Set([
+        'secretKey', 'accessKey', 'oauthToken', 'password',
+        'sftpPrivateKey', 'sftpPassphrase', 'sftpPassword',
+      ]);
+      for (const [k, v] of Object.entries(dto.config)) {
+        if (secretKeys.has(k) && (v === undefined || v === null || v === '' || v === '***')) {
+          // оставляем старое значение
+          continue;
+        }
+        merged[k] = v;
+      }
+      // Удаляем поля, которые фронт явно прислал пустыми (но не секреты — те выше).
+      this.validateConfigForType(row.type, merged);
+      data.config = JSON.stringify(merged);
     }
 
     const updated = await this.prisma.storageLocation.update({
@@ -146,7 +163,7 @@ export class StorageLocationsService {
   async test(id: string, siteName: string): Promise<{ success: boolean; error?: string }> {
     const row = await this.getById(id);
     if (!row.resticEnabled || !row.resticPassword) {
-      return { success: false, error: 'Тест реализован только для Restic-совместимых хранилищ (LOCAL/S3)' };
+      return { success: false, error: 'Тест реализован только для Restic-совместимых хранилищ (LOCAL/S3/SFTP)' };
     }
 
     if (!this.agentRelay.isAgentConnected()) {
@@ -159,7 +176,7 @@ export class StorageLocationsService {
       {
         siteName,
         storage: {
-          type: row.type as 'LOCAL' | 'S3',
+          type: row.type as 'LOCAL' | 'S3' | 'SFTP',
           config: this.safeParseConfig(row.config),
           password: row.resticPassword,
         },
@@ -203,10 +220,14 @@ export class StorageLocationsService {
     return {};
   }
 
-  private redactSecrets(type: string, cfg: Record<string, string>): Record<string, string> {
+  private redactSecrets(_type: string, cfg: Record<string, string>): Record<string, string> {
     const redacted: Record<string, string> = { ...cfg };
     // Секреты: заменяем на маркер (UI будет показывать "●●●● задан" / "не задан")
-    const secretKeys = ['secretKey', 'accessKey', 'oauthToken', 'password'];
+    const secretKeys = [
+      'secretKey', 'accessKey', 'oauthToken', 'password',
+      // SFTP: приватный ключ + опциональная пасфраза.
+      'sftpPrivateKey', 'sftpPassphrase',
+    ];
     for (const k of secretKeys) {
       if (redacted[k]) redacted[k] = '***';
     }
@@ -216,6 +237,10 @@ export class StorageLocationsService {
   private validateConfigForType(type: string, cfg: Record<string, string>): void {
     const required: Record<string, string[]> = {
       S3: ['bucket', 'accessKey', 'secretKey'],
+      // SFTP: host/username/path обязательны; для авторизации — либо
+      // sftpPrivateKey (KEY), либо sftpPassword (PASSWORD через sshpass).
+      // Доп. валидация одного из двух полей — в блоке ниже.
+      SFTP: ['sftpHost', 'sftpUsername', 'sftpPath'],
       YANDEX_DISK: ['oauthToken'],
       CLOUD_MAIL_RU: ['username', 'password'],
       LOCAL: [], // ничего обязательного
@@ -227,10 +252,51 @@ export class StorageLocationsService {
         throw new BadRequestException(`Отсутствует обязательное поле: ${key}`);
       }
     }
-    // S3 endpoint — если задан, должен быть https://
+    // S3 endpoint — если задан, должен быть http(s)://
     if (type === 'S3' && cfg.endpoint) {
       if (!/^https?:\/\//i.test(cfg.endpoint)) {
         throw new BadRequestException('endpoint должен начинаться с http(s)://');
+      }
+    }
+    // SFTP: дополнительная валидация полей (host whitelist, port-число, абсолютный path)
+    if (type === 'SFTP') {
+      if (!/^[a-zA-Z0-9.\-]+$/.test(cfg.sftpHost)) {
+        throw new BadRequestException('sftpHost содержит недопустимые символы (только латинница/цифры/точка/дефис)');
+      }
+      if (!/^[a-zA-Z_][a-zA-Z0-9_-]{0,31}$/.test(cfg.sftpUsername)) {
+        throw new BadRequestException('sftpUsername некорректный (имя Linux-пользователя)');
+      }
+      if (cfg.sftpPort) {
+        const p = Number(cfg.sftpPort);
+        if (!Number.isInteger(p) || p < 1 || p > 65535) {
+          throw new BadRequestException('sftpPort должен быть числом 1..65535');
+        }
+      }
+      if (!cfg.sftpPath.startsWith('/') || cfg.sftpPath.includes('..') || /\s/.test(cfg.sftpPath)) {
+        throw new BadRequestException('sftpPath должен быть абсолютным путём без ".." и пробелов');
+      }
+
+      // Auth mode: KEY (default) или PASSWORD. Если оба заданы — приоритет у
+      // sftpAuthMode, иначе определяем по наличию полей. Хоть одно должно быть.
+      const mode = cfg.sftpAuthMode === 'PASSWORD' ? 'PASSWORD' : 'KEY';
+      cfg.sftpAuthMode = mode;
+
+      if (mode === 'KEY') {
+        if (!cfg.sftpPrivateKey || !cfg.sftpPrivateKey.trim()) {
+          throw new BadRequestException('sftpPrivateKey обязателен при auth mode = KEY');
+        }
+        const pk = cfg.sftpPrivateKey.trim();
+        if (!/-----BEGIN [A-Z ]+PRIVATE KEY-----/.test(pk) || !/-----END [A-Z ]+PRIVATE KEY-----/.test(pk)) {
+          throw new BadRequestException('sftpPrivateKey должен быть PEM/OpenSSH ключом (-----BEGIN ... PRIVATE KEY-----)');
+        }
+      } else {
+        if (!cfg.sftpPassword || !cfg.sftpPassword.trim()) {
+          throw new BadRequestException('sftpPassword обязателен при auth mode = PASSWORD');
+        }
+        // Длина пароля — мягкая защита от пустяковых паролей; sshpass допускает любые байты.
+        if (cfg.sftpPassword.length < 4) {
+          throw new BadRequestException('sftpPassword слишком короткий (минимум 4 символа)');
+        }
       }
     }
   }

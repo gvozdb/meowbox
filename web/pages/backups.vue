@@ -429,6 +429,7 @@
               <select v-model="storageDialog.form.type" class="form-input form-input--select" :disabled="!!storageDialog.editing">
                 <option value="LOCAL">Локально (диск сервера)</option>
                 <option value="S3">S3 / S3-совместимое</option>
+                <option value="SFTP">SFTP (Restic)</option>
                 <option value="YANDEX_DISK">Яндекс.Диск (только TAR)</option>
                 <option value="CLOUD_MAIL_RU">Облако Mail.ru (только TAR)</option>
               </select>
@@ -472,6 +473,59 @@
               </div>
             </template>
 
+            <template v-if="storageDialog.form.type === 'SFTP'">
+              <div class="form-group">
+                <label class="form-label">Хост</label>
+                <input v-model="storageDialog.form.config.sftpHost" class="form-input mono" placeholder="backups.example.com" />
+              </div>
+              <div class="form-group">
+                <label class="form-label">Порт</label>
+                <input v-model="storageDialog.form.config.sftpPort" class="form-input mono" placeholder="22" />
+              </div>
+              <div class="form-group">
+                <label class="form-label">Username</label>
+                <input v-model="storageDialog.form.config.sftpUsername" class="form-input mono" placeholder="backup" />
+              </div>
+              <div class="form-group">
+                <label class="form-label">Путь на удалённой стороне</label>
+                <input v-model="storageDialog.form.config.sftpPath" class="form-input mono" placeholder="/home/backup/restic" />
+                <span class="form-hint">Абсолютный. Папки <code>/&lt;путь&gt;/&lt;имя_сайта&gt;</code> создаются автоматически.</span>
+              </div>
+              <div class="form-group">
+                <label class="form-label">Способ авторизации</label>
+                <select v-model="storageDialog.form.config.sftpAuthMode" class="form-input">
+                  <option value="KEY">SSH-ключ (рекомендовано)</option>
+                  <option value="PASSWORD">Пароль</option>
+                </select>
+                <span class="form-hint">
+                  Ключ безопаснее (нечего перехватывать), но если на удалённом хосте только пароль — выбирай PASSWORD. Авторизация по паролю работает через <code>sshpass -e</code>; пароль никогда не попадает в командную строку.
+                </span>
+              </div>
+              <template v-if="(storageDialog.form.config.sftpAuthMode || 'KEY') === 'KEY'">
+                <div class="form-group">
+                  <label class="form-label">SSH приватный ключ (PEM/OpenSSH)</label>
+                  <textarea v-model="storageDialog.form.config.sftpPrivateKey" class="form-input mono" rows="6"
+                    placeholder="-----BEGIN OPENSSH PRIVATE KEY-----&#10;...&#10;-----END OPENSSH PRIVATE KEY-----"></textarea>
+                  <span class="form-hint">
+                    Ключ хранится в БД и пишется на сервер только при выполнении restic-операции (0600, /var/lib/meowbox/restic-sftp-keys/). Публичный ключ должен быть в <code>~/.ssh/authorized_keys</code> на удалённом хосте.
+                  </span>
+                </div>
+                <div class="form-group">
+                  <label class="form-label">Пасфраза ключа (опционально)</label>
+                  <input v-model="storageDialog.form.config.sftpPassphrase" type="password" class="form-input mono" autocomplete="new-password" />
+                </div>
+              </template>
+              <template v-else>
+                <div class="form-group">
+                  <label class="form-label">Пароль SSH-пользователя</label>
+                  <input v-model="storageDialog.form.config.sftpPassword" type="password" class="form-input mono" autocomplete="new-password" placeholder="••••••••" />
+                  <span class="form-hint">
+                    Передаётся restic'у через переменную окружения <code>SSHPASS</code>, не виден в <code>ps</code>. Минимум 4 символа.
+                  </span>
+                </div>
+              </template>
+            </template>
+
             <template v-if="storageDialog.form.type === 'YANDEX_DISK'">
               <div class="form-group">
                 <label class="form-label">OAuth токен</label>
@@ -499,8 +553,8 @@
               </div>
             </template>
 
-            <!-- Пароль Restic-репы: только для LOCAL/S3 и только при создании -->
-            <template v-if="!storageDialog.editing && (storageDialog.form.type === 'LOCAL' || storageDialog.form.type === 'S3')">
+            <!-- Пароль Restic-репы: только для LOCAL/S3/SFTP и только при создании -->
+            <template v-if="!storageDialog.editing && (storageDialog.form.type === 'LOCAL' || storageDialog.form.type === 'S3' || storageDialog.form.type === 'SFTP')">
               <div class="form-group">
                 <label class="form-label">Пароль Restic (опционально)</label>
                 <input v-model="storageDialog.form.resticPassword" type="text" class="form-input mono" placeholder="qwerty" autocomplete="off" />
@@ -716,7 +770,7 @@ function formatType(t: string) {
 }
 
 function formatStorage(s: string) {
-  const map: Record<string, string> = { LOCAL: 'Локально', YANDEX_DISK: 'Я.Диск', CLOUD_MAIL_RU: 'Cloud Mail', S3: 'S3' };
+  const map: Record<string, string> = { LOCAL: 'Локально', SFTP: 'SFTP', YANDEX_DISK: 'Я.Диск', CLOUD_MAIL_RU: 'Cloud Mail', S3: 'S3' };
   return map[s] || s;
 }
 
@@ -944,7 +998,7 @@ const storageDialog = reactive({
   newPassword: '' as string,
   form: {
     name: '',
-    type: 'S3' as 'LOCAL' | 'S3' | 'YANDEX_DISK' | 'CLOUD_MAIL_RU',
+    type: 'S3' as 'LOCAL' | 'S3' | 'SFTP' | 'YANDEX_DISK' | 'CLOUD_MAIL_RU',
     config: {} as Record<string, string>,
     resticPassword: '' as string,
   },
@@ -965,8 +1019,19 @@ function openStorageDialog(loc: StorageLocationOption | null) {
     storageDialog.form.config = {};
     storageDialog.form.resticPassword = '';
   }
+  // Дефолтный SFTP auth mode = 'KEY', если ещё не выставлен (старые записи или новые формы)
+  if (storageDialog.form.type === 'SFTP' && !storageDialog.form.config.sftpAuthMode) {
+    storageDialog.form.config.sftpAuthMode = 'KEY';
+  }
   storageDialog.open = true;
 }
+
+// При смене типа на SFTP — выставляем default auth mode (если оператор переключил select)
+watch(() => storageDialog.form.type, (t) => {
+  if (t === 'SFTP' && !storageDialog.form.config.sftpAuthMode) {
+    storageDialog.form.config.sftpAuthMode = 'KEY';
+  }
+});
 
 async function saveStorage() {
   storageDialog.saving = true;
@@ -987,7 +1052,7 @@ async function saveStorage() {
     } else {
       // Пароль Restic — опционально. Если пустой, бэк подставит стандартный фоллбек «qwerty».
       // Поле уезжает только для LOCAL/S3 (только они поддерживают Restic), чтобы не мусорить.
-      const resticSupported = storageDialog.form.type === 'LOCAL' || storageDialog.form.type === 'S3';
+      const resticSupported = storageDialog.form.type === 'LOCAL' || storageDialog.form.type === 'S3' || storageDialog.form.type === 'SFTP';
       const payload: Record<string, unknown> = {
         name: storageDialog.form.name,
         type: storageDialog.form.type,

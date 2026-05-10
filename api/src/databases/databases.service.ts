@@ -6,6 +6,8 @@ import {
   InternalServerErrorException,
   BadRequestException,
   Logger,
+  OnModuleInit,
+  OnModuleDestroy,
 } from '@nestjs/common';
 import { DatabaseType } from '../common/enums';
 import { randomBytes } from 'crypto';
@@ -19,6 +21,20 @@ import { PrismaService } from '../common/prisma.service';
 import { AgentRelayService } from '../gateway/agent-relay.service';
 import { CreateDatabaseDto, UpdateDatabaseDto } from './databases.dto';
 
+/**
+ * Где агент создаёт ручные дампы БД для скачивания (db:export → /var/meowbox/exports/...).
+ * Должен совпадать с DB_EXPORTS_DIR в agent/src/config.ts (default `/var/meowbox/exports`).
+ */
+const DB_EXPORTS_DIR =
+  (process.env.DB_EXPORTS_DIR || '/var/meowbox/exports').replace(/\/+$/, '');
+
+/**
+ * TTL для забытых файлов экспорта. Если юзер нажал «Экспорт», но не скачал
+ * (или скачивание оборвалось), файл должен сам уехать в /dev/null через сутки.
+ */
+const EXPORT_TTL_MS = 24 * 60 * 60 * 1000;
+const EXPORT_CLEANUP_INTERVAL_MS = 6 * 60 * 60 * 1000;
+
 interface DbListOptions {
   userId: string;
   role: string;
@@ -30,13 +46,66 @@ interface DbListOptions {
 }
 
 @Injectable()
-export class DatabasesService {
+export class DatabasesService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger('DatabasesService');
+  private exportCleanupTimer?: NodeJS.Timeout;
 
   constructor(
     private readonly prisma: PrismaService,
     private readonly agentRelay: AgentRelayService,
   ) {}
+
+  async onModuleInit(): Promise<void> {
+    // Стартовый прогон + периодический таймер. Если на диске лежат старые
+    // дампы (например, после перезапуска API между export → download) —
+    // они уедут в /dev/null. Дальше — каждые 6 часов.
+    void this.cleanupStaleExports();
+    this.exportCleanupTimer = setInterval(
+      () => void this.cleanupStaleExports(),
+      EXPORT_CLEANUP_INTERVAL_MS,
+    );
+    // Не блокируем shutdown процесса.
+    this.exportCleanupTimer.unref?.();
+  }
+
+  onModuleDestroy(): void {
+    if (this.exportCleanupTimer) clearInterval(this.exportCleanupTimer);
+  }
+
+  /**
+   * Удаляет .sql/.gz/etc файлы старше EXPORT_TTL_MS из DB_EXPORTS_DIR.
+   * Идемпотентно. Не падает, если папки нет (агент мог ещё не создать).
+   */
+  private async cleanupStaleExports(): Promise<void> {
+    try {
+      const entries = await fs.readdir(DB_EXPORTS_DIR).catch((err: NodeJS.ErrnoException) => {
+        if (err.code === 'ENOENT') return [] as string[];
+        throw err;
+      });
+      const cutoff = Date.now() - EXPORT_TTL_MS;
+      let removed = 0;
+      for (const name of entries) {
+        const full = path.join(DB_EXPORTS_DIR, name);
+        try {
+          const st = await fs.lstat(full);
+          // Только обычные файлы — без рекурсии, без symlink-traversal.
+          if (!st.isFile()) continue;
+          if (st.mtimeMs > cutoff) continue;
+          await fs.unlink(full);
+          removed++;
+        } catch (err) {
+          this.logger.debug(
+            `cleanupStaleExports: skip ${full}: ${(err as Error).message}`,
+          );
+        }
+      }
+      if (removed > 0) {
+        this.logger.log(`Cleaned up ${removed} stale DB export(s) from ${DB_EXPORTS_DIR}`);
+      }
+    } catch (err) {
+      this.logger.warn(`cleanupStaleExports failed: ${(err as Error).message}`);
+    }
+  }
 
   async findAll(options: DbListOptions) {
     const { userId, role, type, search, siteId, page = 1, perPage = 20 } = options;

@@ -9,6 +9,7 @@ import { SslManager } from './ssl/ssl.manager';
 import { BackupExecutor } from './backup/backup.executor';
 import { ResticExecutor, ResticStorage, RetentionPolicy } from './backup/restic.executor';
 import { FirewallManager } from './firewall/firewall.manager';
+import { CountryBlockManager, CountryBlockRule, CountrySource } from './country-block/country-block.manager';
 import { CronManager } from './cron/cron.manager';
 import { SiteInstaller } from './installer/site-installer';
 import { PermissionsManager } from './installer/permissions';
@@ -79,6 +80,7 @@ export class AgentService {
   private backup: BackupExecutor;
   private restic: ResticExecutor;
   private firewall: FirewallManager;
+  private countryBlock: CountryBlockManager;
   private cron: CronManager;
   private installer: SiteInstaller;
   private permsMgr: PermissionsManager;
@@ -120,6 +122,7 @@ export class AgentService {
     this.backup = new BackupExecutor();
     this.restic = new ResticExecutor();
     this.firewall = new FirewallManager();
+    this.countryBlock = new CountryBlockManager();
     this.cron = new CronManager();
     this.installer = new SiteInstaller();
     this.terminal = new TerminalManager();
@@ -1037,6 +1040,34 @@ export class AgentService {
 
     this.safeOn(s, 'firewall:status', async (_params: unknown, cb: Callback) => {
       cb({ success: true, data: await this.firewall.status() });
+    });
+
+    // -- Country block (server-level GeoIP блокировка) --
+    // apply: переустанавливает все meowbox-управляемые ipset/iptables под
+    // переданный набор правил (idempotent, чистит старое автоматически).
+    // refresh-db: форсированно скачивает свежие CIDR-zone'ы, не трогая правила.
+    // clear: сносит все meowbox-правила (выключение мастер-свитча).
+    // status: листинг ipset'ов/правил/дат обновления для UI.
+    this.safeOn(s, 'country-block:apply', async (params: {
+      rules: CountryBlockRule[];
+      sources: CountrySource[];
+    }, cb: Callback) => {
+      cb(await this.countryBlock.applyRules(params.rules, params.sources));
+    }, TIMEOUTS.SOCKET_HANDLER * 4);
+
+    this.safeOn(s, 'country-block:refresh-db', async (params: {
+      countries: string[];
+      sources: CountrySource[];
+    }, cb: Callback) => {
+      cb(await this.countryBlock.refreshDatabase(params.countries, params.sources));
+    }, TIMEOUTS.SOCKET_HANDLER * 4);
+
+    this.safeOn(s, 'country-block:clear', async (_params: unknown, cb: Callback) => {
+      cb(await this.countryBlock.clearAll());
+    });
+
+    this.safeOn(s, 'country-block:status', async (_params: unknown, cb: Callback) => {
+      cb(await this.countryBlock.status());
     });
 
     // -- Cron --

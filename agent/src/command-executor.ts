@@ -163,6 +163,12 @@ export class CommandExecutor {
     'ip',
     // ss — проверка занятости порта перед install сервиса.
     'ss',
+    // Country-block: ipset/iptables/ip6tables — server-level GeoIP-блокировка
+    // через netfilter. netfilter-persistent — сохранение правил через reboot.
+    'ipset',
+    'iptables',
+    'ip6tables',
+    'netfilter-persistent',
   ]);
 
   // Accept versioned binaries like php8.2, php8.3, composer2

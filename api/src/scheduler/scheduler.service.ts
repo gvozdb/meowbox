@@ -11,6 +11,7 @@ import { SessionService } from '../auth/session.service';
 import { SslStatus, SiteStatus, BackupStatus, DeployStatus } from '../common/enums';
 import { PanelSettingsService } from '../panel-settings/panel-settings.service';
 import { DnsService } from '../dns/dns.service';
+import { CountryBlockService } from '../country-block/country-block.service';
 
 // Thresholds for high load alerts (avoid alert storms with cooldown).
 // Все пороги конфигурируются через env, т.к. оператор регулярно их подстраивает
@@ -49,7 +50,40 @@ export class SchedulerService {
     private readonly sessionService: SessionService,
     private readonly panelSettings: PanelSettingsService,
     private readonly dnsService: DnsService,
+    private readonly countryBlockService: CountryBlockService,
   ) {}
+
+  // =========================================================================
+  // Country block — refresh CIDR-баз по cron из настроек (`updateSchedule`).
+  //
+  // Тикаем каждую минуту и сверяемся с пользовательским cron-расписанием.
+  // Тот же паттерн используется для backup/check (см. handleScheduledBackups,
+  // handleResticCheck) — без SchedulerRegistry, проще и надёжнее.
+  // Дефолт расписания — '30 4 * * *' (каждый день в 04:30).
+  // =========================================================================
+  @Cron(CronExpression.EVERY_MINUTE)
+  async handleCountryBlockRefresh() {
+    if (!this.agentRelay.isAgentConnected()) return;
+    try {
+      const settings = await this.countryBlockService.getSettings();
+      if (!settings.enabled) return;
+      const schedule = settings.updateSchedule?.trim() || '30 4 * * *';
+      if (!this.shouldRunNow(schedule, new Date())) return;
+
+      const r = await this.countryBlockService.refreshDb();
+      if (r.success) {
+        this.logger.log(
+          `country-block: обновлены CIDR для ${r.updated?.length || 0} стран`,
+        );
+      } else {
+        this.logger.warn(
+          `country-block refresh: ${r.error || (r.errors || []).join('; ')}`,
+        );
+      }
+    } catch (err) {
+      this.logger.error(`country-block refresh failed: ${(err as Error).message}`);
+    }
+  }
 
   // =========================================================================
   // DNS sync — каждый час полный sync zones+records у всех ACTIVE/ERROR провайдеров.

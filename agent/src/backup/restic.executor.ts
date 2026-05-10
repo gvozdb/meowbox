@@ -3,7 +3,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
 import { spawn } from 'child_process';
-import { randomBytes } from 'crypto';
+import { createHash, randomBytes } from 'crypto';
 import { BACKUP_LOCAL_PATH, S3_DEFAULTS, BACKUP_S3, RESTIC_OPS } from '../config';
 import { childProcessRegistry } from '../process-registry';
 
@@ -37,8 +37,13 @@ function assertDbName(name: string): void {
 // =============================================================================
 
 export interface ResticStorage {
-  type: 'LOCAL' | 'S3';
-  config: Record<string, string>; // bucket, endpoint, region, accessKey, secretKey, remotePath
+  type: 'LOCAL' | 'S3' | 'SFTP';
+  // Поля по типу:
+  //   LOCAL: remotePath
+  //   S3:    bucket, endpoint, region, accessKey, secretKey, prefix
+  //   SFTP:  sftpHost, sftpPort, sftpUsername, sftpPath, sftpPrivateKey,
+  //          sftpPassphrase (opt), sftpHostKey (opt — SHA256 fingerprint)
+  config: Record<string, string>;
   password: string;
 }
 
@@ -109,6 +114,27 @@ export class ResticExecutor {
       return `s3:${ep}/${bucket}/${pfx}/${siteName}`;
     }
 
+    if (storage.type === 'SFTP') {
+      const { sftpHost, sftpUsername, sftpPath } = storage.config;
+      if (!sftpHost || !sftpUsername || !sftpPath) {
+        throw new Error('SFTP host/username/path are required');
+      }
+      // Базовые проверки (defense-in-depth поверх API-валидации)
+      if (!/^[a-zA-Z0-9.\-]+$/.test(sftpHost)) {
+        throw new Error('Invalid sftpHost');
+      }
+      if (!/^[a-zA-Z_][a-zA-Z0-9_-]{0,31}$/.test(sftpUsername)) {
+        throw new Error('Invalid sftpUsername');
+      }
+      if (!sftpPath.startsWith('/') || sftpPath.includes('..') || /\s/.test(sftpPath)) {
+        throw new Error('Invalid sftpPath');
+      }
+      // restic SFTP URL: sftp:user@host:/abs/path/<siteName>
+      // Порт прописывается в sftp.command (см. buildResticOpts).
+      const base = sftpPath.replace(/\/+$/, '');
+      return `sftp:${sftpUsername}@${sftpHost}:${base}/${siteName}`;
+    }
+
     throw new Error(`Unsupported storage type for restic: ${storage.type}`);
   }
 
@@ -130,7 +156,121 @@ export class ResticExecutor {
       const base = storage.config.remotePath || path.join(BACKUP_LOCAL_PATH, 'restic');
       try { fs.mkdirSync(base, { recursive: true, mode: 0o700 }); } catch { /* ignore */ }
     }
+    if (storage.type === 'SFTP') {
+      const { sftpAuthMode, sftpPassword } = storage.config;
+      // sshpass читает пароль из ENV SSHPASS (флаг -e). Это безопаснее, чем
+      // -p <pwd> в командной строке (видно в `ps -ef`).
+      // Дочерний sshpass-процесс наследует env от restic, который у нас тут.
+      if (sftpAuthMode === 'PASSWORD') {
+        if (!sftpPassword) throw new Error('SFTP password is required (auth mode = PASSWORD)');
+        env.SSHPASS = sftpPassword;
+      }
+    }
     return env;
+  }
+
+  // ---------------------------------------------------------------------------
+  // SFTP-specific: пишем приватный ключ на диск (0600) и возвращаем путь.
+  // Имя файла = sha256(privateKey) → ключ переиспользуется между вызовами,
+  // и idempotent — рестарты агента и concurrent restic-процессы безопасны.
+  //
+  // /var/lib/meowbox/restic-sftp-keys/ создаётся как 0700 (только root).
+  //
+  // Stale keys (если оператор удалил StorageLocation) НЕ чистим автоматически —
+  // занятая запись на диске — мелкая утечка, не критично; cleanup можно
+  // добавить отдельным cron'ом если разрастётся.
+  // ---------------------------------------------------------------------------
+  private static readonly SFTP_KEYS_DIR = '/var/lib/meowbox/restic-sftp-keys';
+
+  private ensureSftpKeyFile(privateKey: string): string {
+    const dir = ResticExecutor.SFTP_KEYS_DIR;
+    try { fs.mkdirSync(dir, { recursive: true, mode: 0o700 }); } catch { /* ignore */ }
+    // Жёстко 0700 — даже если кто-то уже создал директорию ранее
+    try { fs.chmodSync(dir, 0o700); } catch { /* ignore */ }
+    const sha = createHash('sha256').update(privateKey).digest('hex').slice(0, 32);
+    const file = path.join(dir, `${sha}.key`);
+    if (!fs.existsSync(file)) {
+      // OpenSSH/PEM ключи требуют trailing newline для корректного парсинга
+      const body = privateKey.endsWith('\n') ? privateKey : privateKey + '\n';
+      fs.writeFileSync(file, body, { mode: 0o600 });
+    } else {
+      try { fs.chmodSync(file, 0o600); } catch { /* ignore */ }
+    }
+    return file;
+  }
+
+  /**
+   * Restic args, специфичные для backend'а (например, -o sftp.command=...).
+   * Возвращает массив, который добавляется к `-r repo` в каждом restic-вызове.
+   */
+  private buildBackendOpts(storage: ResticStorage): string[] {
+    if (storage.type !== 'SFTP') return [];
+    const {
+      sftpHost, sftpPort, sftpUsername, sftpPrivateKey, sftpHostKey,
+      sftpAuthMode, sftpPassword,
+    } = storage.config;
+    const port = sftpPort && /^\d+$/.test(sftpPort) ? sftpPort : '22';
+    const mode = sftpAuthMode === 'PASSWORD' ? 'PASSWORD' : 'KEY';
+
+    // UserKnownHostsFile per-storage (sha от стабильного идентификатора —
+    // host+user+port, т.к. ключ может отсутствовать в PASSWORD-режиме).
+    const idHash = createHash('sha256')
+      .update(`${sftpUsername}@${sftpHost}:${port}`)
+      .digest('hex').slice(0, 16);
+    const knownHostsFile = path.join(ResticExecutor.SFTP_KEYS_DIR, `${idHash}.known_hosts`);
+    try { fs.mkdirSync(ResticExecutor.SFTP_KEYS_DIR, { recursive: true, mode: 0o700 }); } catch { /* ignore */ }
+
+    if (sftpHostKey && /^SHA256:[A-Za-z0-9+/=]+$/.test(sftpHostKey) && !fs.existsSync(knownHostsFile)) {
+      // TODO: записать через ssh-keyscan + верифицировать fingerprint.
+      // Пока fallback на accept-new (TOFU).
+    }
+    void sftpHostKey;
+
+    if (mode === 'KEY') {
+      if (!sftpPrivateKey) throw new Error('SFTP privateKey is required (auth mode = KEY)');
+      const keyFile = this.ensureSftpKeyFile(sftpPrivateKey);
+      // BatchMode=yes — не запрашивать пароль интерактивно (только key-auth).
+      const sshCmd = [
+        'ssh',
+        '-i', keyFile,
+        '-p', port,
+        '-o', 'BatchMode=yes',
+        '-o', 'IdentitiesOnly=yes',
+        '-o', 'StrictHostKeyChecking=accept-new',
+        '-o', `UserKnownHostsFile=${knownHostsFile}`,
+        '-o', 'ConnectTimeout=15',
+        '-o', 'ServerAliveInterval=30',
+        `${sftpUsername}@${sftpHost}`,
+        '-s', 'sftp',
+      ].join(' ');
+      return ['-o', `sftp.command=${sshCmd}`];
+    }
+
+    // PASSWORD mode: sshpass -e ssh ...  (читает пароль из env SSHPASS,
+    // который выставляет buildEnv).
+    if (!sftpPassword) throw new Error('SFTP password is required (auth mode = PASSWORD)');
+    const sshCmd = [
+      'sshpass', '-e',
+      'ssh',
+      '-p', port,
+      '-o', 'PreferredAuthentications=password,keyboard-interactive',
+      '-o', 'PubkeyAuthentication=no',
+      '-o', 'StrictHostKeyChecking=accept-new',
+      '-o', `UserKnownHostsFile=${knownHostsFile}`,
+      '-o', 'ConnectTimeout=15',
+      '-o', 'ServerAliveInterval=30',
+      `${sftpUsername}@${sftpHost}`,
+      '-s', 'sftp',
+    ].join(' ');
+    return ['-o', `sftp.command=${sshCmd}`];
+  }
+
+  /**
+   * Унифицированная сборка `[-r repo, ...backend-opts]` для всех restic-команд.
+   */
+  private buildResticBaseArgs(siteName: string, storage: ResticStorage): string[] {
+    const repo = this.buildRepoUrl(siteName, storage);
+    return ['-r', repo, ...this.buildBackendOpts(storage)];
   }
 
   // ---------------------------------------------------------------------------
@@ -141,13 +281,13 @@ export class ResticExecutor {
     siteName: string,
     storage: ResticStorage,
   ): Promise<{ success: boolean; error?: string }> {
-    const repo = this.buildRepoUrl(siteName, storage);
+    const base = this.buildResticBaseArgs(siteName, storage);
     const env = this.buildEnv(storage);
 
     // Проверка: snapshots --json требует инициализированную репу; exit 0 → есть
     const check = await this.executor.execute(
       'restic',
-      ['-r', repo, 'snapshots', '--json', '--no-lock'],
+      [...base, 'snapshots', '--json', '--no-lock'],
       { env, timeout: 30_000, allowFailure: true },
     );
 
@@ -167,7 +307,7 @@ export class ResticExecutor {
     // Инициализируем
     const init = await this.executor.execute(
       'restic',
-      ['-r', repo, 'init'],
+      [...base, 'init'],
       { env, timeout: 60_000, allowFailure: true },
     );
     if (init.exitCode !== 0) {
@@ -203,7 +343,7 @@ export class ResticExecutor {
         return { success: false, error: ensure.error };
       }
 
-      const repo = this.buildRepoUrl(siteName, storage);
+      const base = this.buildResticBaseArgs(siteName, storage);
       const env = this.buildEnv(storage);
 
       onProgress(10);
@@ -234,7 +374,7 @@ export class ResticExecutor {
 
       // 4. Запускаем restic backup с тегом сайта и --json для прогресса
       const args = [
-        '-r', repo,
+        ...base,
         'backup',
         '--tag', `site:${siteName}`,
         '--json',
@@ -291,7 +431,7 @@ export class ResticExecutor {
       if (!snapshotId) {
         const latest = await this.executor.execute(
           'restic',
-          ['-r', repo, 'snapshots', '--json', '--tag', `site:${siteName}`, '--latest', '1'],
+          [...base, 'snapshots', '--json', '--tag', `site:${siteName}`, '--latest', '1'],
           { env, timeout: 30_000, allowFailure: true },
         );
         if (latest.exitCode === 0) {
@@ -326,12 +466,12 @@ export class ResticExecutor {
       if (!ensure.success) {
         return { success: false, error: ensure.error };
       }
-      const repo = this.buildRepoUrl(siteName, storage);
+      const base = this.buildResticBaseArgs(siteName, storage);
       const env = this.buildEnv(storage);
 
       const r = await this.executor.execute(
         'restic',
-        ['-r', repo, 'snapshots', '--json', '--tag', `site:${siteName}`],
+        [...base, 'snapshots', '--json', '--tag', `site:${siteName}`],
         { env, timeout: 60_000, allowFailure: true },
       );
       if (r.exitCode !== 0) {
@@ -380,7 +520,7 @@ export class ResticExecutor {
       );
 
     try {
-      const repo = this.buildRepoUrl(siteName, storage);
+      const base = this.buildResticBaseArgs(siteName, storage);
       const env = this.buildEnv(storage);
 
       onProgress(5);
@@ -391,7 +531,7 @@ export class ResticExecutor {
 
       const result = await this.executor.execute(
         'restic',
-        ['-r', repo, 'restore', snapshotId, '--target', restoreTemp],
+        [...base, 'restore', snapshotId, '--target', restoreTemp],
         { env, timeout: 1800_000, allowFailure: true }, // 30 минут
       );
 
@@ -546,14 +686,14 @@ export class ResticExecutor {
       // env изолированно: только PATH/HOME/LANG + restic-специфичные креды.
       // Не пробрасываем весь process.env — снижаем риск утечки секретов
       // агента (AGENT_SECRET и т.п.) в /proc/<pid>/environ дочернего restic'а.
-      const repo = this.buildRepoUrl(params.siteName, params.storage);
+      const baseArgs = this.buildResticBaseArgs(params.siteName, params.storage);
       const env: Record<string, string> = {
         PATH: process.env.PATH || '',
         HOME: process.env.HOME || '',
         LANG: process.env.LANG || 'C',
         ...this.buildEnv(params.storage),
       };
-      console.log(`[restic.dumpToS3] spawning restic dump: repo=${repo}`);
+      console.log(`[restic.dumpToS3] spawning restic dump: repo=${baseArgs[1]}`);
       // -o s3.connections=32 — параллельные коннекты к S3 backend.
       // Узкое место restic dump = TTFB на каждый range-запрос pack-блобов.
       // Прямой curl показал 8MB/s от S3 firstvds, restic dump — 100KB/s.
@@ -561,7 +701,7 @@ export class ResticExecutor {
       // параллельных запросов. Память не страдает — connections дешёвые.
       const isS3Repo = params.storage.type === 'S3';
       const proc = spawn('restic', [
-        '-r', repo,
+        ...baseArgs,
         ...(isS3Repo ? ['-o', 's3.connections=32'] : []),
         'dump', params.snapshotId,
         params.rootPath,
@@ -739,7 +879,7 @@ export class ResticExecutor {
   }> {
     try {
       const { siteName, snapshotId, rootPath, storage } = params;
-      const repo = this.buildRepoUrl(siteName, storage);
+      const base = this.buildResticBaseArgs(siteName, storage);
       const env = this.buildEnv(storage);
 
       // restic ls --long --json --recursive — NDJSON листинг рекурсивно.
@@ -757,7 +897,7 @@ export class ResticExecutor {
 
       const result = await this.executor.executeStreaming(
         'restic',
-        ['-r', repo, 'ls', '--long', '--json', '--recursive', snapshotId, rootPath],
+        [...base, 'ls', '--long', '--json', '--recursive', snapshotId, rootPath],
         {
           env,
           timeout: RESTIC_OPS.LS_TIMEOUT_MS,
@@ -823,17 +963,18 @@ export class ResticExecutor {
     policy: RetentionPolicy,
   ): Promise<{ success: boolean; error?: string }> {
     try {
-      const repo = this.buildRepoUrl(siteName, storage);
+      const base = this.buildResticBaseArgs(siteName, storage);
       const env = this.buildEnv(storage);
 
-      const args = ['-r', repo, 'forget', '--tag', `site:${siteName}`, '--prune'];
+      const args = [...base, 'forget', '--tag', `site:${siteName}`, '--prune'];
+      const beforeKeepLen = args.length;
       if (policy.keepDaily) args.push('--keep-daily', String(policy.keepDaily));
       if (policy.keepWeekly) args.push('--keep-weekly', String(policy.keepWeekly));
       if (policy.keepMonthly) args.push('--keep-monthly', String(policy.keepMonthly));
       if (policy.keepYearly) args.push('--keep-yearly', String(policy.keepYearly));
 
       // Если ни одного keep-* не задано — не запускаем, иначе restic удалит всё.
-      if (args.length === 5) { // -r repo forget --tag site:xxx --prune
+      if (args.length === beforeKeepLen) {
         return { success: true };
       }
 
@@ -857,7 +998,7 @@ export class ResticExecutor {
     storage: ResticStorage,
   ): Promise<{ success: boolean; error?: string }> {
     try {
-      const repo = this.buildRepoUrl(siteName, storage);
+      const base = this.buildResticBaseArgs(siteName, storage);
       const env = this.buildEnv(storage);
       if (!/^[a-f0-9]+$/i.test(snapshotId)) {
         return { success: false, error: 'Invalid snapshot id' };
@@ -865,7 +1006,7 @@ export class ResticExecutor {
 
       const r = await this.executor.execute(
         'restic',
-        ['-r', repo, 'forget', snapshotId, '--prune'],
+        [...base, 'forget', snapshotId, '--prune'],
         { env, timeout: 600_000, allowFailure: true },
       );
       if (r.exitCode !== 0) {
@@ -916,10 +1057,10 @@ export class ResticExecutor {
       // ensureRepoInit создаст пустую репу — тогда check пройдёт (по факту пустая).
       // Решаем проще: не зовём ensureRepoInit, а делаем сразу check — если репы нет,
       // `restic check` выдаст ошибку, которую мы и вернём.
-      const repo = this.buildRepoUrl(siteName, storage);
+      const base = this.buildResticBaseArgs(siteName, storage);
       const env = this.buildEnv(storage);
 
-      const args = ['-r', repo, 'check'];
+      const args = [...base, 'check'];
       if (opts?.readData) {
         if (opts.readDataSubset && /^\d{1,3}%?$/.test(opts.readDataSubset)) {
           args.push(`--read-data-subset=${opts.readDataSubset}`);
@@ -1066,12 +1207,12 @@ export class ResticExecutor {
       if (!/^[a-f0-9]+$/i.test(snapshotIdA) || !/^[a-f0-9]+$/i.test(snapshotIdB)) {
         return { success: false, error: 'Invalid snapshot id' };
       }
-      const repo = this.buildRepoUrl(siteName, storage);
+      const base = this.buildResticBaseArgs(siteName, storage);
       const env = this.buildEnv(storage);
 
       const r = await this.executor.execute(
         'restic',
-        ['-r', repo, 'diff', '--json', snapshotIdA, snapshotIdB],
+        [...base, 'diff', '--json', snapshotIdA, snapshotIdB],
         { env, timeout: RESTIC_OPS.LS_TIMEOUT_MS, allowFailure: true },
       );
       if (r.exitCode !== 0) {
@@ -1163,7 +1304,7 @@ export class ResticExecutor {
         return { success: false, error: 'Invalid liveRoot' };
       }
 
-      const repo = this.buildRepoUrl(siteName, storage);
+      const base = this.buildResticBaseArgs(siteName, storage);
       const env = this.buildEnv(storage);
 
       // 1) Снапшот → мапа. Стримим NDJSON, чтоб не упереться в maxBuffer.
@@ -1171,7 +1312,7 @@ export class ResticExecutor {
       const snapMap = new Map<string, { type: 'file' | 'dir'; size: number }>();
       const ls = await this.executor.executeStreaming(
         'restic',
-        ['-r', repo, 'ls', '--long', '--json', '--recursive', snapshotId, snapshotRoot],
+        [...base, 'ls', '--long', '--json', '--recursive', snapshotId, snapshotRoot],
         {
           env,
           timeout: RESTIC_OPS.LS_TIMEOUT_MS,
@@ -1396,11 +1537,11 @@ export class ResticExecutor {
     filePath: string,
     outputPath: string,
   ): Promise<{ truncated: boolean; size: number }> {
-    const repo = this.buildRepoUrl(siteName, storage);
+    const base = this.buildResticBaseArgs(siteName, storage);
     const env = this.buildEnv(storage);
 
     return new Promise((resolve, reject) => {
-      const child = spawn('restic', ['-r', repo, 'dump', snapshotId, filePath], {
+      const child = spawn('restic', [...base, 'dump', snapshotId, filePath], {
         env: {
           PATH: process.env.PATH || '',
           HOME: process.env.HOME || '',

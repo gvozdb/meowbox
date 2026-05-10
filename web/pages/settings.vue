@@ -532,6 +532,168 @@
       </div>
     </div>
 
+    <!-- Country block (Блокировка по странам) — server-level GeoIP DROP -->
+    <div v-if="activeTab === 'country-block'" class="tab-content">
+      <div class="settings-card">
+        <h3 class="settings-card__title">Блокировка по странам</h3>
+        <p class="settings-card__desc">
+          Server-level блокировка трафика на основе ipset+iptables (как у HestiaCP):
+          IP-адреса перечисленных стран дропаются на уровне ядра без ответа сервера.
+          База CIDR-блоков обновляется автоматически (ежедневно в 04:30) с фоллбэком на
+          альтернативный источник.
+        </p>
+
+        <div class="settings-fields" style="margin-top: 1rem;">
+          <div class="form-group">
+            <label class="notif-event-check">
+              <input type="checkbox" v-model="cbSettings.enabled" :disabled="cbLoading || cbSaving" @change="onCbMasterToggle" />
+              Блокировка включена
+              <span v-if="cbMasterSaving" style="margin-left: 0.5rem; font-size: 0.85em; color: var(--muted-text);">сохраняем…</span>
+            </label>
+            <span class="form-hint">Применяется немедленно. При выключении агент сносит все meowbox-управляемые ipset и iptables-правила; пользовательские правила firewall не трогаются.</span>
+          </div>
+
+          <div class="form-group">
+            <label class="form-label">Источник CIDR-баз (primary)</label>
+            <select v-model="cbSettings.primarySource" class="form-input form-input--select" :disabled="cbLoading || cbSaving">
+              <option value="IPDENY">ipdeny.com (рекомендуется)</option>
+              <option value="GITHUB_HERRBISCH">github.com/herrbischoff (fallback)</option>
+            </select>
+            <span class="form-hint">Если primary недоступен, агент автоматически переключится на второй источник.</span>
+          </div>
+
+          <div class="form-group">
+            <label class="form-label">Cron обновления базы</label>
+            <input v-model="cbSettings.updateSchedule" class="form-input mono" placeholder="0 4 * * *" :disabled="cbLoading || cbSaving" />
+            <span class="form-hint">
+              5-полевой cron (минуты, часы, день, месяц, день_недели). По умолчанию — <code>0 4 * * *</code> (каждый день в 04:00). Применяется в течение минуты.
+            </span>
+          </div>
+        </div>
+
+        <div class="settings-actions">
+          <button class="settings-card__btn" :disabled="cbSaving || cbLoading" @click="saveCountryBlockSettings">
+            {{ cbSaving ? 'Сохранение...' : 'Сохранить настройки' }}
+          </button>
+          <button class="settings-card__btn settings-card__btn--sm" :disabled="cbRefreshing" style="margin-left: 0.6rem;" @click="refreshCountryBlockDb">
+            {{ cbRefreshing ? 'Обновление…' : 'Обновить базу сейчас' }}
+          </button>
+        </div>
+
+        <div v-if="cbStatus" style="margin-top: 1rem; font-size: 0.85em; color: var(--muted-text);">
+          <div>Состояние iptables: <b :style="{ color: cbStatus.iptablesActive ? 'var(--danger-text)' : 'var(--muted-text)' }">{{ cbStatus.iptablesActive ? 'правила активны' : 'нет правил' }}</b></div>
+          <div v-if="cbSettings.lastUpdate">Последнее обновление базы: {{ formatCbDate(cbSettings.lastUpdate) }}</div>
+          <div v-if="cbSettings.lastUpdateError" style="color: var(--danger-text);">
+            Ошибка обновления: {{ cbSettings.lastUpdateError }}
+          </div>
+        </div>
+      </div>
+
+      <!-- Скачанные базы (zone-файлы / ipset entries) -->
+      <div class="settings-card" style="margin-top: 1rem;">
+        <h3 class="settings-card__title">Скачанные базы CIDR</h3>
+        <p class="settings-card__desc" style="margin-bottom: 0.6rem;">
+          Список стран с уже подкачанными ipset'ами. Базы скачиваются при добавлении правила (если мастер включён) или вручную кнопкой «Обновить базу сейчас».
+        </p>
+        <div v-if="cbLoading" class="audit-log__empty"><p>Загрузка…</p></div>
+        <div v-else-if="!cbStatus || !cbStatus.countries || cbStatus.countries.length === 0" class="audit-log__empty">
+          <p>Базы ещё не скачивались. Добавь правило страны или нажми «Обновить базу сейчас» (если правила уже есть).</p>
+        </div>
+        <div v-else class="sessions-list">
+          <div v-for="c in cbStatus.countries" :key="c.country" class="session-item">
+            <div class="session-item__info">
+              <div class="session-item__ua">
+                {{ countryName(c.country) }} <span class="mono">({{ c.country }})</span>
+              </div>
+              <div class="session-item__meta">
+                CIDR v4: <b>{{ c.v4Count }}</b> · v6: <b>{{ c.v6Count }}</b>
+                <span v-if="c.lastUpdate"> · обновлено {{ formatCbDate(c.lastUpdate) }}</span>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Список правил -->
+      <div class="settings-card" style="margin-top: 1rem;">
+        <div class="sessions-header">
+          <h3 class="settings-card__title">Правила блокировки</h3>
+          <button class="settings-card__btn settings-card__btn--sm" @click="openCbRuleDialog(null)">
+            + Добавить правило
+          </button>
+        </div>
+
+        <div v-if="cbRulesLoading" class="audit-log__empty"><p>Загрузка…</p></div>
+        <div v-else-if="!cbRules.length" class="audit-log__empty">
+          <p>Правил блокировки нет. Жми «+ Добавить правило» сверху.</p>
+        </div>
+        <div v-else class="sessions-list">
+          <div v-for="r in cbRules" :key="r.id" class="session-item">
+            <div class="session-item__info">
+              <div class="session-item__ua">
+                {{ countryName(r.country) }} <span class="mono">({{ r.country }})</span>
+                <span v-if="!r.enabled" class="notif-badge notif-badge--off">OFF</span>
+              </div>
+              <div class="session-item__meta">
+                {{ r.ports ? `Порты: ${r.ports}` : 'Все порты' }} ·
+                {{ r.protocol === 'BOTH' ? 'TCP+UDP' : r.protocol }}
+                <span v-if="r.comment"> · {{ r.comment }}</span>
+                <span v-if="cbCountryStatus(r.country)"> · CIDR v4: {{ cbCountryStatus(r.country)?.v4Count || 0 }}, v6: {{ cbCountryStatus(r.country)?.v6Count || 0 }}</span>
+              </div>
+            </div>
+            <div class="notif-actions">
+              <button class="session-item__revoke" @click="openCbRuleDialog(r)">Изменить</button>
+              <button class="session-item__revoke" @click="deleteCbRule(r.id)">Удалить</button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Add / Edit rule modal -->
+      <div v-if="cbRuleDialog.open" class="modal-backdrop" @mousedown.self="cbRuleDialog.open = false">
+        <div class="modal-box">
+          <h3 class="modal-box__title">{{ cbRuleDialog.editingId ? 'Изменить правило' : 'Новое правило' }}</h3>
+          <div class="form-group">
+            <label class="form-label">Страна</label>
+            <select v-model="cbRuleDialog.form.country" class="form-input form-input--select" :disabled="!!cbRuleDialog.editingId">
+              <option value="">— выбери страну —</option>
+              <option v-for="c in countriesList" :key="c.code" :value="c.code">{{ c.name }} ({{ c.code }})</option>
+            </select>
+          </div>
+          <div class="form-group">
+            <label class="form-label">Порты (опционально)</label>
+            <input v-model="cbRuleDialog.form.ports" class="form-input mono" placeholder="22,80,443 или 8000:9000" />
+            <span class="form-hint">Пусто — блокировать все порты. Перечисление через запятую или диапазон через двоеточие.</span>
+          </div>
+          <div class="form-group">
+            <label class="form-label">Протокол</label>
+            <select v-model="cbRuleDialog.form.protocol" class="form-input form-input--select">
+              <option value="BOTH">TCP + UDP</option>
+              <option value="TCP">TCP</option>
+              <option value="UDP">UDP</option>
+            </select>
+            <span class="form-hint">Игнорируется при пустом поле «Порты» — блокируется ВСЁ.</span>
+          </div>
+          <div class="form-group">
+            <label class="form-label">Комментарий (опционально)</label>
+            <input v-model="cbRuleDialog.form.comment" class="form-input" maxlength="128" />
+          </div>
+          <div class="form-group">
+            <label class="notif-event-check">
+              <input type="checkbox" v-model="cbRuleDialog.form.enabled" />
+              Включено
+            </label>
+          </div>
+          <div class="modal-box__actions">
+            <button class="settings-card__btn" :disabled="cbRuleDialog.saving" @click="saveCbRule">
+              {{ cbRuleDialog.saving ? 'Сохранение...' : 'Сохранить' }}
+            </button>
+            <button class="settings-card__btn settings-card__btn--danger" @click="cbRuleDialog.open = false">Отмена</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
   </div>
 </template>
 
@@ -543,7 +705,7 @@ definePageMeta({ middleware: 'auth' });
 const api = useApi();
 const authStore = useAuthStore();
 
-const activeTab = useTabQuery(['general', 'appearance', 'site-defaults', 'security', 'notifications'], 'general');
+const activeTab = useTabQuery(['general', 'appearance', 'site-defaults', 'security', 'notifications', 'country-block'], 'general');
 const saving = ref(false);
 const mbToast = useMbToast();
 const passwordError = ref('');
@@ -554,6 +716,7 @@ const tabs = [
   { id: 'site-defaults', label: 'Дефолты сайтов' },
   { id: 'security', label: 'Безопасность' },
   { id: 'notifications', label: 'Уведомления' },
+  { id: 'country-block', label: 'Блок по странам' },
 ];
 
 // ── Panel settings (general tab) ──────────────────────────────────────────
@@ -1233,6 +1396,344 @@ function loadDataForTab(tab: string) {
     loadSessions();
     loadIpAllowlist();
   }
+  if (tab === 'country-block') {
+    loadCountryBlock();
+  }
+}
+
+// =============================================================================
+// Country block (server-level GeoIP DROP)
+// =============================================================================
+
+interface CountryBlockSettings {
+  enabled: boolean;
+  updateSchedule: string;
+  primarySource: 'IPDENY' | 'GITHUB_HERRBISCH';
+  lastUpdate: string | null;
+  lastUpdateError: string | null;
+}
+
+interface CountryBlockRule {
+  id: string;
+  country: string;
+  ports: string | null;
+  protocol: 'TCP' | 'UDP' | 'BOTH';
+  enabled: boolean;
+  comment: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+interface CountryBlockStatus {
+  success: boolean;
+  iptablesActive?: boolean;
+  countries?: Array<{ country: string; lastUpdate: string | null; v4Count: number; v6Count: number }>;
+  ipsets?: Array<{ name: string; entries: number; family: 'v4' | 'v6' }>;
+}
+
+const cbSettings = reactive<CountryBlockSettings>({
+  enabled: false,
+  updateSchedule: '0 4 * * *',
+  primarySource: 'IPDENY',
+  lastUpdate: null,
+  lastUpdateError: null,
+});
+const cbRules = ref<CountryBlockRule[]>([]);
+const cbStatus = ref<CountryBlockStatus | null>(null);
+const cbLoading = ref(false);
+const cbSaving = ref(false);
+const cbRefreshing = ref(false);
+const cbRulesLoading = ref(false);
+const cbMasterSaving = ref(false);
+
+const cbRuleDialog = reactive<{
+  open: boolean;
+  editingId: string | null;
+  saving: boolean;
+  form: { country: string; ports: string; protocol: 'TCP' | 'UDP' | 'BOTH'; comment: string; enabled: boolean };
+}>({
+  open: false,
+  editingId: null,
+  saving: false,
+  form: { country: '', ports: '', protocol: 'BOTH', comment: '', enabled: true },
+});
+
+// Список стран — синхронизирован с agent/src/country-block/country.list.ts.
+// Hard-coded: меняется крайне редко, не стоит лишнего эндпоинта.
+const countriesList: ReadonlyArray<{ code: string; name: string }> = [
+  { code: 'AF', name: 'Афганистан' }, { code: 'AL', name: 'Албания' }, { code: 'DZ', name: 'Алжир' },
+  { code: 'AD', name: 'Андорра' }, { code: 'AO', name: 'Ангола' }, { code: 'AG', name: 'Антигуа и Барбуда' },
+  { code: 'AR', name: 'Аргентина' }, { code: 'AM', name: 'Армения' }, { code: 'AW', name: 'Аруба' },
+  { code: 'AU', name: 'Австралия' }, { code: 'AT', name: 'Австрия' }, { code: 'AZ', name: 'Азербайджан' },
+  { code: 'BS', name: 'Багамы' }, { code: 'BH', name: 'Бахрейн' }, { code: 'BD', name: 'Бангладеш' },
+  { code: 'BB', name: 'Барбадос' }, { code: 'BY', name: 'Беларусь' }, { code: 'BE', name: 'Бельгия' },
+  { code: 'BZ', name: 'Белиз' }, { code: 'BJ', name: 'Бенин' }, { code: 'BT', name: 'Бутан' },
+  { code: 'BO', name: 'Боливия' }, { code: 'BA', name: 'Босния и Герцеговина' }, { code: 'BW', name: 'Ботсвана' },
+  { code: 'BR', name: 'Бразилия' }, { code: 'BN', name: 'Бруней' }, { code: 'BG', name: 'Болгария' },
+  { code: 'BF', name: 'Буркина-Фасо' }, { code: 'BI', name: 'Бурунди' }, { code: 'KH', name: 'Камбоджа' },
+  { code: 'CM', name: 'Камерун' }, { code: 'CA', name: 'Канада' }, { code: 'CV', name: 'Кабо-Верде' },
+  { code: 'CF', name: 'ЦАР' }, { code: 'TD', name: 'Чад' }, { code: 'CL', name: 'Чили' },
+  { code: 'CN', name: 'Китай' }, { code: 'CO', name: 'Колумбия' }, { code: 'KM', name: 'Коморы' },
+  { code: 'CG', name: 'Республика Конго' }, { code: 'CD', name: 'ДР Конго' }, { code: 'CR', name: 'Коста-Рика' },
+  { code: 'CI', name: 'Кот-д’Ивуар' }, { code: 'HR', name: 'Хорватия' }, { code: 'CU', name: 'Куба' },
+  { code: 'CY', name: 'Кипр' }, { code: 'CZ', name: 'Чехия' }, { code: 'DK', name: 'Дания' },
+  { code: 'DJ', name: 'Джибути' }, { code: 'DM', name: 'Доминика' }, { code: 'DO', name: 'Доминикана' },
+  { code: 'EC', name: 'Эквадор' }, { code: 'EG', name: 'Египет' }, { code: 'SV', name: 'Сальвадор' },
+  { code: 'GQ', name: 'Экваториальная Гвинея' }, { code: 'ER', name: 'Эритрея' }, { code: 'EE', name: 'Эстония' },
+  { code: 'SZ', name: 'Эсватини' }, { code: 'ET', name: 'Эфиопия' }, { code: 'FJ', name: 'Фиджи' },
+  { code: 'FI', name: 'Финляндия' }, { code: 'FR', name: 'Франция' }, { code: 'GA', name: 'Габон' },
+  { code: 'GM', name: 'Гамбия' }, { code: 'GE', name: 'Грузия' }, { code: 'DE', name: 'Германия' },
+  { code: 'GH', name: 'Гана' }, { code: 'GR', name: 'Греция' }, { code: 'GD', name: 'Гренада' },
+  { code: 'GT', name: 'Гватемала' }, { code: 'GN', name: 'Гвинея' }, { code: 'GW', name: 'Гвинея-Бисау' },
+  { code: 'GY', name: 'Гайана' }, { code: 'HT', name: 'Гаити' }, { code: 'HN', name: 'Гондурас' },
+  { code: 'HK', name: 'Гонконг' }, { code: 'HU', name: 'Венгрия' }, { code: 'IS', name: 'Исландия' },
+  { code: 'IN', name: 'Индия' }, { code: 'ID', name: 'Индонезия' }, { code: 'IR', name: 'Иран' },
+  { code: 'IQ', name: 'Ирак' }, { code: 'IE', name: 'Ирландия' }, { code: 'IL', name: 'Израиль' },
+  { code: 'IT', name: 'Италия' }, { code: 'JM', name: 'Ямайка' }, { code: 'JP', name: 'Япония' },
+  { code: 'JO', name: 'Иордания' }, { code: 'KZ', name: 'Казахстан' }, { code: 'KE', name: 'Кения' },
+  { code: 'KI', name: 'Кирибати' }, { code: 'KP', name: 'КНДР' }, { code: 'KR', name: 'Южная Корея' },
+  { code: 'KW', name: 'Кувейт' }, { code: 'KG', name: 'Киргизия' }, { code: 'LA', name: 'Лаос' },
+  { code: 'LV', name: 'Латвия' }, { code: 'LB', name: 'Ливан' }, { code: 'LS', name: 'Лесото' },
+  { code: 'LR', name: 'Либерия' }, { code: 'LY', name: 'Ливия' }, { code: 'LI', name: 'Лихтенштейн' },
+  { code: 'LT', name: 'Литва' }, { code: 'LU', name: 'Люксембург' }, { code: 'MO', name: 'Макао' },
+  { code: 'MK', name: 'Северная Македония' }, { code: 'MG', name: 'Мадагаскар' }, { code: 'MW', name: 'Малави' },
+  { code: 'MY', name: 'Малайзия' }, { code: 'MV', name: 'Мальдивы' }, { code: 'ML', name: 'Мали' },
+  { code: 'MT', name: 'Мальта' }, { code: 'MH', name: 'Маршалловы Острова' }, { code: 'MR', name: 'Мавритания' },
+  { code: 'MU', name: 'Маврикий' }, { code: 'MX', name: 'Мексика' }, { code: 'FM', name: 'Микронезия' },
+  { code: 'MD', name: 'Молдова' }, { code: 'MC', name: 'Монако' }, { code: 'MN', name: 'Монголия' },
+  { code: 'ME', name: 'Черногория' }, { code: 'MA', name: 'Марокко' }, { code: 'MZ', name: 'Мозамбик' },
+  { code: 'MM', name: 'Мьянма' }, { code: 'NA', name: 'Намибия' }, { code: 'NR', name: 'Науру' },
+  { code: 'NP', name: 'Непал' }, { code: 'NL', name: 'Нидерланды' }, { code: 'NZ', name: 'Новая Зеландия' },
+  { code: 'NI', name: 'Никарагуа' }, { code: 'NE', name: 'Нигер' }, { code: 'NG', name: 'Нигерия' },
+  { code: 'NO', name: 'Норвегия' }, { code: 'OM', name: 'Оман' }, { code: 'PK', name: 'Пакистан' },
+  { code: 'PW', name: 'Палау' }, { code: 'PS', name: 'Палестина' }, { code: 'PA', name: 'Панама' },
+  { code: 'PG', name: 'Папуа — Новая Гвинея' }, { code: 'PY', name: 'Парагвай' }, { code: 'PE', name: 'Перу' },
+  { code: 'PH', name: 'Филиппины' }, { code: 'PL', name: 'Польша' }, { code: 'PT', name: 'Португалия' },
+  { code: 'QA', name: 'Катар' }, { code: 'RO', name: 'Румыния' }, { code: 'RU', name: 'Россия' },
+  { code: 'RW', name: 'Руанда' }, { code: 'KN', name: 'Сент-Китс и Невис' }, { code: 'LC', name: 'Сент-Люсия' },
+  { code: 'VC', name: 'Сент-Винсент и Гренадины' }, { code: 'WS', name: 'Самоа' }, { code: 'SM', name: 'Сан-Марино' },
+  { code: 'ST', name: 'Сан-Томе и Принсипи' }, { code: 'SA', name: 'Саудовская Аравия' }, { code: 'SN', name: 'Сенегал' },
+  { code: 'RS', name: 'Сербия' }, { code: 'SC', name: 'Сейшелы' }, { code: 'SL', name: 'Сьерра-Леоне' },
+  { code: 'SG', name: 'Сингапур' }, { code: 'SK', name: 'Словакия' }, { code: 'SI', name: 'Словения' },
+  { code: 'SB', name: 'Соломоновы Острова' }, { code: 'SO', name: 'Сомали' }, { code: 'ZA', name: 'ЮАР' },
+  { code: 'SS', name: 'Южный Судан' }, { code: 'ES', name: 'Испания' }, { code: 'LK', name: 'Шри-Ланка' },
+  { code: 'SD', name: 'Судан' }, { code: 'SR', name: 'Суринам' }, { code: 'SE', name: 'Швеция' },
+  { code: 'CH', name: 'Швейцария' }, { code: 'SY', name: 'Сирия' }, { code: 'TW', name: 'Тайвань' },
+  { code: 'TJ', name: 'Таджикистан' }, { code: 'TZ', name: 'Танзания' }, { code: 'TH', name: 'Таиланд' },
+  { code: 'TL', name: 'Тимор-Лесте' }, { code: 'TG', name: 'Того' }, { code: 'TO', name: 'Тонга' },
+  { code: 'TT', name: 'Тринидад и Тобаго' }, { code: 'TN', name: 'Тунис' }, { code: 'TR', name: 'Турция' },
+  { code: 'TM', name: 'Туркменистан' }, { code: 'TV', name: 'Тувалу' }, { code: 'UG', name: 'Уганда' },
+  { code: 'UA', name: 'Украина' }, { code: 'AE', name: 'ОАЭ' }, { code: 'GB', name: 'Великобритания' },
+  { code: 'US', name: 'США' }, { code: 'UY', name: 'Уругвай' }, { code: 'UZ', name: 'Узбекистан' },
+  { code: 'VU', name: 'Вануату' }, { code: 'VA', name: 'Ватикан' }, { code: 'VE', name: 'Венесуэла' },
+  { code: 'VN', name: 'Вьетнам' }, { code: 'YE', name: 'Йемен' }, { code: 'ZM', name: 'Замбия' },
+  { code: 'ZW', name: 'Зимбабве' },
+];
+
+function countryName(code: string): string {
+  return countriesList.find((c) => c.code === code)?.name || code;
+}
+
+function cbCountryStatus(code: string) {
+  return cbStatus.value?.countries?.find((c) => c.country === code) || null;
+}
+
+function formatCbDate(iso: string): string {
+  try {
+    const d = new Date(iso);
+    return d.toLocaleString('ru-RU');
+  } catch {
+    return iso;
+  }
+}
+
+async function loadCountryBlock() {
+  cbLoading.value = true;
+  cbRulesLoading.value = true;
+  try {
+    // ВАЖНО: useApi.get() уже unwrap-ает {success, data} → возвращает payload.
+    // Поэтому тип T в api.get<T> — это содержимое data, а не сам ответ.
+    const [s, rules, status] = await Promise.all([
+      api.get<CountryBlockSettings>('/country-block/settings'),
+      api.get<CountryBlockRule[]>('/country-block/rules'),
+      api.get<CountryBlockStatus>('/country-block/status').catch(() => null),
+    ]);
+    if (s) Object.assign(cbSettings, s);
+    cbRules.value = Array.isArray(rules) ? rules : [];
+    cbStatus.value = status || null;
+  } catch (err) {
+    showStatus('Не удалось загрузить настройки блокировки: ' + ((err as Error).message || ''), true);
+  } finally {
+    cbLoading.value = false;
+    cbRulesLoading.value = false;
+  }
+}
+
+async function saveCountryBlockSettings() {
+  cbSaving.value = true;
+  try {
+    const res = await api.patch<CountryBlockSettings>('/country-block/settings', {
+      enabled: cbSettings.enabled,
+      updateSchedule: cbSettings.updateSchedule,
+      primarySource: cbSettings.primarySource,
+    });
+    if (res) Object.assign(cbSettings, res);
+    showStatus('Настройки блокировки сохранены');
+    await loadCountryBlock();
+  } catch (err) {
+    showStatus('Не удалось сохранить: ' + ((err as Error).message || ''), true);
+  } finally {
+    cbSaving.value = false;
+  }
+}
+
+// Авто-сохранение мастер-свитча: чекбокс применяется немедленно (без кнопки
+// «Сохранить»), чтобы оператор не оказался в ситуации «галку поставил, ничего
+// не сохранил, но потом ткнул что-то — и неожиданно всё применилось».
+// Перед ВКЛЮЧЕНИЕМ — confirm с предупреждением о возможной самоблокировке.
+async function onCbMasterToggle(e: Event) {
+  const target = e.target as HTMLInputElement;
+  const next = !!target.checked;
+  if (next && cbRules.value.length > 0) {
+    const list = cbRules.value.map((r) => `${r.country}${r.enabled ? '' : ' (off)'}`).join(', ');
+    const ok = confirm(
+      'ВНИМАНИЕ! После включения правила применятся немедленно (iptables -I INPUT 1 — DROP вставляется первым).\n\n' +
+      `Правила в БД: ${list}\n\n` +
+      'Если ты сейчас ходишь к серверу из заблокированной страны — потеряешь доступ.\n\nВключить?'
+    );
+    if (!ok) {
+      // Откатываем чекбокс
+      cbSettings.enabled = false;
+      target.checked = false;
+      return;
+    }
+  }
+  cbMasterSaving.value = true;
+  try {
+    const res = await api.patch<CountryBlockSettings>('/country-block/settings', {
+      enabled: next,
+    });
+    if (res) Object.assign(cbSettings, res);
+    showStatus(next ? 'Блокировка включена' : 'Блокировка выключена, правила сняты');
+    await loadCountryBlock();
+  } catch (err) {
+    // Откатываем чекбокс при фейле
+    cbSettings.enabled = !next;
+    showStatus('Не удалось сохранить: ' + ((err as Error).message || ''), true);
+  } finally {
+    cbMasterSaving.value = false;
+  }
+}
+
+async function refreshCountryBlockDb() {
+  cbRefreshing.value = true;
+  try {
+    // useApi.post возвращает уже unwrap-нутый payload (AgentResult).
+    const res = await api.post<{
+      success: boolean;
+      error?: string;
+      info?: 'NO_RULES';
+      updated?: string[];
+      errors?: Array<{ country: string; error: string }> | string[];
+    }>('/country-block/refresh-db', {});
+    const upd = res?.updated || [];
+    const errs = res?.errors || [];
+    if (res?.info === 'NO_RULES') {
+      showStatus('Нет правил — сначала добавь хотя бы одну страну для блокировки.', true);
+    } else if (!res?.success && errs.length === 0) {
+      showStatus('Ошибка обновления: ' + (res?.error || 'неизвестная'), true);
+    } else if (upd.length === 0 && errs.length > 0) {
+      showStatus(`Не удалось скачать ни одной зоны (ошибок: ${errs.length}). Проверь интернет/источник.`, true);
+    } else if (upd.length === 0) {
+      showStatus('Нечего обновлять.', true);
+    } else {
+      const errSuffix = errs.length > 0 ? ` (с ошибками: ${errs.length})` : '';
+      showStatus(`Обновлено стран: ${upd.length}${errSuffix}`);
+    }
+    await loadCountryBlock();
+  } catch (err) {
+    showStatus('Refresh не удался: ' + ((err as Error).message || ''), true);
+  } finally {
+    cbRefreshing.value = false;
+  }
+}
+
+function openCbRuleDialog(rule: CountryBlockRule | null) {
+  if (rule) {
+    cbRuleDialog.editingId = rule.id;
+    cbRuleDialog.form = {
+      country: rule.country,
+      ports: rule.ports || '',
+      protocol: rule.protocol,
+      comment: rule.comment || '',
+      enabled: rule.enabled,
+    };
+  } else {
+    cbRuleDialog.editingId = null;
+    cbRuleDialog.form = { country: '', ports: '', protocol: 'BOTH', comment: '', enabled: true };
+  }
+  cbRuleDialog.open = true;
+}
+
+async function saveCbRule() {
+  cbRuleDialog.saving = true;
+  try {
+    if (cbRuleDialog.editingId) {
+      await api.patch(`/country-block/rules/${cbRuleDialog.editingId}`, {
+        ports: cbRuleDialog.form.ports || undefined,
+        protocol: cbRuleDialog.form.protocol,
+        comment: cbRuleDialog.form.comment || undefined,
+        enabled: cbRuleDialog.form.enabled,
+      });
+      showStatus('Правило обновлено');
+    } else {
+      if (!cbRuleDialog.form.country) {
+        showStatus('Выбери страну', true);
+        cbRuleDialog.saving = false;
+        return;
+      }
+      // Если мастер-свитч уже ВКЛ — правило применится моментально (DROP
+      // вставится в INPUT первой строкой). Юзера предупреждаем, чтоб не
+      // отрезал сам себя от сервера.
+      if (cbSettings.enabled && cbRuleDialog.form.enabled !== false) {
+        const ok = confirm(
+          `Мастер-свитч включён — правило применится МОМЕНТАЛЬНО:\n` +
+          `${countryName(cbRuleDialog.form.country)} (${cbRuleDialog.form.country}), ` +
+          `${cbRuleDialog.form.ports || 'все порты'}, ${cbRuleDialog.form.protocol}.\n\n` +
+          `Если ты сейчас подключён из этой страны — потеряешь доступ.\n\nПродолжить?`
+        );
+        if (!ok) {
+          cbRuleDialog.saving = false;
+          return;
+        }
+      }
+      await api.post('/country-block/rules', {
+        country: cbRuleDialog.form.country,
+        ports: cbRuleDialog.form.ports || undefined,
+        protocol: cbRuleDialog.form.protocol,
+        comment: cbRuleDialog.form.comment || undefined,
+        enabled: cbRuleDialog.form.enabled,
+      });
+      showStatus('Правило создано');
+    }
+    cbRuleDialog.open = false;
+    await loadCountryBlock();
+  } catch (err) {
+    showStatus('Не сохранилось: ' + ((err as Error).message || ''), true);
+  } finally {
+    cbRuleDialog.saving = false;
+  }
+}
+
+async function deleteCbRule(id: string) {
+  if (!confirm('Удалить правило?')) return;
+  try {
+    await api.delete(`/country-block/rules/${id}`);
+    showStatus('Правило удалено');
+    await loadCountryBlock();
+  } catch (err) {
+    showStatus('Не удалить: ' + ((err as Error).message || ''), true);
+  }
 }
 
 watch(activeTab, (tab) => loadDataForTab(tab));
@@ -1542,7 +2043,9 @@ onMounted(() => {
 .audit-log__empty {
   text-align: center;
   padding: 2rem;
-  color: var(--bg-elevated);
+  /* Был var(--bg-elevated) — цвет ФОНА карточки, что давало белый-на-белом
+     на светлой теме. Используем явный muted-text, читаемый на обеих темах. */
+  color: var(--text-muted, #6b7280);
   font-size: 0.85rem;
 }
 

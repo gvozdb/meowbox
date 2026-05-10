@@ -99,6 +99,19 @@ export class PanelSettingsService {
     appearance: {
       palettes: {} as Record<string, PaletteId>,
     },
+    // Server-level GeoIP-блокировка стран (см. CountryBlockManager на агенте).
+    //   enabled            — мастер-свитч (false → агент сносит все правила)
+    //   updateSchedule     — cron daily для обновления CIDR-базы (default 04:00)
+    //   primarySource      — primary источник (IPDENY | GITHUB_HERRBISCH)
+    //   lastUpdate         — ISO-таймстамп последнего успешного refresh-а
+    //   lastUpdateError    — последняя ошибка refresh (если есть)
+    'country-block': {
+      enabled: false,
+      updateSchedule: '0 4 * * *',
+      primarySource: 'IPDENY' as 'IPDENY' | 'GITHUB_HERRBISCH',
+      lastUpdate: null as string | null,
+      lastUpdateError: null as string | null,
+    },
   } as const;
 
   async get<T>(key: keyof typeof this.defaults): Promise<T> {

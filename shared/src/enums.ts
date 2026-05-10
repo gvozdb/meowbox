@@ -57,6 +57,7 @@ export enum PhpVersion {
 export enum BackupStorageType {
   LOCAL = 'LOCAL',
   S3 = 'S3',
+  SFTP = 'SFTP',
   YANDEX_DISK = 'YANDEX_DISK',
   CLOUD_MAIL_RU = 'CLOUD_MAIL_RU',
 }
@@ -140,6 +141,20 @@ export enum FirewallProtocol {
   TCP = 'TCP',
   UDP = 'UDP',
   BOTH = 'BOTH',
+}
+
+// =============================================================================
+// Country block (server-level GeoIP blocking via ipset+iptables)
+// =============================================================================
+
+/**
+ * Источник CIDR-баз для GeoIP-блокировки.
+ * - IPDENY:           https://www.ipdeny.com/ipblocks/  — primary, обновляется ежедневно
+ * - GITHUB_HERRBISCH: https://github.com/herrbischoff/country-ip-blocks — fallback
+ */
+export enum CountryBlockSource {
+  IPDENY = 'IPDENY',
+  GITHUB_HERRBISCH = 'GITHUB_HERRBISCH',
 }
 
 // =============================================================================

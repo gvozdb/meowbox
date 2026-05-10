@@ -464,6 +464,26 @@ model FirewallRule {
   @@map("firewall_rules")
 }
 
+// Server-level блокировка трафика по странам (на основе ipset+iptables).
+// База CIDR-блоков обновляется по расписанию (см. PanelSetting `country-block`).
+// Страна — ISO 3166-1 alpha-2 (uppercase): RU, CN, US...
+// ports: null/'' = блокировка всех портов; иначе CSV портов или диапазон 8000:9000.
+// protocol: TCP|UDP|BOTH (для null ports игнорируется — блокируется ВСЁ).
+// Удаление записи → агент чистит ipset/iptables правило для этой страны.
+model CountryBlock {
+  id        String   @id @default(uuid())
+  country   String // ISO 3166-1 alpha-2 (RU, CN, US...)
+  ports     String?
+  protocol  String   @default("BOTH") // TCP|UDP|BOTH
+  enabled   Boolean  @default(true)
+  comment   String?
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@unique([country, ports, protocol], name: "country_ports_protocol")
+  @@map("country_blocks")
+}
+
 model SiteDiskSnapshot {
   id        String   @id @default(uuid())
   siteId    String   @map("site_id")

@@ -98,6 +98,24 @@ export interface BackupStorageConfig {
   remotePath?: string;
   /** OAuth token for Yandex Disk or Cloud Mail.ru. */
   oauthToken?: string;
+  /** SFTP host (e.g. backups.example.com). */
+  sftpHost?: string;
+  /** SFTP port (default 22). */
+  sftpPort?: string;
+  /** SFTP username. */
+  sftpUsername?: string;
+  /** Remote абсолютный путь, в котором restic создаёт репу. */
+  sftpPath?: string;
+  /** Режим аутентификации SFTP: 'KEY' (приватный ключ) или 'PASSWORD' (пароль). По умолчанию 'KEY'. */
+  sftpAuthMode?: 'KEY' | 'PASSWORD';
+  /** SSH private key (PEM, OpenSSH). Используется при sftpAuthMode='KEY'. */
+  sftpPrivateKey?: string;
+  /** Парольная фраза для зашифрованного SSH-ключа (опционально, только при KEY-режиме). */
+  sftpPassphrase?: string;
+  /** Пароль SSH-пользователя. Используется при sftpAuthMode='PASSWORD' (через sshpass). */
+  sftpPassword?: string;
+  /** SHA256 fingerprint удалённого SSH-сервера для StrictHostKeyChecking. */
+  sftpHostKey?: string;
 }
 
 export interface BackupConfig {

@@ -14,6 +14,7 @@ import { CronModule } from './cron/cron.module';
 import { SystemCronModule } from './system-cron/system-cron.module';
 import { MigrationHostpanelModule } from './migration-hostpanel/migration-hostpanel.module';
 import { FirewallModule } from './firewall/firewall.module';
+import { CountryBlockModule } from './country-block/country-block.module';
 import { NginxModule } from './nginx/nginx.module';
 import { PhpModule } from './php/php.module';
 import { FilesModule } from './files/files.module';
@@ -89,6 +90,7 @@ import { CustomThrottlerGuard } from './common/guards/throttler-tracker.guard';
     SystemCronModule,
     MigrationHostpanelModule,
     FirewallModule,
+    CountryBlockModule,
     NginxModule,
     PhpModule,
     FilesModule,

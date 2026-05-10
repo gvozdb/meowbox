@@ -163,7 +163,27 @@ export class DatabasesController {
       'Content-Disposition': attachmentDisposition(filename),
     });
 
-    return new StreamableFile(fs.createReadStream(safePath));
+    // Удаляем файл после успешной передачи. Дамп — одноразовая
+    // штука: каждое нажатие «Экспорт» создаёт новый файл с новым ts.
+    // Если соединение оборвалось (`close` без `finish`) — НЕ удаляем,
+    // чтобы юзер мог докачать; забытые файлы подберёт периодический
+    // cleanup в DatabasesService.
+    //
+    // Ставим listener только на `finish` response — он триггерится,
+    // когда весь body отправлен клиенту. Express прокидывает finish
+    // через writable stream — для StreamableFile это работает корректно.
+    const stream = fs.createReadStream(safePath);
+    res.on('finish', () => {
+      fs.unlink(safePath, () => {
+        // ENOENT/etc — игнорим: cleanup-таймер всё равно подметёт мусор.
+      });
+    });
+    // Если что-то порвётся на нашей стороне — уничтожаем стрим, файл оставляем.
+    res.on('close', () => {
+      if (!res.writableEnded) stream.destroy();
+    });
+
+    return new StreamableFile(stream);
   }
 
   @Post(':id/import')
