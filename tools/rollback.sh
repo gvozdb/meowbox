@@ -21,6 +21,13 @@ SNAP_ROOT="$DATA_DIR/snapshots"
 say() { echo "[rollback] $*"; }
 err() { echo "[rollback] ✗ $*" >&2; exit 1; }
 
+# ----- Dev-mode guard -----
+if [[ -f "$PANEL_DIR/.dev-mode" ]]; then
+  echo "❌ Это dev-сервер (.dev-mode). rollback.sh оперирует releases/ — на dev это сломает git workspace."
+  echo "   Откат на dev = 'git checkout <commit>' + 'make dev' (rebuild)."
+  exit 1
+fi
+
 mode="${1:-release}"
 target="${2:-}"
 

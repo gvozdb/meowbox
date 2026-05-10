@@ -1,6 +1,7 @@
 .PHONY: start stop restart logs logs-api logs-web logs-agent status install build deploy seed \
         migrate migrate-prisma migrate-system migrate-status new-migration link-shared \
-        snapshot rollback update update-check healthcheck ip-allow ip-allow-list ip-allow-clear
+        snapshot rollback update update-check healthcheck ip-allow ip-allow-list ip-allow-clear \
+        dev dev-build dev-pull dev-force
 
 # =============================================================================
 # Meowbox Management Commands
@@ -125,6 +126,22 @@ update:
 
 update-check:
 	@bash tools/update.sh --check
+
+# --- Dev workflow (только для серверов с .dev-mode) ---
+# make dev          — git pull + умная пересборка (только задетых пакетов) + pm2 reload
+# make dev-build    — без git pull, пересобрать только то что задели локально
+# make dev-pull     — то же что 'dev' (синоним)
+# make dev-force    — пересобрать ВСЁ (включая web/api/agent), даже если ничего не менялось
+dev:
+	@bash tools/dev.sh
+
+dev-pull: dev
+
+dev-build:
+	@bash tools/dev.sh --no-pull
+
+dev-force:
+	@bash tools/dev.sh --force
 
 # --- IP allowlist (быстрый escape-hatch из терминала) ---------------------
 # Используй когда страшно пилить с UI или когда заперся снаружи allowlist'а

@@ -36,6 +36,10 @@
 #   MEOWBOX_REF     — ветка/тег/коммит git для тестового режима. Если задана,
 #                     MEOWBOX_VERSION игнорируется, тянется архив с git и dist
 #                     собирается локально (требует ~2 ГБ диска под devDeps + build).
+#   MEOWBOX_DEV     — если =1, ставит dev-сервер (git clone в /opt/meowbox/,
+#                     current → ., маркер .dev-mode). Обновление через
+#                     `make dev` вместо `make update`.
+#   MEOWBOX_DEV_BRANCH — ветка для dev-режима (по умолчанию main).
 #   GITHUB_REPO     — owner/name (по умолчанию gvozdb/meowbox)
 #   GITHUB_TOKEN    — нужен только для приватных репо
 #   PANEL_DOMAIN    — домен панели (по умолчанию localhost)
@@ -54,6 +58,8 @@ MEOWBOX_DIR="${MEOWBOX_DIR:-/opt/meowbox}"
 GITHUB_REPO="${GITHUB_REPO:-gvozdb/meowbox}"
 TARGET="${MEOWBOX_VERSION:-}"
 MEOWBOX_REF="${MEOWBOX_REF:-}"
+MEOWBOX_DEV="${MEOWBOX_DEV:-}"
+MEOWBOX_DEV_BRANCH="${MEOWBOX_DEV_BRANCH:-main}"
 
 GREEN='\033[0;32m'
 RED='\033[0;31m'
@@ -100,6 +106,55 @@ trap 'rm -rf "$TMP_DIR"' EXIT
 
 DL_AUTH=()
 [[ -n "${GITHUB_TOKEN:-}" ]] && DL_AUTH=(-H "Authorization: Bearer $GITHUB_TOKEN")
+
+# =============================================================================
+# Dev-mode: установка dev-сервера. Код панели = живой git workspace в $MEOWBOX_DIR/.
+# Без releases/, без tarball. `current → .`. Маркер `.dev-mode` блокирует update.sh.
+# Обновление = `make dev` (git pull + умная пересборка + pm2 reload).
+# =============================================================================
+if [[ -n "$MEOWBOX_DEV" ]]; then
+  warn "MEOWBOX_DEV=1 — dev-режим (git workspace в $MEOWBOX_DIR/, без releases/)"
+  log "Устанавливаю git..."
+  apt-get install -y -qq git >/dev/null
+
+  # Проверка: $MEOWBOX_DIR не должен быть уже обжитой git-репой с локальными правками
+  if [[ -d "$MEOWBOX_DIR/.git" ]]; then
+    warn "$MEOWBOX_DIR/.git уже существует — пропускаю clone, делаю git pull"
+    cd "$MEOWBOX_DIR"
+    git fetch origin
+    git checkout "$MEOWBOX_DEV_BRANCH"
+    git pull --rebase --autostash
+  else
+    # В $MEOWBOX_DIR уже могут лежать state/, releases/ от предыдущей prod-установки —
+    # клонируем во временное место, потом мерджим .git и tracked-файлы в корень.
+    log "Клонирую $GITHUB_REPO (ветка $MEOWBOX_DEV_BRANCH) в $MEOWBOX_DIR..."
+    GIT_TMP="$(mktemp -d)"
+    git clone --depth 50 --branch "$MEOWBOX_DEV_BRANCH" \
+      "https://github.com/$GITHUB_REPO.git" "$GIT_TMP" >/dev/null
+    # Перемещаем .git в корень и checkout — чтобы tracked-файлы оказались поверх
+    # уже существующих state/, не затирая persistent-данные.
+    mv "$GIT_TMP/.git" "$MEOWBOX_DIR/.git"
+    cd "$MEOWBOX_DIR"
+    git checkout -- .
+    rm -rf "$GIT_TMP"
+  fi
+
+  # current → . (раскладка как у прода, но через симлинк на сам корень git workspace)
+  ln -sfn . "$MEOWBOX_DIR/current"
+  log "current → . (live git workspace)"
+
+  # Маркер .dev-mode — блокирует update.sh / rollback.sh
+  touch "$MEOWBOX_DIR/.dev-mode"
+
+  # Симлинк .env: state/.env как на проде, но api ищет '../.env' от cwd → нужен симлинк
+  ln -sfn state/.env "$MEOWBOX_DIR/.env"
+
+  # Запускаем install.sh из корня в режиме --from-source
+  [[ -f "$MEOWBOX_DIR/install.sh" ]] || error "install.sh не найден в репо"
+  chmod +x "$MEOWBOX_DIR/install.sh"
+  log "Запускаю install.sh с --from-source (build из исходников)..."
+  exec bash "$MEOWBOX_DIR/install.sh" --from-source "$@"
+fi
 
 # =============================================================================
 # Branch-mode: тестовая установка с произвольной ветки/тега/коммита git.

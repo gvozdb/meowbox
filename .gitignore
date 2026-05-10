@@ -39,6 +39,10 @@ state/
 releases/
 current
 
+# Dev-mode marker — не коммитим в репо, иначе при `make update` на проде
+# создастся и заблокирует прод-обновления.
+.dev-mode
+
 # --- Локальные доки/скиллы Claude (не должны попадать в git) ---
 .claude/
 SOUL.md

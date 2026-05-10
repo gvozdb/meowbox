@@ -49,6 +49,18 @@ for arg in "$@"; do
   esac
 done
 
+# ----- Dev-mode guard -----
+# Если в корне панели лежит .dev-mode → этот сервер живёт прямо из git workspace
+# (releases/<v>/, current/, tarball'ы тут не нужны). update.sh скачает tarball,
+# распакует поверх, переименует api/ в releases/<v>/api/ → разъебёт git workspace
+# и подменит исходники бинарниками. На dev для этого есть `make dev` (tools/dev.sh).
+if [[ -f "$PANEL_DIR/.dev-mode" ]]; then
+  echo "❌ Это dev-сервер (найден $PANEL_DIR/.dev-mode)."
+  echo "   update.sh для прода. На dev используй: make dev"
+  echo "   (git pull → пересборка изменённых пакетов → pm2 reload)"
+  exit 1
+fi
+
 # ----- Hookable stage logging -----
 stage()  { echo "[stage:$1] $2"; }
 say()    { echo "[update] $*"; }
