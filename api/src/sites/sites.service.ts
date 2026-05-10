@@ -14,6 +14,8 @@ import { SiteType, SiteStatus, DatabaseType, SslStatus } from '../common/enums';
 import { randomBytes } from 'crypto';
 import { hashPassword } from '../common/crypto/argon2.helper';
 import { encryptJson } from '../common/crypto/credentials-cipher';
+import { encryptSshPassword, decryptSshPassword } from '../common/crypto/ssh-cipher';
+import { encryptCmsPassword, decryptCmsPassword } from '../common/crypto/cms-cipher';
 import { PrismaService } from '../common/prisma.service';
 import { AgentRelayService } from '../gateway/agent-relay.service';
 import { AgentGateway } from '../gateway/agent.gateway';
@@ -469,7 +471,7 @@ export class SitesService implements OnModuleInit {
         orderBy: { createdAt: 'desc' },
         take,
         skip,
-        omit: { sshPassword: true, cmsAdminPassword: true },
+        omit: { sshPasswordEnc: true, cmsAdminPasswordEnc: true },
         include: {
           sslCertificate: { select: { status: true, expiresAt: true } },
           _count: { select: { databases: true, backups: true } },
@@ -492,7 +494,7 @@ export class SitesService implements OnModuleInit {
   async findById(id: string, userId?: string, role?: string) {
     const site = await this.prisma.site.findUnique({
       where: { id },
-      omit: { sshPassword: true, cmsAdminPassword: true },
+      omit: { sshPasswordEnc: true, cmsAdminPasswordEnc: true },
       include: {
         sslCertificate: true,
         databases: {
@@ -522,9 +524,11 @@ export class SitesService implements OnModuleInit {
     const site = await this.prisma.site.findUnique({
       where: { id },
       select: {
-        id: true, userId: true, systemUser: true, sshPassword: true,
-        rootPath: true, cmsAdminUser: true, cmsAdminPassword: true, domain: true,
-        managerPath: true,
+        id: true, userId: true, systemUser: true,
+        sshPasswordEnc: true,
+        rootPath: true,
+        cmsAdminUser: true, cmsAdminPasswordEnc: true,
+        domain: true, managerPath: true,
       },
     });
 
@@ -536,18 +540,39 @@ export class SitesService implements OnModuleInit {
       throw new ForbiddenException('Access denied to this site');
     }
 
+    const sshPlain = site.sshPasswordEnc ? this.tryDecryptSsh(site.sshPasswordEnc, id) : null;
+    const cmsPlain = site.cmsAdminPasswordEnc ? this.tryDecryptCms(site.cmsAdminPasswordEnc, id) : null;
+
     return {
       username: site.systemUser,
-      password: site.sshPassword,
+      password: sshPlain,
       host: 'server',
       port: 22,
       homeDir: site.rootPath,
       cms: site.cmsAdminUser ? {
         user: site.cmsAdminUser,
-        password: site.cmsAdminPassword,
+        password: cmsPlain,
         url: `https://${site.domain}/${site.managerPath || 'manager'}/`,
       } : null,
     };
+  }
+
+  private tryDecryptSsh(enc: string, siteId: string): string | null {
+    try {
+      return decryptSshPassword(enc);
+    } catch (e) {
+      this.logger.error(`Failed to decrypt sshPassword for site ${siteId}: ${(e as Error).message}`);
+      return null;
+    }
+  }
+
+  private tryDecryptCms(enc: string, siteId: string): string | null {
+    try {
+      return decryptCmsPassword(enc);
+    } catch (e) {
+      this.logger.error(`Failed to decrypt cmsAdminPassword for site ${siteId}: ${(e as Error).message}`);
+      return null;
+    }
   }
 
   /**
@@ -603,10 +628,9 @@ export class SitesService implements OnModuleInit {
       );
     }
 
-    // Сохраняем в БД, чтобы показывать в UI.
     await this.prisma.site.update({
       where: { id },
-      data: { sshPassword: password },
+      data: { sshPasswordEnc: encryptSshPassword(password) },
     });
 
     this.logger.log(`SSH password changed for site "${site.name}"`);
@@ -700,7 +724,7 @@ export class SitesService implements OnModuleInit {
 
     await this.prisma.site.update({
       where: { id },
-      data: { cmsAdminPassword: password },
+      data: { cmsAdminPasswordEnc: encryptCmsPassword(password) },
     });
 
     this.logger.log(`MODX admin password changed for site "${site.name}" (user "${site.cmsAdminUser}")`);
@@ -1042,6 +1066,7 @@ export class SitesService implements OnModuleInit {
     const rootPath = dto.rootPath?.trim() || `${basePath}/${safeName}`;
     const filesRelPath = dto.filesRelPath?.trim() || relPath;
     const sshPassword = randomBytes(16).toString('base64url');
+    const sshPasswordEnc = encryptSshPassword(sshPassword);
 
     // Атомарность: Site + SslCertificate создаются в одной транзакции. До
     // этого падение между двумя вызовами оставляло сайт без SSL-placeholder'а —
@@ -1065,7 +1090,7 @@ export class SitesService implements OnModuleInit {
           filesRelPath,
           nginxConfigPath,
           systemUser,
-          sshPassword,
+          sshPasswordEnc,
           dbEnabled,
           httpsRedirect,
           // Стартовый кастом-блок для CMS — кладётся в БД при создании,
@@ -1173,6 +1198,7 @@ export class SitesService implements OnModuleInit {
     const filesRelPath = (source as { filesRelPath?: string | null }).filesRelPath || relPath;
     const nginxConfigPath = `/etc/nginx/sites-available/${safeName}.conf`;
     const sshPassword = randomBytes(16).toString('base64url');
+    const sshPasswordEnc = encryptSshPassword(sshPassword);
 
     // 5) Собираем загружаемый source — phpVersion, type, httpsRedirect.
     const sourceFull = await this.prisma.site.findUnique({
@@ -1201,7 +1227,7 @@ export class SitesService implements OnModuleInit {
         filesRelPath,
         nginxConfigPath,
         systemUser,
-        sshPassword,
+        sshPasswordEnc,
         dbEnabled: sourceFull.dbEnabled,
         httpsRedirect: sourceFull.httpsRedirect,
         phpPoolCustom: sourceFull.phpPoolCustom,
@@ -1699,7 +1725,7 @@ export class SitesService implements OnModuleInit {
             where: { id: siteId },
             data: {
               cmsAdminUser: adminUser,
-              cmsAdminPassword: adminPassword,
+              cmsAdminPasswordEnc: encryptCmsPassword(adminPassword),
               managerPath,
               connectorsPath,
             },
@@ -1965,7 +1991,7 @@ export class SitesService implements OnModuleInit {
 
     const updatedRaw = await this.prisma.site.update({
       where: { id },
-      omit: { sshPassword: true },
+      omit: { sshPasswordEnc: true, cmsAdminPasswordEnc: true },
       data: {
         ...(dto.name !== undefined && { name: dto.name }),
         ...(dto.domain !== undefined && { domain: dto.domain }),

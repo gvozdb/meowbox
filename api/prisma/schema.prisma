@@ -64,9 +64,11 @@ model Site {
   rootPath         String   @map("root_path")
   nginxConfigPath  String   @map("nginx_config_path")
   systemUser       String?  @map("site_user")
-  sshPassword      String?  @map("ssh_password")
+  /// AES-256-GCM, HKDF(master,'meowbox:ssh:v1'). См. spec master-key-unification.
+  sshPasswordEnc   String?  @map("ssh_password_enc")
   cmsAdminUser     String?  @map("cms_admin_user")
-  cmsAdminPassword String?  @map("cms_admin_password")
+  /// AES-256-GCM, HKDF(master,'meowbox:cms:v1').
+  cmsAdminPasswordEnc String? @map("cms_admin_password_enc")
   managerPath      String?  @map("manager_path")
   connectorsPath   String?  @map("connectors_path")
   // Версия установленной CMS (для MODX: "2.8.8-pl", "3.1.2-pl" и т.п.).
