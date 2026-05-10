@@ -5,10 +5,14 @@
         <h1 class="backups__title">Бэкапы</h1>
         <p class="backups__subtitle">Конфигурации и история резервных копий</p>
       </div>
-      <button class="backups__refresh" :disabled="loading" @click="refresh">
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" :class="{ spinning: loading }"><polyline points="23,4 23,10 17,10" /><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10" /></svg>
-        Обновить
-      </button>
+      <div style="display:flex; gap:0.4rem; align-items:center; flex-wrap:wrap;">
+        <NuxtLink to="/backups-server" class="backups__refresh" style="text-decoration:none;">📁 Серверные пути</NuxtLink>
+        <NuxtLink to="/backups-panel-data" class="backups__refresh" style="text-decoration:none;">🛡️ Данные панели</NuxtLink>
+        <button class="backups__refresh" :disabled="loading" @click="refresh">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" :class="{ spinning: loading }"><polyline points="23,4 23,10 17,10" /><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10" /></svg>
+          Обновить
+        </button>
+      </div>
     </div>
 
     <!-- Конфигурации (глобальные): две вкладки — Расписание и Хранилища -->

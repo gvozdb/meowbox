@@ -83,6 +83,16 @@ export enum BackupStatus {
   FAILED = 'FAILED',
 }
 
+// Scope конфига бэкапа. Определяет источник данных и UI-вкладку.
+//   SITE        — файлы и БД конкретного сайта (привязка к siteId).
+//   SERVER_PATH — произвольный путь на сервере (`/etc`, `/opt`, ...), один путь = один config.
+//   PANEL_DATA  — preset: данные самой панели (БД, master-key, .env, vpn state, LE сертификаты).
+export enum BackupScope {
+  SITE = 'SITE',
+  SERVER_PATH = 'SERVER_PATH',
+  PANEL_DATA = 'PANEL_DATA',
+}
+
 // =============================================================================
 // SSL
 // =============================================================================

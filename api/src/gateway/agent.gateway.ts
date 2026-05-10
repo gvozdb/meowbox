@@ -13,6 +13,8 @@ import { io as ioClient, Socket as ClientSocket } from 'socket.io-client';
 import { AgentRelayService } from './agent-relay.service';
 import { DeployService } from '../deploy/deploy.service';
 import { BackupsService } from '../backups/backups.service';
+import { ServerPathBackupService } from '../backups/server-path-backup.service';
+import { PanelDataBackupService } from '../backups/panel-data-backup.service';
 import { BackupExportsService } from '../backups/backup-exports.service';
 import { SslService } from '../ssl/ssl.service';
 import { SitesService } from '../sites/sites.service';
@@ -100,6 +102,8 @@ export class AgentGateway implements OnGatewayConnection, OnGatewayDisconnect {
     private readonly relay: AgentRelayService,
     private readonly deployService: DeployService,
     private readonly backupsService: BackupsService,
+    private readonly serverPathBackupService: ServerPathBackupService,
+    private readonly panelDataBackupService: PanelDataBackupService,
     private readonly backupExportsService: BackupExportsService,
     private readonly sslService: SslService,
     @Inject(forwardRef(() => SitesService))
@@ -679,10 +683,14 @@ export class AgentGateway implements OnGatewayConnection, OnGatewayDisconnect {
     agent.on(
       'backup:progress',
       async (data: { backupId: string; progress: number }) => {
-        await this.backupsService.updateBackupProgress(
-          data.backupId,
-          data.progress,
-        );
+        // Один и тот же event прилетает для SITE / SERVER_PATH / PANEL_DATA.
+        // Каждый сервис делает updateMany по WHERE id=backupId — попадёт только
+        // та таблица, где этот id реально есть.
+        await Promise.all([
+          this.backupsService.updateBackupProgress(data.backupId, data.progress).catch(() => {}),
+          this.serverPathBackupService.updateProgress(data.backupId, data.progress).catch(() => {}),
+          this.panelDataBackupService.updateProgress(data.backupId, data.progress).catch(() => {}),
+        ]);
         agent.broadcast.emit('backup:progress', {
           backupId: data.backupId,
           progress: data.progress,
@@ -703,6 +711,62 @@ export class AgentGateway implements OnGatewayConnection, OnGatewayDisconnect {
         snapshotId?: string; // для Restic
       }) => {
         await this.backupsService.completeBackup(
+          data.backupId,
+          data.success,
+          data.filePath,
+          data.sizeBytes,
+          data.error,
+          data.snapshotId,
+        );
+        agent.broadcast.emit('backup:progress', {
+          backupId: data.backupId,
+          progress: data.success ? 100 : 0,
+          status: data.success ? 'COMPLETED' : 'FAILED',
+          timestamp: new Date().toISOString(),
+        });
+      },
+    );
+
+    // --- Server-path backup complete (scope=SERVER_PATH) ---
+    agent.on(
+      'server-path:complete',
+      async (data: {
+        backupId: string;
+        success: boolean;
+        filePath?: string;
+        sizeBytes?: number;
+        error?: string;
+        snapshotId?: string;
+      }) => {
+        await this.serverPathBackupService.completeBackup(
+          data.backupId,
+          data.success,
+          data.filePath,
+          data.sizeBytes,
+          data.error,
+          data.snapshotId,
+        );
+        agent.broadcast.emit('backup:progress', {
+          backupId: data.backupId,
+          progress: data.success ? 100 : 0,
+          status: data.success ? 'COMPLETED' : 'FAILED',
+          timestamp: new Date().toISOString(),
+        });
+      },
+    );
+
+    // --- Panel-data backup complete (scope=PANEL_DATA) ---
+    agent.on(
+      'panel-data:complete',
+      async (data: {
+        backupId: string;
+        success: boolean;
+        filePath?: string;
+        sizeBytes?: number;
+        error?: string;
+        snapshotId?: string;
+      }) => {
+        await this.panelDataBackupService.completeBackup(
           data.backupId,
           data.success,
           data.filePath,

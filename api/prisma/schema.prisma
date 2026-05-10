@@ -236,9 +236,13 @@ model StorageLocation {
   createdAt       DateTime @default(now()) @map("created_at")
   updatedAt       DateTime @updatedAt @map("updated_at")
 
-  backups       Backup[]
-  backupConfigs BackupConfig[]
-  resticChecks  ResticCheck[]
+  backups                    Backup[]
+  backupConfigs              BackupConfig[]
+  resticChecks               ResticCheck[]
+  serverPathBackupConfigs    ServerPathBackupConfig[] @relation("ServerPathBackupConfigToStorageLocation")
+  serverPathBackups          ServerPathBackup[]       @relation("ServerPathBackupToStorageLocation")
+  panelDataBackupConfigs     PanelDataBackupConfig[]  @relation("PanelDataBackupConfigToStorageLocation")
+  panelDataBackups           PanelDataBackup[]        @relation("PanelDataBackupToStorageLocation")
 
   @@map("storage_locations")
 }
@@ -304,6 +308,115 @@ model BackupConfig {
 
   @@index([siteId])
   @@map("backup_configs")
+}
+
+// =============================================================================
+// Server-path backups: бэкап произвольных директорий сервера (/etc, /opt, /root).
+// Один путь = один config. См. docs/specs/2026-05-10-unified-backups.md.
+// =============================================================================
+model ServerPathBackupConfig {
+  id                   String   @id @default(uuid())
+  /// Имя конфига для UI и логов: "etc daily", "opt weekly", ...
+  name                 String
+  /// Абсолютный путь. Один путь на конфиг — если нужны разные расписания,
+  /// создаёшь второй config с тем же path.
+  path                 String
+  /// Подтверждение, что юзер прочитал warning'и о пути из warnlist
+  /// (`/var/log`, `/var/lib/mysql`, ...). Для аудита.
+  warningAcknowledged  Boolean  @default(false) @map("warning_acknowledged")
+  /// Движок: TAR (классический tar.gz) | RESTIC (дедупликация).
+  engine               String   @default("RESTIC")
+  /// Список StorageLocation.id (JSON-массив).
+  storageLocationIds   String   @default("[]") @map("storage_location_ids")
+  schedule             String?  // cron expression
+  retention            Int      @default(7)
+  keepDaily            Int      @default(7) @map("keep_daily")
+  keepWeekly           Int      @default(4) @map("keep_weekly")
+  keepMonthly          Int      @default(6) @map("keep_monthly")
+  keepYearly           Int      @default(1) @map("keep_yearly")
+  /// Restic-exclude паттерны (относительно path).
+  excludePaths         String   @default("[]") @map("exclude_paths")
+  enabled              Boolean  @default(true)
+  createdAt            DateTime @default(now()) @map("created_at")
+  updatedAt            DateTime @updatedAt @map("updated_at")
+
+  backups              ServerPathBackup[]
+  storageLocations     StorageLocation[]  @relation("ServerPathBackupConfigToStorageLocation")
+
+  @@index([enabled])
+  @@map("server_path_backup_configs")
+}
+
+model ServerPathBackup {
+  id                String    @id @default(uuid())
+  configId          String    @map("config_id")
+  status            String    @default("PENDING") // BackupStatus
+  engine            String    @default("RESTIC")
+  storageLocationId String?   @map("storage_location_id")
+  resticSnapshotId  String?   @map("restic_snapshot_id")
+  filePath          String    @default("") @map("file_path")
+  sizeBytes         BigInt?   @map("size_bytes")
+  progress          Int       @default(0)
+  errorMessage      String?   @map("error_message")
+  startedAt         DateTime? @map("started_at")
+  completedAt       DateTime? @map("completed_at")
+  createdAt         DateTime  @default(now()) @map("created_at")
+
+  config            ServerPathBackupConfig @relation(fields: [configId], references: [id], onDelete: Cascade)
+  storageLocation   StorageLocation?       @relation("ServerPathBackupToStorageLocation", fields: [storageLocationId], references: [id], onDelete: SetNull)
+
+  @@index([configId])
+  @@index([status])
+  @@map("server_path_backups")
+}
+
+// =============================================================================
+// Panel-data backups: жёстко зашитый набор путей для бэкапа данных самой панели.
+// Путей юзер не выбирает — preset защищает от ошибки "забыл .master-key".
+// =============================================================================
+model PanelDataBackupConfig {
+  id                   String   @id @default(uuid())
+  name                 String
+  engine               String   @default("RESTIC")
+  storageLocationIds   String   @default("[]") @map("storage_location_ids")
+  schedule             String?
+  retention            Int      @default(7)
+  keepDaily            Int      @default(24) @map("keep_daily")     // 24 hourly = day
+  keepWeekly           Int      @default(7) @map("keep_weekly")     // 7 days
+  keepMonthly          Int      @default(12) @map("keep_monthly")
+  keepYearly           Int      @default(5) @map("keep_yearly")
+  enabled              Boolean  @default(true)
+  createdAt            DateTime @default(now()) @map("created_at")
+  updatedAt            DateTime @updatedAt @map("updated_at")
+
+  backups              PanelDataBackup[]
+  storageLocations     StorageLocation[] @relation("PanelDataBackupConfigToStorageLocation")
+
+  @@index([enabled])
+  @@map("panel_data_backup_configs")
+}
+
+model PanelDataBackup {
+  id                String    @id @default(uuid())
+  configId          String    @map("config_id")
+  status            String    @default("PENDING")
+  engine            String    @default("RESTIC")
+  storageLocationId String?   @map("storage_location_id")
+  resticSnapshotId  String?   @map("restic_snapshot_id")
+  filePath          String    @default("") @map("file_path")
+  sizeBytes         BigInt?   @map("size_bytes")
+  progress          Int       @default(0)
+  errorMessage      String?   @map("error_message")
+  startedAt         DateTime? @map("started_at")
+  completedAt       DateTime? @map("completed_at")
+  createdAt         DateTime  @default(now()) @map("created_at")
+
+  config            PanelDataBackupConfig @relation(fields: [configId], references: [id], onDelete: Cascade)
+  storageLocation   StorageLocation?      @relation("PanelDataBackupToStorageLocation", fields: [storageLocationId], references: [id], onDelete: SetNull)
+
+  @@index([configId])
+  @@index([status])
+  @@map("panel_data_backups")
 }
 
 model Backup {
