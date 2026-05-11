@@ -362,7 +362,12 @@ ${s}
         { timeout: 120_000, onLine: log, stdin: 'ignore', allowFailure: true },
       );
 
-      const packages = [
+      // CORE — обязательные пакеты. Без них fpm не запустится. Транзакция
+      // должна успешно завершиться, иначе мы НЕ хотим оставлять огрызок
+      // /etc/php/{V}/ без php{V}-fpm.service (классический баг: 8.4 показывается
+      // в гриде как «установлен», но статус inactive и активировать нечем —
+      // потому что fpm на самом деле не доехал).
+      const corePackages = [
         `php${version}-fpm`,
         `php${version}-cli`,
         `php${version}-common`,
@@ -377,12 +382,11 @@ ${s}
         `php${version}-intl`,
         `php${version}-bcmath`,
         `php${version}-opcache`,
-        `php${version}-imagick`,
       ];
 
-      log(`→ apt-get install ${packages.length} packages...`);
-      const result = await this.executor.executeStreaming(
-        'apt-get', ['install', '-y', ...packages],
+      log(`→ apt-get install core (${corePackages.length} packages)...`);
+      const coreResult = await this.executor.executeStreaming(
+        'apt-get', ['install', '-y', ...corePackages],
         {
           timeout: 600_000,
           onLine: log,
@@ -392,15 +396,52 @@ ${s}
         },
       );
 
-      if (result.exitCode !== 0) {
-        log(`✗ apt-get install exit=${result.exitCode}`, 'stderr');
-        return { success: false, error: result.stderr || `apt-get install exit ${result.exitCode}` };
+      if (coreResult.exitCode !== 0) {
+        log(`✗ apt-get install CORE exit=${coreResult.exitCode}`, 'stderr');
+        return { success: false, error: coreResult.stderr || `apt-get install core exit ${coreResult.exitCode}` };
+      }
+
+      // OPTIONAL — может отсутствовать в репах для конкретной версии (классика:
+      // php8.4-imagick первые месяцы после релиза 8.4 не было в ondrej/php).
+      // Ставим по одному, отвалы НЕ ломают всю установку.
+      const optionalPackages = [`php${version}-imagick`];
+      for (const pkg of optionalPackages) {
+        log(`→ apt-get install optional ${pkg} (best-effort)...`);
+        const r = await this.executor.executeStreaming(
+          'apt-get', ['install', '-y', pkg],
+          {
+            timeout: 300_000,
+            onLine: log,
+            stdin: 'ignore',
+            env: { DEBIAN_FRONTEND: 'noninteractive' },
+            allowFailure: true,
+          },
+        );
+        if (r.exitCode !== 0) {
+          log(`! optional ${pkg} install failed — пропускаю (exit=${r.exitCode})`, 'stderr');
+        }
       }
 
       log(`→ systemctl enable php${version}-fpm`);
       await this.executor.execute('systemctl', ['enable', `php${version}-fpm`]);
       log(`→ systemctl start php${version}-fpm`);
       await this.executor.execute('systemctl', ['start', `php${version}-fpm`]);
+
+      // Sanity-check: после enable+start сервис должен быть active. Если нет —
+      // возвращаем error с подсказкой посмотреть journalctl, чтобы UI не врал
+      // «installed успешно», когда на самом деле fpm лежит.
+      const check = await this.executor.execute(
+        'systemctl', ['is-active', `php${version}-fpm`],
+        { allowFailure: true },
+      );
+      const isActive = check.stdout.trim() === 'active';
+      if (!isActive) {
+        log(`✗ php${version}-fpm не активен после установки (is-active=${check.stdout.trim()})`, 'stderr');
+        return {
+          success: false,
+          error: `PHP ${version} установлен, но сервис php${version}-fpm не запустился. Посмотри: journalctl -xeu php${version}-fpm`,
+        };
+      }
 
       log(`✓ PHP ${version} installed`);
       return { success: true };

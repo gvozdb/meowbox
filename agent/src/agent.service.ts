@@ -29,6 +29,7 @@ import { MariadbEngineExecutor, PostgresqlEngineExecutor } from './database/db-e
 import { XrayManager } from './vpn/xray.manager';
 import { AmneziaWgManager } from './vpn/amnezia-wg.manager';
 import { VpnInstaller } from './vpn/installer';
+import { PanelAccessManager } from './panel-access/panel-access.manager';
 import * as fs from 'fs';
 import * as fsp from 'fs/promises';
 import * as path from 'path';
@@ -101,6 +102,7 @@ export class AgentService {
   private xrayMgr: XrayManager;
   private amneziaMgr: AmneziaWgManager;
   private vpnInstaller: VpnInstaller;
+  private panelAccess: PanelAccessManager;
   private metricsInterval: ReturnType<typeof setInterval> | null = null;
   /**
    * Single-flight для hostpanel-миграции (см. spec §17.5: 1 одновременная
@@ -143,6 +145,7 @@ export class AgentService {
     this.xrayMgr = new XrayManager(this.cmdExec);
     this.amneziaMgr = new AmneziaWgManager(this.cmdExec);
     this.vpnInstaller = new VpnInstaller(this.cmdExec);
+    this.panelAccess = new PanelAccessManager();
   }
 
   start() {
@@ -669,6 +672,64 @@ export class AgentService {
 
     this.safeOn(s, 'ssl:install-custom', async (params: { domain: string; certPem: string; keyPem: string; chainPem?: string }, cb: Callback) => {
       cb(await this.ssl.installCustomCertificate(params));
+    });
+
+    // -- Panel Access (domain / HTTPS / redirect / deny-ip) --
+    this.safeOn(s, 'panel-access:status', async (params: { domain?: string | null; certPath?: string | null }, cb: Callback) => {
+      try {
+        const r = await this.panelAccess.getStatus(params || {});
+        cb(r);
+      } catch (err) {
+        cb({ success: false, error: (err as Error).message });
+      }
+    });
+
+    this.safeOn(s, 'panel-access:render-nginx', async (params: {
+      domain: string | null;
+      certMode: 'NONE' | 'SELFSIGNED' | 'LE';
+      certPath: string | null;
+      keyPath: string | null;
+      httpsRedirect: boolean;
+      denyIpAccess: boolean;
+    }, cb: Callback) => {
+      try {
+        const r = await this.panelAccess.renderNginx(params);
+        cb(r);
+      } catch (err) {
+        cb({ success: false, error: (err as Error).message });
+      }
+    });
+
+    this.safeOn(s, 'panel-access:issue-le', async (params: { domain: string; email: string }, cb: Callback) => {
+      try {
+        const r = await this.panelAccess.issueLeCert(params);
+        cb(r);
+      } catch (err) {
+        cb({ success: false, error: (err as Error).message });
+      }
+    });
+
+    this.safeOn(s, 'panel-access:gen-selfsigned', async (_params: unknown, cb: Callback) => {
+      try {
+        const r = await this.panelAccess.generateSelfSigned();
+        cb(r);
+      } catch (err) {
+        cb({ success: false, error: (err as Error).message });
+      }
+    });
+
+    this.safeOn(s, 'panel-access:remove-cert', async (params: {
+      domain?: string | null;
+      certPath?: string | null;
+      keyPath?: string | null;
+      mode?: 'NONE' | 'SELFSIGNED' | 'LE';
+    }, cb: Callback) => {
+      try {
+        const r = await this.panelAccess.removeCert(params || {});
+        cb(r);
+      } catch (err) {
+        cb({ success: false, error: (err as Error).message });
+      }
     });
 
     // -- Backup --

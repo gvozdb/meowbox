@@ -649,6 +649,8 @@
         </div>
       </div>
 
+      <!-- Access tab modal-backdrop and rules end -->
+
       <!-- Add / Edit rule modal -->
       <div v-if="cbRuleDialog.open" class="modal-backdrop" @mousedown.self="cbRuleDialog.open = false">
         <div class="modal-box">
@@ -694,6 +696,202 @@
       </div>
     </div>
 
+    <!-- =========================================================== -->
+    <!-- ACCESS — domain / HTTPS / редирект / запрет IP-доступа       -->
+    <!-- =========================================================== -->
+    <div v-if="activeTab === 'access'" class="tab-content">
+      <div v-if="accessLoading" class="audit-log__empty"><p>Загрузка состояния…</p></div>
+      <template v-else>
+
+        <!-- ── Текущий доступ (live-статус) ─────────────────────── -->
+        <div class="settings-card access-card">
+          <h3 class="settings-card__title">Текущий доступ</h3>
+          <div class="access-status">
+            <div class="access-status__row">
+              <span class="access-status__label">URL</span>
+              <span class="access-status__value mono">{{ currentPanelUrl }}</span>
+            </div>
+            <div class="access-status__row">
+              <span class="access-status__label">Протокол</span>
+              <span class="access-status__value">
+                <span :class="['access-pill', accessProtocolHttps ? 'access-pill--ok' : 'access-pill--off']">
+                  {{ accessProtocolHttps ? 'HTTPS' : 'HTTP' }}
+                </span>
+              </span>
+            </div>
+            <div class="access-status__row">
+              <span class="access-status__label">Сертификат</span>
+              <span class="access-status__value">
+                <template v-if="accessForm.certMode === 'NONE'">
+                  <span class="access-pill access-pill--off">не выпущен</span>
+                </template>
+                <template v-else>
+                  <span :class="['access-pill', certExpiryClass]">
+                    {{ accessForm.certMode === 'LE' ? "Let's Encrypt" : 'Self-signed' }}
+                  </span>
+                  <span v-if="accessForm.certExpiresAt" class="access-status__hint">
+                    истекает {{ formatAccessDate(accessForm.certExpiresAt) }}
+                  </span>
+                </template>
+              </span>
+            </div>
+            <div class="access-status__row">
+              <span class="access-status__label">Редирект HTTP → HTTPS</span>
+              <span class="access-status__value">
+                <span :class="['access-pill', accessForm.httpsRedirect ? 'access-pill--ok' : 'access-pill--off']">
+                  {{ accessForm.httpsRedirect ? 'включён' : 'выключен' }}
+                </span>
+              </span>
+            </div>
+            <div class="access-status__row">
+              <span class="access-status__label">Доступ через IP:PORT</span>
+              <span class="access-status__value">
+                <span :class="['access-pill', accessForm.denyIpAccess ? 'access-pill--off' : 'access-pill--ok']">
+                  {{ accessForm.denyIpAccess ? 'запрещён' : 'разрешён' }}
+                </span>
+              </span>
+            </div>
+          </div>
+        </div>
+
+        <!-- ── Доменное имя ─────────────────────────────────────── -->
+        <div class="settings-card access-card">
+          <h3 class="settings-card__title">Доменное имя</h3>
+          <p class="settings-card__desc">
+            Привяжи DNS-имя к панели, чтобы потом получить полноценный Let's Encrypt сертификат.
+            DNS A-запись должна указывать на этот сервер.
+          </p>
+
+          <div class="settings-fields" style="margin-top: 1rem;">
+            <div class="form-group">
+              <label class="form-label">Домен</label>
+              <div class="access-input-row">
+                <input v-model="accessForm.domain" class="form-input mono" placeholder="panel.example.com" :disabled="accessSaving" />
+                <button class="settings-card__btn settings-card__btn--sm" :disabled="accessSaving" @click="saveAccessDomain">
+                  {{ accessSaving ? '...' : 'Сохранить' }}
+                </button>
+                <button v-if="accessForm.domain" class="settings-card__btn settings-card__btn--sm settings-card__btn--danger" :disabled="accessSaving" @click="unbindAccessDomain">
+                  Отвязать
+                </button>
+              </div>
+              <span class="form-hint">
+                Сменa домена при наличии текущего сертификата автоматически снесёт серт (нужно будет выпустить заново).
+              </span>
+            </div>
+
+            <div v-if="accessForm.domain" class="access-dns-status">
+              <div v-if="accessLive.dnsResolved === null && accessForm.domain === accessOriginalDomain" class="access-dns-row access-dns-row--off">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+                DNS не резолвится — проверь A-запись у регистратора.
+              </div>
+              <div v-else-if="accessLive.dnsMatchesServer === true" class="access-dns-row access-dns-row--ok">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="20,6 9,17 4,12"/></svg>
+                DNS указывает на этот сервер ({{ accessLive.dnsResolved }}).
+              </div>
+              <div v-else-if="accessLive.dnsResolved && accessLive.serverIp" class="access-dns-row access-dns-row--off">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+                DNS указывает на <b class="mono">{{ accessLive.dnsResolved }}</b>, а сервер — <b class="mono">{{ accessLive.serverIp }}</b>. Выпуск LE упадёт.
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- ── HTTPS-сертификат ─────────────────────────────────── -->
+        <div class="settings-card access-card">
+          <h3 class="settings-card__title">HTTPS-сертификат</h3>
+
+          <!-- Вариант 1: домен привязан → ТОЛЬКО LE -->
+          <div v-if="accessForm.domain" class="access-cert-option">
+            <div class="access-cert-option__head">
+              <div class="access-cert-option__title">Let's Encrypt</div>
+              <span class="access-cert-option__hint">бесплатно, авто-перевыпуск каждые 60 дней</span>
+            </div>
+            <div class="form-group" style="margin-top: 0.7rem;">
+              <label class="form-label">Email регистрации</label>
+              <input v-model="accessForm.leEmailDraft" type="email" class="form-input" placeholder="admin@example.com" :disabled="accessIssueLeRunning" />
+              <span class="form-hint">Используется LE для уведомлений об истечении (предзаполнен из профиля админа).</span>
+            </div>
+            <div class="settings-actions">
+              <button
+                class="settings-card__btn"
+                :disabled="accessIssueLeRunning || !accessLeReady"
+                @click="issueAccessLe"
+                :title="!accessLeReady ? 'Сначала сохрани домен и проверь DNS' : ''"
+              >
+                {{ accessIssueLeRunning ? 'Выпускаем…' : (accessForm.certMode === 'LE' ? 'Перевыпустить cert' : 'Выпустить cert') }}
+              </button>
+              <button v-if="accessForm.certMode !== 'NONE'" class="settings-card__btn settings-card__btn--sm settings-card__btn--danger" style="margin-left: 0.6rem;" :disabled="accessRemoveRunning" @click="removeAccessCert">
+                Снести cert
+              </button>
+            </div>
+            <div v-if="accessForm.leLastError" class="access-error">
+              <strong>Последняя ошибка certbot:</strong>
+              <pre>{{ accessForm.leLastError }}</pre>
+            </div>
+          </div>
+
+          <!-- Вариант 2: домен НЕ привязан → ТОЛЬКО self-signed -->
+          <div v-else class="access-cert-option">
+            <div class="access-cert-option__head">
+              <div class="access-cert-option__title">Self-signed</div>
+              <span class="access-cert-option__hint">для доступа по IP — браузер выдаст предупреждение, но трафик зашифрован</span>
+            </div>
+            <p class="settings-card__desc" style="margin: 0.7rem 0;">
+              Let's Encrypt не выдаёт сертификаты на IP. Чтобы избавиться от предупреждений браузера —
+              привяжи домен выше.
+            </p>
+            <div class="settings-actions">
+              <button class="settings-card__btn" :disabled="accessGenSsRunning" @click="generateAccessSelfSigned">
+                {{ accessGenSsRunning ? 'Генерируем…' : (accessForm.certMode === 'SELFSIGNED' ? 'Сгенерировать заново' : 'Сгенерировать') }}
+              </button>
+              <button v-if="accessForm.certMode !== 'NONE'" class="settings-card__btn settings-card__btn--sm settings-card__btn--danger" style="margin-left: 0.6rem;" :disabled="accessRemoveRunning" @click="removeAccessCert">
+                Снести cert
+              </button>
+            </div>
+          </div>
+        </div>
+
+        <!-- ── Поведение (redirect / deny-ip) ───────────────────── -->
+        <div class="settings-card access-card">
+          <h3 class="settings-card__title">Поведение</h3>
+
+          <div class="settings-fields">
+            <div class="form-group">
+              <label class="notif-event-check">
+                <input
+                  type="checkbox"
+                  v-model="accessForm.httpsRedirect"
+                  :disabled="accessForm.certMode === 'NONE' || accessBehaviorSaving"
+                  @change="saveAccessBehavior"
+                />
+                Принудительный редирект HTTP → HTTPS
+              </label>
+              <span class="form-hint">
+                Требует выпущенного сертификата. Браузер на http://… получит 301 на https://…
+              </span>
+            </div>
+
+            <div class="form-group">
+              <label class="notif-event-check">
+                <input
+                  type="checkbox"
+                  v-model="accessForm.denyIpAccess"
+                  :disabled="!canDenyIpAccess || accessBehaviorSaving"
+                  @change="saveAccessBehavior"
+                />
+                Запретить доступ по IP:PORT
+              </label>
+              <span class="form-hint">
+                Требует валидный сертификат и привязанный домен. После включения панель будет
+                доступна <b>только</b> по домену; запросы на <code>{{ accessLive.serverIp || 'IP' }}:{{ panelPort }}</code> будут закрываться (444).
+              </span>
+            </div>
+          </div>
+        </div>
+
+      </template>
+    </div>
+
   </div>
 </template>
 
@@ -705,7 +903,7 @@ definePageMeta({ middleware: 'auth' });
 const api = useApi();
 const authStore = useAuthStore();
 
-const activeTab = useTabQuery(['general', 'appearance', 'site-defaults', 'security', 'notifications', 'country-block'], 'general');
+const activeTab = useTabQuery(['general', 'appearance', 'site-defaults', 'security', 'notifications', 'country-block', 'access'], 'general');
 const saving = ref(false);
 const mbToast = useMbToast();
 const passwordError = ref('');
@@ -717,6 +915,7 @@ const tabs = [
   { id: 'security', label: 'Безопасность' },
   { id: 'notifications', label: 'Уведомления' },
   { id: 'country-block', label: 'Блок по странам' },
+  { id: 'access', label: 'Доступ' },
 ];
 
 // ── Panel settings (general tab) ──────────────────────────────────────────
@@ -1396,6 +1595,7 @@ function loadDataForTab(tab: string) {
     loadSessions();
     loadIpAllowlist();
   }
+  if (tab === 'access') loadPanelAccess();
   if (tab === 'country-block') {
     loadCountryBlock();
   }
@@ -1733,6 +1933,222 @@ async function deleteCbRule(id: string) {
     await loadCountryBlock();
   } catch (err) {
     showStatus('Не удалить: ' + ((err as Error).message || ''), true);
+  }
+}
+
+// ── Access tab (домен / HTTPS / редирект / запрет IP) ────────────────────
+interface AccessSettings {
+  domain: string | null;
+  certMode: 'NONE' | 'SELFSIGNED' | 'LE';
+  httpsRedirect: boolean;
+  denyIpAccess: boolean;
+  certIssuedAt: string | null;
+  certExpiresAt: string | null;
+  certPath: string | null;
+  keyPath: string | null;
+  leLastError: string | null;
+  leEmail: string | null;
+}
+interface AccessLive {
+  certOnDisk: boolean;
+  certExpiresAt: string | null;
+  dnsResolved: string | null;
+  serverIp: string | null;
+  dnsMatchesServer: boolean | null;
+  agentOnline: boolean;
+}
+
+const accessLoading = ref(false);
+const accessSaving = ref(false);
+const accessBehaviorSaving = ref(false);
+const accessIssueLeRunning = ref(false);
+const accessGenSsRunning = ref(false);
+const accessRemoveRunning = ref(false);
+// Хранилище формы. `domain` редактируется юзером, остальное — отзеркаливание API state.
+const accessForm = reactive<AccessSettings & { leEmailDraft: string }>({
+  domain: '',
+  certMode: 'NONE',
+  httpsRedirect: false,
+  denyIpAccess: false,
+  certIssuedAt: null,
+  certExpiresAt: null,
+  certPath: null,
+  keyPath: null,
+  leLastError: null,
+  leEmail: null,
+  leEmailDraft: '',
+});
+const accessLive = reactive<AccessLive>({
+  certOnDisk: false,
+  certExpiresAt: null,
+  dnsResolved: null,
+  serverIp: null,
+  dnsMatchesServer: null,
+  agentOnline: false,
+});
+const accessOriginalDomain = ref<string | null>(null);
+const accessDefaultEmail = ref<string | null>(null);
+// PANEL_PORT мы фронту не отдаём напрямую — но он есть в URL текущей страницы.
+const panelPort = computed(() => {
+  if (typeof window === 'undefined') return '';
+  return window.location.port || (window.location.protocol === 'https:' ? '443' : '80');
+});
+
+const currentPanelUrl = computed(() => {
+  if (typeof window === 'undefined') return '';
+  return `${window.location.protocol}//${window.location.host}`;
+});
+
+const accessProtocolHttps = computed(() => {
+  if (typeof window === 'undefined') return false;
+  return window.location.protocol === 'https:';
+});
+
+const certExpiryClass = computed(() => {
+  if (!accessForm.certExpiresAt) return 'access-pill--ok';
+  const expiresMs = Date.parse(accessForm.certExpiresAt);
+  if (!Number.isFinite(expiresMs)) return 'access-pill--ok';
+  const daysLeft = (expiresMs - Date.now()) / (1000 * 60 * 60 * 24);
+  if (daysLeft < 7) return 'access-pill--danger';
+  if (daysLeft < 30) return 'access-pill--warn';
+  return 'access-pill--ok';
+});
+
+// LE можно запускать только когда: домен сохранён (originalDomain совпадает с
+// формой), email валиден, и DNS либо совпадает либо ещё не проверен.
+const accessLeReady = computed(() => {
+  if (!accessForm.domain) return false;
+  if (accessForm.domain !== accessOriginalDomain.value) return false;
+  const email = (accessForm.leEmailDraft || '').trim();
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return false;
+  return true;
+});
+
+const canDenyIpAccess = computed(() => {
+  return !!accessForm.domain && accessForm.certMode !== 'NONE';
+});
+
+function formatAccessDate(iso: string | null): string {
+  if (!iso) return '—';
+  try {
+    return new Date(iso).toLocaleDateString('ru-RU', { year: 'numeric', month: '2-digit', day: '2-digit' });
+  } catch {
+    return iso;
+  }
+}
+
+async function loadPanelAccess() {
+  accessLoading.value = true;
+  try {
+    const res = await api.get<{
+      settings: AccessSettings;
+      live: AccessLive;
+      defaultEmail: string | null;
+    }>('/panel-access');
+    Object.assign(accessForm, res.settings);
+    Object.assign(accessLive, res.live);
+    accessForm.domain = res.settings.domain || '';
+    accessOriginalDomain.value = res.settings.domain;
+    accessDefaultEmail.value = res.defaultEmail;
+    // Email — берём из настроек, fallback на email админа.
+    accessForm.leEmailDraft = res.settings.leEmail || res.defaultEmail || '';
+  } catch (err) {
+    showStatus('Не удалось загрузить настройки доступа: ' + ((err as Error).message || ''), true);
+  } finally {
+    accessLoading.value = false;
+  }
+}
+
+async function saveAccessDomain() {
+  const domain = (accessForm.domain || '').trim() || null;
+  accessSaving.value = true;
+  try {
+    const res = await api.put<{ settings: AccessSettings; live: AccessLive }>('/panel-access/domain', { domain });
+    Object.assign(accessForm, res.settings);
+    Object.assign(accessLive, res.live);
+    accessForm.domain = res.settings.domain || '';
+    accessOriginalDomain.value = res.settings.domain;
+    showStatus(domain ? 'Домен сохранён' : 'Домен отвязан');
+  } catch (err) {
+    showStatus('Не сохранить домен: ' + ((err as Error).message || ''), true);
+  } finally {
+    accessSaving.value = false;
+  }
+}
+
+async function unbindAccessDomain() {
+  if (!confirm('Отвязать домен? Если есть сертификат — он будет снесён.')) return;
+  accessForm.domain = '';
+  await saveAccessDomain();
+}
+
+async function issueAccessLe() {
+  if (!accessLeReady.value) return;
+  const email = (accessForm.leEmailDraft || '').trim();
+  accessIssueLeRunning.value = true;
+  try {
+    const res = await api.post<{ settings: AccessSettings; live: AccessLive }>('/panel-access/cert/le', { email });
+    Object.assign(accessForm, res.settings);
+    Object.assign(accessLive, res.live);
+    accessForm.domain = res.settings.domain || '';
+    showStatus('Let\'s Encrypt сертификат выпущен');
+  } catch (err) {
+    // Ошибка детальная — показываем как есть.
+    showStatus('Не удалось выпустить cert: ' + ((err as Error).message || ''), true);
+    // Перечитаем настройки чтобы подтянуть leLastError.
+    await loadPanelAccess();
+  } finally {
+    accessIssueLeRunning.value = false;
+  }
+}
+
+async function generateAccessSelfSigned() {
+  accessGenSsRunning.value = true;
+  try {
+    const res = await api.post<{ settings: AccessSettings; live: AccessLive }>('/panel-access/cert/selfsigned', {});
+    Object.assign(accessForm, res.settings);
+    Object.assign(accessLive, res.live);
+    accessForm.domain = res.settings.domain || '';
+    showStatus('Self-signed cert сгенерирован');
+  } catch (err) {
+    showStatus('Не сгенерировать: ' + ((err as Error).message || ''), true);
+  } finally {
+    accessGenSsRunning.value = false;
+  }
+}
+
+async function removeAccessCert() {
+  if (!confirm('Снести сертификат? Панель станет доступна только по HTTP.')) return;
+  accessRemoveRunning.value = true;
+  try {
+    const res = await api.delete<{ settings: AccessSettings; live: AccessLive }>('/panel-access/cert');
+    Object.assign(accessForm, res.settings);
+    Object.assign(accessLive, res.live);
+    accessForm.domain = res.settings.domain || '';
+    showStatus('Сертификат снесён');
+  } catch (err) {
+    showStatus('Не удалось снести cert: ' + ((err as Error).message || ''), true);
+  } finally {
+    accessRemoveRunning.value = false;
+  }
+}
+
+async function saveAccessBehavior() {
+  accessBehaviorSaving.value = true;
+  try {
+    const res = await api.put<{ settings: AccessSettings; live: AccessLive }>('/panel-access/behavior', {
+      httpsRedirect: accessForm.httpsRedirect,
+      denyIpAccess: accessForm.denyIpAccess,
+    });
+    Object.assign(accessForm, res.settings);
+    Object.assign(accessLive, res.live);
+    showStatus('Настройки доступа применены');
+  } catch (err) {
+    showStatus('Не применить: ' + ((err as Error).message || ''), true);
+    // Откатываем чекбоксы к серверной правде.
+    await loadPanelAccess();
+  } finally {
+    accessBehaviorSaving.value = false;
   }
 }
 
@@ -2500,5 +2916,134 @@ onMounted(() => {
   font-size: 0.8rem;
   color: var(--text-tertiary);
   line-height: 1.35;
+}
+
+/* ── Access tab ──────────────────────────────────────────────────────── */
+.access-card { margin-bottom: 1rem; }
+
+.access-status {
+  display: grid;
+  grid-template-columns: 200px 1fr;
+  gap: 0.7rem 1rem;
+  align-items: center;
+  margin-top: 0.5rem;
+}
+.access-status__label {
+  font-size: 0.8rem;
+  color: var(--text-muted);
+}
+.access-status__value {
+  font-size: 0.88rem;
+  color: var(--text-secondary);
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  flex-wrap: wrap;
+}
+.access-status__hint {
+  font-size: 0.78rem;
+  color: var(--text-muted);
+}
+
+.access-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  font-size: 0.7rem;
+  font-weight: 600;
+  padding: 0.22rem 0.55rem;
+  border-radius: 6px;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+}
+.access-pill--ok    { background: rgba(34, 197, 94, 0.12);  color: #4ade80; }
+.access-pill--off   { background: rgba(148, 163, 184, 0.12); color: #94a3b8; }
+.access-pill--warn  { background: rgba(234, 179, 8, 0.14);  color: #facc15; }
+.access-pill--danger{ background: rgba(239, 68, 68, 0.14);  color: #fca5a5; }
+
+.access-input-row {
+  display: flex;
+  gap: 0.5rem;
+  align-items: center;
+  flex-wrap: wrap;
+}
+.access-input-row .form-input {
+  flex: 1;
+  min-width: 220px;
+}
+
+.access-dns-status { margin-top: 0.7rem; }
+.access-dns-row {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.55rem 0.8rem;
+  border-radius: 8px;
+  font-size: 0.82rem;
+}
+.access-dns-row--ok {
+  background: rgba(34, 197, 94, 0.08);
+  border: 1px solid rgba(34, 197, 94, 0.2);
+  color: #86efac;
+}
+.access-dns-row--off {
+  background: rgba(239, 68, 68, 0.06);
+  border: 1px solid rgba(239, 68, 68, 0.2);
+  color: #fca5a5;
+}
+
+.access-cert-option {
+  margin-top: 0.5rem;
+  padding: 1rem 1.1rem;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--bg-input);
+}
+.access-cert-option__head {
+  display: flex;
+  align-items: baseline;
+  gap: 0.6rem;
+  flex-wrap: wrap;
+}
+.access-cert-option__title {
+  font-size: 0.95rem;
+  font-weight: 600;
+  color: var(--text-heading);
+}
+.access-cert-option__hint {
+  font-size: 0.78rem;
+  color: var(--text-muted);
+}
+
+.access-error {
+  margin-top: 0.8rem;
+  padding: 0.7rem 0.9rem;
+  border-radius: 8px;
+  background: rgba(239, 68, 68, 0.06);
+  border: 1px solid rgba(239, 68, 68, 0.2);
+  color: #fca5a5;
+  font-size: 0.78rem;
+}
+.access-error strong { display: block; margin-bottom: 0.3rem; color: #fda4a4; font-weight: 600; }
+.access-error pre {
+  margin: 0;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.72rem;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: rgba(252, 165, 165, 0.85);
+}
+
+@media (max-width: 640px) {
+  .access-status {
+    grid-template-columns: 1fr;
+    gap: 0.3rem;
+  }
+  .access-status__label {
+    font-size: 0.72rem;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: var(--text-muted);
+  }
 }
 </style>

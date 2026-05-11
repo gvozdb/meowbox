@@ -112,6 +112,35 @@ export class PanelSettingsService {
       lastUpdate: null as string | null,
       lastUpdateError: null as string | null,
     },
+    // Доступ к панели: домен, HTTPS-сертификат, редиректы, ограничения по IP.
+    //
+    //   domain          — DNS-имя, привязанное к панели. Если null/'' — панель
+    //                     доступна только по IP:PORT, HTTPS не выпускается.
+    //   certMode        — NONE: HTTP only;
+    //                     SELFSIGNED: self-signed (только для IP-доступа);
+    //                     LE: Let's Encrypt (требует domain).
+    //   httpsRedirect   — слать 301 http://… → https://… на основной URL.
+    //                     Имеет смысл только при certMode != NONE.
+    //   denyIpAccess    — при привязанном domain закрыть доступ через IP:PORT
+    //                     (server_name только domain; default_server → 444).
+    //                     Требует валидный cert на domain.
+    //   certIssuedAt    — ISO дата выпуска текущего серта (для UI).
+    //   certExpiresAt   — ISO дата истечения (для UI; чтение из openssl).
+    //   certPath/keyPath— абсолютные пути на диске. Заполняет агент при выпуске.
+    //   leLastError     — текст последней ошибки certbot (для дебага в UI).
+    //   leEmail         — email регистрации в LE (для подстановки в форму).
+    'panel-access': {
+      domain: null as string | null,
+      certMode: 'NONE' as 'NONE' | 'SELFSIGNED' | 'LE',
+      httpsRedirect: false,
+      denyIpAccess: false,
+      certIssuedAt: null as string | null,
+      certExpiresAt: null as string | null,
+      certPath: null as string | null,
+      keyPath: null as string | null,
+      leLastError: null as string | null,
+      leEmail: null as string | null,
+    },
   } as const;
 
   async get<T>(key: keyof typeof this.defaults): Promise<T> {
@@ -205,5 +234,21 @@ export class PanelSettingsService {
     current.palettes[serverId] = palette;
     await this.set('appearance', { palettes: current.palettes });
     return current;
+  }
+
+  // ── Panel access (домен, HTTPS, редиректы, IP-блок) ─────────────────────
+  async getPanelAccess(): Promise<{
+    domain: string | null;
+    certMode: 'NONE' | 'SELFSIGNED' | 'LE';
+    httpsRedirect: boolean;
+    denyIpAccess: boolean;
+    certIssuedAt: string | null;
+    certExpiresAt: string | null;
+    certPath: string | null;
+    keyPath: string | null;
+    leLastError: string | null;
+    leEmail: string | null;
+  }> {
+    return this.get('panel-access');
   }
 }

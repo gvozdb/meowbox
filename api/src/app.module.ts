@@ -33,6 +33,7 @@ import { HealthModule } from './health/health.module';
 import { MigrationModule } from './migration/migration.module';
 import { AiModule } from './ai/ai.module';
 import { PanelSettingsModule } from './panel-settings/panel-settings.module';
+import { PanelAccessModule } from './panel-access/panel-access.module';
 import { StorageLocationsModule } from './storage-locations/storage-locations.module';
 import { DnsModule } from './dns/dns.module';
 import { ServicesModule } from './services/services.module';
@@ -108,6 +109,7 @@ import { CustomThrottlerGuard } from './common/guards/throttler-tracker.guard';
     MigrationModule,
     AiModule,
     PanelSettingsModule,
+    PanelAccessModule,
     StorageLocationsModule,
     DnsModule,
     ServicesModule,

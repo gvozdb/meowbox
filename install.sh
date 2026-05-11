@@ -308,43 +308,41 @@ PHP_MANAGED_VERSIONS=("8.4" "8.3" "8.2" "8.1")
 # Системный `php` symlink создаст `update-alternatives` автоматически.
 log "Installing PHP-FPM versions: ${PHP_MANAGED_VERSIONS[*]} (доступные в репо)..."
 
-PHP_SITE_EXTS=(mysql pgsql sqlite3 mbstring curl zip xml gd bcmath intl opcache imagick)
+# CORE — обязательные пакеты (без них PHP-FPM не запустится / сайты не поедут).
+# Ставим строго: если что-то из этого отвалится → apt откатывает транзакцию, и
+# мы НЕ оставляем огрызок /etc/php/${V}/ без php${V}-fpm.service.
+PHP_CORE_EXTS=(cli fpm mysql pgsql sqlite3 mbstring curl zip xml gd bcmath intl opcache)
+# OPTIONAL — то, что может быть сломано/отсутствовать в репах для отдельных
+# версий (классический пример: php8.4-imagick часто отсутствует в ondrej/php
+# первые месяцы после релиза 8.4). Ставим best-effort, по одному — отвалившийся
+# пакет не утаскивает за собой остальное.
+PHP_OPTIONAL_EXTS=(imagick)
 
 # Ставим в порядке от младшей к старшей — чисто для красоты лога.
 for V in $(printf '%s\n' "${PHP_MANAGED_VERSIONS[@]}" | sort -V); do
-  if apt-cache show "php${V}-cli" >/dev/null 2>&1; then
-    log "  → installing PHP ${V}..."
-    apt-get "${APT_OPTS[@]}" install \
-      "php${V}-cli" "php${V}-fpm" \
-      "php${V}-mysql" "php${V}-pgsql" "php${V}-sqlite3" \
-      "php${V}-mbstring" "php${V}-curl" "php${V}-zip" \
-      "php${V}-xml" "php${V}-gd" "php${V}-bcmath" "php${V}-intl" \
-      "php${V}-opcache" "php${V}-imagick" \
-      >> "$LOG_FILE" 2>&1 || warn "    PHP ${V} install partial — некоторые модули не доступны"
-  else
+  if ! apt-cache show "php${V}-cli" >/dev/null 2>&1; then
     log "  → PHP ${V} в репо не найден, пропускаю"
+    continue
   fi
-done
-
-# Доустанавливаем MODX-расширения только для УПРАВЛЯЕМЫХ версий.
-# Раньше итерировали по `ls /etc/php/` — это подхватывало случайно установленную
-# 8.5 (через unversioned зависимости) и обрабатывало её как валидную. Теперь
-# ограничиваемся PHP_MANAGED_VERSIONS — все остальные версии в /etc/php/
-# игнорируем (даже если они там есть).
-for V in $(printf '%s\n' "${PHP_MANAGED_VERSIONS[@]}" | sort -V); do
-  [[ -d "/etc/php/${V}" ]] || continue
-  PKGS=()
-  for EXT in "${PHP_SITE_EXTS[@]}"; do
+  log "  → installing PHP ${V} (core)..."
+  CORE_PKGS=()
+  for EXT in "${PHP_CORE_EXTS[@]}"; do CORE_PKGS+=("php${V}-${EXT}"); done
+  if ! apt-get "${APT_OPTS[@]}" install "${CORE_PKGS[@]}" >> "$LOG_FILE" 2>&1; then
+    warn "    PHP ${V} CORE install FAILED — версия может не работать; см. $LOG_FILE"
+    continue
+  fi
+  # Optional — best-effort, по одному. Если php${V}-imagick не существует
+  # в репе, apt-get -y exit≠0 → продолжаем, не валим установку.
+  for EXT in "${PHP_OPTIONAL_EXTS[@]}"; do
     PKG="php${V}-${EXT}"
     if apt-cache show "$PKG" >/dev/null 2>&1; then
-      PKGS+=("$PKG")
+      if ! apt-get "${APT_OPTS[@]}" install "$PKG" >> "$LOG_FILE" 2>&1; then
+        warn "    PHP ${V}: optional ${EXT} install failed (broken deps) — пропускаю"
+      fi
+    else
+      log "    PHP ${V}: optional ${EXT} в репо не найден — пропускаю"
     fi
   done
-  if (( ${#PKGS[@]} > 0 )); then
-    log "  → ensuring PHP ${V} MODX extensions..."
-    apt-get "${APT_OPTS[@]}" install "${PKGS[@]}" \
-      >> "$LOG_FILE" 2>&1 || warn "    PHP ${V} extensions install partial — некоторые модули не доступны"
-  fi
 done
 
 # Самая высокая УСТАНОВЛЕННАЯ из управляемых версий — для Adminer pool ниже.
@@ -1031,6 +1029,26 @@ NGINX
 rm -f /etc/nginx/sites-enabled/meowbox /etc/nginx/sites-enabled/meowbox-panel.conf
 ln -sf /etc/nginx/sites-available/meowbox-panel /etc/nginx/sites-enabled/meowbox-panel
 rm -f /etc/nginx/sites-enabled/default
+
+# ACME webroot для будущего LE-выпуска панельного сертификата (через UI /settings → Доступ).
+# Кладём один раз тут, чтобы при первом нажатии «Выпустить LE» webroot уже был и
+# certbot не падал на «directory not found».
+mkdir -p /var/www/meowbox-acme
+chmod 0755 /var/www/meowbox-acme
+
+# Renewal post-hook — после авто-renew certbot перечитывает nginx без рестарта.
+mkdir -p /etc/letsencrypt/renewal-hooks/deploy
+cat > /etc/letsencrypt/renewal-hooks/deploy/meowbox-reload-nginx <<'HOOK'
+#!/usr/bin/env bash
+set -e
+nginx -t >/dev/null 2>&1 && systemctl reload nginx || true
+HOOK
+chmod 0755 /etc/letsencrypt/renewal-hooks/deploy/meowbox-reload-nginx
+
+# Директория self-signed cert'ов панели (для UI-кнопки «Self-signed для IP»).
+mkdir -p /etc/ssl/meowbox/panel
+chmod 0700 /etc/ssl/meowbox/panel
+
 nginx -t >> "$LOG_FILE" 2>&1 && systemctl reload nginx
 
 # =============================================================================
