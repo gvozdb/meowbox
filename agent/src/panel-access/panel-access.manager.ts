@@ -403,12 +403,10 @@ ${
     //   Плюс отдельный default-server на этом же порту, который 444 отдаёт.
     // Иначе — server_name <domain> _; default_server (как раньше).
     const isHttps = s.certMode !== 'NONE';
-    // Используем легаси-параметр `listen ... ssl http2` вместо отдельного
-    // `http2 on;` директивы — последняя появилась только в nginx 1.25.
-    // Параметр работает на всех версиях (на 1.25+ кидает только deprecation
-    // warning, не error).
+    // HTTP/2 не включаем — не у всех сборок nginx есть ngx_http_v2_module,
+    // а для админ-панели http/1.1 более чем достаточно.
     const listenLine = isHttps
-      ? `    listen ${PANEL_PORT} ssl http2;\n    listen [::]:${PANEL_PORT} ssl http2;`
+      ? `    listen ${PANEL_PORT} ssl;\n    listen [::]:${PANEL_PORT} ssl;`
       : `    listen ${PANEL_PORT};\n    listen [::]:${PANEL_PORT};`;
 
     let serverNames: string;
@@ -424,7 +422,7 @@ ${
 # Default server — IP:PORT доступ запрещён (server_name только domain).
 server {
 ${isHttps
-  ? `    listen ${PANEL_PORT} ssl http2 default_server;\n    listen [::]:${PANEL_PORT} ssl http2 default_server;\n    ssl_certificate ${s.certPath};\n    ssl_certificate_key ${s.keyPath};`
+  ? `    listen ${PANEL_PORT} ssl default_server;\n    listen [::]:${PANEL_PORT} ssl default_server;\n    ssl_certificate ${s.certPath};\n    ssl_certificate_key ${s.keyPath};`
   : `    listen ${PANEL_PORT} default_server;\n    listen [::]:${PANEL_PORT} default_server;`
 }
     server_name _;
