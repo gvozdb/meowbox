@@ -916,9 +916,8 @@ function togglePanelStorage(id: string) {
 async function savePanel() {
   panelDialog.saving = true;
   try {
-    const body = {
+    const common = {
       name: panelDialog.form.name,
-      engine: panelDialog.form.engine,
       storageLocationIds: panelDialog.form.storageLocationIds,
       schedule: panelDialog.form.schedule || undefined,
       keepDaily: panelDialog.form.keepDaily,
@@ -932,9 +931,10 @@ async function savePanel() {
         : null,
     };
     if (panelDialog.editId) {
-      await api.patch(`/backups/panel-data/${panelDialog.editId}`, body);
+      // engine иммутабелен — не шлём в PATCH (иначе forbidNonWhitelisted → 400)
+      await api.patch(`/backups/panel-data/${panelDialog.editId}`, common);
     } else {
-      await api.post('/backups/panel-data', body);
+      await api.post('/backups/panel-data', { ...common, engine: panelDialog.form.engine });
     }
     toast.success('Сохранено');
     panelDialog.open = false;
