@@ -27,6 +27,9 @@ import { ManticoreExecutor } from './services/manticore.executor';
 import { RedisExecutor } from './services/redis.executor';
 import { MariadbEngineExecutor, PostgresqlEngineExecutor } from './database/db-engine.executor';
 import { ServerConfigExecutor } from './services/server-config.executor';
+import { SshExecutor } from './services/ssh.executor';
+import { Fail2banExecutor, FAIL2BAN_PRESETS } from './services/fail2ban.executor';
+import { PostfixExecutor } from './services/postfix.executor';
 import { XrayManager } from './vpn/xray.manager';
 import { AmneziaWgManager } from './vpn/amnezia-wg.manager';
 import { VpnInstaller } from './vpn/installer';
@@ -101,6 +104,9 @@ export class AgentService {
   private mariadbEngine: MariadbEngineExecutor;
   private postgresqlEngine: PostgresqlEngineExecutor;
   private serverConfig: ServerConfigExecutor;
+  private sshSvc: SshExecutor;
+  private fail2banSvc: Fail2banExecutor;
+  private postfixSvc: PostfixExecutor;
   private xrayMgr: XrayManager;
   private amneziaMgr: AmneziaWgManager;
   private vpnInstaller: VpnInstaller;
@@ -145,6 +151,9 @@ export class AgentService {
     this.mariadbEngine = new MariadbEngineExecutor(this.cmdExec);
     this.postgresqlEngine = new PostgresqlEngineExecutor(this.cmdExec);
     this.serverConfig = new ServerConfigExecutor();
+    this.sshSvc = new SshExecutor(this.cmdExec);
+    this.fail2banSvc = new Fail2banExecutor(this.cmdExec);
+    this.postfixSvc = new PostfixExecutor(this.cmdExec);
     this.xrayMgr = new XrayManager(this.cmdExec);
     this.amneziaMgr = new AmneziaWgManager(this.cmdExec);
     this.vpnInstaller = new VpnInstaller(this.cmdExec);
@@ -2485,6 +2494,181 @@ export class AgentService {
         cb({ success: false, error: (err as Error).message });
       }
     }, 90_000);
+
+    // -- SSH (system core) --
+    this.safeOn(s, 'ssh:server-status', async (_params: unknown, cb: Callback) => {
+      try {
+        const data = await this.sshSvc.serverStatus();
+        cb({ success: true, data });
+      } catch (err) {
+        cb({ success: false, error: (err as Error).message });
+      }
+    });
+    // ssh:server-install — для системного SSH `install` обычно noop (уже установлен),
+    // но допускаем idempotent apt install -y openssh-server. Uninstall не предоставляем.
+    this.safeOn(s, 'ssh:server-install', async (_params: unknown, cb: Callback) => {
+      try {
+        const data = await this.sshSvc.serverInstall();
+        cb({ success: true, data });
+      } catch (err) {
+        cb({ success: false, error: (err as Error).message });
+      }
+    }, 600_000);
+
+    // -- Fail2ban --
+    this.safeOn(s, 'fail2ban:server-status', async (_params: unknown, cb: Callback) => {
+      try {
+        const data = await this.fail2banSvc.serverStatus();
+        cb({ success: true, data });
+      } catch (err) {
+        cb({ success: false, error: (err as Error).message });
+      }
+    });
+
+    this.safeOn(s, 'fail2ban:server-install', async (_params: unknown, cb: Callback) => {
+      try {
+        const data = await this.fail2banSvc.serverInstall();
+        cb({ success: true, data });
+      } catch (err) {
+        cb({ success: false, error: (err as Error).message });
+      }
+    }, 600_000);
+
+    this.safeOn(s, 'fail2ban:server-uninstall', async (_params: unknown, cb: Callback) => {
+      try {
+        await this.fail2banSvc.serverUninstall();
+        cb({ success: true });
+      } catch (err) {
+        cb({ success: false, error: (err as Error).message });
+      }
+    }, 300_000);
+
+    this.safeOn(s, 'fail2ban:presets-get', async (_params: unknown, cb: Callback) => {
+      try {
+        const data = await this.fail2banSvc.getPresetsState();
+        cb({ success: true, data });
+      } catch (err) {
+        cb({ success: false, error: (err as Error).message });
+      }
+    });
+
+    this.safeOn(s, 'fail2ban:presets-apply', async (params: { enabledKeys: string[]; defaults?: { bantime?: string; findtime?: string; maxretry?: string } }, cb: Callback) => {
+      try {
+        const data = await this.fail2banSvc.applyPresets(params.enabledKeys || [], params.defaults);
+        cb({ success: true, data });
+      } catch (err) {
+        cb({ success: false, error: (err as Error).message });
+      }
+    }, 120_000);
+
+    this.safeOn(s, 'fail2ban:client-status', async (_params: unknown, cb: Callback) => {
+      try {
+        const data = await this.fail2banSvc.clientStatus();
+        cb({ success: true, data });
+      } catch (err) {
+        cb({ success: false, error: (err as Error).message });
+      }
+    });
+    // Каталог пресетов (статика) — пусть API запрашивает у агента, а не дублирует
+    // у себя. Так упрощается добавление нового пресета: правка в одном файле.
+    this.safeOn(s, 'fail2ban:presets-catalog', async (_params: unknown, cb: Callback) => {
+      try {
+        cb({
+          success: true,
+          data: FAIL2BAN_PRESETS.map((p) => ({
+            key: p.key,
+            name: p.name,
+            description: p.description,
+          })),
+        });
+      } catch (err) {
+        cb({ success: false, error: (err as Error).message });
+      }
+    });
+
+    // -- Postfix (relay-only MTA) --
+    this.safeOn(s, 'postfix:server-status', async (_params: unknown, cb: Callback) => {
+      try {
+        const data = await this.postfixSvc.serverStatus();
+        cb({ success: true, data });
+      } catch (err) {
+        cb({ success: false, error: (err as Error).message });
+      }
+    });
+
+    this.safeOn(s, 'postfix:server-install', async (_params: unknown, cb: Callback) => {
+      try {
+        const data = await this.postfixSvc.serverInstall();
+        cb({ success: true, data });
+      } catch (err) {
+        cb({ success: false, error: (err as Error).message });
+      }
+    }, 600_000);
+
+    this.safeOn(s, 'postfix:server-uninstall', async (_params: unknown, cb: Callback) => {
+      try {
+        await this.postfixSvc.serverUninstall();
+        cb({ success: true });
+      } catch (err) {
+        cb({ success: false, error: (err as Error).message });
+      }
+    }, 300_000);
+
+    // Каталог пресетов (gmail/yandex/mailru/mailgun/sendgrid/custom) — без пароля,
+    // используется UI для рендеринга селекта.
+    this.safeOn(s, 'postfix:relay-presets', async (_params: unknown, cb: Callback) => {
+      try {
+        cb({ success: true, data: this.postfixSvc.getPresetsCatalog() });
+      } catch (err) {
+        cb({ success: false, error: (err as Error).message });
+      }
+    });
+
+    // Текущее состояние relay. Пароль наружу НЕ отдаётся (только hasPassword).
+    this.safeOn(s, 'postfix:relay-get', async (_params: unknown, cb: Callback) => {
+      try {
+        const data = await this.postfixSvc.getRelayState();
+        cb({ success: true, data });
+      } catch (err) {
+        cb({ success: false, error: (err as Error).message });
+      }
+    });
+
+    this.safeOn(
+      s,
+      'postfix:relay-apply',
+      async (
+        params: {
+          preset: string;
+          host: string;
+          port: number;
+          wrapperSSL: boolean;
+          username: string;
+          password: string;
+          fromEmail: string;
+          adminEmail: string;
+          myhostname: string;
+        },
+        cb: Callback,
+      ) => {
+        try {
+          const data = await this.postfixSvc.applyRelay(params);
+          cb({ success: true, data });
+        } catch (err) {
+          cb({ success: false, error: (err as Error).message });
+        }
+      },
+      120_000,
+    );
+
+    this.safeOn(s, 'postfix:send-test', async (params: { toEmail: string }, cb: Callback) => {
+      try {
+        const data = await this.postfixSvc.sendTestEmail(params.toEmail);
+        cb({ success: true, data });
+      } catch (err) {
+        cb({ success: false, error: (err as Error).message });
+      }
+    }, 45_000);
 
     this.safeOn(s, 'redis:server-status', async (_params: unknown, cb: Callback) => {
       try {

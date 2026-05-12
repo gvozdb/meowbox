@@ -16,6 +16,9 @@ import { ManticoreServiceHandler } from './handlers/manticore.handler';
 import { RedisServiceHandler } from './handlers/redis.handler';
 import { MariadbServiceHandler } from './handlers/mariadb.handler';
 import { PostgresqlServiceHandler } from './handlers/postgresql.handler';
+import { SshServiceHandler } from './handlers/ssh.handler';
+import { Fail2banServiceHandler } from './handlers/fail2ban.handler';
+import { PostfixServiceHandler } from './handlers/postfix.handler';
 import {
   ServerServiceState,
   ServiceCatalogEntry,
@@ -46,6 +49,9 @@ export class ServicesService implements OnModuleInit {
     this.registerHandler(new RedisServiceHandler(agent));
     this.registerHandler(new MariadbServiceHandler(agent));
     this.registerHandler(new PostgresqlServiceHandler(agent));
+    this.registerHandler(new SshServiceHandler(agent));
+    this.registerHandler(new Fail2banServiceHandler(agent));
+    this.registerHandler(new PostfixServiceHandler(agent));
   }
 
   /**
@@ -422,11 +428,210 @@ export class ServicesService implements OnModuleInit {
    * для них config-editor не имеет смысла, отказ 400.
    */
   private assertConfigEditableService(key: string): void {
-    if (key !== 'mariadb' && key !== 'postgresql') {
+    if (
+      key !== 'mariadb' &&
+      key !== 'postgresql' &&
+      key !== 'ssh' &&
+      key !== 'fail2ban' &&
+      key !== 'postfix'
+    ) {
       throw new BadRequestException(
         `Сервис «${key}» не поддерживает редактирование конфигурации через панель`,
       );
     }
+  }
+
+  // =====================================================================
+  // Fail2ban presets — каталог пресетов + текущее состояние + apply.
+  // Живут отдельно от config editor: пресеты пересобирают `meowbox.local`
+  // целиком из выбранных секций. Ручные правки — через config editor
+  // (`jail.local`).
+  // =====================================================================
+
+  async getFail2banPresets(): Promise<{
+    catalog: Array<{ key: string; name: string; description: string }>;
+    state: {
+      presets: Array<{ key: string; name: string; description: string; enabled: boolean }>;
+      defaults: { bantime: string; findtime: string; maxretry: string };
+      managedFilePath: string;
+      managedFileExists: boolean;
+    };
+  }> {
+    const [catRes, stateRes] = await Promise.all([
+      this.agent.emitToAgent<Array<{ key: string; name: string; description: string }>>(
+        'fail2ban:presets-catalog',
+        {},
+        15_000,
+      ),
+      this.agent.emitToAgent<{
+        presets: Array<{ key: string; name: string; description: string; enabled: boolean }>;
+        defaults: { bantime: string; findtime: string; maxretry: string };
+        managedFilePath: string;
+        managedFileExists: boolean;
+      }>(
+        'fail2ban:presets-get',
+        {},
+        30_000,
+      ),
+    ]);
+    if (!catRes.success) throw new BadRequestException(catRes.error || 'fail2ban:presets-catalog failed');
+    if (!stateRes.success) throw new BadRequestException(stateRes.error || 'fail2ban:presets-get failed');
+    return { catalog: catRes.data!, state: stateRes.data! };
+  }
+
+  async applyFail2banPresets(
+    enabledKeys: string[],
+    defaults?: { bantime?: string; findtime?: string; maxretry?: string },
+  ): Promise<{ path: string; restart: { unit: string; ok: boolean; output: string } }> {
+    if (!Array.isArray(enabledKeys)) {
+      throw new BadRequestException('enabledKeys must be string[]');
+    }
+    // Защита от мусора — ограничим количество ключей.
+    if (enabledKeys.length > 64) {
+      throw new BadRequestException('Too many preset keys (max 64)');
+    }
+    // Защита от мусора в значениях defaults.
+    const safeDefaults = defaults
+      ? {
+          bantime: typeof defaults.bantime === 'string' ? defaults.bantime : undefined,
+          findtime: typeof defaults.findtime === 'string' ? defaults.findtime : undefined,
+          maxretry: typeof defaults.maxretry === 'string' ? defaults.maxretry : undefined,
+        }
+      : undefined;
+    const r = await this.agent.emitToAgent<{ path: string; restart: { unit: string; ok: boolean; output: string } }>(
+      'fail2ban:presets-apply',
+      { enabledKeys, defaults: safeDefaults },
+      120_000,
+    );
+    if (!r.success) throw new BadRequestException(r.error || 'fail2ban:presets-apply failed');
+    return r.data!;
+  }
+
+  // =====================================================================
+  // Postfix relay (smarthost) — каталог пресетов + текущее состояние + apply.
+  // Пароль ВСЕГДА маскируется: getRelay не возвращает password, только
+  // hasPassword: boolean. applyRelay принимает пароль и пишет его в /etc/postfix/sasl_passwd
+  // на стороне агента; через API он наружу не утекает.
+  // =====================================================================
+
+  async getPostfixRelay(): Promise<{
+    catalog: Array<{
+      key: string;
+      name: string;
+      description: string;
+      host: string;
+      port: number;
+      wrapperSSL: boolean;
+      hint?: string;
+      defaultUsername?: string;
+    }>;
+    state: {
+      configured: boolean;
+      preset: string | null;
+      host: string | null;
+      port: number | null;
+      wrapperSSL: boolean | null;
+      username: string | null;
+      hasPassword: boolean;
+      fromEmail: string | null;
+      adminEmail: string | null;
+      myhostname: string | null;
+      mainCfPath: string;
+      saslPasswdPath: string;
+    };
+  }> {
+    const [catRes, stateRes] = await Promise.all([
+      this.agent.emitToAgent<Array<{
+        key: string; name: string; description: string;
+        host: string; port: number; wrapperSSL: boolean;
+        hint?: string; defaultUsername?: string;
+      }>>('postfix:relay-presets', {}, 15_000),
+      this.agent.emitToAgent<{
+        configured: boolean;
+        preset: string | null;
+        host: string | null;
+        port: number | null;
+        wrapperSSL: boolean | null;
+        username: string | null;
+        hasPassword: boolean;
+        fromEmail: string | null;
+        adminEmail: string | null;
+        myhostname: string | null;
+        mainCfPath: string;
+        saslPasswdPath: string;
+      }>('postfix:relay-get', {}, 30_000),
+    ]);
+    if (!catRes.success) throw new BadRequestException(catRes.error || 'postfix:relay-presets failed');
+    if (!stateRes.success) throw new BadRequestException(stateRes.error || 'postfix:relay-get failed');
+    return { catalog: catRes.data!, state: stateRes.data! };
+  }
+
+  async applyPostfixRelay(cfg: {
+    preset?: string;
+    host?: string;
+    port?: number;
+    wrapperSSL?: boolean;
+    username?: string;
+    password?: string;
+    fromEmail?: string;
+    adminEmail?: string;
+    myhostname?: string;
+  }): Promise<{ paths: string[]; restart: { unit: string; ok: boolean; output: string } }> {
+    if (!cfg || typeof cfg !== 'object') {
+      throw new BadRequestException('Body must be relay config object');
+    }
+    // Жёсткая валидация типов — реальная санация на стороне агента.
+    const safe = {
+      preset: typeof cfg.preset === 'string' ? cfg.preset : 'custom',
+      host: typeof cfg.host === 'string' ? cfg.host : '',
+      port: typeof cfg.port === 'number' ? cfg.port : 587,
+      wrapperSSL: !!cfg.wrapperSSL,
+      username: typeof cfg.username === 'string' ? cfg.username : '',
+      password: typeof cfg.password === 'string' ? cfg.password : '',
+      fromEmail: typeof cfg.fromEmail === 'string' ? cfg.fromEmail : '',
+      adminEmail: typeof cfg.adminEmail === 'string' ? cfg.adminEmail : '',
+      myhostname: typeof cfg.myhostname === 'string' ? cfg.myhostname : '',
+    };
+    if (!safe.host) throw new BadRequestException('host обязателен');
+    if (!safe.username) throw new BadRequestException('username обязателен');
+    if (!safe.password) throw new BadRequestException('password обязателен');
+    if (!safe.fromEmail) throw new BadRequestException('fromEmail обязателен');
+    if (!safe.adminEmail) throw new BadRequestException('adminEmail обязателен');
+    if (safe.password.length > 1024) {
+      throw new BadRequestException('password слишком длинный');
+    }
+
+    const r = await this.agent.emitToAgent<{
+      paths: string[]; restart: { unit: string; ok: boolean; output: string };
+    }>('postfix:relay-apply', safe, 120_000);
+    if (!r.success) throw new BadRequestException(r.error || 'postfix:relay-apply failed');
+    return r.data!;
+  }
+
+  async sendPostfixTestEmail(toEmail: string): Promise<{ sent: boolean; log: string }> {
+    if (typeof toEmail !== 'string' || !toEmail.includes('@')) {
+      throw new BadRequestException('toEmail: ожидается email');
+    }
+    if (toEmail.length > 254) {
+      throw new BadRequestException('toEmail: слишком длинный');
+    }
+    const r = await this.agent.emitToAgent<{ sent: boolean; log: string }>(
+      'postfix:send-test',
+      { toEmail },
+      45_000,
+    );
+    if (!r.success) throw new BadRequestException(r.error || 'postfix:send-test failed');
+    return r.data!;
+  }
+
+  async getFail2banClientStatus(): Promise<{ raw: string; jails: string[] }> {
+    const r = await this.agent.emitToAgent<{ raw: string; jails: string[] }>(
+      'fail2ban:client-status',
+      {},
+      15_000,
+    );
+    if (!r.success) throw new BadRequestException(r.error || 'fail2ban:client-status failed');
+    return r.data!;
   }
 
   // =====================================================================

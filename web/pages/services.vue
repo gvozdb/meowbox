@@ -45,6 +45,13 @@
               <path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5" />
               <path d="M3 12c0 1.66 4 3 9 3s9-1.34 9-3" />
             </svg>
+            <svg v-else-if="item.catalog.icon === 'shield'" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M12 2 4 5v6c0 5 3.4 9.5 8 11 4.6-1.5 8-6 8-11V5l-8-3z" />
+            </svg>
+            <svg v-else-if="item.catalog.icon === 'mail'" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z" />
+              <polyline points="22,6 12,13 2,6" />
+            </svg>
             <svg v-else width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10" /></svg>
           </div>
           <div class="svc-card__title-block">
@@ -85,6 +92,9 @@
         </div>
 
         <div class="svc-card__actions">
+          <!-- Install: системные сервисы (SSH) тоже могут «доустановиться» через apt
+               idempotent — на нормальной Ubuntu это noop, но для аварийных машин
+               без openssh-server пусть будет возможность. -->
           <button
             v-if="!item.installed"
             class="btn btn--primary btn--sm"
@@ -95,10 +105,31 @@
           </button>
           <template v-else>
             <button
+              v-if="hasPresets(item)"
+              class="btn btn--primary btn--sm"
+              :disabled="busy[item.key] === 'presets'"
+              title="Каталог готовых fail2ban-пресетов (SSH, nginx, recidive)"
+              @click="openPresetsModal(item)"
+            >Пресеты</button>
+            <button
+              v-if="item.key === 'postfix'"
+              class="btn btn--primary btn--sm"
+              :disabled="busy[item.key] === 'relay'"
+              title="Настройка smarthost: Gmail / Yandex / Mailgun / SendGrid / custom SMTP"
+              @click="openRelayModal(item)"
+            >Relay</button>
+            <button
+              v-if="item.key === 'postfix'"
+              class="btn btn--ghost btn--sm"
+              :disabled="busy[item.key] === 'test'"
+              title="Отправить тестовое письмо через настроенный relay"
+              @click="sendPostfixTest(item)"
+            >{{ busy[item.key] === 'test' ? 'Отправляю…' : 'Тест' }}</button>
+            <button
               v-if="canEditConfig(item)"
               class="btn btn--ghost btn--sm"
               :disabled="busy[item.key] === 'config'"
-              :title="`Редактировать ${item.key === 'mariadb' ? 'my.cnf' : 'postgresql.conf + pg_hba.conf'}`"
+              :title="configTooltip(item)"
               @click="openConfigEditor(item)"
             >Конфиг</button>
             <button
@@ -108,17 +139,232 @@
             >Проверить</button>
             <button
               class="btn btn--danger btn--sm"
-              :disabled="item.sitesUsing > 0 || busy[item.key] === 'uninstall'"
-              :title="item.sitesUsing > 0
-                ? (item.catalog.scope === 'global'
-                  ? 'Сначала удали все БД этого движка на странице /databases'
-                  : 'Сначала отключи сервис у всех сайтов')
-                : ''"
+              :disabled="!canUninstall(item) || item.sitesUsing > 0 || busy[item.key] === 'uninstall'"
+              :title="uninstallTooltip(item)"
               @click="uninstallService(item)"
             >
               {{ busy[item.key] === 'uninstall' ? 'Удаление…' : 'Удалить' }}
             </button>
           </template>
+        </div>
+      </div>
+    </div>
+
+    <!-- Fail2ban presets modal -->
+    <div
+      v-if="presets.open"
+      class="cfg-modal-overlay"
+      @mousedown.self="!presets.saving && closePresetsModal()"
+    >
+      <div class="cfg-modal cfg-modal--narrow">
+        <div class="cfg-modal__head">
+          <div>
+            <h3 class="cfg-modal__title">Fail2ban — пресеты защиты</h3>
+            <p class="cfg-modal__path mono">{{ presets.managedFilePath || '/etc/fail2ban/jail.d/meowbox.local' }}</p>
+          </div>
+          <button
+            class="cfg-modal__close"
+            :disabled="presets.saving"
+            aria-label="Закрыть"
+            @click="closePresetsModal"
+          >
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+          </button>
+        </div>
+
+        <div class="cfg-modal__body cfg-modal__body--column">
+          <div v-if="presets.loading" class="cfg-modal__loading">
+            <div class="spinner" />
+            <span>Загрузка пресетов…</span>
+          </div>
+          <div v-else-if="presets.loadError" class="cfg-modal__error">{{ presets.loadError }}</div>
+          <template v-else>
+            <div class="presets__defaults">
+              <div class="presets__defaults-title">Дефолты [DEFAULT]</div>
+              <div class="presets__defaults-grid">
+                <label class="presets__field">
+                  <span class="presets__field-label">bantime</span>
+                  <input v-model="presets.defaults.bantime" class="presets__input mono" :disabled="presets.saving" placeholder="1h" />
+                </label>
+                <label class="presets__field">
+                  <span class="presets__field-label">findtime</span>
+                  <input v-model="presets.defaults.findtime" class="presets__input mono" :disabled="presets.saving" placeholder="10m" />
+                </label>
+                <label class="presets__field">
+                  <span class="presets__field-label">maxretry</span>
+                  <input v-model="presets.defaults.maxretry" class="presets__input mono" :disabled="presets.saving" placeholder="5" />
+                </label>
+              </div>
+              <p class="presets__hint">Форматы: <code>30s</code>, <code>10m</code>, <code>1h</code>, <code>1d</code>, <code>1w</code> или число секунд. Применяется ко всем включённым пресетам.</p>
+            </div>
+
+            <div class="presets__list">
+              <label
+                v-for="p in presets.items"
+                :key="p.key"
+                class="preset-item"
+                :class="{ 'preset-item--enabled': p.enabled }"
+              >
+                <input
+                  type="checkbox"
+                  v-model="p.enabled"
+                  :disabled="presets.saving"
+                  class="preset-item__check"
+                />
+                <div class="preset-item__body">
+                  <div class="preset-item__name">{{ p.name }}</div>
+                  <div class="preset-item__desc">{{ p.description }}</div>
+                </div>
+              </label>
+            </div>
+          </template>
+        </div>
+
+        <div v-if="presets.saveError" class="cfg-modal__error cfg-modal__error--inline">{{ presets.saveError }}</div>
+        <div v-if="presets.saveResult" class="cfg-modal__ok">
+          ✓ Пресеты применены: <span class="mono">{{ presets.saveResult.path }}</span><br />
+          ✓ <span class="mono">{{ presets.saveResult.restart.unit }}</span> перезапущен.
+        </div>
+
+        <div class="cfg-modal__foot">
+          <button
+            class="btn btn--ghost btn--sm"
+            :disabled="presets.saving"
+            @click="closePresetsModal"
+          >Закрыть</button>
+          <button
+            class="btn btn--primary btn--sm"
+            :disabled="presets.saving || presets.loading || !!presets.loadError"
+            @click="applyPresets"
+          >
+            {{ presets.saving ? 'Применяю…' : 'Применить + перезапустить' }}
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Postfix relay modal -->
+    <div
+      v-if="relay.open"
+      class="cfg-modal-overlay"
+      @mousedown.self="!relay.saving && closeRelayModal()"
+    >
+      <div class="cfg-modal cfg-modal--narrow">
+        <div class="cfg-modal__head">
+          <div>
+            <h3 class="cfg-modal__title">Postfix — relay через SMTP</h3>
+            <p class="cfg-modal__path mono">{{ relay.state?.mainCfPath || '/etc/postfix/main.cf' }}</p>
+          </div>
+          <button
+            class="cfg-modal__close"
+            :disabled="relay.saving"
+            aria-label="Закрыть"
+            @click="closeRelayModal"
+          >
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+          </button>
+        </div>
+
+        <div class="cfg-modal__body cfg-modal__body--column">
+          <div v-if="relay.loading" class="cfg-modal__loading">
+            <div class="spinner" />
+            <span>Загрузка relay-конфигурации…</span>
+          </div>
+          <div v-else-if="relay.loadError" class="cfg-modal__error">{{ relay.loadError }}</div>
+          <template v-else>
+            <div class="relay__status" v-if="relay.state?.configured">
+              <span class="relay__status-dot relay__status-dot--ok"></span>
+              <span>Relay настроен: <span class="mono">{{ relay.state?.host }}:{{ relay.state?.port }}</span> от <span class="mono">{{ relay.state?.username }}</span></span>
+            </div>
+            <div class="relay__status relay__status--warn" v-else>
+              <span class="relay__status-dot relay__status-dot--warn"></span>
+              <span>Relay не настроен — системные письма не отправляются никуда</span>
+            </div>
+
+            <label class="relay__field">
+              <span class="relay__field-label">SMTP пресет</span>
+              <select v-model="relay.form.preset" class="relay__input" :disabled="relay.saving" @change="onPresetChange">
+                <option v-for="p in relay.presets" :key="p.key" :value="p.key">{{ p.name }}</option>
+              </select>
+            </label>
+
+            <div v-if="currentPresetHint" class="relay__hint">{{ currentPresetHint }}</div>
+
+            <div class="relay__row">
+              <label class="relay__field relay__field--grow">
+                <span class="relay__field-label">SMTP host</span>
+                <input v-model="relay.form.host" class="relay__input mono" :disabled="relay.saving || relay.form.preset !== 'custom'" placeholder="smtp.example.com" />
+              </label>
+              <label class="relay__field relay__field--port">
+                <span class="relay__field-label">Port</span>
+                <input v-model.number="relay.form.port" class="relay__input mono" :disabled="relay.saving || relay.form.preset !== 'custom'" type="number" min="1" max="65535" />
+              </label>
+            </div>
+
+            <label class="relay__check" v-if="relay.form.preset === 'custom'">
+              <input type="checkbox" v-model="relay.form.wrapperSSL" :disabled="relay.saving" />
+              <span>SMTPS (SSL wrappermode) — обычно для порта 465. Для 587 (STARTTLS) — выключить.</span>
+            </label>
+
+            <label class="relay__field">
+              <span class="relay__field-label">Username (логин SMTP)</span>
+              <input v-model="relay.form.username" class="relay__input mono" :disabled="relay.saving" placeholder="user@gmail.com" />
+            </label>
+
+            <label class="relay__field">
+              <span class="relay__field-label">Password / App password / API key</span>
+              <input
+                v-model="relay.form.password"
+                class="relay__input mono"
+                :type="relay.showPassword ? 'text' : 'password'"
+                :disabled="relay.saving"
+                :placeholder="relay.state?.hasPassword ? '(сохранён, заполни чтобы перезаписать)' : 'обязательно'"
+              />
+              <span class="relay__field-hint">
+                <button type="button" class="relay__toggle-btn" :disabled="relay.saving" @click="relay.showPassword = !relay.showPassword">
+                  {{ relay.showPassword ? 'Скрыть' : 'Показать' }}
+                </button>
+                Сохраняется в <span class="mono">/etc/postfix/sasl_passwd</span> (root:root 0600). Через панель наружу не отдаётся.
+              </span>
+            </label>
+
+            <label class="relay__field">
+              <span class="relay__field-label">From: (адрес отправителя в письмах)</span>
+              <input v-model="relay.form.fromEmail" class="relay__input mono" :disabled="relay.saving" placeholder="alerts@example.com" />
+            </label>
+
+            <label class="relay__field">
+              <span class="relay__field-label">Куда форвардить root@/postmaster@ (admin email)</span>
+              <input v-model="relay.form.adminEmail" class="relay__input mono" :disabled="relay.saving" placeholder="you@example.com" />
+            </label>
+
+            <label class="relay__field">
+              <span class="relay__field-label">myhostname (HELO)</span>
+              <input v-model="relay.form.myhostname" class="relay__input mono" :disabled="relay.saving" placeholder="server.example.com" />
+              <span class="relay__field-hint">FQDN сервера. Обычно совпадает с обратной DNS-записью.</span>
+            </label>
+          </template>
+        </div>
+
+        <div v-if="relay.saveError" class="cfg-modal__error cfg-modal__error--inline">{{ relay.saveError }}</div>
+        <div v-if="relay.saveResult" class="cfg-modal__ok">
+          ✓ Конфиг записан: <span class="mono">{{ relay.saveResult.paths.join(', ') }}</span><br />
+          ✓ <span class="mono">{{ relay.saveResult.restart.unit }}</span> перезапущен.
+        </div>
+
+        <div class="cfg-modal__foot">
+          <button
+            class="btn btn--ghost btn--sm"
+            :disabled="relay.saving"
+            @click="closeRelayModal"
+          >Закрыть</button>
+          <button
+            class="btn btn--primary btn--sm"
+            :disabled="relay.saving || relay.loading || !!relay.loadError"
+            @click="applyRelay"
+          >
+            {{ relay.saving ? 'Применяю…' : 'Применить + перезапустить' }}
+          </button>
         </div>
       </div>
     </div>
@@ -218,6 +464,13 @@ interface ServerSvc {
     icon: string;
     /** 'per-site' — Redis/Manticore (per-site инстанс), 'global' — MariaDB/PostgreSQL */
     scope?: 'per-site' | 'global';
+    /** Если false — кнопка «Удалить» в UI должна быть заблокирована (SSH). */
+    uninstallable?: boolean;
+    /**
+     * Системный сервис (SSH) — установлен всегда, кнопку «Установить» скрываем,
+     * «Удалить» — заблокирована с tooltip'ом «системный сервис».
+     */
+    systemCore?: boolean;
   };
   installed: boolean;
   version: string | null;
@@ -280,10 +533,342 @@ const editor = reactive<{
 
 const isAnyDirty = computed(() => Object.values(editor.dirty).some((v) => v));
 
+// -- Fail2ban presets state --
+interface PresetItem { key: string; name: string; description: string; enabled: boolean; }
+interface PresetsApplyResult {
+  path: string;
+  restart: { unit: string; ok: boolean; output: string };
+}
+
+const presets = reactive<{
+  open: boolean;
+  loading: boolean;
+  saving: boolean;
+  loadError: string;
+  saveError: string;
+  items: PresetItem[];
+  defaults: { bantime: string; findtime: string; maxretry: string };
+  managedFilePath: string;
+  saveResult: PresetsApplyResult | null;
+}>({
+  open: false,
+  loading: false,
+  saving: false,
+  loadError: '',
+  saveError: '',
+  items: [],
+  defaults: { bantime: '1h', findtime: '10m', maxretry: '5' },
+  managedFilePath: '',
+  saveResult: null,
+});
+
+// -- Postfix relay state --
+interface RelayPreset {
+  key: string;
+  name: string;
+  description: string;
+  host: string;
+  port: number;
+  wrapperSSL: boolean;
+  hint?: string;
+  defaultUsername?: string;
+}
+
+interface RelayState {
+  configured: boolean;
+  preset: string | null;
+  host: string | null;
+  port: number | null;
+  wrapperSSL: boolean | null;
+  username: string | null;
+  hasPassword: boolean;
+  fromEmail: string | null;
+  adminEmail: string | null;
+  myhostname: string | null;
+  mainCfPath: string;
+  saslPasswdPath: string;
+}
+
+interface RelayApplyResult {
+  paths: string[];
+  restart: { unit: string; ok: boolean; output: string };
+}
+
+const relay = reactive<{
+  open: boolean;
+  loading: boolean;
+  saving: boolean;
+  loadError: string;
+  saveError: string;
+  presets: RelayPreset[];
+  state: RelayState | null;
+  form: {
+    preset: string;
+    host: string;
+    port: number;
+    wrapperSSL: boolean;
+    username: string;
+    password: string;
+    fromEmail: string;
+    adminEmail: string;
+    myhostname: string;
+  };
+  showPassword: boolean;
+  saveResult: RelayApplyResult | null;
+}>({
+  open: false,
+  loading: false,
+  saving: false,
+  loadError: '',
+  saveError: '',
+  presets: [],
+  state: null,
+  form: {
+    preset: 'gmail',
+    host: '',
+    port: 587,
+    wrapperSSL: false,
+    username: '',
+    password: '',
+    fromEmail: '',
+    adminEmail: '',
+    myhostname: '',
+  },
+  showPassword: false,
+  saveResult: null,
+});
+
+const currentPresetHint = computed(() => {
+  const p = relay.presets.find((x) => x.key === relay.form.preset);
+  return p?.hint || '';
+});
+
+async function openRelayModal(item: ServerSvc) {
+  if (item.key !== 'postfix') return;
+  relay.open = true;
+  relay.loading = true;
+  relay.loadError = '';
+  relay.saveError = '';
+  relay.saveResult = null;
+  relay.showPassword = false;
+  try {
+    const data = await api.get<{ catalog: RelayPreset[]; state: RelayState }>('/services/postfix/relay');
+    relay.presets = data.catalog;
+    relay.state = data.state;
+    // Префилл формы текущим состоянием. Пароль никогда не приходит — оставляем
+    // пустым, юзер либо вводит новый, либо оставляет пустым (тогда применить нельзя).
+    const st = data.state;
+    const initialPreset = st.preset || 'gmail';
+    const presetCfg = relay.presets.find((p) => p.key === initialPreset);
+    relay.form.preset = initialPreset;
+    relay.form.host = st.host || presetCfg?.host || '';
+    relay.form.port = st.port ?? presetCfg?.port ?? 587;
+    relay.form.wrapperSSL = (st.wrapperSSL ?? presetCfg?.wrapperSSL) || false;
+    relay.form.username = st.username || presetCfg?.defaultUsername || '';
+    relay.form.password = '';
+    relay.form.fromEmail = st.fromEmail || '';
+    relay.form.adminEmail = st.adminEmail || '';
+    relay.form.myhostname = st.myhostname || '';
+  } catch (err) {
+    relay.loadError = (err as Error).message || 'Не удалось загрузить relay';
+  } finally {
+    relay.loading = false;
+  }
+}
+
+function onPresetChange() {
+  const p = relay.presets.find((x) => x.key === relay.form.preset);
+  if (!p) return;
+  // Custom — позволяем редактировать host/port руками; для остальных подставляем.
+  if (p.key !== 'custom') {
+    relay.form.host = p.host;
+    relay.form.port = p.port;
+    relay.form.wrapperSSL = p.wrapperSSL;
+  }
+  if (p.defaultUsername && !relay.form.username) {
+    relay.form.username = p.defaultUsername;
+  }
+}
+
+function closeRelayModal() {
+  if (relay.saving) return;
+  relay.open = false;
+}
+
+async function applyRelay() {
+  // Минимальная валидация на фронте — основная на бэке.
+  if (!relay.form.host || !relay.form.username || !relay.form.password
+      || !relay.form.fromEmail || !relay.form.adminEmail || !relay.form.myhostname) {
+    relay.saveError = 'Заполни все поля (включая password — он не сохраняется в форме после применения)';
+    return;
+  }
+  if (!confirm(`Применить relay-конфиг и перезапустить Postfix?\n\nSMTP: ${relay.form.host}:${relay.form.port}\nUser: ${relay.form.username}\nFrom: ${relay.form.fromEmail}\nAdmin: ${relay.form.adminEmail}\n\nЕсли restart упадёт — настройки откатим автоматически.`)) {
+    return;
+  }
+  relay.saving = true;
+  relay.saveError = '';
+  relay.saveResult = null;
+  try {
+    const res = await api.post<RelayApplyResult>('/services/postfix/relay', relay.form);
+    relay.saveResult = res;
+    // Обновим state по факту применения (без перезагрузки модалки).
+    if (relay.state) {
+      relay.state.configured = true;
+      relay.state.host = relay.form.host;
+      relay.state.port = relay.form.port;
+      relay.state.wrapperSSL = relay.form.wrapperSSL;
+      relay.state.username = relay.form.username;
+      relay.state.hasPassword = true;
+      relay.state.fromEmail = relay.form.fromEmail;
+      relay.state.adminEmail = relay.form.adminEmail;
+      relay.state.myhostname = relay.form.myhostname;
+      relay.state.preset = relay.form.preset;
+    }
+    // Пароль из формы сразу затираем — больше не нужен.
+    relay.form.password = '';
+    toast.success('Postfix relay применён');
+  } catch (err) {
+    relay.saveError = (err as Error).message || 'Не удалось применить relay';
+    toast.error(relay.saveError);
+  } finally {
+    relay.saving = false;
+  }
+}
+
+async function sendPostfixTest(item: ServerSvc) {
+  const to = prompt('На какой email отправить тестовое письмо?', '');
+  if (!to) return;
+  busy[item.key] = 'test';
+  try {
+    const res = await api.post<{ sent: boolean; log: string }>('/services/postfix/test-email', { toEmail: to.trim() });
+    toast.success(`Тестовое письмо отправлено на ${to}`);
+    // Показываем последние строки mail.log в alert — proxima diagnostic.
+    if (res.log) {
+      // Берём только последние 15 строк, иначе alert разрастётся.
+      const tail = res.log.split(/\r?\n/).filter(Boolean).slice(-15).join('\n');
+      alert(`Письмо передано в sendmail. Если на ${to} не пришло — смотри /var/log/mail.log.\n\nПоследние строки:\n${tail}`);
+    }
+  } catch (err) {
+    toast.error((err as Error).message || 'Не удалось отправить тестовое письмо');
+  } finally {
+    delete busy[item.key];
+  }
+}
+
+async function openPresetsModal(item: ServerSvc) {
+  if (item.key !== 'fail2ban') return;
+  presets.open = true;
+  presets.loading = true;
+  presets.loadError = '';
+  presets.saveError = '';
+  presets.saveResult = null;
+  presets.items = [];
+  try {
+    const data = await api.get<{
+      catalog: Array<{ key: string; name: string; description: string }>;
+      state: {
+        presets: PresetItem[];
+        defaults: { bantime: string; findtime: string; maxretry: string };
+        managedFilePath: string;
+        managedFileExists: boolean;
+      };
+    }>('/services/fail2ban/presets');
+    // Берём порядок из catalog (он стабильный), но enabled — из state.
+    const stateByKey = new Map(data.state.presets.map((p) => [p.key, p]));
+    presets.items = data.catalog.map((c) => ({
+      key: c.key,
+      name: c.name,
+      description: c.description,
+      enabled: stateByKey.get(c.key)?.enabled ?? false,
+    }));
+    presets.defaults = { ...data.state.defaults };
+    presets.managedFilePath = data.state.managedFilePath;
+  } catch (err) {
+    presets.loadError = (err as Error).message || 'Не удалось загрузить пресеты';
+  } finally {
+    presets.loading = false;
+  }
+}
+
+function closePresetsModal() {
+  if (presets.saving) return;
+  presets.open = false;
+}
+
+async function applyPresets() {
+  const enabledKeys = presets.items.filter((p) => p.enabled).map((p) => p.key);
+  const list = enabledKeys.length
+    ? `Включаем ${enabledKeys.length} пресет(ов): ${enabledKeys.join(', ')}.`
+    : 'Все пресеты будут выключены — fail2ban не будет банить ничего из ранее активированных правил.';
+  if (!confirm(`Применить пресеты fail2ban и перезапустить демон?\n\n${list}\n\nЕсли рестарт упадёт — настройки откатим автоматически.`)) {
+    return;
+  }
+  presets.saving = true;
+  presets.saveError = '';
+  presets.saveResult = null;
+  try {
+    const res = await api.post<PresetsApplyResult>('/services/fail2ban/presets', {
+      enabledKeys,
+      defaults: presets.defaults,
+    });
+    presets.saveResult = res;
+    toast.success('Fail2ban перезапущен с новыми пресетами');
+  } catch (err) {
+    presets.saveError = (err as Error).message || 'Не удалось применить пресеты';
+    toast.error(presets.saveError);
+  } finally {
+    presets.saving = false;
+  }
+}
+
 function canEditConfig(item: ServerSvc): boolean {
-  // Только для global-сервисов с общим конфигом. Redis/Manticore — per-site,
-  // у них нет глобального файла, см. API serverConfig whitelist.
-  return item.key === 'mariadb' || item.key === 'postgresql';
+  // Whitelisted сервисы с глобальным конфигом (см. API ServerConfigExecutor):
+  //   mariadb     → my.cnf
+  //   postgresql  → postgresql.conf + pg_hba.conf
+  //   ssh         → sshd_config
+  //   fail2ban    → jail.local
+  return item.key === 'mariadb'
+    || item.key === 'postgresql'
+    || item.key === 'ssh'
+    || item.key === 'fail2ban'
+    || item.key === 'postfix';
+}
+
+function hasPresets(item: ServerSvc): boolean {
+  return item.key === 'fail2ban';
+}
+
+function canUninstall(item: ServerSvc): boolean {
+  // catalog.uninstallable===false означает «системный сервис, удаление запрещено»
+  // (SSH). Без этого поля — по умолчанию true.
+  return item.catalog.uninstallable !== false;
+}
+
+function isSystemCore(item: ServerSvc): boolean {
+  return item.catalog.systemCore === true;
+}
+
+function configTooltip(item: ServerSvc): string {
+  switch (item.key) {
+    case 'mariadb': return 'Редактировать /etc/mysql/my.cnf';
+    case 'postgresql': return 'Редактировать postgresql.conf + pg_hba.conf';
+    case 'ssh': return 'Редактировать /etc/ssh/sshd_config (валидация через sshd -t перед сохранением)';
+    case 'fail2ban': return 'Редактировать /etc/fail2ban/jail.local (ручные overrides, пресеты — отдельно)';
+    case 'postfix': return 'Редактировать main.cf / master.cf / aliases (relay настраивается через отдельную модалку)';
+    default: return 'Редактировать конфиг';
+  }
+}
+
+function uninstallTooltip(item: ServerSvc): string {
+  if (!canUninstall(item)) {
+    return 'Системный сервис — удаление через панель запрещено';
+  }
+  if (item.sitesUsing > 0) {
+    return item.catalog.scope === 'global'
+      ? 'Сначала удали все БД этого движка на странице /databases'
+      : 'Сначала отключи сервис у всех сайтов';
+  }
+  return '';
 }
 
 async function openConfigEditor(item: ServerSvc) {
@@ -476,6 +1061,8 @@ function categoryLabel(c: string): string {
     case 'cache': return 'Кэш';
     case 'queue': return 'Очереди';
     case 'database': return 'База данных';
+    case 'security': return 'Безопасность';
+    case 'mail': return 'Почта';
     default: return 'Сервис';
   }
 }
@@ -581,6 +1168,14 @@ onMounted(loadAll);
 .svc-card__icon--database {
   background: rgba(59, 130, 246, 0.13);
   color: rgb(96, 165, 250);
+}
+.svc-card__icon--security {
+  background: rgba(244, 114, 182, 0.13);
+  color: rgb(244, 114, 182);
+}
+.svc-card__icon--mail {
+  background: rgba(251, 146, 60, 0.13);
+  color: rgb(251, 146, 60);
 }
 
 .svc-card__title-block {
@@ -857,4 +1452,214 @@ onMounted(loadAll);
   padding: 0.85rem 1.25rem;
   border-top: 1px solid var(--border-subtle);
 }
+
+.cfg-modal--narrow {
+  width: min(640px, 100%);
+}
+.cfg-modal__body--column {
+  flex-direction: column;
+  gap: 1rem;
+  min-height: 200px;
+  overflow-y: auto;
+}
+
+.presets__defaults {
+  background: var(--bg-input);
+  border: 1px solid var(--border-subtle);
+  border-radius: 10px;
+  padding: 0.85rem;
+}
+.presets__defaults-title {
+  font-size: 0.78rem;
+  font-weight: 600;
+  color: var(--text-secondary);
+  margin-bottom: 0.55rem;
+}
+.presets__defaults-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 0.55rem;
+}
+.presets__field {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+.presets__field-label {
+  font-size: 0.72rem;
+  color: var(--text-tertiary);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.presets__input {
+  background: var(--bg-elevated);
+  color: var(--text-primary);
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  padding: 0.45rem 0.6rem;
+  font-size: 0.82rem;
+  outline: none;
+  transition: border-color 0.15s;
+}
+.presets__input:focus { border-color: var(--primary); }
+.presets__input:disabled { opacity: 0.5; }
+.presets__hint {
+  margin: 0.55rem 0 0 0;
+  font-size: 0.72rem;
+  color: var(--text-tertiary);
+}
+.presets__hint code {
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-subtle);
+  border-radius: 4px;
+  padding: 0 4px;
+  font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+  font-size: 0.7rem;
+}
+
+.presets__list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+}
+.preset-item {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 0.65rem;
+  padding: 0.7rem 0.85rem;
+  background: var(--bg-input);
+  border: 1px solid var(--border-subtle);
+  border-radius: 10px;
+  cursor: pointer;
+  transition: border-color 0.15s, background 0.15s;
+}
+.preset-item:hover { border-color: var(--border-strong); }
+.preset-item--enabled {
+  border-color: rgba(var(--primary-rgb), 0.5);
+  background: rgba(var(--primary-rgb), 0.05);
+}
+.preset-item__check {
+  margin-top: 4px;
+  width: 16px;
+  height: 16px;
+  accent-color: var(--primary);
+  cursor: pointer;
+}
+.preset-item__body { min-width: 0; }
+.preset-item__name {
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+.preset-item__desc {
+  font-size: 0.76rem;
+  color: var(--text-tertiary);
+  margin-top: 0.15rem;
+  line-height: 1.4;
+}
+
+/* === Postfix relay modal === */
+.relay__status {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+  padding: 0.6rem 0.8rem;
+  background: rgba(16, 185, 129, 0.08);
+  border: 1px solid rgba(16, 185, 129, 0.25);
+  border-radius: 8px;
+  font-size: 0.82rem;
+  color: var(--text-secondary);
+}
+.relay__status--warn {
+  background: rgba(251, 146, 60, 0.08);
+  border-color: rgba(251, 146, 60, 0.3);
+  color: rgb(251, 146, 60);
+}
+.relay__status-dot {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+.relay__status-dot--ok { background: rgb(52, 211, 153); box-shadow: 0 0 6px rgba(52, 211, 153, 0.5); }
+.relay__status-dot--warn { background: rgb(251, 146, 60); box-shadow: 0 0 6px rgba(251, 146, 60, 0.5); }
+
+.relay__field {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+}
+.relay__field--grow { flex: 1; }
+.relay__field--port { width: 110px; flex: none; }
+.relay__field-label {
+  font-size: 0.74rem;
+  color: var(--text-secondary);
+  font-weight: 500;
+}
+.relay__field-hint {
+  font-size: 0.7rem;
+  color: var(--text-tertiary);
+  margin-top: 0.2rem;
+  line-height: 1.4;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  flex-wrap: wrap;
+}
+.relay__hint {
+  font-size: 0.74rem;
+  color: var(--text-tertiary);
+  background: var(--bg-input);
+  border-left: 3px solid rgba(var(--primary-rgb), 0.5);
+  padding: 0.5rem 0.7rem;
+  border-radius: 0 6px 6px 0;
+  line-height: 1.5;
+}
+.relay__row {
+  display: flex;
+  gap: 0.6rem;
+  align-items: flex-end;
+}
+.relay__input {
+  background: var(--bg-elevated);
+  color: var(--text-primary);
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  padding: 0.5rem 0.7rem;
+  font-size: 0.85rem;
+  outline: none;
+  transition: border-color 0.15s;
+  width: 100%;
+  box-sizing: border-box;
+}
+.relay__input:focus { border-color: var(--primary); }
+.relay__input:disabled { opacity: 0.55; cursor: not-allowed; }
+.relay__check {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.55rem;
+  font-size: 0.78rem;
+  color: var(--text-secondary);
+  cursor: pointer;
+  line-height: 1.4;
+}
+.relay__check input {
+  margin-top: 3px;
+  width: 16px;
+  height: 16px;
+  accent-color: var(--primary);
+  cursor: pointer;
+}
+.relay__toggle-btn {
+  background: var(--bg-elevated);
+  color: var(--text-secondary);
+  border: 1px solid var(--border-subtle);
+  border-radius: 6px;
+  padding: 1px 8px;
+  font-size: 0.7rem;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+.relay__toggle-btn:hover:not(:disabled) { background: var(--bg-input); color: var(--text-primary); }
+.relay__toggle-btn:disabled { opacity: 0.5; cursor: not-allowed; }
 </style>

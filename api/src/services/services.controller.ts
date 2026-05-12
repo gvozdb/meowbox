@@ -106,6 +106,84 @@ export class ServicesController {
     return { success: true, data };
   }
 
+  // ----- Fail2ban presets -----
+
+  @Get('services/fail2ban/presets')
+  @Roles(UserRole.ADMIN)
+  @Throttle({ default: { limit: 30, ttl: 60_000 } })
+  async fail2banPresets() {
+    const data = await this.services.getFail2banPresets();
+    return { success: true, data };
+  }
+
+  @Post('services/fail2ban/presets')
+  @Roles(UserRole.ADMIN)
+  @Throttle({ default: { limit: 10, ttl: 60_000 } })
+  async applyFail2banPresets(
+    @Body() body: {
+      enabledKeys?: string[];
+      defaults?: { bantime?: string; findtime?: string; maxretry?: string };
+    },
+  ) {
+    if (!body || !Array.isArray(body.enabledKeys)) {
+      throw new BadRequestException('Body must be { enabledKeys: string[], defaults? }');
+    }
+    const data = await this.services.applyFail2banPresets(body.enabledKeys, body.defaults);
+    return { success: true, data };
+  }
+
+  // ----- Postfix relay -----
+
+  @Get('services/postfix/relay')
+  @Roles(UserRole.ADMIN)
+  @Throttle({ default: { limit: 30, ttl: 60_000 } })
+  async postfixRelayGet() {
+    const data = await this.services.getPostfixRelay();
+    return { success: true, data };
+  }
+
+  @Post('services/postfix/relay')
+  @Roles(UserRole.ADMIN)
+  @Throttle({ default: { limit: 10, ttl: 60_000 } })
+  async postfixRelayApply(
+    @Body() body: {
+      preset?: string;
+      host?: string;
+      port?: number;
+      wrapperSSL?: boolean;
+      username?: string;
+      password?: string;
+      fromEmail?: string;
+      adminEmail?: string;
+      myhostname?: string;
+    },
+  ) {
+    if (!body || typeof body !== 'object') {
+      throw new BadRequestException('Body must be relay config object');
+    }
+    const data = await this.services.applyPostfixRelay(body);
+    return { success: true, data };
+  }
+
+  @Post('services/postfix/test-email')
+  @Roles(UserRole.ADMIN)
+  @Throttle({ default: { limit: 5, ttl: 60_000 } })
+  async postfixTestEmail(@Body() body: { toEmail?: string }) {
+    if (!body || typeof body.toEmail !== 'string') {
+      throw new BadRequestException('Body must be { toEmail: string }');
+    }
+    const data = await this.services.sendPostfixTestEmail(body.toEmail);
+    return { success: true, data };
+  }
+
+  @Get('services/fail2ban/client-status')
+  @Roles(UserRole.ADMIN)
+  @Throttle({ default: { limit: 30, ttl: 60_000 } })
+  async fail2banClientStatus() {
+    const data = await this.services.getFail2banClientStatus();
+    return { success: true, data };
+  }
+
   // =====================================================================
   // Site level — /sites/:siteId/services
   // =====================================================================

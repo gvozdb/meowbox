@@ -35,7 +35,7 @@ export interface ServiceCatalogEntry {
   /** Краткое описание для UI. */
   description: string;
   /** Категория (для группировки в UI). */
-  category: 'search' | 'cache' | 'queue' | 'database' | 'other';
+  category: 'search' | 'cache' | 'queue' | 'database' | 'security' | 'mail' | 'other';
   /** Иконка (имя SVG из набора). */
   icon: string;
   /**
@@ -54,6 +54,12 @@ export interface ServiceCatalogEntry {
   databaseTypes?: readonly string[];
   /** Можно ли удалить сервис через UI. По умолчанию true. */
   uninstallable?: boolean;
+  /**
+   * Системный сервис — поставляется с ОС (SSH-демон). Считаем установленным
+   * всегда, кнопка «Установить» в UI исчезает, «Удалить» — заблокирована.
+   * Управляем только конфигом + restart.
+   */
+  systemCore?: boolean;
 }
 
 export interface ServerServiceState {

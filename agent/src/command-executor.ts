@@ -169,6 +169,20 @@ export class CommandExecutor {
     'iptables',
     'ip6tables',
     'netfilter-persistent',
+    // sshd — нужен для `sshd -t -f <file>` валидации конфига перед записью.
+    // Сам по себе ничего не меняет.
+    'sshd',
+    // fail2ban-client — для status/reload/unban команд (`fail2ban-client status`).
+    'fail2ban-client',
+    // Postfix-семейство: debconf-set-selections — preseed для unattended apt install,
+    // postmap — компиляция .db из sasl_passwd/generic, newaliases — пересборка
+    // /etc/aliases.db, sendmail — отправка тестового письма (через stdin pipe),
+    // mail — альтернативный CLI для отправки.
+    'debconf-set-selections',
+    'postmap',
+    'newaliases',
+    'sendmail',
+    'mail',
   ]);
 
   // Accept versioned binaries like php8.2, php8.3, composer2

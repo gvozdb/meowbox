@@ -45,6 +45,37 @@ export const SERVICE_CATALOG: readonly ServiceCatalogEntry[] = [
     icon: 'cache',
     scope: 'per-site',
   },
+  {
+    key: 'ssh',
+    name: 'SSH (sshd)',
+    description:
+      'OpenSSH-демон. Системный сервис — поставляется с ОС, удалить через панель нельзя. Можно редактировать sshd_config (с валидацией `sshd -t`) и рестартовать демон.',
+    category: 'security',
+    icon: 'shield',
+    scope: 'global',
+    uninstallable: false,
+    systemCore: true,
+  },
+  {
+    key: 'fail2ban',
+    name: 'Fail2ban',
+    description:
+      'Защита от брутфорса: банит IP по совпадениям в логах (SSH, nginx, recidive). Готовые пресеты подключаются одним кликом; ручные правки — через jail.local.',
+    category: 'security',
+    icon: 'shield',
+    scope: 'global',
+    uninstallable: true,
+  },
+  {
+    key: 'postfix',
+    name: 'Postfix (системная почта)',
+    description:
+      'MTA для отправки системных алертов (cron, fail2ban, certbot). Конфигурируется как null-client с relay через внешний SMTP — Gmail, Yandex.Mail, Mail.ru или произвольный. Локальная доставка отключена, входящая почта не принимается.',
+    category: 'mail',
+    icon: 'mail',
+    scope: 'global',
+    uninstallable: true,
+  },
 ] as const;
 
 /**
