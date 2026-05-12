@@ -19,28 +19,58 @@ const MEOWBOX_COOKIE_NAME = 'meowbox_adminer_session';
 const MEOWBOX_COOKIE_PATH = '/adminer';
 const MEOWBOX_COOKIE_TTL = 1800; // 30 мин (sliding)
 
-/** Считывает ADMINER_SSO_KEY из ENV или /opt/meowbox/.env. Возвращает 32-байтный raw-key. */
-function meowbox_load_key(): string {
-    $b64 = getenv('ADMINER_SSO_KEY');
-    if (!$b64) {
-        $envFile = '/opt/meowbox/.env';
-        if (is_readable($envFile)) {
-            $contents = file_get_contents($envFile);
-            // Простой парсер: ищем строку KEY=VALUE, без поддержки многострочных значений
-            // (нашему ключу это не нужно — он в одну строку).
-            if (preg_match('/^\s*ADMINER_SSO_KEY\s*=\s*"?([A-Za-z0-9+\/=]+)"?\s*$/m', $contents, $m)) {
-                $b64 = $m[1];
-            }
+/**
+ * Считывает ADMINER_SSO_KEY из ENV и /opt/meowbox/.env.
+ * Возвращает массив 32-байтных raw-ключей (уникальных), чтобы decrypt мог
+ * перебрать все доступные источники.
+ *
+ * Зачем массив, а не один ключ:
+ *   - PHP-FPM pool хранит свой `env[ADMINER_SSO_KEY] = "..."`, .env — свой.
+ *   - При апгрейде через master-key bootstrap эти два источника могут
+ *     временно разъехаться (sync-pool-sso-key миграция не достучалась
+ *     до старого pool без env[]-строки, php-fpm не успели перезапустить и т.д.).
+ *   - Тикеты от API шифруются ОДНИМ из этих ключей — если попробуем оба,
+ *     decrypt не упадёт молча с "tag mismatch".
+ */
+function meowbox_load_keys(): array {
+    $candidates = [];
+    $b64Env = getenv('ADMINER_SSO_KEY');
+    if (is_string($b64Env) && $b64Env !== '') {
+        $candidates[] = $b64Env;
+    }
+    foreach (['/opt/meowbox/.env', '/opt/meowbox/state/.env'] as $envFile) {
+        if (!is_readable($envFile)) continue;
+        $contents = @file_get_contents($envFile);
+        if ($contents === false) continue;
+        if (preg_match('/^\s*ADMINER_SSO_KEY\s*=\s*"?([A-Za-z0-9+\/=]+)"?\s*$/m', $contents, $m)) {
+            $candidates[] = $m[1];
         }
     }
-    if (!$b64) {
-        throw new RuntimeException('ADMINER_SSO_KEY is not configured');
+    $keys = [];
+    $seen = [];
+    foreach ($candidates as $b64) {
+        $raw = base64_decode($b64, true);
+        if ($raw === false || strlen($raw) !== 32) continue;
+        $h = sha1($raw, true);
+        if (isset($seen[$h])) continue;
+        $seen[$h] = true;
+        $keys[] = $raw;
     }
-    $key = base64_decode($b64, true);
-    if ($key === false || strlen($key) !== 32) {
-        throw new RuntimeException('ADMINER_SSO_KEY must be valid base64 of 32 bytes');
+    if (!$keys) {
+        throw new RuntimeException('ADMINER_SSO_KEY is not configured (нет ни в php-fpm pool env, ни в state/.env)');
     }
-    return $key;
+    return $keys;
+}
+
+/** Backwards-compat: первый валидный ключ (для encrypt). */
+function meowbox_load_key(): string {
+    $keys = meowbox_load_keys();
+    return $keys[0];
+}
+
+/** Лог diagnostic'а в php error_log (попадает в /var/log/meowbox-adminer.error.log по pool conf). */
+function meowbox_diag_log(string $msg): void {
+    @error_log('[meowbox-sso] ' . $msg);
 }
 
 function meowbox_b64url_encode(string $bin): string {
@@ -71,9 +101,13 @@ function meowbox_encrypt(array $payload): string {
     return meowbox_b64url_encode($iv . $tag . $ct);
 }
 
-/** Расшифровывает токен. Бросает на любую невалидность. */
+/**
+ * Расшифровывает токен. Пробует ВСЕ доступные ключи (pool env + .env),
+ * возвращает первый успешный decrypt. На fail логирует в error.log
+ * диагностику (количество ключей, fingerprints — без раскрытия ключа).
+ */
 function meowbox_decrypt(string $token): array {
-    $key = meowbox_load_key();
+    $keys = meowbox_load_keys();
     $bin = meowbox_b64url_decode($token);
     if (strlen($bin) < 12 + 16 + 1) {
         throw new RuntimeException('Token too short');
@@ -81,15 +115,27 @@ function meowbox_decrypt(string $token): array {
     $iv = substr($bin, 0, 12);
     $tag = substr($bin, 12, 16);
     $ct = substr($bin, 28);
-    $plaintext = openssl_decrypt($ct, 'aes-256-gcm', $key, OPENSSL_RAW_DATA, $iv, $tag);
-    if ($plaintext === false) {
-        throw new RuntimeException('Decryption failed (bad key or tampered token)');
+
+    $tried = [];
+    foreach ($keys as $key) {
+        $plaintext = openssl_decrypt($ct, 'aes-256-gcm', $key, OPENSSL_RAW_DATA, $iv, $tag);
+        if ($plaintext !== false) {
+            $obj = json_decode($plaintext, true);
+            if (!is_array($obj)) {
+                throw new RuntimeException('Token payload is not JSON object');
+            }
+            return $obj;
+        }
+        $tried[] = substr(sha1($key), 0, 8);
     }
-    $obj = json_decode($plaintext, true);
-    if (!is_array($obj)) {
-        throw new RuntimeException('Token payload is not JSON object');
-    }
-    return $obj;
+    // Все ключи мимо — пишем диагностику.
+    meowbox_diag_log(sprintf(
+        'decrypt fail: tried %d key(s) with fingerprints [%s]; token_len=%d. '
+        . 'Проверь, что ADMINER_SSO_KEY в php-fpm pool совпадает с state/.env '
+        . '(см. tools/adminer-diag.sh).',
+        count($keys), implode(',', $tried), strlen($token),
+    ));
+    throw new RuntimeException('Decryption failed (bad key or tampered token)');
 }
 
 /** Ставит сессионную куку с зашифрованными credentials. TTL = MEOWBOX_COOKIE_TTL. */
