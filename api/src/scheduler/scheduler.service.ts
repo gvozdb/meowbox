@@ -223,71 +223,89 @@ export class SchedulerService {
       }
     }
 
-    // --- 2. Глобальные дефолты ---
-    const defaults = await this.panelSettings.getBackupDefaults();
-    if (!defaults.enabled || !defaults.schedule) return;
-    if (!this.shouldRunNow(defaults.schedule, now)) return;
-    if (!defaults.storageLocationIds.length) return; // некуда писать
+    // --- 2. Глобальные дефолты (per-site сайты, не покрытые конфигом) ---
+    // ВАЖНО: эти три условия НЕ должны быть `return` — иначе блоки 3 и 4
+    // (server-path и panel-data) никогда не дойдут до выполнения, когда
+    // глобальные дефолты не настроены. Раньше тут было `return` — баг.
+    try {
+      const defaults = await this.panelSettings.getBackupDefaults();
+      const globalsActive =
+        defaults.enabled &&
+        defaults.schedule &&
+        this.shouldRunNow(defaults.schedule, now) &&
+        defaults.storageLocationIds.length > 0;
 
-    // Для каждого сайта, не покрытого per-site конфигом, запускаем бэкап
-    const sites = await this.prisma.site.findMany({
-      where: {
-        id: { notIn: Array.from(sitesCoveredByConfig) },
-      },
-      select: { id: true, name: true, userId: true },
-    });
+      if (globalsActive) {
+        const sites = await this.prisma.site.findMany({
+          where: {
+            id: { notIn: Array.from(sitesCoveredByConfig) },
+          },
+          select: { id: true, name: true, userId: true },
+        });
 
-    for (const site of sites) {
-      const active = await this.prisma.backup.findFirst({
-        where: {
-          siteId: site.id,
-          status: { in: ['PENDING', 'IN_PROGRESS'] },
-        },
-      });
-      if (active) continue;
+        for (const site of sites) {
+          const active = await this.prisma.backup.findFirst({
+            where: {
+              siteId: site.id,
+              status: { in: ['PENDING', 'IN_PROGRESS'] },
+            },
+          });
+          if (active) continue;
 
-      try {
-        await this.backupsService.triggerBackup(
-          { siteId: site.id }, // без configId → сервис возьмёт globals
-          site.userId,
-          'ADMIN',
-        );
-        this.logger.log(`Scheduled backup (global) triggered for "${site.name}"`);
-      } catch (err) {
-        this.logger.error(
-          `Global scheduled backup failed for "${site.name}": ${(err as Error).message}`,
-        );
+          try {
+            await this.backupsService.triggerBackup(
+              { siteId: site.id }, // без configId → сервис возьмёт globals
+              site.userId,
+              'ADMIN',
+            );
+            this.logger.log(`Scheduled backup (global) triggered for "${site.name}"`);
+          } catch (err) {
+            this.logger.error(
+              `Global scheduled backup failed for "${site.name}": ${(err as Error).message}`,
+            );
+          }
+        }
       }
+    } catch (err) {
+      this.logger.error(`Global backup defaults check failed: ${(err as Error).message}`);
     }
 
     // --- 3. Server-path backup configs ---
-    const serverPathConfigs = await this.prisma.serverPathBackupConfig.findMany({
-      where: { enabled: true, schedule: { not: null } },
-    });
-    for (const config of serverPathConfigs) {
-      if (!config.schedule) continue;
-      if (!this.shouldRunNow(config.schedule, now)) continue;
-      try {
-        await this.serverPathBackupService.triggerBackup(config.id);
-        this.logger.log(`Scheduled server-path backup triggered: "${config.name}" → ${config.path}`);
-      } catch (err) {
-        this.logger.error(`Server-path backup failed for "${config.name}": ${(err as Error).message}`);
+    try {
+      const serverPathConfigs = await this.prisma.serverPathBackupConfig.findMany({
+        where: { enabled: true, schedule: { not: null } },
+      });
+      for (const config of serverPathConfigs) {
+        if (!config.schedule) continue;
+        if (!this.shouldRunNow(config.schedule, now)) continue;
+        try {
+          await this.serverPathBackupService.triggerBackup(config.id);
+          this.logger.log(`Scheduled server-path backup triggered: "${config.name}" → ${config.path}`);
+        } catch (err) {
+          this.logger.error(`Server-path backup failed for "${config.name}": ${(err as Error).message}`);
+        }
       }
+    } catch (err) {
+      this.logger.error(`Server-path scheduler failed: ${(err as Error).message}`);
     }
 
     // --- 4. Panel-data backup configs ---
-    const panelDataConfigs = await this.prisma.panelDataBackupConfig.findMany({
-      where: { enabled: true, schedule: { not: null } },
-    });
-    for (const config of panelDataConfigs) {
-      if (!config.schedule) continue;
-      if (!this.shouldRunNow(config.schedule, now)) continue;
-      try {
-        await this.panelDataBackupService.triggerBackup(config.id);
-        this.logger.log(`Scheduled panel-data backup triggered: "${config.name}"`);
-      } catch (err) {
-        this.logger.error(`Panel-data backup failed for "${config.name}": ${(err as Error).message}`);
+    try {
+      const panelDataConfigs = await this.prisma.panelDataBackupConfig.findMany({
+        where: { enabled: true, schedule: { not: null } },
+      });
+      for (const config of panelDataConfigs) {
+        if (!config.schedule) continue;
+        if (!this.shouldRunNow(config.schedule, now)) continue;
+        try {
+          await this.panelDataBackupService.triggerBackup(config.id);
+          this.logger.log(`Scheduled panel-data backup triggered: "${config.name}"`);
+        } catch (err) {
+          this.logger.error(`Panel-data backup failed for "${config.name}": ${(err as Error).message}`);
+        }
       }
+    } catch (err) {
+      this.logger.error(`Panel-data scheduler failed: ${(err as Error).message}`);
     }
   }
 
