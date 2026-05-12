@@ -144,6 +144,13 @@ export class TriggerBackupDto {
   @IsString()
   storageLocationId?: string;
 
+  // Для запуска из scheduler (SiteBackupSchedule) — список хранилищ,
+  // создаст по бэкапу на каждое (как в server-path/panel-data flow).
+  @IsOptional()
+  @IsArray()
+  @IsString({ each: true })
+  storageLocationIds?: string[];
+
   // Legacy (back-compat)
   @IsOptional()
   @IsEnum(BackupStorageType)

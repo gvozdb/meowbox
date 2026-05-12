@@ -21,143 +21,59 @@
       <button class="backups__tab" :class="{ 'backups__tab--active': tab === 'panel' }" @click="tab = 'panel'">Данные панели</button>
     </div>
 
-    <!-- ===== Tab: Расписание (auto-backups defaults) ===== -->
+    <!-- ===== Tab: Расписание (множественные шедули per-site бэкапов) ===== -->
     <div v-if="tab === 'schedule'" class="settings-card">
-      <p class="section-hint">
-        Глобальные параметры автоматических бэкапов <b>сайтов</b>. Применяются ко всем сайтам сразу.
-        Per-site настройки (на странице сайта → вкладка «Бэкапы») перебивают эти.
-      </p>
-      <div class="settings-fields">
-        <label class="inline-check">
-          <input type="checkbox" v-model="backupDefaults.enabled" />
-          Включить автобэкапы
-        </label>
-
-        <div class="form-group">
-          <label class="form-label">Движок</label>
-          <select v-model="backupDefaults.engine" class="form-input form-input--select">
-            <option value="RESTIC">Restic (дедупликация, рекомендуется)</option>
-            <option value="TAR">TAR (простой архив .tar.gz)</option>
-          </select>
-          <p class="form-hint">
-            Restic хранит один «снапшот» на каждый запуск, но физически льёт только изменившиеся чанки.
-            TAR — обычный .tar.gz: совместим со всеми хранилищами, без дедупликации.
-          </p>
-        </div>
-
-        <div class="form-group">
-          <label class="form-label">Что бэкапим</label>
-          <select v-model="backupDefaults.type" class="form-input form-input--select">
-            <option value="FULL">Полный (файлы + БД)</option>
-            <option value="FILES_ONLY">Только файлы</option>
-            <option value="DB_ONLY">Только БД</option>
-            <option v-if="backupDefaults.engine === 'TAR'" value="DIFFERENTIAL">Дифференциальный (от последнего FULL)</option>
-          </select>
-        </div>
-
-        <div class="form-group">
-          <label class="form-label">Расписание (cron)</label>
-          <input v-model="backupDefaults.schedule" class="form-input mono" placeholder="0 3 * * *" />
-          <p class="form-hint">Пример: <code>0 3 * * *</code> — ежедневно в 3:00.</p>
-        </div>
-
-        <div class="form-group">
-          <label class="form-label">Хранилища (куда писать)</label>
-          <div v-if="storages.length === 0" class="form-hint">
-            Нет ни одного хранилища. Создай на странице <NuxtLink to="/backup-storages">Хранилища</NuxtLink>.
-          </div>
-          <label v-for="loc in storages" :key="loc.id" class="inline-check">
-            <input
-              type="checkbox"
-              :value="loc.id"
-              :checked="backupDefaults.storageLocationIds.includes(loc.id)"
-              :disabled="backupDefaults.engine === 'RESTIC' && !loc.resticEnabled"
-              @change="toggleBackupLocation(loc.id)"
-            />
-            {{ loc.name }}
-            <span class="cfg-badge">{{ loc.type }}</span>
-            <span v-if="!loc.resticEnabled" class="cfg-badge cfg-badge--muted">Restic не поддерживается</span>
-          </label>
-        </div>
-
-        <div v-if="backupDefaults.engine === 'RESTIC'" class="form-group">
-          <label class="form-label">Retention (Restic)</label>
-          <div class="retention-grid retention-grid--4">
-            <div><label class="form-sublabel">По одному за день</label>
-              <input v-model.number="backupDefaults.retention.keepDaily" type="number" min="0" max="365" class="form-input" /></div>
-            <div><label class="form-sublabel">По одному за неделю</label>
-              <input v-model.number="backupDefaults.retention.keepWeekly" type="number" min="0" max="52" class="form-input" /></div>
-            <div><label class="form-sublabel">По одному за месяц</label>
-              <input v-model.number="backupDefaults.retention.keepMonthly" type="number" min="0" max="24" class="form-input" /></div>
-            <div><label class="form-sublabel">По одному за год</label>
-              <input v-model.number="backupDefaults.retention.keepYearly" type="number" min="0" max="20" class="form-input" /></div>
-          </div>
-          <p class="form-hint">
-            Пример: 7 / 4 / 6 / 1 — последние 7 дней ежедневно, 4 воскресенья,
-            6 последних 1-х чисел месяца, 1 последний снапшот года.
-            Остальное чистится автоматически (<code>restic forget --prune</code>).
-          </p>
-        </div>
-
-        <div v-else class="form-group">
-          <label class="form-label">Срок хранения (TAR), бэкапов</label>
-          <input v-model.number="backupDefaults.retentionDays" type="number" min="1" max="365" class="form-input" />
-        </div>
-
-        <div class="check-block">
-          <label class="inline-check">
-            <input type="checkbox" v-model="backupDefaults.checkEnabled" />
-            Плановая проверка целостности Restic-реп
-          </label>
-          <p class="form-hint">
-            Запускает <code>restic check</code> по расписанию — чтобы битый pack или обрыв загрузки не остался незамеченным.
-          </p>
-
-          <div v-if="backupDefaults.checkEnabled" class="check-block__fields">
-            <div class="form-group">
-              <label class="form-label">Расписание (cron)</label>
-              <input v-model="backupDefaults.checkSchedule" class="form-input mono" placeholder="0 4 * * 0" />
-            </div>
-            <div class="form-group">
-              <label class="inline-check">
-                <input type="checkbox" v-model="backupDefaults.checkReadData" />
-                Читать данные (--read-data-subset)
-              </label>
-            </div>
-            <div v-if="backupDefaults.checkReadData" class="form-group">
-              <label class="form-label">Subset (доля данных)</label>
-              <input v-model="backupDefaults.checkReadDataSubset" class="form-input mono" placeholder="10%" />
-            </div>
-            <div class="form-group">
-              <label class="form-label">Минимальный интервал между проверками, часов</label>
-              <input v-model.number="backupDefaults.checkMinIntervalHours" type="number" min="1" max="720" class="form-input" />
-            </div>
-          </div>
-        </div>
+      <div class="cfg-panel__head">
+        <p class="section-hint">
+          Множественные шедули автоматических бэкапов <b>сайтов</b>. Каждый шедуль —
+          отдельный пресет (своё расписание, движок, набор хранилищ, retention).
+          Применяются ко всем сайтам, кроме тех, у кого свой per-site конфиг.
+        </p>
+        <button class="btn btn--primary btn--sm" @click="openScheduleDialog(null)">+ Создать конфиг</button>
       </div>
 
-      <div class="global-excludes">
-        <div class="global-excludes__field">
-          <label class="form-label">Глобальные исключения путей</label>
-          <p class="form-hint global-excludes__hint">
-            Применяются, если у сайта <b>не задано</b> своих excludes. Один путь на строке. Glob (<code>*</code>, <code>**</code>) работают.
-          </p>
-          <textarea v-model="globalExcludesText" class="global-excludes__textarea" rows="6" spellcheck="false"
-            placeholder="www/wp-content/cache&#10;tmp&#10;*.log" />
-        </div>
-        <div class="global-excludes__field">
-          <label class="form-label">Глобальные исключения таблиц БД</label>
-          <p class="form-hint global-excludes__hint">Список таблиц по одной на строке. CREATE TABLE попадёт, INSERT — нет.</p>
-          <textarea v-model="globalExcludeTablesText" class="global-excludes__textarea" rows="4" spellcheck="false"
-            placeholder="modx_session&#10;modx_manager_log&#10;wp_options" />
-        </div>
+      <div v-if="loadingSchedules" class="empty-card empty-card--flush">Загрузка…</div>
+      <div v-else-if="!schedules.length" class="empty-card empty-card--flush">
+        <p>Шедулей нет. Создай хотя бы один — иначе автобэкапы сайтов не пойдут.</p>
       </div>
 
-      <div class="cfg-actions">
-        <button class="btn btn--primary" :disabled="savingDefaults" @click="saveBackupDefaults">
-          {{ savingDefaults ? 'Сохранение…' : 'Сохранить' }}
-        </button>
-      </div>
+      <table v-else class="storage-table">
+        <thead>
+          <tr>
+            <th>Имя</th>
+            <th>Cron</th>
+            <th>Движок</th>
+            <th>Тип</th>
+            <th>Хранилища</th>
+            <th>Уведомления</th>
+            <th>Статус</th>
+            <th></th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr v-for="c in schedules" :key="c.id">
+            <td><b>{{ c.name }}</b></td>
+            <td><code class="mono">{{ c.schedule || '—' }}</code></td>
+            <td><span class="cfg-badge">{{ c.engine }}</span></td>
+            <td><small>{{ formatType(c.type) }}</small></td>
+            <td>{{ c.storageLocationIds.length }} шт.</td>
+            <td>
+              <span class="cfg-badge">{{ notificationModeLabel(c.notificationMode) }}</span>
+              <small v-if="c.notificationMode === 'DIGEST' && c.digestSchedule" class="muted-text mono">
+                {{ c.digestSchedule }}
+              </small>
+            </td>
+            <td>
+              <span :class="['cfg-badge', c.enabled ? 'cfg-badge--ok' : 'cfg-badge--muted']">{{ c.enabled ? 'enabled' : 'disabled' }}</span>
+            </td>
+            <td class="actions-cell">
+              <button class="link-btn" :disabled="runningSchedule[c.id]" @click="runSchedule(c)">{{ runningSchedule[c.id] ? '…' : 'Запустить' }}</button>
+              <button class="link-btn" @click="openScheduleDialog(c)">Изменить</button>
+              <button class="link-btn link-btn--danger" @click="deleteSchedule(c)">Удалить</button>
+            </td>
+          </tr>
+        </tbody>
+      </table>
     </div>
 
     <!-- ===== Tab: Серверные пути ===== -->
@@ -381,6 +297,22 @@
                 Остальное чистится автоматически (<code>restic forget --prune</code>).
               </p>
             </div>
+            <div class="form-group">
+              <label class="form-label">Режим уведомлений</label>
+              <select v-model="serverDialog.form.notificationMode" class="form-input form-input--select">
+                <option value="INSTANT">Мгновенно — каждое событие</option>
+                <option value="DIGEST">Дайджест — копить и слать по cron</option>
+                <option value="FAILURES_ONLY">Только при ошибке</option>
+              </select>
+              <p class="form-hint">
+                Для частых бэкапов выбери дайджест — события накопятся и придут сводным сообщением.
+              </p>
+            </div>
+            <div v-if="serverDialog.form.notificationMode === 'DIGEST'" class="form-group">
+              <label class="form-label">Cron дайджеста</label>
+              <input v-model="serverDialog.form.digestSchedule" class="form-input mono" placeholder="0 9 * * *" />
+              <p class="form-hint">Когда отправить накопленные события. Пример: <code>0 9 * * *</code> — ежедневно в 9:00.</p>
+            </div>
             <label class="inline-check">
               <input type="checkbox" v-model="serverDialog.form.enabled" />
               Включён
@@ -444,6 +376,22 @@
                 Остальное чистится автоматически (<code>restic forget --prune</code>).
               </p>
             </div>
+            <div class="form-group">
+              <label class="form-label">Режим уведомлений</label>
+              <select v-model="panelDialog.form.notificationMode" class="form-input form-input--select">
+                <option value="INSTANT">Мгновенно — каждое событие</option>
+                <option value="DIGEST">Дайджест — копить и слать по cron</option>
+                <option value="FAILURES_ONLY">Только при ошибке</option>
+              </select>
+              <p class="form-hint">
+                Для частых бэкапов выбери дайджест — события накопятся и придут сводным сообщением.
+              </p>
+            </div>
+            <div v-if="panelDialog.form.notificationMode === 'DIGEST'" class="form-group">
+              <label class="form-label">Cron дайджеста</label>
+              <input v-model="panelDialog.form.digestSchedule" class="form-input mono" placeholder="0 9 * * *" />
+              <p class="form-hint">Когда отправить накопленные события. Пример: <code>0 9 * * *</code> — ежедневно в 9:00.</p>
+            </div>
             <label class="inline-check">
               <input type="checkbox" v-model="panelDialog.form.enabled" />
               Включён
@@ -453,6 +401,141 @@
             <button class="btn btn--ghost" @click="panelDialog.open = false">Отмена</button>
             <button class="btn btn--primary" :disabled="panelDialog.saving" @click="savePanel">
               {{ panelDialog.saving ? 'Сохранение…' : (panelDialog.editId ? 'Сохранить' : 'Создать') }}
+            </button>
+          </div>
+        </div>
+      </div>
+    </Teleport>
+
+    <!-- ===== Modal: site backup schedule (вкладка «Расписание») ===== -->
+    <Teleport to="body">
+      <div v-if="scheduleDialog.open" class="modal-overlay" @mousedown.self="scheduleDialog.open = false">
+        <div class="modal modal--wide">
+          <h3 class="modal__title">{{ scheduleDialog.editId ? 'Редактировать шедуль' : 'Новый шедуль' }}</h3>
+          <div class="modal__fields">
+            <div class="form-group">
+              <label class="form-label">Имя</label>
+              <input v-model="scheduleDialog.form.name" class="form-input" placeholder="hourly DB to local" maxlength="120" />
+            </div>
+            <div class="form-group">
+              <label class="form-label">Движок</label>
+              <select v-model="scheduleDialog.form.engine" class="form-input form-input--select">
+                <option value="RESTIC">Restic (дедупликация)</option>
+                <option value="TAR">TAR (.tar.gz)</option>
+              </select>
+            </div>
+            <div class="form-group">
+              <label class="form-label">Что бэкапим</label>
+              <select v-model="scheduleDialog.form.type" class="form-input form-input--select">
+                <option value="FULL">Полный (файлы + БД)</option>
+                <option value="FILES_ONLY">Только файлы</option>
+                <option value="DB_ONLY">Только БД</option>
+                <option v-if="scheduleDialog.form.engine === 'TAR'" value="DIFFERENTIAL">Дифференциальный</option>
+              </select>
+            </div>
+            <div class="form-group">
+              <label class="form-label">Хранилища</label>
+              <div v-if="storages.length === 0" class="form-hint">
+                Нет ни одного хранилища. Создай на странице <NuxtLink to="/backup-storages">Хранилища</NuxtLink>.
+              </div>
+              <label v-for="s in storages" :key="s.id" class="inline-check">
+                <input type="checkbox" :value="s.id"
+                  :checked="scheduleDialog.form.storageLocationIds.includes(s.id)"
+                  :disabled="scheduleDialog.form.engine === 'RESTIC' && !s.resticEnabled"
+                  @change="toggleScheduleStorage(s.id)" />
+                {{ s.name }} <span class="cfg-badge">{{ s.type }}</span>
+                <span v-if="!s.resticEnabled" class="cfg-badge cfg-badge--muted">Restic не поддерживается</span>
+              </label>
+            </div>
+            <div class="form-group">
+              <label class="form-label">Cron</label>
+              <input v-model="scheduleDialog.form.schedule" class="form-input mono" placeholder="0 3 * * *" />
+              <p class="form-hint">Пример: <code>0 3 * * *</code> — ежедневно в 3:00, <code>0 * * * *</code> — каждый час.</p>
+            </div>
+            <div v-if="scheduleDialog.form.engine === 'RESTIC'" class="form-group">
+              <label class="form-label">Retention (Restic)</label>
+              <div class="retention-grid retention-grid--4">
+                <div><label class="form-sublabel">По одному за день</label>
+                  <input v-model.number="scheduleDialog.form.keepDaily" type="number" min="0" max="365" class="form-input" /></div>
+                <div><label class="form-sublabel">По одному за неделю</label>
+                  <input v-model.number="scheduleDialog.form.keepWeekly" type="number" min="0" max="52" class="form-input" /></div>
+                <div><label class="form-sublabel">По одному за месяц</label>
+                  <input v-model.number="scheduleDialog.form.keepMonthly" type="number" min="0" max="24" class="form-input" /></div>
+                <div><label class="form-sublabel">По одному за год</label>
+                  <input v-model.number="scheduleDialog.form.keepYearly" type="number" min="0" max="20" class="form-input" /></div>
+              </div>
+            </div>
+            <div v-else class="form-group">
+              <label class="form-label">Срок хранения (TAR), бэкапов</label>
+              <input v-model.number="scheduleDialog.form.retentionDays" type="number" min="1" max="365" class="form-input" />
+            </div>
+
+            <div class="form-group">
+              <label class="form-label">Глобальные исключения путей</label>
+              <p class="form-hint">Если у сайта <b>не задано</b> своих excludes — применяются эти. Один путь на строке.</p>
+              <textarea v-model="scheduleExcludesText" class="form-input" rows="4" spellcheck="false"
+                placeholder="www/wp-content/cache&#10;tmp&#10;*.log" />
+            </div>
+            <div class="form-group">
+              <label class="form-label">Глобальные исключения таблиц БД</label>
+              <p class="form-hint">Список таблиц по одной на строке. CREATE TABLE попадёт, INSERT — нет.</p>
+              <textarea v-model="scheduleExcludeTablesText" class="form-input" rows="3" spellcheck="false"
+                placeholder="modx_session&#10;wp_options" />
+            </div>
+
+            <div class="check-block">
+              <label class="inline-check">
+                <input type="checkbox" v-model="scheduleDialog.form.checkEnabled" />
+                Плановая проверка целостности Restic-реп
+              </label>
+              <div v-if="scheduleDialog.form.checkEnabled" class="check-block__fields">
+                <div class="form-group">
+                  <label class="form-label">Cron проверки</label>
+                  <input v-model="scheduleDialog.form.checkSchedule" class="form-input mono" placeholder="0 4 * * 0" />
+                </div>
+                <div class="form-group">
+                  <label class="inline-check">
+                    <input type="checkbox" v-model="scheduleDialog.form.checkReadData" />
+                    Читать данные (--read-data-subset)
+                  </label>
+                </div>
+                <div v-if="scheduleDialog.form.checkReadData" class="form-group">
+                  <label class="form-label">Subset</label>
+                  <input v-model="scheduleDialog.form.checkReadDataSubset" class="form-input mono" placeholder="10%" />
+                </div>
+                <div class="form-group">
+                  <label class="form-label">Минимальный интервал, часов</label>
+                  <input v-model.number="scheduleDialog.form.checkMinIntervalHours" type="number" min="0" max="720" class="form-input" />
+                </div>
+              </div>
+            </div>
+
+            <div class="form-group">
+              <label class="form-label">Режим уведомлений</label>
+              <select v-model="scheduleDialog.form.notificationMode" class="form-input form-input--select">
+                <option value="INSTANT">Мгновенно — каждое событие</option>
+                <option value="DIGEST">Дайджест — копить и слать по cron</option>
+                <option value="FAILURES_ONLY">Только при ошибке</option>
+              </select>
+              <p class="form-hint">
+                Для частых бэкапов (например, ежечасных) выбери дайджест — события накопятся и придут одним сообщением.
+              </p>
+            </div>
+            <div v-if="scheduleDialog.form.notificationMode === 'DIGEST'" class="form-group">
+              <label class="form-label">Cron дайджеста</label>
+              <input v-model="scheduleDialog.form.digestSchedule" class="form-input mono" placeholder="0 9 * * *" />
+              <p class="form-hint">Когда отправить накопленные события. Пример: <code>0 9 * * *</code> — ежедневно в 9:00.</p>
+            </div>
+
+            <label class="inline-check">
+              <input type="checkbox" v-model="scheduleDialog.form.enabled" />
+              Включён
+            </label>
+          </div>
+          <div class="modal__actions">
+            <button class="btn btn--ghost" @click="scheduleDialog.open = false">Отмена</button>
+            <button class="btn btn--primary" :disabled="scheduleDialog.saving" @click="saveSchedule">
+              {{ scheduleDialog.saving ? 'Сохранение…' : (scheduleDialog.editId ? 'Сохранить' : 'Создать') }}
             </button>
           </div>
         </div>
@@ -483,6 +566,8 @@ interface UnifiedRow {
   createdAt: string;
 }
 
+type NotificationMode = 'INSTANT' | 'DIGEST' | 'FAILURES_ONLY';
+
 interface ServerPathConfig {
   id: string;
   name: string;
@@ -493,6 +578,8 @@ interface ServerPathConfig {
   keepDaily: number; keepWeekly: number; keepMonthly: number; keepYearly: number;
   enabled: boolean;
   warningAcknowledged: boolean;
+  notificationMode: NotificationMode;
+  digestSchedule: string | null;
 }
 
 interface PanelDataConfig {
@@ -503,24 +590,32 @@ interface PanelDataConfig {
   schedule: string | null;
   keepDaily: number; keepWeekly: number; keepMonthly: number; keepYearly: number;
   enabled: boolean;
+  notificationMode: NotificationMode;
+  digestSchedule: string | null;
 }
 
-interface BackupRetention { keepDaily: number; keepWeekly: number; keepMonthly: number; keepYearly: number; }
-interface BackupDefaults {
+interface SiteBackupSchedule {
+  id: string;
+  name: string;
   enabled: boolean;
-  schedule: string;
-  engine: 'TAR' | 'RESTIC';
   type: 'FULL' | 'FILES_ONLY' | 'DB_ONLY' | 'DIFFERENTIAL';
+  engine: 'RESTIC' | 'TAR';
   storageLocationIds: string[];
-  retention: BackupRetention;
+  schedule: string | null;
+  keepDaily: number;
+  keepWeekly: number;
+  keepMonthly: number;
+  keepYearly: number;
   retentionDays: number;
   excludePaths: string[];
   excludeTableData: string[];
   checkEnabled: boolean;
-  checkSchedule: string;
+  checkSchedule: string | null;
   checkReadData: boolean;
-  checkReadDataSubset: string;
+  checkReadDataSubset: string | null;
   checkMinIntervalHours: number;
+  notificationMode: NotificationMode;
+  digestSchedule: string | null;
 }
 
 const api = useApi();
@@ -542,25 +637,13 @@ const panelConfigs = ref<PanelDataConfig[]>([]);
 const loadingPanel = ref(false);
 const runningPanel = ref<Record<string, boolean>>({});
 
-const savingDefaults = ref(false);
-const backupDefaults = reactive<BackupDefaults>({
-  enabled: false,
-  schedule: '0 3 * * *',
-  engine: 'RESTIC',
-  type: 'FULL',
-  storageLocationIds: [],
-  retention: { keepDaily: 7, keepWeekly: 4, keepMonthly: 6, keepYearly: 1 },
-  retentionDays: 14,
-  excludePaths: [],
-  excludeTableData: [],
-  checkEnabled: false,
-  checkSchedule: '0 4 * * 0',
-  checkReadData: false,
-  checkReadDataSubset: '10%',
-  checkMinIntervalHours: 20,
-});
-const globalExcludesText = ref('');
-const globalExcludeTablesText = ref('');
+const schedules = ref<SiteBackupSchedule[]>([]);
+const loadingSchedules = ref(false);
+const runningSchedule = ref<Record<string, boolean>>({});
+
+function notificationModeLabel(m: string | null | undefined) {
+  return ({ INSTANT: 'Мгновенно', DIGEST: 'Дайджест', FAILURES_ONLY: 'Только ошибки' } as Record<string, string>)[m || ''] || (m || '—');
+}
 
 // -------- helpers --------
 function kindLabel(k: string) {
@@ -631,44 +714,17 @@ async function loadPanel() {
   finally { loadingPanel.value = false; }
 }
 
-async function loadBackupDefaults() {
+async function loadSchedules() {
+  loadingSchedules.value = true;
   try {
-    const data = await api.get<BackupDefaults>('/backups/auto-settings');
-    if (!data.storageLocationIds) data.storageLocationIds = [];
-    if (!data.retention) data.retention = { keepDaily: 7, keepWeekly: 4, keepMonthly: 6, keepYearly: 1 };
-    if (data.checkSchedule === undefined) data.checkSchedule = '0 4 * * 0';
-    if (data.checkReadDataSubset === undefined) data.checkReadDataSubset = '10%';
-    if (data.checkMinIntervalHours === undefined) data.checkMinIntervalHours = 20;
-    if (!data.excludePaths) data.excludePaths = [];
-    if (!data.excludeTableData) data.excludeTableData = [];
-    Object.assign(backupDefaults, data);
-    globalExcludesText.value = (backupDefaults.excludePaths || []).join('\n');
-    globalExcludeTablesText.value = (backupDefaults.excludeTableData || []).join('\n');
-  } catch { /* первый запуск — дефолты */ }
-}
-
-async function saveBackupDefaults() {
-  savingDefaults.value = true;
-  try {
-    backupDefaults.excludePaths = parseLines(globalExcludesText.value);
-    backupDefaults.excludeTableData = parseLines(globalExcludeTablesText.value);
-    await api.post('/backups/auto-settings', backupDefaults);
-    toast.success('Настройки автобэкапов сохранены');
-  } catch (e) {
-    toast.error((e as Error)?.message || 'Не удалось сохранить');
-  } finally {
-    savingDefaults.value = false;
-  }
-}
-
-function toggleBackupLocation(id: string) {
-  const i = backupDefaults.storageLocationIds.indexOf(id);
-  if (i >= 0) backupDefaults.storageLocationIds.splice(i, 1);
-  else backupDefaults.storageLocationIds.push(id);
+    const res = await api.get<{ data: SiteBackupSchedule[] }>('/backups/site-schedules');
+    schedules.value = (res as unknown as { data: SiteBackupSchedule[] }).data || (res as unknown as SiteBackupSchedule[]) || [];
+  } catch { schedules.value = []; }
+  finally { loadingSchedules.value = false; }
 }
 
 async function refreshAll() {
-  await Promise.all([loadStorages(), loadHistory(), loadServer(), loadPanel(), loadBackupDefaults()]);
+  await Promise.all([loadStorages(), loadHistory(), loadServer(), loadPanel(), loadSchedules()]);
 }
 
 // -------- server-paths CRUD --------
@@ -683,6 +739,8 @@ const serverDialog = reactive({
     keepDaily: 7, keepWeekly: 4, keepMonthly: 6, keepYearly: 1,
     enabled: true,
     warningAcknowledged: false,
+    notificationMode: 'INSTANT' as NotificationMode,
+    digestSchedule: '',
   },
 });
 const serverWarnings = ref<{ code: string; message: string }[]>([]);
@@ -709,6 +767,8 @@ function openServerDialog(c: ServerPathConfig | null) {
       keepDaily: c.keepDaily, keepWeekly: c.keepWeekly,
       keepMonthly: c.keepMonthly, keepYearly: c.keepYearly,
       enabled: c.enabled, warningAcknowledged: c.warningAcknowledged,
+      notificationMode: (c.notificationMode || 'INSTANT') as NotificationMode,
+      digestSchedule: c.digestSchedule || '',
     };
   } else {
     serverDialog.editId = null;
@@ -716,6 +776,7 @@ function openServerDialog(c: ServerPathConfig | null) {
       name: '', path: '', engine: 'RESTIC', storageLocationIds: [],
       schedule: '', keepDaily: 7, keepWeekly: 4, keepMonthly: 6, keepYearly: 1,
       enabled: true, warningAcknowledged: false,
+      notificationMode: 'INSTANT', digestSchedule: '',
     };
   }
   serverWarnings.value = [];
@@ -731,6 +792,12 @@ function toggleServerStorage(id: string) {
 async function saveServer() {
   serverDialog.saving = true;
   try {
+    const notifFields = {
+      notificationMode: serverDialog.form.notificationMode,
+      digestSchedule: serverDialog.form.notificationMode === 'DIGEST'
+        ? (serverDialog.form.digestSchedule || undefined)
+        : null,
+    };
     if (serverDialog.editId) {
       await api.patch(`/backups/server-paths/${serverDialog.editId}`, {
         name: serverDialog.form.name,
@@ -741,6 +808,7 @@ async function saveServer() {
         keepMonthly: serverDialog.form.keepMonthly,
         keepYearly: serverDialog.form.keepYearly,
         enabled: serverDialog.form.enabled,
+        ...notifFields,
       });
     } else {
       await api.post('/backups/server-paths', {
@@ -755,6 +823,7 @@ async function saveServer() {
         keepYearly: serverDialog.form.keepYearly,
         enabled: serverDialog.form.enabled,
         warningAcknowledged: serverDialog.form.warningAcknowledged,
+        ...notifFields,
       });
     }
     toast.success('Сохранено');
@@ -808,6 +877,8 @@ const panelDialog = reactive({
     schedule: '',
     keepDaily: 24, keepWeekly: 7, keepMonthly: 12, keepYearly: 5,
     enabled: true,
+    notificationMode: 'INSTANT' as NotificationMode,
+    digestSchedule: '',
   },
 });
 
@@ -821,6 +892,8 @@ function openPanelDialog(c: PanelDataConfig | null) {
       keepDaily: c.keepDaily, keepWeekly: c.keepWeekly,
       keepMonthly: c.keepMonthly, keepYearly: c.keepYearly,
       enabled: c.enabled,
+      notificationMode: (c.notificationMode || 'INSTANT') as NotificationMode,
+      digestSchedule: c.digestSchedule || '',
     };
   } else {
     panelDialog.editId = null;
@@ -828,6 +901,7 @@ function openPanelDialog(c: PanelDataConfig | null) {
       name: '', engine: 'RESTIC', storageLocationIds: [],
       schedule: '', keepDaily: 24, keepWeekly: 7, keepMonthly: 12, keepYearly: 5,
       enabled: true,
+      notificationMode: 'INSTANT', digestSchedule: '',
     };
   }
   panelDialog.open = true;
@@ -852,6 +926,10 @@ async function savePanel() {
       keepMonthly: panelDialog.form.keepMonthly,
       keepYearly: panelDialog.form.keepYearly,
       enabled: panelDialog.form.enabled,
+      notificationMode: panelDialog.form.notificationMode,
+      digestSchedule: panelDialog.form.notificationMode === 'DIGEST'
+        ? (panelDialog.form.digestSchedule || undefined)
+        : null,
     };
     if (panelDialog.editId) {
       await api.patch(`/backups/panel-data/${panelDialog.editId}`, body);
@@ -892,6 +970,158 @@ async function deletePanel(c: PanelDataConfig) {
   try {
     await api.del(`/backups/panel-data/${c.id}`);
     await loadPanel();
+    toast.success('Удалено');
+  } catch (e) {
+    toast.error((e as Error).message);
+  }
+}
+
+// -------- site-backup-schedules CRUD --------
+const scheduleDialog = reactive({
+  open: false,
+  editId: null as string | null,
+  saving: false,
+  form: {
+    name: '',
+    enabled: true,
+    type: 'FULL' as 'FULL' | 'FILES_ONLY' | 'DB_ONLY' | 'DIFFERENTIAL',
+    engine: 'RESTIC' as 'RESTIC' | 'TAR',
+    storageLocationIds: [] as string[],
+    schedule: '',
+    keepDaily: 7, keepWeekly: 4, keepMonthly: 6, keepYearly: 1,
+    retentionDays: 14,
+    checkEnabled: false,
+    checkSchedule: '0 4 * * 0',
+    checkReadData: false,
+    checkReadDataSubset: '10%',
+    checkMinIntervalHours: 168,
+    notificationMode: 'INSTANT' as NotificationMode,
+    digestSchedule: '',
+  },
+});
+const scheduleExcludesText = ref('');
+const scheduleExcludeTablesText = ref('');
+
+function openScheduleDialog(c: SiteBackupSchedule | null) {
+  if (c) {
+    scheduleDialog.editId = c.id;
+    scheduleDialog.form = {
+      name: c.name,
+      enabled: c.enabled,
+      type: c.type,
+      engine: c.engine,
+      storageLocationIds: [...c.storageLocationIds],
+      schedule: c.schedule || '',
+      keepDaily: c.keepDaily, keepWeekly: c.keepWeekly,
+      keepMonthly: c.keepMonthly, keepYearly: c.keepYearly,
+      retentionDays: c.retentionDays,
+      checkEnabled: c.checkEnabled,
+      checkSchedule: c.checkSchedule || '0 4 * * 0',
+      checkReadData: c.checkReadData,
+      checkReadDataSubset: c.checkReadDataSubset || '10%',
+      checkMinIntervalHours: c.checkMinIntervalHours,
+      notificationMode: (c.notificationMode || 'INSTANT') as NotificationMode,
+      digestSchedule: c.digestSchedule || '',
+    };
+    scheduleExcludesText.value = (c.excludePaths || []).join('\n');
+    scheduleExcludeTablesText.value = (c.excludeTableData || []).join('\n');
+  } else {
+    scheduleDialog.editId = null;
+    scheduleDialog.form = {
+      name: '', enabled: true, type: 'FULL', engine: 'RESTIC',
+      storageLocationIds: [], schedule: '0 3 * * *',
+      keepDaily: 7, keepWeekly: 4, keepMonthly: 6, keepYearly: 1,
+      retentionDays: 14,
+      checkEnabled: false, checkSchedule: '0 4 * * 0',
+      checkReadData: false, checkReadDataSubset: '10%',
+      checkMinIntervalHours: 168,
+      notificationMode: 'INSTANT', digestSchedule: '',
+    };
+    scheduleExcludesText.value = '';
+    scheduleExcludeTablesText.value = '';
+  }
+  scheduleDialog.open = true;
+}
+
+function toggleScheduleStorage(id: string) {
+  const i = scheduleDialog.form.storageLocationIds.indexOf(id);
+  if (i >= 0) scheduleDialog.form.storageLocationIds.splice(i, 1);
+  else scheduleDialog.form.storageLocationIds.push(id);
+}
+
+async function saveSchedule() {
+  scheduleDialog.saving = true;
+  try {
+    const body: Record<string, unknown> = {
+      name: scheduleDialog.form.name,
+      enabled: scheduleDialog.form.enabled,
+      type: scheduleDialog.form.type,
+      engine: scheduleDialog.form.engine,
+      storageLocationIds: scheduleDialog.form.storageLocationIds,
+      schedule: scheduleDialog.form.schedule || undefined,
+      keepDaily: scheduleDialog.form.keepDaily,
+      keepWeekly: scheduleDialog.form.keepWeekly,
+      keepMonthly: scheduleDialog.form.keepMonthly,
+      keepYearly: scheduleDialog.form.keepYearly,
+      retentionDays: scheduleDialog.form.retentionDays,
+      excludePaths: parseLines(scheduleExcludesText.value),
+      excludeTableData: parseLines(scheduleExcludeTablesText.value),
+      checkEnabled: scheduleDialog.form.checkEnabled,
+      checkSchedule: scheduleDialog.form.checkEnabled
+        ? (scheduleDialog.form.checkSchedule || undefined)
+        : undefined,
+      checkReadData: scheduleDialog.form.checkReadData,
+      checkReadDataSubset: scheduleDialog.form.checkReadData
+        ? (scheduleDialog.form.checkReadDataSubset || undefined)
+        : undefined,
+      checkMinIntervalHours: scheduleDialog.form.checkMinIntervalHours,
+      notificationMode: scheduleDialog.form.notificationMode,
+      digestSchedule: scheduleDialog.form.notificationMode === 'DIGEST'
+        ? (scheduleDialog.form.digestSchedule || undefined)
+        : null,
+    };
+    if (scheduleDialog.editId) {
+      await api.patch(`/backups/site-schedules/${scheduleDialog.editId}`, body);
+    } else {
+      await api.post('/backups/site-schedules', body);
+    }
+    toast.success('Сохранено');
+    scheduleDialog.open = false;
+    await loadSchedules();
+  } catch (e: unknown) {
+    const msg = (e as { data?: { error?: { message?: string } } })?.data?.error?.message || (e as Error).message;
+    toast.error(msg);
+  } finally {
+    scheduleDialog.saving = false;
+  }
+}
+
+async function runSchedule(c: SiteBackupSchedule) {
+  runningSchedule.value[c.id] = true;
+  try {
+    const res = await api.post<{ data: { launched: { siteId: string }[]; errors: unknown[] } }>(
+      `/backups/site-schedules/${c.id}/run`,
+    );
+    const launched = (res as { data?: { launched?: unknown[] } })?.data?.launched?.length ?? 0;
+    toast.success(`Шедуль "${c.name}" — запущен на ${launched} сайт(ах)`);
+    setTimeout(loadHistory, 1500);
+  } catch (e: unknown) {
+    toast.error((e as Error).message || 'Ошибка запуска');
+  } finally {
+    runningSchedule.value[c.id] = false;
+  }
+}
+
+async function deleteSchedule(c: SiteBackupSchedule) {
+  const ok = await useMbConfirm().ask({
+    title: 'Удаление шедуля',
+    message: `Удалить "${c.name}"? Автобэкапы по этому шедулю остановятся.`,
+    confirmText: 'Удалить', danger: true,
+  });
+  if (!ok) return;
+  try {
+    await api.del(`/backups/site-schedules/${c.id}`);
+    await loadSchedules();
     toast.success('Удалено');
   } catch (e) {
     toast.error((e as Error).message);
@@ -1081,6 +1311,12 @@ onBeforeUnmount(() => {
 }
 .cfg-badge--muted { background: var(--bg-input); color: var(--text-tertiary); }
 .cfg-badge--ok { background: var(--success-bg, rgba(34,197,94,0.12)); color: var(--success, #22c55e); }
+
+.muted-text {
+  color: var(--text-muted);
+  font-size: 0.7rem;
+  margin-left: 0.4rem;
+}
 
 .check-block {
   margin-top: 0.5rem; padding-top: 1rem;

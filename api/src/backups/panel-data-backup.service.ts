@@ -9,6 +9,7 @@ import { BackupEngine, BackupStatus } from '../common/enums';
 import { PrismaService } from '../common/prisma.service';
 import { AgentRelayService } from '../gateway/agent-relay.service';
 import { NotificationDispatcherService } from '../notifications/notification-dispatcher.service';
+import { NotificationDigestService, DigestNotificationMode } from '../notifications/notification-digest.service';
 import { execFile } from 'child_process';
 import { promisify } from 'util';
 import * as fs from 'fs';
@@ -60,6 +61,7 @@ export class PanelDataBackupService {
     private readonly prisma: PrismaService,
     private readonly agentRelay: AgentRelayService,
     private readonly notifier: NotificationDispatcherService,
+    private readonly digest: NotificationDigestService,
   ) {}
 
   // ===========================================================================
@@ -341,7 +343,7 @@ export class PanelDataBackupService {
   ) {
     const backup = await this.prisma.panelDataBackup.findUnique({
       where: { id: backupId },
-      include: { config: { select: { name: true } } },
+      include: { config: { select: { id: true, name: true, notificationMode: true } } },
     });
     if (!backup) return;
 
@@ -381,17 +383,20 @@ export class PanelDataBackupService {
       this.logger.warn(`Snapshot cleanup failed: ${(e as Error).message}`);
     }
 
-    this.notifier
-      .dispatch({
-        event: success ? 'BACKUP_COMPLETED' : 'BACKUP_FAILED',
-        title: success ? 'Panel-data Backup Completed' : 'Panel-data Backup Failed',
-        message: success
-          ? `Panel-data backup "${backup.config.name}" completed${
-              sizeBytes ? ` (${(sizeBytes / 1048576).toFixed(1)} MB)` : ''
-            }`
-          : `Panel-data backup "${backup.config.name}" failed: ${errorMessage || 'unknown error'}`,
-        timestamp: new Date(),
-      })
+    const mode = (backup.config.notificationMode || 'INSTANT') as DigestNotificationMode;
+    this.digest
+      .handleCompletion(
+        {
+          configType: 'PANEL_DATA',
+          configId: backup.config.id,
+          configName: backup.config.name,
+          resourceLabel: backup.config.name,
+          success,
+          sizeBytes,
+          errorMessage,
+        },
+        mode,
+      )
       .catch((err) => this.logger.error(`Notification failed: ${(err as Error).message}`));
   }
 

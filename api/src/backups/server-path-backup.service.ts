@@ -9,6 +9,7 @@ import { BackupEngine, BackupStatus } from '../common/enums';
 import { PrismaService } from '../common/prisma.service';
 import { AgentRelayService } from '../gateway/agent-relay.service';
 import { NotificationDispatcherService } from '../notifications/notification-dispatcher.service';
+import { NotificationDigestService, DigestNotificationMode } from '../notifications/notification-digest.service';
 import { StorageLocationsService } from '../storage-locations/storage-locations.service';
 import {
   CreateServerPathBackupDto,
@@ -27,6 +28,7 @@ export class ServerPathBackupService {
     private readonly prisma: PrismaService,
     private readonly agentRelay: AgentRelayService,
     private readonly notifier: NotificationDispatcherService,
+    private readonly digest: NotificationDigestService,
     private readonly storageLocations: StorageLocationsService,
   ) {}
 
@@ -329,7 +331,7 @@ export class ServerPathBackupService {
   ) {
     const backup = await this.prisma.serverPathBackup.findUnique({
       where: { id: backupId },
-      include: { config: { select: { name: true } } },
+      include: { config: { select: { id: true, name: true, path: true, notificationMode: true } } },
     });
     if (!backup) return;
 
@@ -346,17 +348,20 @@ export class ServerPathBackupService {
       },
     });
 
-    this.notifier
-      .dispatch({
-        event: success ? 'BACKUP_COMPLETED' : 'BACKUP_FAILED',
-        title: success ? 'Server-path Backup Completed' : 'Server-path Backup Failed',
-        message: success
-          ? `Server-path backup "${backup.config.name}" completed${
-              sizeBytes ? ` (${(sizeBytes / 1048576).toFixed(1)} MB)` : ''
-            }`
-          : `Server-path backup "${backup.config.name}" failed: ${errorMessage || 'unknown error'}`,
-        timestamp: new Date(),
-      })
+    const mode = (backup.config.notificationMode || 'INSTANT') as DigestNotificationMode;
+    this.digest
+      .handleCompletion(
+        {
+          configType: 'SERVER_PATH',
+          configId: backup.config.id,
+          configName: backup.config.name,
+          resourceLabel: backup.config.path,
+          success,
+          sizeBytes,
+          errorMessage,
+        },
+        mode,
+      )
       .catch((err) => this.logger.error(`Notification failed: ${(err as Error).message}`));
   }
 

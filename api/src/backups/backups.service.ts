@@ -276,7 +276,10 @@ export class BackupsService {
         : (siteExcludeTables.length > 0 ? siteExcludeTables : defaults.excludeTableData);
       retentionPolicy = defaults.retention;
 
-      if (dto.storageLocationId) {
+      if (dto.storageLocationIds && dto.storageLocationIds.length > 0) {
+        // Запуск из SiteBackupSchedule — список хранилищ передан явно
+        locationIds = dto.storageLocationIds;
+      } else if (dto.storageLocationId) {
         // Юзер выбрал одно конкретное хранилище
         locationIds = [dto.storageLocationId];
       } else if (dto.storageType) {

@@ -4,11 +4,13 @@ import { PrismaService } from '../common/prisma.service';
 import { BackupsService } from '../backups/backups.service';
 import { ServerPathBackupService } from '../backups/server-path-backup.service';
 import { PanelDataBackupService } from '../backups/panel-data-backup.service';
+import { SiteBackupScheduleService } from '../backups/site-backup-schedule.service';
 import { ResticCheckService } from '../backups/restic-check.service';
 import { SslService } from '../ssl/ssl.service';
 import { AgentRelayService } from '../gateway/agent-relay.service';
 import { MonitoringService } from '../monitoring/monitoring.service';
 import { NotificationDispatcherService } from '../notifications/notification-dispatcher.service';
+import { NotificationDigestService } from '../notifications/notification-digest.service';
 import { SessionService } from '../auth/session.service';
 import { SslStatus, SiteStatus, BackupStatus, DeployStatus } from '../common/enums';
 import { PanelSettingsService } from '../panel-settings/panel-settings.service';
@@ -46,11 +48,13 @@ export class SchedulerService {
     private readonly backupsService: BackupsService,
     private readonly serverPathBackupService: ServerPathBackupService,
     private readonly panelDataBackupService: PanelDataBackupService,
+    private readonly siteBackupScheduleService: SiteBackupScheduleService,
     private readonly resticCheckService: ResticCheckService,
     private readonly sslService: SslService,
     private readonly agentRelay: AgentRelayService,
     private readonly monitoringService: MonitoringService,
     private readonly notifier: NotificationDispatcherService,
+    private readonly digestService: NotificationDigestService,
     private readonly sessionService: SessionService,
     private readonly panelSettings: PanelSettingsService,
     private readonly dnsService: DnsService,
@@ -223,51 +227,36 @@ export class SchedulerService {
       }
     }
 
-    // --- 2. Глобальные дефолты (per-site сайты, не покрытые конфигом) ---
-    // ВАЖНО: эти три условия НЕ должны быть `return` — иначе блоки 3 и 4
-    // (server-path и panel-data) никогда не дойдут до выполнения, когда
-    // глобальные дефолты не настроены. Раньше тут было `return` — баг.
+    // --- 2. Site backup schedules (множественные глобальные шедули) ---
+    // Заменили одиночный `backup-defaults` на множественные SiteBackupSchedule.
+    // Каждый шедуль применяется ко всем сайтам, не покрытым per-site BackupConfig.
     try {
-      const defaults = await this.panelSettings.getBackupDefaults();
-      const globalsActive =
-        defaults.enabled &&
-        defaults.schedule &&
-        this.shouldRunNow(defaults.schedule, now) &&
-        defaults.storageLocationIds.length > 0;
-
-      if (globalsActive) {
-        const sites = await this.prisma.site.findMany({
-          where: {
-            id: { notIn: Array.from(sitesCoveredByConfig) },
-          },
-          select: { id: true, name: true, userId: true },
-        });
-
-        for (const site of sites) {
-          const active = await this.prisma.backup.findFirst({
-            where: {
-              siteId: site.id,
-              status: { in: ['PENDING', 'IN_PROGRESS'] },
-            },
-          });
-          if (active) continue;
-
-          try {
-            await this.backupsService.triggerBackup(
-              { siteId: site.id }, // без configId → сервис возьмёт globals
-              site.userId,
-              'ADMIN',
-            );
-            this.logger.log(`Scheduled backup (global) triggered for "${site.name}"`);
-          } catch (err) {
-            this.logger.error(
-              `Global scheduled backup failed for "${site.name}": ${(err as Error).message}`,
+      const schedules = await this.prisma.siteBackupSchedule.findMany({
+        where: { enabled: true, schedule: { not: null } },
+      });
+      for (const schedule of schedules) {
+        if (!schedule.schedule) continue;
+        if (!this.shouldRunNow(schedule.schedule, now)) continue;
+        try {
+          const r = await this.siteBackupScheduleService.triggerForAllSites(schedule.id);
+          if (r.launched.length > 0) {
+            this.logger.log(
+              `Scheduled site-backup "${schedule.name}" — launched on ${r.launched.length} site(s)`,
             );
           }
+          for (const e of r.errors) {
+            this.logger.warn(
+              `Scheduled site-backup "${schedule.name}" / "${e.siteName}": ${e.error}`,
+            );
+          }
+        } catch (err) {
+          this.logger.error(
+            `Scheduled site-backup "${schedule.name}" failed: ${(err as Error).message}`,
+          );
         }
       }
     } catch (err) {
-      this.logger.error(`Global backup defaults check failed: ${(err as Error).message}`);
+      this.logger.error(`Site-backup schedules cron failed: ${(err as Error).message}`);
     }
 
     // --- 3. Server-path backup configs ---
@@ -306,6 +295,25 @@ export class SchedulerService {
       }
     } catch (err) {
       this.logger.error(`Panel-data scheduler failed: ${(err as Error).message}`);
+    }
+  }
+
+  // =========================================================================
+  // Notification Digest Flush — каждую минуту проверяем, не пора ли
+  // отправить накопленный дайджест по какому-то из конфигов.
+  // =========================================================================
+  @Cron(CronExpression.EVERY_MINUTE)
+  async handleNotificationDigestFlush() {
+    try {
+      const r = await this.digestService.flushDue(
+        new Date(),
+        (cron, now) => this.shouldRunNow(cron, now),
+      );
+      if (r.flushed > 0) {
+        this.logger.log(`Notification digest: flushed ${r.flushed} digest(s)`);
+      }
+    } catch (err) {
+      this.logger.error(`Notification digest flush failed: ${(err as Error).message}`);
     }
   }
 

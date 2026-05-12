@@ -248,6 +248,7 @@ model StorageLocation {
   serverPathBackups          ServerPathBackup[]       @relation("ServerPathBackupToStorageLocation")
   panelDataBackupConfigs     PanelDataBackupConfig[]  @relation("PanelDataBackupConfigToStorageLocation")
   panelDataBackups           PanelDataBackup[]        @relation("PanelDataBackupToStorageLocation")
+  siteBackupSchedules        SiteBackupSchedule[]     @relation("SiteBackupScheduleToStorageLocation")
 
   @@map("storage_locations")
 }
@@ -342,6 +343,11 @@ model ServerPathBackupConfig {
   /// Restic-exclude паттерны (относительно path).
   excludePaths         String   @default("[]") @map("exclude_paths")
   enabled              Boolean  @default(true)
+  /// Режим уведомлений: INSTANT (по каждому), DIGEST (накапливать и слать по
+  /// cron), FAILURES_ONLY (только при ошибке). См. NotificationDigestQueue.
+  notificationMode     String   @default("INSTANT") @map("notification_mode")
+  /// cron для отправки дайджеста (используется только при notificationMode=DIGEST).
+  digestSchedule       String?  @map("digest_schedule")
   createdAt            DateTime @default(now()) @map("created_at")
   updatedAt            DateTime @updatedAt @map("updated_at")
 
@@ -391,6 +397,9 @@ model PanelDataBackupConfig {
   keepMonthly          Int      @default(12) @map("keep_monthly")
   keepYearly           Int      @default(5) @map("keep_yearly")
   enabled              Boolean  @default(true)
+  /// Режим уведомлений (см. ServerPathBackupConfig.notificationMode).
+  notificationMode     String   @default("INSTANT") @map("notification_mode")
+  digestSchedule       String?  @map("digest_schedule")
   createdAt            DateTime @default(now()) @map("created_at")
   updatedAt            DateTime @updatedAt @map("updated_at")
 
@@ -422,6 +431,87 @@ model PanelDataBackup {
   @@index([configId])
   @@index([status])
   @@map("panel_data_backups")
+}
+
+// =============================================================================
+// SiteBackupSchedule — глобальные шедули per-site бэкапов (множественные).
+// Заменяет одиночные `PanelSetting('backup-defaults')`: теперь можно иметь
+// несколько шедулей с разными хранилищами/расписаниями/типами, и они
+// применяются ко ВСЕМ сайтам, у которых нет per-site BackupConfig.
+// Логика старого `backup-defaults` (одна форма на всю панель) переехала сюда.
+// =============================================================================
+model SiteBackupSchedule {
+  id                     String   @id @default(uuid())
+  /// Имя для UI: "hourly DB to local", "daily FULL to S3", ...
+  name                   String
+  enabled                Boolean  @default(true)
+  /// BackupType (FULL | FILES_ONLY | DB_ONLY | DIFFERENTIAL)
+  type                   String   @default("FULL")
+  /// BackupEngine (TAR | RESTIC)
+  engine                 String   @default("RESTIC")
+  /// JSON string[] — StorageLocation.id
+  storageLocationIds     String   @default("[]") @map("storage_location_ids")
+  /// cron-расписание основного запуска
+  schedule               String?
+  /// Для RESTIC — keep-политика
+  keepDaily              Int      @default(7) @map("keep_daily")
+  keepWeekly             Int      @default(4) @map("keep_weekly")
+  keepMonthly            Int      @default(6) @map("keep_monthly")
+  keepYearly             Int      @default(1) @map("keep_yearly")
+  /// Для TAR — кол-во последних бэкапов
+  retentionDays          Int      @default(7) @map("retention_days")
+  /// JSON string[]
+  excludePaths           String   @default("[]") @map("exclude_paths")
+  excludeTableData       String   @default("[]") @map("exclude_table_data")
+  /// Restic integrity check
+  checkEnabled           Boolean  @default(false) @map("check_enabled")
+  checkSchedule          String?  @map("check_schedule")
+  checkReadData          Boolean  @default(false) @map("check_read_data")
+  checkReadDataSubset    String?  @map("check_read_data_subset")
+  checkMinIntervalHours  Int      @default(168) @map("check_min_interval_hours")
+  /// Режим уведомлений: INSTANT | DIGEST | FAILURES_ONLY
+  notificationMode       String   @default("INSTANT") @map("notification_mode")
+  digestSchedule         String?  @map("digest_schedule")
+  createdAt              DateTime @default(now()) @map("created_at")
+  updatedAt              DateTime @updatedAt @map("updated_at")
+
+  storageLocations       StorageLocation[] @relation("SiteBackupScheduleToStorageLocation")
+
+  @@index([enabled])
+  @@map("site_backup_schedules")
+}
+
+// =============================================================================
+// NotificationDigestQueue — очередь событий для дайджест-уведомлений.
+// Когда у бэкап-конфига notificationMode=DIGEST, completeBackup() пишет
+// сюда вместо прямого dispatch. Отдельный cron `flushDigests` забирает
+// записи с `sentAt IS NULL` сгруппированно по configType+configId,
+// отправляет одним сообщением и проставляет sentAt.
+//
+// configName/resourceLabel — снапшоты, чтобы дайджест выглядел нормально
+// даже если конфиг был удалён до отправки.
+// =============================================================================
+model NotificationDigestQueue {
+  id            String    @id @default(uuid())
+  /// SITE_SCHEDULE | SERVER_PATH | PANEL_DATA — какой тип бэкапа
+  configType    String    @map("config_type")
+  /// id шедуля/конфига (FK не ставим — нужно сохранить запись при удалении конфига)
+  configId      String    @map("config_id")
+  /// Имя конфига на момент события (для красивого заголовка)
+  configName    String    @map("config_name")
+  /// BACKUP_COMPLETED | BACKUP_FAILED
+  event         String
+  /// Имя ресурса (site name / path / "Panel Data") — для строки в дайджесте
+  resourceLabel String    @map("resource_label")
+  sizeBytes     BigInt?   @map("size_bytes")
+  /// errorMessage или дополнительная инфа
+  message       String?
+  createdAt     DateTime  @default(now()) @map("created_at")
+  sentAt        DateTime? @map("sent_at")
+
+  @@index([configType, configId, sentAt])
+  @@index([sentAt])
+  @@map("notification_digest_queue")
 }
 
 model Backup {

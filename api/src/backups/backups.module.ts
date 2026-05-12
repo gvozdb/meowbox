@@ -10,6 +10,8 @@ import { ServerPathBackupService } from './server-path-backup.service';
 import { ServerPathBackupController } from './server-path-backup.controller';
 import { PanelDataBackupService } from './panel-data-backup.service';
 import { PanelDataBackupController } from './panel-data-backup.controller';
+import { SiteBackupScheduleService } from './site-backup-schedule.service';
+import { SiteBackupScheduleController } from './site-backup-schedule.controller';
 import { NotificationsModule } from '../notifications/notifications.module';
 import { StorageLocationsModule } from '../storage-locations/storage-locations.module';
 import { PanelSettingsModule } from '../panel-settings/panel-settings.module';
@@ -34,6 +36,7 @@ import { PanelSettingsModule } from '../panel-settings/panel-settings.module';
     BackupExportsController,
     ServerPathBackupController,
     PanelDataBackupController,
+    SiteBackupScheduleController,
   ],
   providers: [
     BackupsService,
@@ -41,6 +44,7 @@ import { PanelSettingsModule } from '../panel-settings/panel-settings.module';
     BackupExportsService,
     ServerPathBackupService,
     PanelDataBackupService,
+    SiteBackupScheduleService,
   ],
   exports: [
     BackupsService,
@@ -48,6 +52,7 @@ import { PanelSettingsModule } from '../panel-settings/panel-settings.module';
     BackupExportsService,
     ServerPathBackupService,
     PanelDataBackupService,
+    SiteBackupScheduleService,
   ],
 })
 export class BackupsModule {}
