@@ -10,7 +10,10 @@ import {
   ParseUUIDPipe,
 } from '@nestjs/common';
 import { PanelDataBackupService } from './panel-data-backup.service';
-import { CreatePanelDataBackupDto } from './server-path-backup.dto';
+import {
+  CreatePanelDataBackupDto,
+  UpdatePanelDataBackupDto,
+} from './server-path-backup.dto';
 import { Roles } from '../common/decorators/roles.decorator';
 
 @Controller('backups/panel-data')
@@ -39,7 +42,7 @@ export class PanelDataBackupController {
   @Roles('ADMIN')
   async update(
     @Param('id', ParseUUIDPipe) id: string,
-    @Body() dto: Partial<CreatePanelDataBackupDto>,
+    @Body() dto: UpdatePanelDataBackupDto,
   ) {
     return { success: true, data: await this.svc.update(id, dto) };
   }

@@ -14,7 +14,10 @@ import { execFile } from 'child_process';
 import { promisify } from 'util';
 import * as fs from 'fs';
 import * as path from 'path';
-import { CreatePanelDataBackupDto } from './server-path-backup.dto';
+import {
+  CreatePanelDataBackupDto,
+  UpdatePanelDataBackupDto,
+} from './server-path-backup.dto';
 import { parseStringArray, stringifyStringArray, parseJsonObject } from '../common/json-array';
 
 const execFileP = promisify(execFile);
@@ -120,13 +123,16 @@ export class PanelDataBackupService {
         keepMonthly: dto.keepMonthly ?? 12,
         keepYearly: dto.keepYearly ?? 5,
         enabled: dto.enabled ?? true,
+        notificationMode: dto.notificationMode ?? 'INSTANT',
+        digestSchedule:
+          dto.notificationMode === 'DIGEST' ? dto.digestSchedule ?? null : null,
         storageLocations: { connect: locIds.map((id) => ({ id })) },
       },
     });
     return this.get(created.id);
   }
 
-  async update(id: string, dto: Partial<CreatePanelDataBackupDto>) {
+  async update(id: string, dto: UpdatePanelDataBackupDto) {
     const existing = await this.prisma.panelDataBackupConfig.findUnique({ where: { id } });
     if (!existing) throw new NotFoundException('Config not found');
 
@@ -154,6 +160,16 @@ export class PanelDataBackupService {
         ...(dto.keepMonthly !== undefined && { keepMonthly: dto.keepMonthly }),
         ...(dto.keepYearly !== undefined && { keepYearly: dto.keepYearly }),
         ...(dto.enabled !== undefined && { enabled: dto.enabled }),
+        ...(dto.notificationMode !== undefined && {
+          notificationMode: dto.notificationMode,
+          digestSchedule:
+            dto.notificationMode === 'DIGEST'
+              ? dto.digestSchedule ?? existing.digestSchedule ?? null
+              : null,
+        }),
+        ...(dto.notificationMode === undefined && dto.digestSchedule !== undefined && {
+          digestSchedule: dto.digestSchedule || null,
+        }),
         ...(connect && connect.length > 0 ? { storageLocations: { connect } } : {}),
         ...(disconnect && disconnect.length > 0 ? { storageLocations: { disconnect } } : {}),
       },

@@ -19,6 +19,12 @@ export enum BackupEngineDto {
   RESTIC = 'RESTIC',
 }
 
+export enum NotificationModeDto {
+  INSTANT = 'INSTANT',
+  DIGEST = 'DIGEST',
+  FAILURES_ONLY = 'FAILURES_ONLY',
+}
+
 export class CreateServerPathBackupDto {
   @IsString() @IsNotEmpty() @MaxLength(120)
   name!: string;
@@ -61,6 +67,13 @@ export class CreateServerPathBackupDto {
   /** Подтверждение, что юзер прочитал warning'и о dangerous path. */
   @IsBoolean() @IsOptional()
   warningAcknowledged?: boolean;
+
+  @IsEnum(NotificationModeDto) @IsOptional()
+  notificationMode?: NotificationModeDto;
+
+  @IsString() @IsOptional() @MaxLength(64)
+  @Matches(CRON_SCHEDULE_REGEX, { message: 'Невалидный cron schedule для digest' })
+  digestSchedule?: string;
 }
 
 export class UpdateServerPathBackupDto {
@@ -93,6 +106,13 @@ export class UpdateServerPathBackupDto {
 
   @IsBoolean() @IsOptional()
   enabled?: boolean;
+
+  @IsEnum(NotificationModeDto) @IsOptional()
+  notificationMode?: NotificationModeDto;
+
+  @IsString() @IsOptional() @MaxLength(64)
+  @Matches(CRON_SCHEDULE_REGEX, { message: 'Невалидный cron schedule для digest' })
+  digestSchedule?: string;
 }
 
 export class CreatePanelDataBackupDto {
@@ -124,4 +144,46 @@ export class CreatePanelDataBackupDto {
 
   @IsBoolean() @IsOptional()
   enabled?: boolean;
+
+  @IsEnum(NotificationModeDto) @IsOptional()
+  notificationMode?: NotificationModeDto;
+
+  @IsString() @IsOptional() @MaxLength(64)
+  @Matches(CRON_SCHEDULE_REGEX, { message: 'Невалидный cron schedule для digest' })
+  digestSchedule?: string;
+}
+
+export class UpdatePanelDataBackupDto {
+  @IsString() @IsOptional() @MaxLength(120)
+  name?: string;
+
+  @IsArray() @IsOptional() @ArrayMaxSize(8)
+  @IsString({ each: true })
+  storageLocationIds?: string[];
+
+  @IsString() @IsOptional()
+  @Matches(CRON_SCHEDULE_REGEX, { message: 'Невалидный cron schedule' })
+  schedule?: string;
+
+  @IsInt() @Min(1) @Max(365) @IsOptional()
+  retention?: number;
+
+  @IsInt() @Min(0) @Max(365) @IsOptional()
+  keepDaily?: number;
+  @IsInt() @Min(0) @Max(52) @IsOptional()
+  keepWeekly?: number;
+  @IsInt() @Min(0) @Max(60) @IsOptional()
+  keepMonthly?: number;
+  @IsInt() @Min(0) @Max(20) @IsOptional()
+  keepYearly?: number;
+
+  @IsBoolean() @IsOptional()
+  enabled?: boolean;
+
+  @IsEnum(NotificationModeDto) @IsOptional()
+  notificationMode?: NotificationModeDto;
+
+  @IsString() @IsOptional() @MaxLength(64)
+  @Matches(CRON_SCHEDULE_REGEX, { message: 'Невалидный cron schedule для digest' })
+  digestSchedule?: string;
 }

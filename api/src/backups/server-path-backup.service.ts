@@ -108,6 +108,9 @@ export class ServerPathBackupService {
         keepYearly: dto.keepYearly ?? 1,
         excludePaths: stringifyStringArray(dto.excludePaths || []),
         enabled: dto.enabled ?? true,
+        notificationMode: dto.notificationMode ?? 'INSTANT',
+        digestSchedule:
+          dto.notificationMode === 'DIGEST' ? dto.digestSchedule ?? null : null,
         // many-to-many через relation table
         storageLocations: { connect: locIds.map((id) => ({ id })) },
       },
@@ -146,6 +149,16 @@ export class ServerPathBackupService {
           excludePaths: stringifyStringArray(dto.excludePaths),
         }),
         ...(dto.enabled !== undefined && { enabled: dto.enabled }),
+        ...(dto.notificationMode !== undefined && {
+          notificationMode: dto.notificationMode,
+          digestSchedule:
+            dto.notificationMode === 'DIGEST'
+              ? dto.digestSchedule ?? existing.digestSchedule ?? null
+              : null,
+        }),
+        ...(dto.notificationMode === undefined && dto.digestSchedule !== undefined && {
+          digestSchedule: dto.digestSchedule || null,
+        }),
         ...(connect && connect.length > 0 ? { storageLocations: { connect } } : {}),
         ...(disconnect && disconnect.length > 0 ? { storageLocations: { disconnect } } : {}),
       },

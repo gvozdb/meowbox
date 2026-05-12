@@ -412,8 +412,19 @@ stage reload "PM2 reload"
 # ecosystem.config.js из release (там wait_ready: true, и новый код шлёт ready).
 ECOSYSTEM_FILE="$PANEL_DIR/ecosystem.config.js"
 if [[ -f "$RELEASE_DIR/ecosystem.config.js" ]]; then
-  cp -f "$RELEASE_DIR/ecosystem.config.js" "$ECOSYSTEM_FILE"
-  say "  ecosystem.config.js обновлён из релиза"
+  # NB: после migrate-legacy-to-release.sh $PANEL_DIR/ecosystem.config.js —
+  # симлинк на current/ecosystem.config.js. После switch он резолвится в тот же
+  # файл, что и $RELEASE_DIR/ecosystem.config.js → `cp -f src dst` падает с
+  # "are the same file", set -e валит апдейт ДО pm2 reload. Поэтому сравниваем
+  # реальные пути и пропускаем копирование, если они совпадают.
+  src_real="$(readlink -f "$RELEASE_DIR/ecosystem.config.js" 2>/dev/null || echo "$RELEASE_DIR/ecosystem.config.js")"
+  dst_real="$(readlink -f "$ECOSYSTEM_FILE" 2>/dev/null || echo "$ECOSYSTEM_FILE")"
+  if [[ "$src_real" == "$dst_real" ]]; then
+    say "  ecosystem.config.js: panel-root — симлинк на release, копирование не нужно"
+  else
+    cp -f "$RELEASE_DIR/ecosystem.config.js" "$ECOSYSTEM_FILE"
+    say "  ecosystem.config.js обновлён из релиза"
+  fi
 fi
 # Бэкап + патч: убираем wait_ready/listen_timeout на время reload.
 ECO_BAK="$STATE_DIR/.ecosystem.bak"
