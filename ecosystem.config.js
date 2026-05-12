@@ -87,7 +87,17 @@ const INTERNAL_TOKEN =
 const API_URL = `http://${API_HOST === '0.0.0.0' ? '127.0.0.1' : API_HOST}:${API_PORT}`;
 
 // --- 4) Общие env для всех приложений ---
+// КРИТИЧНО: NestJS ConfigModule в release-раскладке ищет .env по пути
+// `../.env` относительно cwd (= current/api/), т.е. в current/ — а его там нет
+// (state/.env живёт в state/). Поэтому пробрасываем ВСЕ переменные из state/.env
+// напрямую в PM2 env. Криптоключи (ADMINER_SSO_KEY, MEOWBOX_MASTER_KEY,
+// VPN_SECRET_KEY, DNS_CREDENTIAL_KEY, MIGRATION_SECRET) ОБЯЗАНЫ дойти до API,
+// иначе шифраторы используют stale значение из shell-env, в котором pm2 был
+// запущен — рассинхрон с PHP-pool, "Ticket невалиден" и битые secrets в БД.
+// COMMON_ENV перезаписывает envVars (NODE_ENV=production и абсолютные пути
+// важнее значений из .env).
 const COMMON_ENV = {
+  ...envVars,
   NODE_ENV: 'production',
   // Передаём абсолютные пути, чтобы приложения могли найти persistent data:
   MEOWBOX_PANEL_DIR: PANEL_DIR,

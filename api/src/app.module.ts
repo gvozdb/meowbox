@@ -53,7 +53,11 @@ import { CustomThrottlerGuard } from './common/guards/throttler-tracker.guard';
     // --- Config ---
     ConfigModule.forRoot({
       isGlobal: true,
-      envFilePath: '../.env',
+      // В release-раскладке cwd = current/api/, и `../.env` указывает на
+      // current/.env, которого там НЕТ (env живёт в state/.env). PM2
+      // ecosystem пробрасывает DOTENV_PATH = state/.env — используем его
+      // приоритетно, fallback оставляем для legacy git-checkout раскладки.
+      envFilePath: process.env.DOTENV_PATH || '../.env',
     }),
 
     // --- Security: Rate limiting ---
