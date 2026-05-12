@@ -411,6 +411,16 @@ stage reload "PM2 reload"
 # в коде api ready-сигнал ещё не шлётся. После reload восстанавливаем canonical
 # ecosystem.config.js из release (там wait_ready: true, и новый код шлёт ready).
 ECOSYSTEM_FILE="$PANEL_DIR/ecosystem.config.js"
+# Хэш до копирования — нужен чтобы понять, изменился ли ecosystem.config.js в
+# этом релизе. Если изменился — простой `pm2 restart --update-env` не подхватит
+# новый файл (он только освежает env из in-memory PM2 конфига); тогда нужен
+# `pm2 reload <file> --only <name>` который перечитывает файл (но при этом
+# остаётся graceful, без полного delete процесса — важно когда update.sh
+# запущен из панели и юзер ждёт ответа от api).
+ECO_OLD_HASH=""
+if [[ -f "$ECOSYSTEM_FILE" ]]; then
+  ECO_OLD_HASH="$(sha256sum "$ECOSYSTEM_FILE" 2>/dev/null | cut -d' ' -f1 || echo '')"
+fi
 if [[ -f "$RELEASE_DIR/ecosystem.config.js" ]]; then
   # NB: после migrate-legacy-to-release.sh $PANEL_DIR/ecosystem.config.js —
   # симлинк на current/ecosystem.config.js. После switch он резолвится в тот же
@@ -430,6 +440,16 @@ fi
 ECO_BAK="$STATE_DIR/.ecosystem.bak"
 cp -f "$ECOSYSTEM_FILE" "$ECO_BAK"
 sed -i '/^[[:space:]]*wait_ready:[[:space:]]*true,*$/d; /^[[:space:]]*listen_timeout:[[:space:]]*[0-9]\+,*$/d' "$ECOSYSTEM_FILE"
+# Сравниваем хэши ДО-cp и ПОСЛЕ-cp+sed. Если совпали — файл не менялся,
+# хватит restart --update-env. Если разные — обязателен reload <file>,
+# чтобы PM2 перечитал новый env-блок (например, при v0.6.31 → v0.6.32
+# добавились пробросы криптоключей из state/.env).
+ECO_NEW_HASH="$(sha256sum "$ECOSYSTEM_FILE" 2>/dev/null | cut -d' ' -f1 || echo '')"
+ECO_CHANGED=0
+if [[ -n "$ECO_OLD_HASH" && "$ECO_OLD_HASH" != "$ECO_NEW_HASH" ]]; then
+  ECO_CHANGED=1
+  say "  ecosystem.config.js изменился — буду использовать pm2 reload <file> для перечитывания"
+fi
 
 # КРИТИЧНО: api рестартим ПОСЛЕДНИМ + отдельной командой + с timeout.
 # Контекст: update.sh запущен из старого api-процесса. Любой `pm2 reload`
@@ -448,19 +468,36 @@ sed -i '/^[[:space:]]*wait_ready:[[:space:]]*true,*$/d; /^[[:space:]]*listen_tim
 
 pm2_safe_restart() {
   local name="$1"
-  say "  → restart $name (delete+start для перечитывания ecosystem.config.js)"
-  # ВАЖНО: `pm2 restart --update-env` обновляет env процесса ИЗ in-memory PM2
-  # конфига, но НЕ перечитывает ecosystem.config.js. Если в новом релизе
-  # ecosystem.config.js изменился (например, добавлены пробросы env-переменных
-  # из state/.env — см. v0.6.31, фикс рассинхрона ADMINER_SSO_KEY), простой
-  # restart его проигнорирует. Поэтому делаем delete+start всегда — это
-  # форсированно перечитывает файл. update.sh запущен detached от api
-  # (setsid), поэтому delete meowbox-api нас не убивает.
-  timeout 15 pm2 delete "$name" >/dev/null 2>&1 || true
-  if ! timeout 30 pm2 start "$ECOSYSTEM_FILE" --only "$name" --update-env >/dev/null 2>&1; then
-    say "    pm2 start упал — fallback на pm2 restart $name (если процесс ещё жив)"
-    timeout 30 pm2 restart "$name" --update-env >/dev/null 2>&1 || \
-      say "    fallback тоже не сработал — pm2 daemon в плохом состоянии"
+  # Логика выбора метода (от самого щадящего к самому жёсткому):
+  #   1) ecosystem не менялся → `pm2 restart --update-env`.
+  #      Graceful (SIGINT + kill_timeout). Только обновляет env из in-memory
+  #      PM2 конфига. Что нужно в 99% обновлений.
+  #   2) ecosystem менялся → `pm2 reload <file> --only <name> --update-env`.
+  #      Тоже graceful, НО перечитывает ecosystem.config.js (подхватит новые
+  #      env-блоки, изменённые пути, и т.д.). Это редкий случай — раз в
+  #      несколько релизов.
+  #   3) И тот и тот fallback → `pm2 delete + pm2 start <file> --only <name>`.
+  #      Жёстко, не graceful, на 1-2 секунды API недоступен. Срабатывает
+  #      только если первые два упали (зависший процесс, повреждённый
+  #      pm2 daemon).
+  # update.sh запущен detached от api через setsid → даже fallback delete
+  # сам update.sh не убивает.
+  if [[ "${ECO_CHANGED:-0}" -eq 1 ]]; then
+    say "  → reload $name (ecosystem.config.js обновился)"
+    if ! timeout 30 pm2 reload "$ECOSYSTEM_FILE" --only "$name" --update-env >/dev/null 2>&1; then
+      say "    pm2 reload упал — fallback на delete+start"
+      timeout 10 pm2 delete "$name" >/dev/null 2>&1 || true
+      timeout 30 pm2 start "$ECOSYSTEM_FILE" --only "$name" --update-env >/dev/null 2>&1 || \
+        say "    delete+start тоже не сработал — pm2 daemon в плохом состоянии"
+    fi
+  else
+    say "  → restart $name (graceful, ecosystem.config.js без изменений)"
+    if ! timeout 30 pm2 restart "$name" --update-env >/dev/null 2>&1; then
+      say "    timeout — fallback: delete + start --only $name"
+      timeout 10 pm2 delete "$name" >/dev/null 2>&1 || true
+      timeout 30 pm2 start "$ECOSYSTEM_FILE" --only "$name" --update-env >/dev/null 2>&1 || \
+        say "    delete+start тоже не сработал — pm2 daemon в плохом состоянии"
+    fi
   fi
 }
 
