@@ -1860,6 +1860,7 @@ export class AgentService {
       systemUser?: string;
       managerPath?: string;
       connectorsPath?: string;
+      tablePrefix?: string;
     }, cb: Callback) => {
       try {
         let result: { success: boolean; error?: string; version?: string };
@@ -1890,6 +1891,7 @@ export class AgentService {
           systemUser: params.systemUser,
           managerPath: params.managerPath || 'manager',
           connectorsPath: params.connectorsPath || 'connectors',
+          tablePrefix: params.tablePrefix,
         };
 
         switch (params.siteType) {
