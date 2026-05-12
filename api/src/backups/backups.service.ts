@@ -21,6 +21,26 @@ import {
 } from './backups.dto';
 import { parseStringArray, stringifyStringArray, parseJsonObject } from '../common/json-array';
 
+export interface UnifiedBackupRow {
+  id: string;
+  kind: 'SITE' | 'SERVER_PATH' | 'PANEL_DATA';
+  type: string;
+  status: string;
+  engine: string;
+  sourceName: string;
+  sourceSubtitle: string;
+  sourceId: string | null;
+  sizeBytes: bigint | number | null;
+  progress: number;
+  errorMessage: string | null;
+  resticSnapshotId: string | null;
+  filePath: string;
+  storageLocation: { id: string; name: string; type: string } | null;
+  createdAt: Date;
+  startedAt: Date | null;
+  completedAt: Date | null;
+}
+
 // ============================================================================
 // Нюансы движков:
 //
@@ -1113,6 +1133,156 @@ export class BackupsService {
       },
       select: { id: true, filePath: true, storageType: true },
     });
+  }
+
+  // Единая лента истории бэкапов — сайты + серверные пути + данные панели.
+  // Объединяет 3 таблицы (Backup, ServerPathBackup, PanelDataBackup), сортирует
+  // по createdAt desc и пагинирует. Чтобы не тянуть всё в память при больших
+  // объёмах — каждая таблица отдаётся первыми (skip + take) записями,
+  // мерджится, сортируется и режется. Для админ-панели хватает с запасом.
+  async listUnifiedHistory(page = 1, perPage = 30) {
+    const take = Math.min(perPage, 100);
+    const skip = Math.max(0, (page - 1) * take);
+    const fetchN = skip + take; // сколько берём из каждой таблицы
+
+    const [siteBackups, serverBackups, panelBackups, siteTotal, serverTotal, panelTotal] = await Promise.all([
+      this.prisma.backup.findMany({
+        orderBy: { createdAt: 'desc' },
+        take: fetchN,
+        select: {
+          id: true,
+          type: true,
+          status: true,
+          engine: true,
+          storageType: true,
+          resticSnapshotId: true,
+          filePath: true,
+          sizeBytes: true,
+          progress: true,
+          errorMessage: true,
+          baseBackupId: true,
+          createdAt: true,
+          startedAt: true,
+          completedAt: true,
+          storageLocation: { select: { id: true, name: true, type: true } },
+          site: { select: { id: true, name: true, domain: true } },
+        },
+      }),
+      this.prisma.serverPathBackup.findMany({
+        orderBy: { createdAt: 'desc' },
+        take: fetchN,
+        select: {
+          id: true,
+          status: true,
+          engine: true,
+          resticSnapshotId: true,
+          filePath: true,
+          sizeBytes: true,
+          progress: true,
+          errorMessage: true,
+          createdAt: true,
+          startedAt: true,
+          completedAt: true,
+          storageLocation: { select: { id: true, name: true, type: true } },
+          config: { select: { id: true, name: true, path: true } },
+        },
+      }),
+      this.prisma.panelDataBackup.findMany({
+        orderBy: { createdAt: 'desc' },
+        take: fetchN,
+        select: {
+          id: true,
+          status: true,
+          engine: true,
+          resticSnapshotId: true,
+          filePath: true,
+          sizeBytes: true,
+          progress: true,
+          errorMessage: true,
+          createdAt: true,
+          startedAt: true,
+          completedAt: true,
+          storageLocation: { select: { id: true, name: true, type: true } },
+          config: { select: { id: true, name: true } },
+        },
+      }),
+      this.prisma.backup.count(),
+      this.prisma.serverPathBackup.count(),
+      this.prisma.panelDataBackup.count(),
+    ]);
+
+    const rows: UnifiedBackupRow[] = [];
+    for (const b of siteBackups) {
+      rows.push({
+        id: b.id,
+        kind: 'SITE',
+        type: b.type,
+        status: b.status,
+        engine: b.engine,
+        sourceName: b.site?.name || '—',
+        sourceSubtitle: b.site?.domain || '',
+        sourceId: b.site?.id || null,
+        sizeBytes: b.sizeBytes ?? null,
+        progress: b.progress,
+        errorMessage: b.errorMessage,
+        resticSnapshotId: b.resticSnapshotId,
+        filePath: b.filePath,
+        storageLocation: b.storageLocation,
+        createdAt: b.createdAt,
+        startedAt: b.startedAt,
+        completedAt: b.completedAt,
+      });
+    }
+    for (const b of serverBackups) {
+      rows.push({
+        id: b.id,
+        kind: 'SERVER_PATH',
+        type: 'FULL',
+        status: b.status,
+        engine: b.engine,
+        sourceName: b.config?.name || '—',
+        sourceSubtitle: b.config?.path || '',
+        sourceId: b.config?.id || null,
+        sizeBytes: b.sizeBytes ?? null,
+        progress: b.progress,
+        errorMessage: b.errorMessage,
+        resticSnapshotId: b.resticSnapshotId,
+        filePath: b.filePath,
+        storageLocation: b.storageLocation,
+        createdAt: b.createdAt,
+        startedAt: b.startedAt,
+        completedAt: b.completedAt,
+      });
+    }
+    for (const b of panelBackups) {
+      rows.push({
+        id: b.id,
+        kind: 'PANEL_DATA',
+        type: 'FULL',
+        status: b.status,
+        engine: b.engine,
+        sourceName: b.config?.name || 'Данные панели',
+        sourceSubtitle: 'Панель Meowbox',
+        sourceId: b.config?.id || null,
+        sizeBytes: b.sizeBytes ?? null,
+        progress: b.progress,
+        errorMessage: b.errorMessage,
+        resticSnapshotId: b.resticSnapshotId,
+        filePath: b.filePath,
+        storageLocation: b.storageLocation,
+        createdAt: b.createdAt,
+        startedAt: b.startedAt,
+        completedAt: b.completedAt,
+      });
+    }
+
+    rows.sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime());
+    const items = rows.slice(skip, skip + take);
+    const total = siteTotal + serverTotal + panelTotal;
+    return {
+      items,
+      meta: { page, perPage: take, total, totalPages: Math.ceil(total / take) },
+    };
   }
 
   async getBackupForDownload(backupId: string, userId: string, role: string) {

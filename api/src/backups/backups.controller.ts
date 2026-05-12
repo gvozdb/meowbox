@@ -261,6 +261,19 @@ export class BackupsController {
     return { success: true, data };
   }
 
+  @Get('backups/history')
+  @Roles('ADMIN')
+  async listUnifiedHistory(
+    @Query('page') page?: string,
+    @Query('perPage') perPage?: string,
+  ) {
+    const result = await this.backupsService.listUnifiedHistory(
+      page ? parseInt(page, 10) : 1,
+      perPage ? parseInt(perPage, 10) : 30,
+    );
+    return { success: true, data: result.items, meta: result.meta };
+  }
+
   @Get('sites/:siteId/backups')
   async listBackups(
     @Param('siteId', ParseUUIDPipe) siteId: string,
