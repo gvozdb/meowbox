@@ -448,12 +448,19 @@ sed -i '/^[[:space:]]*wait_ready:[[:space:]]*true,*$/d; /^[[:space:]]*listen_tim
 
 pm2_safe_restart() {
   local name="$1"
-  say "  → restart $name"
-  if ! timeout 30 pm2 restart "$name" --update-env >/dev/null 2>&1; then
-    say "    timeout — fallback: delete + start --only $name"
-    timeout 10 pm2 delete "$name" >/dev/null 2>&1 || true
-    timeout 30 pm2 start "$ECOSYSTEM_FILE" --only "$name" --update-env >/dev/null 2>&1 || \
-      say "    delete+start тоже не сработал — pm2 daemon в плохом состоянии"
+  say "  → restart $name (delete+start для перечитывания ecosystem.config.js)"
+  # ВАЖНО: `pm2 restart --update-env` обновляет env процесса ИЗ in-memory PM2
+  # конфига, но НЕ перечитывает ecosystem.config.js. Если в новом релизе
+  # ecosystem.config.js изменился (например, добавлены пробросы env-переменных
+  # из state/.env — см. v0.6.31, фикс рассинхрона ADMINER_SSO_KEY), простой
+  # restart его проигнорирует. Поэтому делаем delete+start всегда — это
+  # форсированно перечитывает файл. update.sh запущен detached от api
+  # (setsid), поэтому delete meowbox-api нас не убивает.
+  timeout 15 pm2 delete "$name" >/dev/null 2>&1 || true
+  if ! timeout 30 pm2 start "$ECOSYSTEM_FILE" --only "$name" --update-env >/dev/null 2>&1; then
+    say "    pm2 start упал — fallback на pm2 restart $name (если процесс ещё жив)"
+    timeout 30 pm2 restart "$name" --update-env >/dev/null 2>&1 || \
+      say "    fallback тоже не сработал — pm2 daemon в плохом состоянии"
   fi
 }
 
