@@ -61,6 +61,51 @@ export class ServicesController {
     return { success: true };
   }
 
+  // ----- Server config editor -----
+
+  @Get('services/:key/config')
+  @Roles(UserRole.ADMIN)
+  @Throttle({ default: { limit: 30, ttl: 60_000 } })
+  async listConfigs(@Param('key') key: string) {
+    validateKey(key);
+    const data = await this.services.listServerConfigs(key);
+    return { success: true, data };
+  }
+
+  @Get('services/:key/config/:file')
+  @Roles(UserRole.ADMIN)
+  @Throttle({ default: { limit: 30, ttl: 60_000 } })
+  async readConfig(@Param('key') key: string, @Param('file') file: string) {
+    validateKey(key);
+    const data = await this.services.readServerConfig(key, file);
+    return { success: true, data };
+  }
+
+  @Post('services/:key/config/:file')
+  @Roles(UserRole.ADMIN)
+  @Throttle({ default: { limit: 10, ttl: 60_000 } })
+  async writeConfig(
+    @Param('key') key: string,
+    @Param('file') file: string,
+    @Body() body: { content: string },
+  ) {
+    validateKey(key);
+    if (!body || typeof body.content !== 'string') {
+      throw new BadRequestException('Body must be { content: string }');
+    }
+    const data = await this.services.writeServerConfig(key, file, body.content);
+    return { success: true, data };
+  }
+
+  @Post('services/:key/restart')
+  @Roles(UserRole.ADMIN)
+  @Throttle({ default: { limit: 5, ttl: 60_000 } })
+  async restart(@Param('key') key: string) {
+    validateKey(key);
+    const data = await this.services.restartServerService(key);
+    return { success: true, data };
+  }
+
   // =====================================================================
   // Site level — /sites/:siteId/services
   // =====================================================================

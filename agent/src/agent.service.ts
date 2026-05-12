@@ -26,6 +26,7 @@ import { LogTailManager } from './logs/log.tail';
 import { ManticoreExecutor } from './services/manticore.executor';
 import { RedisExecutor } from './services/redis.executor';
 import { MariadbEngineExecutor, PostgresqlEngineExecutor } from './database/db-engine.executor';
+import { ServerConfigExecutor } from './services/server-config.executor';
 import { XrayManager } from './vpn/xray.manager';
 import { AmneziaWgManager } from './vpn/amnezia-wg.manager';
 import { VpnInstaller } from './vpn/installer';
@@ -99,6 +100,7 @@ export class AgentService {
   private redisSvc: RedisExecutor;
   private mariadbEngine: MariadbEngineExecutor;
   private postgresqlEngine: PostgresqlEngineExecutor;
+  private serverConfig: ServerConfigExecutor;
   private xrayMgr: XrayManager;
   private amneziaMgr: AmneziaWgManager;
   private vpnInstaller: VpnInstaller;
@@ -142,6 +144,7 @@ export class AgentService {
     this.redisSvc = new RedisExecutor(this.cmdExec);
     this.mariadbEngine = new MariadbEngineExecutor(this.cmdExec);
     this.postgresqlEngine = new PostgresqlEngineExecutor(this.cmdExec);
+    this.serverConfig = new ServerConfigExecutor();
     this.xrayMgr = new XrayManager(this.cmdExec);
     this.amneziaMgr = new AmneziaWgManager(this.cmdExec);
     this.vpnInstaller = new VpnInstaller(this.cmdExec);
@@ -2443,6 +2446,45 @@ export class AgentService {
         cb({ success: false, error: (err as Error).message });
       }
     }, 300_000);
+
+    // -- Server config editor (mariadb/my.cnf, postgresql/postgresql.conf + pg_hba.conf) --
+    // Допустимые комбинации `serviceKey + file` хардкоднуты в ServerConfigExecutor —
+    // ни один user-controlled путь сюда не дойдёт. См. agent/src/services/server-config.executor.ts.
+    this.safeOn(s, 'services:list-server-configs', async (params: { serviceKey: string }, cb: Callback) => {
+      try {
+        const data = await this.serverConfig.listConfigs(params.serviceKey);
+        cb({ success: true, data });
+      } catch (err) {
+        cb({ success: false, error: (err as Error).message });
+      }
+    });
+
+    this.safeOn(s, 'services:read-server-config', async (params: { serviceKey: string; file: string }, cb: Callback) => {
+      try {
+        const data = await this.serverConfig.readConfig(params.serviceKey, params.file);
+        cb({ success: true, data });
+      } catch (err) {
+        cb({ success: false, error: (err as Error).message });
+      }
+    });
+
+    this.safeOn(s, 'services:write-server-config', async (params: { serviceKey: string; file: string; content: string }, cb: Callback) => {
+      try {
+        const data = await this.serverConfig.writeConfig(params.serviceKey, params.file, params.content);
+        cb({ success: true, data });
+      } catch (err) {
+        cb({ success: false, error: (err as Error).message });
+      }
+    });
+
+    this.safeOn(s, 'services:restart-server', async (params: { serviceKey: string }, cb: Callback) => {
+      try {
+        const data = await this.serverConfig.restartService(params.serviceKey);
+        cb({ success: true, data });
+      } catch (err) {
+        cb({ success: false, error: (err as Error).message });
+      }
+    }, 90_000);
 
     this.safeOn(s, 'redis:server-status', async (_params: unknown, cb: Callback) => {
       try {

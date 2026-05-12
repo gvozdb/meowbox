@@ -349,6 +349,11 @@
                   Апгрейд
                 </button>
               </div>
+              <div v-if="isModxSite && site.cmsTablePrefix" class="info-row">
+                <span class="info-row__label">Префикс таблиц</span>
+                <span class="info-row__value info-row__value--mono">{{ site.cmsTablePrefix }}</span>
+                <span class="info-row__value info-row__value--muted" title="Изменить нельзя — таблицы уже созданы с этим префиксом">read-only</span>
+              </div>
             </div>
             <div v-else-if="isModxSite" class="info-card__rows">
               <div class="info-row">
@@ -2753,6 +2758,7 @@ interface SiteDetail {
   nginxConfigPath: string;
   systemUser: string | null;
   cmsAdminUser?: string | null;
+  cmsTablePrefix?: string | null;
   managerPath?: string | null;
   modxVersion?: string | null;
   gitRepository: string | null;

@@ -71,6 +71,11 @@ model Site {
   cmsAdminPasswordEnc String? @map("cms_admin_password_enc")
   managerPath      String?  @map("manager_path")
   connectorsPath   String?  @map("connectors_path")
+  // Префикс таблиц в БД CMS (MODX). Задаётся ОДИН РАЗ при создании сайта,
+  // дальше не меняется (read-only в UI) — иначе пришлось бы переименовывать
+  // таблицы. Формат: ^[a-z][a-z0-9_]*_$ (например, `xkqzwfa_`). Если null —
+  // fallback на MODX_DB_DEFAULTS.TABLE_PREFIX ("modx_").
+  cmsTablePrefix   String?  @map("cms_table_prefix")
   // Версия установленной CMS (для MODX: "2.8.8-pl", "3.1.2-pl" и т.п.).
   modxVersion      String?  @map("modx_version")
   // Кастомный фрагмент php-fpm пула — дописывается в конец pool-конфига при

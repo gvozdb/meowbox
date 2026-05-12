@@ -82,7 +82,7 @@
 
         <div v-if="backupDefaults.engine === 'RESTIC'" class="form-group">
           <label class="form-label">Retention (Restic)</label>
-          <div class="retention-grid">
+          <div class="retention-grid retention-grid--4">
             <div><label class="form-sublabel">По одному за день</label>
               <input v-model.number="backupDefaults.retention.keepDaily" type="number" min="0" max="365" class="form-input" /></div>
             <div><label class="form-sublabel">По одному за неделю</label>
@@ -92,6 +92,11 @@
             <div><label class="form-sublabel">По одному за год</label>
               <input v-model.number="backupDefaults.retention.keepYearly" type="number" min="0" max="20" class="form-input" /></div>
           </div>
+          <p class="form-hint">
+            Пример: 7 / 4 / 6 / 1 — последние 7 дней ежедневно, 4 воскресенья,
+            6 последних 1-х чисел месяца, 1 последний снапшот года.
+            Остальное чистится автоматически (<code>restic forget --prune</code>).
+          </p>
         </div>
 
         <div v-else class="form-group">
@@ -358,15 +363,23 @@
               <label class="form-label">Cron (опц.)</label>
               <input v-model="serverDialog.form.schedule" class="form-input mono" placeholder="0 3 * * *" />
             </div>
-            <div class="retention-grid">
-              <div><label class="form-sublabel">Daily</label>
-                <input v-model.number="serverDialog.form.keepDaily" type="number" min="0" max="365" class="form-input" /></div>
-              <div><label class="form-sublabel">Weekly</label>
-                <input v-model.number="serverDialog.form.keepWeekly" type="number" min="0" max="52" class="form-input" /></div>
-              <div><label class="form-sublabel">Monthly</label>
-                <input v-model.number="serverDialog.form.keepMonthly" type="number" min="0" max="60" class="form-input" /></div>
-              <div><label class="form-sublabel">Yearly</label>
-                <input v-model.number="serverDialog.form.keepYearly" type="number" min="0" max="20" class="form-input" /></div>
+            <div class="form-group">
+              <label class="form-label">Retention (Restic)</label>
+              <div class="retention-grid retention-grid--4">
+                <div><label class="form-sublabel">По одному за день</label>
+                  <input v-model.number="serverDialog.form.keepDaily" type="number" min="0" max="365" class="form-input" /></div>
+                <div><label class="form-sublabel">По одному за неделю</label>
+                  <input v-model.number="serverDialog.form.keepWeekly" type="number" min="0" max="52" class="form-input" /></div>
+                <div><label class="form-sublabel">По одному за месяц</label>
+                  <input v-model.number="serverDialog.form.keepMonthly" type="number" min="0" max="60" class="form-input" /></div>
+                <div><label class="form-sublabel">По одному за год</label>
+                  <input v-model.number="serverDialog.form.keepYearly" type="number" min="0" max="20" class="form-input" /></div>
+              </div>
+              <p class="form-hint">
+                Пример: 7 / 4 / 6 / 1 — последние 7 дней ежедневно, 4 воскресенья,
+                6 последних 1-х чисел месяца, 1 последний снапшот года.
+                Остальное чистится автоматически (<code>restic forget --prune</code>).
+              </p>
             </div>
             <label class="inline-check">
               <input type="checkbox" v-model="serverDialog.form.enabled" />
@@ -413,15 +426,23 @@
               <label class="form-label">Cron (опц.)</label>
               <input v-model="panelDialog.form.schedule" class="form-input mono" placeholder="0 * * * *" />
             </div>
-            <div class="retention-grid">
-              <div><label class="form-sublabel">Daily</label>
-                <input v-model.number="panelDialog.form.keepDaily" type="number" min="0" max="365" class="form-input" /></div>
-              <div><label class="form-sublabel">Weekly</label>
-                <input v-model.number="panelDialog.form.keepWeekly" type="number" min="0" max="52" class="form-input" /></div>
-              <div><label class="form-sublabel">Monthly</label>
-                <input v-model.number="panelDialog.form.keepMonthly" type="number" min="0" max="60" class="form-input" /></div>
-              <div><label class="form-sublabel">Yearly</label>
-                <input v-model.number="panelDialog.form.keepYearly" type="number" min="0" max="20" class="form-input" /></div>
+            <div class="form-group">
+              <label class="form-label">Retention (Restic)</label>
+              <div class="retention-grid retention-grid--4">
+                <div><label class="form-sublabel">По одному за день</label>
+                  <input v-model.number="panelDialog.form.keepDaily" type="number" min="0" max="365" class="form-input" /></div>
+                <div><label class="form-sublabel">По одному за неделю</label>
+                  <input v-model.number="panelDialog.form.keepWeekly" type="number" min="0" max="52" class="form-input" /></div>
+                <div><label class="form-sublabel">По одному за месяц</label>
+                  <input v-model.number="panelDialog.form.keepMonthly" type="number" min="0" max="60" class="form-input" /></div>
+                <div><label class="form-sublabel">По одному за год</label>
+                  <input v-model.number="panelDialog.form.keepYearly" type="number" min="0" max="20" class="form-input" /></div>
+              </div>
+              <p class="form-hint">
+                Пример: 7 / 4 / 6 / 1 — последние 7 дней ежедневно, 4 воскресенья,
+                6 последних 1-х чисел месяца, 1 последний снапшот года.
+                Остальное чистится автоматически (<code>restic forget --prune</code>).
+              </p>
             </div>
             <label class="inline-check">
               <input type="checkbox" v-model="panelDialog.form.enabled" />
@@ -1046,6 +1067,10 @@ onBeforeUnmount(() => {
 
 .retention-grid {
   display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 0.75rem;
+}
+.retention-grid--4 { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+@media (max-width: 560px) {
+  .retention-grid--4 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
 
 .cfg-badge {

@@ -42,13 +42,12 @@ export enum DatabaseType {
 // PHP
 // =============================================================================
 
-export enum PhpVersion {
-  PHP_74 = '7.4',
-  PHP_80 = '8.0',
-  PHP_81 = '8.1',
-  PHP_82 = '8.2',
-  PHP_83 = '8.3',
-}
+// Единственный источник правды — SUPPORTED_PHP_VERSIONS в shared/src/constants.ts.
+// PhpVersion остаётся как type-alias для обратной совместимости импортов;
+// раньше был enum, но это давало второй список, который расходился с массивом
+// (например, 8.4 был в SUPPORTED, но отсутствовал в enum → DTO с @IsEnum резал
+// валидные значения). Для валидации в DTO используем @IsIn(SUPPORTED_PHP_VERSIONS).
+export type PhpVersion = import('./constants').SupportedPhpVersion;
 
 // =============================================================================
 // Backups

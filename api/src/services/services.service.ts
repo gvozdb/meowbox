@@ -355,6 +355,81 @@ export class ServicesService implements OnModuleInit {
   }
 
   // =====================================================================
+  // Server config editor — редактирование my.cnf / postgresql.conf / pg_hba.conf
+  // через панель. Whitelist путей на стороне агента.
+  // =====================================================================
+
+  /** Список конфиг-файлов сервиса с реальными путями (для рендеринга вкладок). */
+  async listServerConfigs(key: string): Promise<Array<{ file: string; path: string; exists: boolean }>> {
+    this.assertConfigEditableService(key);
+    const r = await this.agent.emitToAgent<Array<{ file: string; path: string; exists: boolean }>>(
+      'services:list-server-configs',
+      { serviceKey: key },
+      30_000,
+    );
+    if (!r.success) throw new BadRequestException(r.error || 'list-server-configs failed');
+    return r.data!;
+  }
+
+  async readServerConfig(key: string, file: string): Promise<{ path: string; content: string; size: number; utf8: boolean }> {
+    this.assertConfigEditableService(key);
+    if (!file || file.length > 64 || !/^[a-zA-Z0-9._-]+$/.test(file)) {
+      throw new BadRequestException('Invalid config file name');
+    }
+    const r = await this.agent.emitToAgent<{ path: string; content: string; size: number; utf8: boolean }>(
+      'services:read-server-config',
+      { serviceKey: key, file },
+      30_000,
+    );
+    if (!r.success) throw new BadRequestException(r.error || 'read-server-config failed');
+    return r.data!;
+  }
+
+  async writeServerConfig(key: string, file: string, content: string): Promise<{ path: string; backupPath: string }> {
+    this.assertConfigEditableService(key);
+    if (!file || file.length > 64 || !/^[a-zA-Z0-9._-]+$/.test(file)) {
+      throw new BadRequestException('Invalid config file name');
+    }
+    if (typeof content !== 'string') {
+      throw new BadRequestException('content must be a string');
+    }
+    if (content.length > 1_000_000) {
+      throw new BadRequestException('content too large (limit 1 MB)');
+    }
+    const r = await this.agent.emitToAgent<{ path: string; backupPath: string }>(
+      'services:write-server-config',
+      { serviceKey: key, file, content },
+      30_000,
+    );
+    if (!r.success) throw new BadRequestException(r.error || 'write-server-config failed');
+    return r.data!;
+  }
+
+  async restartServerService(key: string): Promise<{ unit: string; ok: boolean; output: string }> {
+    this.assertConfigEditableService(key);
+    const r = await this.agent.emitToAgent<{ unit: string; ok: boolean; output: string }>(
+      'services:restart-server',
+      { serviceKey: key },
+      90_000,
+    );
+    if (!r.success) throw new BadRequestException(r.error || 'restart-server failed');
+    return r.data!;
+  }
+
+  /**
+   * Не каждый сервис умеет редактироваться через панель. Per-site сервисы
+   * (Redis/Manticore) живут per-site, у них нет глобального конфига —
+   * для них config-editor не имеет смысла, отказ 400.
+   */
+  private assertConfigEditableService(key: string): void {
+    if (key !== 'mariadb' && key !== 'postgresql') {
+      throw new BadRequestException(
+        `Сервис «${key}» не поддерживает редактирование конфигурации через панель`,
+      );
+    }
+  }
+
+  // =====================================================================
   // Site level
   // =====================================================================
 

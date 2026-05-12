@@ -36,6 +36,13 @@ interface ModxInstallParams {
   systemUser?: string; // per-site Linux user (defaults to www-data)
   managerPath?: string;   // default: 'manager'
   connectorsPath?: string; // default: 'connectors'
+  /**
+   * Префикс таблиц БД MODX. Если не задан — fallback на
+   * `MODX_DB_DEFAULTS.TABLE_PREFIX` ("modx_") для обратной совместимости с
+   * legacy-сайтами. Для новых сайтов API всегда передаёт значение
+   * (либо юзерское, либо рандомный `[a-z]{7}_`).
+   */
+  tablePrefix?: string;
 }
 
 interface ModxUpdateParams {
@@ -1060,7 +1067,7 @@ export class SiteInstaller {
       `--database_connection_charset=${MODX_DB_DEFAULTS.MYSQL_CHARSET}`,
       `--database_charset=${MODX_DB_DEFAULTS.MYSQL_CHARSET}`,
       `--database_collation=${isPg ? MODX_DB_DEFAULTS.POSTGRESQL_COLLATION : MODX_DB_DEFAULTS.MYSQL_COLLATION}`,
-      `--table_prefix=${MODX_DB_DEFAULTS.TABLE_PREFIX}`,
+      `--table_prefix=${params.tablePrefix || MODX_DB_DEFAULTS.TABLE_PREFIX}`,
       '--language=en',
       `--cmsadmin=${adminUser}`,
       `--cmspassword=${adminPassword}`,
@@ -1170,7 +1177,7 @@ export class SiteInstaller {
     <database_connection_charset>${MODX_DB_DEFAULTS.MYSQL_CHARSET}</database_connection_charset>
     <database_charset>${MODX_DB_DEFAULTS.MYSQL_CHARSET}</database_charset>
     <database_collation>${isPg ? MODX_DB_DEFAULTS.POSTGRESQL_COLLATION : MODX_DB_DEFAULTS.MYSQL_COLLATION}</database_collation>
-    <table_prefix>${MODX_DB_DEFAULTS.TABLE_PREFIX}</table_prefix>
+    <table_prefix>${this.escapeXml(params.tablePrefix || MODX_DB_DEFAULTS.TABLE_PREFIX)}</table_prefix>
     <https_port>${MODX_DB_DEFAULTS.HTTPS_PORT}</https_port>
     <http_host>${params.domain}</http_host>
     <inplace>1</inplace>
@@ -1438,7 +1445,7 @@ $database_user = '${dbUserEsc}';
 $database_password = '${dbPasswordEsc}';
 $database_connection_charset = '${MODX_DB_DEFAULTS.CHARSET}';
 $dbase = '${dbNameEsc}';
-$table_prefix = '${MODX_DB_DEFAULTS.TABLE_PREFIX}';
+$table_prefix = '${phpEsc(params.tablePrefix || MODX_DB_DEFAULTS.TABLE_PREFIX)}';
 $database_dsn = '${dbDsnEsc}';
 $config_options = array();
 $driver_options = array();

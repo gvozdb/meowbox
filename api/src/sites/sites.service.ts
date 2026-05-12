@@ -406,6 +406,18 @@ export class SitesService implements OnModuleInit {
   }
 
   /**
+   * Случайная строка из [a-z], длина `length`. Используется для генерации
+   * дефолтного префикса таблиц MODX (`[a-z]{7}_`) — лучше дефолтного `modx_`
+   * с точки зрения скрытия движка и снижения шанса коллизии с другими БД,
+   * если случайно подцепят чужую.
+   */
+  private generateRandomLower(length: number): string {
+    const chars = 'abcdefghijklmnopqrstuvwxyz';
+    const bytes = randomBytes(length);
+    return Array.from(bytes, (b) => chars[b % chars.length]).join('');
+  }
+
+  /**
    * Best-effort: ставит/обновляет per-user CLI-шим, чтобы команда `php` в
    * SSH/SFTP-сессии юзера сайта вызывала ту же версию PHP, что и FPM-пул.
    *
@@ -1711,14 +1723,20 @@ export class SitesService implements OnModuleInit {
 
       // 4. Установка файлов сайта (MODX загрузка / CUSTOM скелет)
       if (!dto.skipInstall) {
-        const adminUser = MODX_TYPES.includes(dto.type)
+        const isModx = MODX_TYPES.includes(dto.type);
+        const adminUser = isModx
           ? (dto.cmsAdminUser || systemUser)
           : undefined;
-        const adminPassword = MODX_TYPES.includes(dto.type)
+        const adminPassword = isModx
           ? (dto.cmsAdminPassword || this.generatePassword(16))
           : undefined;
         const managerPath = dto.managerPath || 'manager';
         const connectorsPath = dto.connectorsPath || 'connectors';
+        // Префикс таблиц: либо пришёл из DTO (юзер задал), либо рандом `[a-z]{7}_`.
+        // Только для MODX; для CUSTOM не имеет смысла.
+        const tablePrefix = isModx
+          ? (dto.cmsTablePrefix || `${this.generateRandomLower(7)}_`)
+          : undefined;
 
         if (adminPassword) {
           await this.prisma.site.update({
@@ -1728,6 +1746,7 @@ export class SitesService implements OnModuleInit {
               cmsAdminPasswordEnc: encryptCmsPassword(adminPassword),
               managerPath,
               connectorsPath,
+              cmsTablePrefix: tablePrefix ?? null,
             },
           });
         }
@@ -1760,6 +1779,7 @@ export class SitesService implements OnModuleInit {
           systemUser,
           managerPath,
           connectorsPath,
+          tablePrefix,
         }, 1_200_000); // 20 минут: composer create-project + cli-install.php + setup
 
         if (!installResult.success) {

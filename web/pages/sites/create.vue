@@ -269,9 +269,9 @@
           </div>
         </div>
 
-        <!-- MODX admin fields -->
+        <!-- MODX-специфика: версия, админ-креды, префикс таблиц БД, пути manager/connectors -->
         <div v-if="isMODX" class="create-site__fields create-site__fields--group">
-          <h3 class="create-site__group-title">MODX-администратор</h3>
+          <h3 class="create-site__group-title">MODX-специфика</h3>
 
           <div class="form-group">
             <label class="form-label">Версия MODX</label>
@@ -287,32 +287,51 @@
             <span class="form-hint">Обновить на более свежую версию можно потом на странице сайта</span>
           </div>
 
-          <div class="form-group">
-            <label class="form-label">CMS Логин</label>
-            <input
-              v-model="form.cmsAdminUser"
-              type="text"
-              class="form-input form-input--mono"
-              :placeholder="form.name || 'admin'"
-              maxlength="64"
-            />
-            <span class="form-hint">По умолчанию = имя Linux-юзера</span>
+          <div class="form-row">
+            <div class="form-group">
+              <label class="form-label">Admin Логин</label>
+              <input
+                v-model="form.cmsAdminUser"
+                type="text"
+                class="form-input form-input--mono"
+                :placeholder="form.name || 'admin'"
+                maxlength="64"
+              />
+              <span class="form-hint">По умолчанию = имя Linux-юзера</span>
+            </div>
+            <div class="form-group">
+              <label class="form-label">Admin Пароль</label>
+              <div class="form-input-group">
+                <input
+                  v-model="form.cmsAdminPassword"
+                  :type="showCmsPassword ? 'text' : 'password'"
+                  class="form-input form-input--mono form-input--with-btn"
+                  placeholder="Сгенерируется автоматически"
+                  maxlength="128"
+                />
+                <button type="button" class="form-input-btn" @click="showCmsPassword = !showCmsPassword">
+                  {{ showCmsPassword ? 'Скрыть' : 'Показать' }}
+                </button>
+              </div>
+            </div>
           </div>
 
           <div class="form-group">
-            <label class="form-label">CMS Пароль</label>
+            <label class="form-label">Префикс таблиц БД</label>
             <div class="form-input-group">
               <input
-                v-model="form.cmsAdminPassword"
-                :type="showCmsPassword ? 'text' : 'password'"
+                v-model="form.cmsTablePrefix"
+                type="text"
                 class="form-input form-input--mono form-input--with-btn"
-                placeholder="Сгенерируется автоматически"
-                maxlength="128"
+                placeholder="modx_"
+                maxlength="32"
+                pattern="^[a-z][a-z0-9_]*_$"
               />
-              <button type="button" class="form-input-btn" @click="showCmsPassword = !showCmsPassword">
-                {{ showCmsPassword ? 'Скрыть' : 'Показать' }}
+              <button type="button" class="form-input-btn" @click="form.cmsTablePrefix = generateTablePrefix()">
+                Сгенерировать
               </button>
             </div>
+            <span class="form-hint">Формат: <code>[a-z0-9_]+_</code>. Подставится в таблицы MODX (например, <code>modx_site_content</code>). После создания изменить нельзя.</span>
           </div>
 
           <div class="form-row">
@@ -611,6 +630,7 @@ const form = reactive({
   // CMS (MODX only)
   cmsAdminUser: '',
   cmsAdminPassword: '',
+  cmsTablePrefix: '',
   managerPath: '',
   connectorsPath: '',
   modxVersion: '3.1.2-pl',
@@ -811,6 +831,31 @@ onMounted(() => {
 
 const isMODX = computed(() => form.type === 'MODX_REVO' || form.type === 'MODX_3');
 
+// Генерируем случайный префикс таблиц вида `[a-z]{7}_`. Используется как
+// дефолт при первом раскрытии MODX-блока и при клике «Сгенерировать».
+function generateTablePrefix(): string {
+  const a = 'abcdefghijklmnopqrstuvwxyz';
+  let s = '';
+  // crypto.getRandomValues — браузерный CSPRNG; на SSR Nuxt не выполнится этот код,
+  // потому что watch ниже стреляет только в клиенте.
+  const buf = new Uint32Array(7);
+  if (typeof window !== 'undefined' && window.crypto && window.crypto.getRandomValues) {
+    window.crypto.getRandomValues(buf);
+    for (let i = 0; i < 7; i++) s += a[buf[i] % 26];
+  } else {
+    for (let i = 0; i < 7; i++) s += a[Math.floor(Math.random() * 26)];
+  }
+  return `${s}_`;
+}
+
+// Когда юзер впервые выбирает MODX-тип — заполняем дефолтным префиксом.
+// Если он потом стирает поле или меняет — сохраняем введённое значение.
+watch(isMODX, (now) => {
+  if (now && !form.cmsTablePrefix) {
+    form.cmsTablePrefix = generateTablePrefix();
+  }
+}, { immediate: true });
+
 const typeLabel = computed(() => {
   return siteTypes.find((t) => t.value === form.type)?.label || form.type;
 });
@@ -938,6 +983,7 @@ async function handleSubmit() {
     if (isMODX.value) {
       if (form.cmsAdminUser.trim()) payload.cmsAdminUser = form.cmsAdminUser.trim();
       if (form.cmsAdminPassword.trim()) payload.cmsAdminPassword = form.cmsAdminPassword.trim();
+      if (form.cmsTablePrefix.trim()) payload.cmsTablePrefix = form.cmsTablePrefix.trim();
       if (form.managerPath.trim()) payload.managerPath = form.managerPath.trim();
       if (form.connectorsPath.trim()) payload.connectorsPath = form.connectorsPath.trim();
       if (form.modxVersion) payload.modxVersion = form.modxVersion;

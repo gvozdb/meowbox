@@ -95,6 +95,13 @@
           </button>
           <template v-else>
             <button
+              v-if="canEditConfig(item)"
+              class="btn btn--ghost btn--sm"
+              :disabled="busy[item.key] === 'config'"
+              :title="`Редактировать ${item.key === 'mariadb' ? 'my.cnf' : 'postgresql.conf + pg_hba.conf'}`"
+              @click="openConfigEditor(item)"
+            >Конфиг</button>
+            <button
               class="btn btn--ghost btn--sm"
               :disabled="busy[item.key] === 'refresh'"
               @click="refreshService(item)"
@@ -112,6 +119,86 @@
               {{ busy[item.key] === 'uninstall' ? 'Удаление…' : 'Удалить' }}
             </button>
           </template>
+        </div>
+      </div>
+    </div>
+
+    <!-- Config editor modal: textarea с моноширинным шрифтом, для PG — вкладки. -->
+    <div
+      v-if="editor.open"
+      class="cfg-modal-overlay"
+      @mousedown.self="!editor.saving && closeConfigEditor()"
+    >
+      <div class="cfg-modal">
+        <div class="cfg-modal__head">
+          <div>
+            <h3 class="cfg-modal__title">Конфигурация — {{ editor.serviceName }}</h3>
+            <p class="cfg-modal__path mono">{{ editor.currentFile?.path || '…' }}</p>
+          </div>
+          <button
+            class="cfg-modal__close"
+            :disabled="editor.saving"
+            aria-label="Закрыть"
+            @click="closeConfigEditor"
+          >
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+          </button>
+        </div>
+
+        <div v-if="editor.files.length > 1" class="cfg-modal__tabs">
+          <button
+            v-for="f in editor.files"
+            :key="f.file"
+            class="cfg-modal__tab"
+            :class="{ 'cfg-modal__tab--active': f.file === editor.activeFile, 'cfg-modal__tab--dirty': editor.dirty[f.file] }"
+            :disabled="editor.saving || editor.loading"
+            @click="switchConfigTab(f.file)"
+          >
+            {{ f.file }}<span v-if="editor.dirty[f.file]"> •</span>
+          </button>
+        </div>
+
+        <div class="cfg-modal__body">
+          <div v-if="editor.loading" class="cfg-modal__loading">
+            <div class="spinner" />
+            <span>Загрузка конфига…</span>
+          </div>
+          <div v-else-if="editor.loadError" class="cfg-modal__error">
+            {{ editor.loadError }}
+          </div>
+          <textarea
+            v-else
+            v-model="editor.content"
+            class="cfg-modal__textarea"
+            spellcheck="false"
+            autocorrect="off"
+            autocapitalize="off"
+            :disabled="editor.saving"
+            @input="markDirty"
+          />
+        </div>
+
+        <div v-if="editor.saveError" class="cfg-modal__error cfg-modal__error--inline">{{ editor.saveError }}</div>
+        <div v-if="editor.saveResult" class="cfg-modal__ok">
+          ✓ Сохранено. Бэкап: <span class="mono">{{ editor.saveResult.backupPath }}</span><br />
+          <template v-if="editor.restartResult">
+            ✓ <span class="mono">{{ editor.restartResult.unit }}</span> перезапущен.
+          </template>
+        </div>
+
+        <div class="cfg-modal__foot">
+          <button
+            class="btn btn--ghost btn--sm"
+            :disabled="editor.saving"
+            @click="closeConfigEditor"
+          >Закрыть</button>
+          <button
+            class="btn btn--primary btn--sm"
+            :disabled="editor.saving || editor.loading || !!editor.loadError || !isAnyDirty"
+            @click="saveAndRestart"
+          >
+            {{ editor.saving ? 'Сохраняю…' : 'Сохранить + перезапустить' }}
+          </button>
         </div>
       </div>
     </div>
@@ -145,6 +232,184 @@ const toast = useMbToast();
 const items = ref<ServerSvc[]>([]);
 const loading = ref(true);
 const busy = reactive<Record<string, string>>({});
+
+// -- Config editor state --
+interface ConfigFileInfo { file: string; path: string; exists: boolean; }
+interface SaveResult { path: string; backupPath: string; }
+interface RestartResult { unit: string; ok: boolean; output: string; }
+
+const editor = reactive<{
+  open: boolean;
+  serviceKey: string;
+  serviceName: string;
+  loading: boolean;
+  saving: boolean;
+  loadError: string;
+  saveError: string;
+  files: ConfigFileInfo[];
+  activeFile: string;
+  /** Локально загруженный контент по каждому файлу — переключение вкладок без потери правок. */
+  contents: Record<string, string>;
+  /** Оригинальный контент (для определения dirty). */
+  originals: Record<string, string>;
+  /** Был ли файл изменён. */
+  dirty: Record<string, boolean>;
+  /** Текущий редактируемый текст (привязка к textarea). */
+  content: string;
+  currentFile: ConfigFileInfo | null;
+  saveResult: SaveResult | null;
+  restartResult: RestartResult | null;
+}>({
+  open: false,
+  serviceKey: '',
+  serviceName: '',
+  loading: false,
+  saving: false,
+  loadError: '',
+  saveError: '',
+  files: [],
+  activeFile: '',
+  contents: {},
+  originals: {},
+  dirty: {},
+  content: '',
+  currentFile: null,
+  saveResult: null,
+  restartResult: null,
+});
+
+const isAnyDirty = computed(() => Object.values(editor.dirty).some((v) => v));
+
+function canEditConfig(item: ServerSvc): boolean {
+  // Только для global-сервисов с общим конфигом. Redis/Manticore — per-site,
+  // у них нет глобального файла, см. API serverConfig whitelist.
+  return item.key === 'mariadb' || item.key === 'postgresql';
+}
+
+async function openConfigEditor(item: ServerSvc) {
+  editor.open = true;
+  editor.serviceKey = item.key;
+  editor.serviceName = item.catalog.name;
+  editor.loading = true;
+  editor.saving = false;
+  editor.loadError = '';
+  editor.saveError = '';
+  editor.saveResult = null;
+  editor.restartResult = null;
+  editor.files = [];
+  editor.contents = {};
+  editor.originals = {};
+  editor.dirty = {};
+  editor.activeFile = '';
+  editor.content = '';
+  editor.currentFile = null;
+  try {
+    const files = await api.get<ConfigFileInfo[]>(`/services/${item.key}/config`);
+    editor.files = files;
+    // Стартовая вкладка — первая existing. Если все missing → первая (покажем ошибку при попытке load).
+    const first = files.find((f) => f.exists) || files[0];
+    if (!first) {
+      editor.loadError = 'У сервиса нет конфигурационных файлов для редактирования';
+      editor.loading = false;
+      return;
+    }
+    await loadConfigFile(first.file);
+  } catch (err) {
+    editor.loadError = (err as Error).message || 'Не удалось получить список конфигов';
+    editor.loading = false;
+  }
+}
+
+async function loadConfigFile(file: string) {
+  editor.loading = true;
+  editor.loadError = '';
+  editor.activeFile = file;
+  editor.currentFile = editor.files.find((f) => f.file === file) || null;
+  try {
+    // Если уже загружали — берём из локального кеша (вместе с локальными правками).
+    if (file in editor.contents) {
+      editor.content = editor.contents[file];
+      editor.loading = false;
+      return;
+    }
+    const data = await api.get<{ path: string; content: string; size: number; utf8: boolean }>(
+      `/services/${editor.serviceKey}/config/${encodeURIComponent(file)}`,
+    );
+    if (!data.utf8) {
+      editor.loadError = 'Файл не является UTF-8 текстом — отказ в редактировании';
+      editor.loading = false;
+      return;
+    }
+    editor.contents[file] = data.content;
+    editor.originals[file] = data.content;
+    editor.dirty[file] = false;
+    editor.content = data.content;
+    if (editor.currentFile) editor.currentFile.path = data.path;
+  } catch (err) {
+    editor.loadError = (err as Error).message || 'Не удалось загрузить конфиг';
+  } finally {
+    editor.loading = false;
+  }
+}
+
+async function switchConfigTab(file: string) {
+  if (file === editor.activeFile) return;
+  // Сохраняем локальные правки текущей вкладки.
+  if (editor.activeFile) editor.contents[editor.activeFile] = editor.content;
+  await loadConfigFile(file);
+}
+
+function markDirty() {
+  editor.contents[editor.activeFile] = editor.content;
+  editor.dirty[editor.activeFile] = editor.content !== editor.originals[editor.activeFile];
+}
+
+async function saveAndRestart() {
+  if (!isAnyDirty.value) return;
+  const dirtyFiles = editor.files.filter((f) => editor.dirty[f.file]);
+  if (!dirtyFiles.length) return;
+  // Подтверждение — рестарт сервиса грохнет активные коннекты.
+  const fileList = dirtyFiles.map((f) => f.file).join(', ');
+  if (!confirm(`Сохранить изменения (${fileList}) и перезапустить ${editor.serviceName}?\n\nАктивные соединения с сервисом будут разорваны.`)) {
+    return;
+  }
+  editor.saving = true;
+  editor.saveError = '';
+  editor.saveResult = null;
+  editor.restartResult = null;
+  try {
+    let lastResult: SaveResult | null = null;
+    for (const f of dirtyFiles) {
+      const res = await api.post<SaveResult>(
+        `/services/${editor.serviceKey}/config/${encodeURIComponent(f.file)}`,
+        { content: editor.contents[f.file] },
+      );
+      lastResult = res;
+      // Обновим origin/dirty.
+      editor.originals[f.file] = editor.contents[f.file];
+      editor.dirty[f.file] = false;
+    }
+    editor.saveResult = lastResult;
+    // Restart.
+    editor.restartResult = await api.post<RestartResult>(
+      `/services/${editor.serviceKey}/restart`,
+    );
+    toast.success(`${editor.serviceName} перезапущен`);
+  } catch (err) {
+    editor.saveError = (err as Error).message || 'Не удалось сохранить / перезапустить';
+    toast.error(editor.saveError);
+  } finally {
+    editor.saving = false;
+  }
+}
+
+function closeConfigEditor() {
+  if (editor.saving) return;
+  if (isAnyDirty.value && !confirm('Есть несохранённые изменения. Закрыть без сохранения?')) {
+    return;
+  }
+  editor.open = false;
+}
 
 // Если CatMascot не зарегистрирован глобально — не валиться. У nuxt компоненты
 // auto-import, эта переменная — просто страховка для шаблона.
@@ -445,5 +710,151 @@ onMounted(loadAll);
 .mono {
   font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
   font-size: 0.78rem;
+}
+
+/* --- Config editor modal --- */
+.cfg-modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.55);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+  padding: 1rem;
+}
+.cfg-modal {
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-subtle);
+  border-radius: 14px;
+  width: min(960px, 100%);
+  max-height: 90vh;
+  display: flex;
+  flex-direction: column;
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.4);
+}
+.cfg-modal__head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 1rem 1.25rem 0.75rem;
+  border-bottom: 1px solid var(--border-subtle);
+}
+.cfg-modal__title {
+  margin: 0;
+  font-size: 1rem;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+.cfg-modal__path {
+  margin: 0.2rem 0 0 0;
+  font-size: 0.74rem;
+  color: var(--text-tertiary);
+  font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+  word-break: break-all;
+}
+.cfg-modal__close {
+  background: transparent;
+  border: none;
+  color: var(--text-tertiary);
+  cursor: pointer;
+  padding: 0.25rem;
+  border-radius: 6px;
+}
+.cfg-modal__close:hover:not(:disabled) {
+  background: var(--bg-input);
+  color: var(--text-primary);
+}
+.cfg-modal__tabs {
+  display: flex;
+  gap: 0.25rem;
+  padding: 0.5rem 1.25rem 0;
+  border-bottom: 1px solid var(--border-subtle);
+}
+.cfg-modal__tab {
+  background: transparent;
+  border: none;
+  border-bottom: 2px solid transparent;
+  padding: 0.5rem 0.85rem;
+  font-size: 0.78rem;
+  font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+  color: var(--text-tertiary);
+  cursor: pointer;
+  transition: color 0.15s, border-color 0.15s;
+}
+.cfg-modal__tab:hover:not(:disabled) { color: var(--text-secondary); }
+.cfg-modal__tab--active {
+  color: var(--text-primary);
+  border-bottom-color: var(--primary);
+}
+.cfg-modal__tab--dirty { color: rgb(250, 204, 21); }
+.cfg-modal__tab:disabled { cursor: not-allowed; opacity: 0.5; }
+
+.cfg-modal__body {
+  flex: 1;
+  display: flex;
+  padding: 1rem 1.25rem;
+  min-height: 320px;
+  overflow: hidden;
+}
+.cfg-modal__loading {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 0.7rem;
+  color: var(--text-tertiary);
+}
+.cfg-modal__error {
+  flex: 1;
+  padding: 0.9rem 1rem;
+  font-size: 0.82rem;
+  color: rgb(248, 113, 113);
+  background: rgba(239, 68, 68, 0.08);
+  border: 1px solid rgba(239, 68, 68, 0.25);
+  border-radius: 8px;
+  word-break: break-word;
+}
+.cfg-modal__error--inline {
+  margin: 0 1.25rem;
+  flex: none;
+}
+.cfg-modal__ok {
+  margin: 0 1.25rem;
+  padding: 0.6rem 0.85rem;
+  font-size: 0.78rem;
+  color: rgb(52, 211, 153);
+  background: rgba(16, 185, 129, 0.1);
+  border: 1px solid rgba(16, 185, 129, 0.25);
+  border-radius: 8px;
+}
+.cfg-modal__textarea {
+  flex: 1;
+  width: 100%;
+  min-height: 360px;
+  max-height: calc(90vh - 220px);
+  resize: vertical;
+  background: var(--bg-input);
+  color: var(--text-primary);
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  padding: 0.75rem 0.9rem;
+  font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+  font-size: 0.82rem;
+  line-height: 1.45;
+  tab-size: 4;
+  outline: none;
+  transition: border-color 0.15s;
+}
+.cfg-modal__textarea:focus { border-color: var(--primary); }
+.cfg-modal__textarea:disabled { opacity: 0.7; }
+.cfg-modal__foot {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.5rem;
+  padding: 0.85rem 1.25rem;
+  border-top: 1px solid var(--border-subtle);
 }
 </style>

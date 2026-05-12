@@ -2,6 +2,7 @@ import {
   IsString,
   IsNotEmpty,
   IsEnum,
+  IsIn,
   IsOptional,
   IsInt,
   IsBoolean,
@@ -19,7 +20,7 @@ import {
 // api/web/agent провоцируют рассинхрон (напр. agent знает про 'PHP_84',
 // которого нет в api) — поэтому держим их строго в shared/src/enums.ts.
 // Runtime работает через symlink api/node_modules/@meowbox/shared → /opt/meowbox/shared.
-import { SiteType, PhpVersion, DatabaseType } from '@meowbox/shared';
+import { SiteType, DatabaseType, SUPPORTED_PHP_VERSIONS } from '@meowbox/shared';
 import {
   SITE_NAME_REGEX,
   SITE_NAME_MESSAGE,
@@ -103,7 +104,9 @@ export class CreateSiteDto {
   phpEnabled?: boolean;
 
   @IsOptional()
-  @IsEnum(PhpVersion)
+  @IsIn(SUPPORTED_PHP_VERSIONS as unknown as string[], {
+    message: `phpVersion must be one of: ${SUPPORTED_PHP_VERSIONS.join(', ')}`,
+  })
   phpVersion?: string;
 
   // ── Database module ────────────────────────────────────────────────────
@@ -206,6 +209,17 @@ export class CreateSiteDto {
   @MaxLength(128)
   cmsAdminPassword?: string;
 
+  // Префикс таблиц БД MODX. Если не указан — генерится `[a-z]{7}_` на сервере.
+  // Валидация: начинается с буквы, далее [a-z0-9_], обязательно заканчивается на `_`.
+  // Длина 2..32 (включая trailing `_`).
+  @IsOptional()
+  @IsString()
+  @MaxLength(32)
+  @Matches(/^[a-z][a-z0-9_]*_$/, {
+    message: 'Table prefix must start with a letter, contain only [a-z0-9_] and end with "_"',
+  })
+  cmsTablePrefix?: string;
+
   @IsOptional()
   @IsString()
   @MaxLength(64)
@@ -270,7 +284,9 @@ export class UpdateSiteDto {
   aliases?: Array<string | { domain: string; redirect?: boolean }>;
 
   @IsOptional()
-  @IsEnum(PhpVersion)
+  @IsIn(SUPPORTED_PHP_VERSIONS as unknown as string[], {
+    message: `phpVersion must be one of: ${SUPPORTED_PHP_VERSIONS.join(', ')}`,
+  })
   phpVersion?: string;
 
   @IsOptional()
