@@ -9,7 +9,7 @@
  *
  * Источники секретов:
  *   1. ENV `ADMINER_SSO_KEY` (передаётся через php-fpm pool env);
- *   2. Файл `/opt/meowbox/.env` (fallback — парсим строку `ADMINER_SSO_KEY=...`).
+ *   2. Файл `state/.env` (`/opt/meowbox/state/.env`, парсим `ADMINER_SSO_KEY=...`).
  *
  * Куки: `meowbox_adminer_session`, HttpOnly, SameSite=Lax, Path=/adminer.
  * Secure ставится автоматически, если запрос пришёл по HTTPS.
@@ -38,11 +38,13 @@ function meowbox_load_keys(): array {
     if (is_string($b64Env) && $b64Env !== '') {
         $candidates[] = $b64Env;
     }
-    foreach (['/opt/meowbox/.env', '/opt/meowbox/state/.env'] as $envFile) {
-        if (!is_readable($envFile)) continue;
+    // Читаем только state/.env (legacy /opt/meowbox/.env удалён в v0.6.x, не пытаемся
+    // даже is_readable — open_basedir всё равно даст warning).
+    $envFile = '/opt/meowbox/state/.env';
+    if (@is_readable($envFile)) {
         $contents = @file_get_contents($envFile);
-        if ($contents === false) continue;
-        if (preg_match('/^\s*ADMINER_SSO_KEY\s*=\s*"?([A-Za-z0-9+\/=]+)"?\s*$/m', $contents, $m)) {
+        if ($contents !== false
+            && preg_match('/^\s*ADMINER_SSO_KEY\s*=\s*"?([A-Za-z0-9+\/=]+)"?\s*$/m', $contents, $m)) {
             $candidates[] = $m[1];
         }
     }
