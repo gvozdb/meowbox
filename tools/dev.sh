@@ -167,9 +167,19 @@ if $NEED_WEB || $FORCE; then
 fi
 
 # ----- PM2 reload -----
-stage reload "pm2 reload all"
-pm2 reload "$PANEL_DIR/ecosystem.config.js" --update-env >/dev/null \
-  || pm2 start "$PANEL_DIR/ecosystem.config.js"
+# api/web — graceful reload (zero-downtime для HTTP).
+# agent — ТОЛЬКО restart: reload в cluster mode оставляет socket.io в петле
+# "transport close → reconnect → websocket error", API получает
+# AgentUnavailableError на любых запросах, которые идут через агента
+# (/api/php/versions и т.п.) до полного рестарта.
+stage reload "pm2 reload api+web, restart agent"
+if pm2 describe meowbox-api >/dev/null 2>&1; then
+  pm2 reload meowbox-api --update-env >/dev/null 2>&1 || pm2 restart meowbox-api --update-env >/dev/null 2>&1
+  pm2 reload meowbox-web --update-env >/dev/null 2>&1 || pm2 restart meowbox-web --update-env >/dev/null 2>&1
+  pm2 restart meowbox-agent --update-env >/dev/null 2>&1
+else
+  pm2 start "$PANEL_DIR/ecosystem.config.js"
+fi
 pm2 save >/dev/null 2>&1 || true
 
 # ----- Healthcheck -----
