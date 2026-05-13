@@ -193,6 +193,7 @@ export class SiteBackupScheduleService {
         await this.backups.triggerBackup(
           {
             siteId: site.id,
+            scheduleId: schedule.id,
             type: schedule.type,
             engine: schedule.engine,
             storageLocationIds: locIds,

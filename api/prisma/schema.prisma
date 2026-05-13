@@ -476,6 +476,7 @@ model SiteBackupSchedule {
   updatedAt              DateTime @updatedAt @map("updated_at")
 
   storageLocations       StorageLocation[] @relation("SiteBackupScheduleToStorageLocation")
+  backups                Backup[]
 
   @@index([enabled])
   @@map("site_backup_schedules")
@@ -518,6 +519,10 @@ model Backup {
   id                String    @id @default(uuid())
   siteId            String    @map("site_id")
   configId          String?   @map("config_id")
+  /// SiteBackupSchedule, по которому запущен этот бэкап (если запуск был из шедуля).
+  /// Используется для группировки уведомлений в дайджест: один cron-запуск шедуля
+  /// собирает в очередь все per-site события и шлёт одной пачкой.
+  scheduleId        String?   @map("schedule_id")
   type              String // BackupType
   status            String    @default("PENDING") // BackupStatus
   // Движок, которым сделан этот бэкап
@@ -537,15 +542,17 @@ model Backup {
   baseBackupId      String?   @map("base_backup_id")
   createdAt         DateTime  @default(now()) @map("created_at")
 
-  site            Site             @relation(fields: [siteId], references: [id], onDelete: Cascade)
-  config          BackupConfig?    @relation(fields: [configId], references: [id], onDelete: SetNull)
-  storageLocation StorageLocation? @relation(fields: [storageLocationId], references: [id], onDelete: SetNull)
-  baseBackup      Backup?          @relation("DiffBase", fields: [baseBackupId], references: [id], onDelete: SetNull)
-  differentials   Backup[]         @relation("DiffBase")
+  site            Site                 @relation(fields: [siteId], references: [id], onDelete: Cascade)
+  config          BackupConfig?        @relation(fields: [configId], references: [id], onDelete: SetNull)
+  schedule        SiteBackupSchedule?  @relation(fields: [scheduleId], references: [id], onDelete: SetNull)
+  storageLocation StorageLocation?     @relation(fields: [storageLocationId], references: [id], onDelete: SetNull)
+  baseBackup      Backup?              @relation("DiffBase", fields: [baseBackupId], references: [id], onDelete: SetNull)
+  differentials   Backup[]             @relation("DiffBase")
   exports         BackupExport[]
 
   @@index([siteId])
   @@index([status])
+  @@index([scheduleId])
   @@map("backups")
 }
 

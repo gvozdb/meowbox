@@ -11,6 +11,10 @@ import { BackupType, BackupStatus, BackupStorageType, BackupEngine } from '../co
 import { PrismaService } from '../common/prisma.service';
 import { AgentRelayService } from '../gateway/agent-relay.service';
 import { NotificationDispatcherService } from '../notifications/notification-dispatcher.service';
+import {
+  NotificationDigestService,
+  DigestNotificationMode,
+} from '../notifications/notification-digest.service';
 import { StorageLocationsService } from '../storage-locations/storage-locations.service';
 import { PanelSettingsService } from '../panel-settings/panel-settings.service';
 import { BackupExportsService } from './backup-exports.service';
@@ -74,6 +78,7 @@ export class BackupsService {
     private readonly prisma: PrismaService,
     private readonly agentRelay: AgentRelayService,
     private readonly notifier: NotificationDispatcherService,
+    private readonly digest: NotificationDigestService,
     private readonly storageLocations: StorageLocationsService,
     private readonly panelSettings: PanelSettingsService,
     // forwardRef защищает от потенциального цикла на старте Nest, хотя
@@ -359,6 +364,7 @@ export class BackupsService {
           data: {
             siteId: dto.siteId,
             configId,
+            scheduleId: dto.scheduleId ?? null,
             type: backupType,
             engine,
             status: BackupStatus.PENDING,
@@ -411,6 +417,7 @@ export class BackupsService {
         data: {
           siteId: dto.siteId,
           configId,
+          scheduleId: dto.scheduleId ?? null,
           type: backupType,
           engine,
           status: BackupStatus.PENDING,
@@ -574,8 +581,37 @@ export class BackupsService {
         site: { select: { name: true } },
         type: true,
         engine: true,
+        scheduleId: true,
+        schedule: { select: { id: true, name: true, notificationMode: true } },
       },
     });
+
+    // Запуск был из SiteBackupSchedule — отдаём событие в дайджест-сервис,
+    // который сам решит (INSTANT / DIGEST / FAILURES_ONLY) на основе
+    // notificationMode шедуля. В режиме DIGEST все события одного cron-запуска
+    // шедуля копятся в очереди и шлются одним сообщением по digestSchedule.
+    if (backup?.schedule) {
+      const mode = (backup.schedule.notificationMode || 'INSTANT') as DigestNotificationMode;
+      this.digest
+        .handleCompletion(
+          {
+            configType: 'SITE_SCHEDULE',
+            configId: backup.schedule.id,
+            configName: backup.schedule.name,
+            resourceLabel: backup.site?.name || '—',
+            success,
+            sizeBytes,
+            errorMessage,
+          },
+          mode,
+        )
+        .catch((err) =>
+          this.logger.error(`Digest dispatch failed: ${(err as Error).message}`),
+        );
+      return;
+    }
+
+    // Без шедуля (ручной запуск, per-site BackupConfig) — старое поведение: instant-нотификация.
     this.notifier.dispatch({
       event: success ? 'BACKUP_COMPLETED' : 'BACKUP_FAILED',
       title: success ? 'Backup Completed' : 'Backup Failed',

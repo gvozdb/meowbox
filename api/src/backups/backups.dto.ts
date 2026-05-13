@@ -131,6 +131,12 @@ export class TriggerBackupDto {
   @IsString()
   configId?: string;
 
+  // Запуск из SiteBackupSchedule.triggerForAllSites — id шедуля,
+  // чтобы потом сгруппировать события в один дайджест.
+  @IsOptional()
+  @IsString()
+  scheduleId?: string;
+
   @IsOptional()
   @IsEnum(BackupType)
   type?: string;

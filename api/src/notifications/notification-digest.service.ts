@@ -156,11 +156,9 @@ export class NotificationDigestService {
     }
 
     // --- Site backup schedules (per-site бэкапы по глобальным шедулям) ---
-    // На данный момент per-site bаckup'ы не привязаны к scheduleId в Backup
-    // модели — оставлено для следующего релиза. Здесь читаем все шедули,
-    // которые в режиме DIGEST + matched cron, чтобы хотя бы не потерять
-    // конфиг при flushed-подсчёте; реальный flush будет работать только
-    // если в очереди есть записи.
+    // BackupsService.completeBackup() кладёт в очередь по configId = scheduleId,
+    // когда у бэкапа выставлен scheduleId (см. SiteBackupSchedule.triggerForAllSites).
+    // Здесь по cron шедуля отдаём накопленные события одной пачкой на чат.
     const siteSchedules = await this.prisma.siteBackupSchedule.findMany({
       where: { notificationMode: 'DIGEST', digestSchedule: { not: null } },
       select: { id: true, name: true, digestSchedule: true },
