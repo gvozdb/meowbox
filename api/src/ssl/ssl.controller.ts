@@ -30,16 +30,21 @@ export class SslOverviewController {
   }
 }
 
-@Controller('sites/:siteId/ssl')
+/**
+ * SSL nested per основной домен (`SiteDomain`). Каждый домен имеет
+ * собственный сертификат (`SslCertificate.domainId`).
+ */
+@Controller('sites/:siteId/domains/:domainId/ssl')
 export class SslController {
   constructor(private readonly sslService: SslService) {}
 
   @Get()
   async getCertificate(
     @Param('siteId', ParseUUIDPipe) siteId: string,
+    @Param('domainId', ParseUUIDPipe) domainId: string,
     @CurrentUser() user?: JwtUser,
   ) {
-    const cert = await this.sslService.findBySite(siteId, user!.id, user!.role);
+    const cert = await this.sslService.findByDomain(siteId, domainId, user!.id, user!.role);
     return { success: true, data: cert };
   }
 
@@ -47,9 +52,10 @@ export class SslController {
   @Throttle({ default: { limit: 3, ttl: 60000 } })
   async issueCertificate(
     @Param('siteId', ParseUUIDPipe) siteId: string,
+    @Param('domainId', ParseUUIDPipe) domainId: string,
     @CurrentUser() user?: JwtUser,
   ) {
-    const params = await this.sslService.requestIssuance(siteId, user!.id, user!.role);
+    const params = await this.sslService.requestIssuance(siteId, domainId, user!.id, user!.role);
     return {
       success: true,
       data: params,
@@ -57,25 +63,30 @@ export class SslController {
     };
   }
 
-  // Отозвать (и удалить) действующий сертификат через UI.
   @Post('revoke')
   @Throttle({ default: { limit: 3, ttl: 60000 } })
   async revokeCertificate(
     @Param('siteId', ParseUUIDPipe) siteId: string,
+    @Param('domainId', ParseUUIDPipe) domainId: string,
     @CurrentUser() user?: JwtUser,
   ) {
-    const result = await this.sslService.revokeCertificate(siteId, user!.id, user!.role);
+    const result = await this.sslService.revokeCertificate(siteId, domainId, user!.id, user!.role);
     return { success: true, data: result };
   }
 
-  // Подхватить уже выпущенный на диске сертификат (без нового запроса к LE).
   @Post('import')
   @Throttle({ default: { limit: 5, ttl: 60000 } })
   async importExistingCertificate(
     @Param('siteId', ParseUUIDPipe) siteId: string,
+    @Param('domainId', ParseUUIDPipe) domainId: string,
     @CurrentUser() user?: JwtUser,
   ) {
-    const result = await this.sslService.importExistingCertificate(siteId, user!.id, user!.role);
+    const result = await this.sslService.importExistingCertificate(
+      siteId,
+      domainId,
+      user!.id,
+      user!.role,
+    );
     return { success: true, data: result };
   }
 
@@ -83,11 +94,13 @@ export class SslController {
   @Throttle({ default: { limit: 3, ttl: 60000 } })
   async installCustomCertificate(
     @Param('siteId', ParseUUIDPipe) siteId: string,
+    @Param('domainId', ParseUUIDPipe) domainId: string,
     @Body() body: InstallCustomCertDto,
     @CurrentUser() user?: JwtUser,
   ) {
     const result = await this.sslService.installCustomCertificate(
       siteId,
+      domainId,
       user!.id,
       user!.role,
       body.certPem,

@@ -85,7 +85,7 @@ const migration: SystemMigration = {
     const templates: AgentTemplatesModule = require(agentTemplatesPath);
 
     const sites = await ctx.prisma.site.findMany({
-      include: { sslCertificate: true },
+      include: { sslCertificates: true },
     });
 
     if (sites.length === 0) {
@@ -148,7 +148,7 @@ const migration: SystemMigration = {
       }
 
       // 4. Рендерим layered.
-      const ssl = (site as { sslCertificate?: { status?: string; certPath?: string | null; keyPath?: string | null } | null }).sslCertificate;
+      const ssl = (site as { sslCertificates?: Array<{ status?: string; certPath?: string | null; keyPath?: string | null }> }).sslCertificates?.[0];
       const sslActive = !!(ssl && ssl.status === 'ACTIVE' && ssl.certPath && ssl.keyPath);
       const aliases = (() => {
         try { return JSON.parse(site.aliases || '[]'); } catch { return []; }

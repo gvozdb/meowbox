@@ -144,7 +144,8 @@ if ! $SKIP_MIGRATE && ($NEED_MIGRATE || $FORCE); then
   (cd "$PANEL_DIR/api" && npx prisma migrate deploy) || abort "prisma migrate deploy failed"
   if [[ -d "$PANEL_DIR/migrations/system" ]]; then
     stage migrate "system migrations"
-    (cd "$PANEL_DIR/migrations" && npx tsc && node dist/runner.js) \
+    # `up` обязателен: без аргумента runner.js дефолтит в `status` и ничего не применяет.
+    (cd "$PANEL_DIR/migrations" && npx tsc && node dist/runner.js up) \
       || say "⚠ system migrations упали — проверь логи"
   fi
 fi

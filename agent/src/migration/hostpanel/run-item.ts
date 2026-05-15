@@ -920,35 +920,46 @@ async function applyNginxStage(ctx: RunCtx) {
   const nginx = new NginxManager();
   const homeDir = path.join(SITES_BASE_PATH, ctx.plan.newName);
   const filesRelPath = ctx.plan.filesRelPath || 'www';
-  // ВАЖНО: миграция Hostpanel создаёт Site в БД master ПОСЛЕ apply-nginx
+  // Миграция Hostpanel — single-domain. В много-доменной модели заворачиваем
+  // в один элемент `domains[]`. domainId стабильный — генерим из newName
+  // (миграция всегда один домен на сайт), API после persist пере-создаст Site
+  // и регенерит конфиг авторитетно из БД.
+  const domainId = `migrated-${ctx.plan.newName}`;
+  // Имя rate-limit зоны: в обычном потоке его присылает API, но миграция
+  // создаёт Site в БД master ПОСЛЕ apply-nginx
   // (см. migration-hostpanel.service.ts::persistMigratedSiteRecords). Поэтому
-  // обычный путь "API регенерит meowbox-zones.conf перед nginx:create-config"
-  // здесь не отрабатывает, и `nginx -t` падает с
-  // "zero size shared memory zone site_<newName>". Страхуемся идемпотентным
-  // append'ом зоны прямо в агенте — после persist API перепишет файл целиком.
-  await nginx.ensureZoneForSite(ctx.plan.newName);
+  // имя зоны определяем локально и идемпотентно добавляем зону прямо в агенте —
+  // иначе `nginx -t` падает с "zero size shared memory zone ...". После persist
+  // API перепишет meowbox-zones.conf и главный конфиг целиком.
+  const zoneName = `site_${String(ctx.plan.newName).replace(/[^a-zA-Z0-9_-]/g, '_')}`;
+  await nginx.ensureZone(zoneName);
   // spec §7.2: если на источнике есть `if ($host != $main_host) return 301`
-  // — все алиасы 301-редиректят на главный домен. Передаём это в NginxManager
-  // через формат `{domain, redirect: true}[]` (см. NginxAliasInput в templates.ts).
-  const aliasInputs = ctx.plan.aliasesRedirectToMain === true
-    ? ctx.plan.newAliases.map((d) => ({ domain: d, redirect: true }))
-    : ctx.plan.newAliases;
+  // — все алиасы 301-редиректят на главный домен.
+  const redirectAliases = ctx.plan.aliasesRedirectToMain === true;
+  const aliases = ctx.plan.newAliases.map((d) => ({ domain: d, redirect: redirectAliases }));
+  const sslEnabled = !!ctx.plan.ssl?.transfer;
   const result = await nginx.createSiteConfig({
     siteName: ctx.plan.newName,
-    siteType: ctx.plan.sourceCms === 'modx' ? 'MODX_REVO' : 'CUSTOM',
-    domain: ctx.plan.newDomain,
-    aliases: aliasInputs,
     rootPath: homeDir,
-    filesRelPath,
-    phpVersion: ctx.plan.phpVersion,
     phpEnabled: true,
-    sslEnabled: !!ctx.plan.ssl?.transfer,
-    httpsRedirect: !!ctx.plan.ssl?.transfer,
-    settings: ctx.plan.nginxHsts === true ? { hsts: true } : undefined,
-    certPath: ctx.plan.ssl ? `${LETSENCRYPT_LIVE_DIR}/${ctx.plan.newDomain}/fullchain.pem` : undefined,
-    keyPath: ctx.plan.ssl ? `${LETSENCRYPT_LIVE_DIR}/${ctx.plan.newDomain}/privkey.pem` : undefined,
-    customConfig: ctx.plan.nginxCustomConfig || undefined,
-  } as Parameters<typeof nginx.createSiteConfig>[0]);
+    phpVersion: ctx.plan.phpVersion,
+    systemUser: ctx.plan.newName,
+    domains: [
+      {
+        domainId,
+        domain: ctx.plan.newDomain,
+        aliases,
+        filesRelPath,
+        sslEnabled,
+        httpsRedirect: sslEnabled,
+        zoneName,
+        settings: ctx.plan.nginxHsts === true ? { hsts: true } : {},
+        certPath: ctx.plan.ssl ? `${LETSENCRYPT_LIVE_DIR}/${ctx.plan.newDomain}/fullchain.pem` : null,
+        keyPath: ctx.plan.ssl ? `${LETSENCRYPT_LIVE_DIR}/${ctx.plan.newDomain}/privkey.pem` : null,
+        customConfig: ctx.plan.nginxCustomConfig || undefined,
+      },
+    ],
+  });
   if (!result.success) {
     throw new Error(`apply-nginx failed: ${result.error}`);
   }

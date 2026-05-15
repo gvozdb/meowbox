@@ -34,56 +34,25 @@ import {
 } from '../common/sqlite-mappers';
 import { PanelSettingsService } from '../panel-settings/panel-settings.service';
 import { isReservedSiteName } from '../common/validators/site-names';
-import { siteNginxOverrides, initialCustomConfigFor, type SiteNginxColumns } from '@meowbox/shared';
+import { initialCustomConfigFor } from '@meowbox/shared';
+import {
+  buildMultiDomainNginxPayload,
+  serializeSiteDomain,
+  nginxZoneName,
+  type RawSiteForNginx,
+} from './site-domains.helper';
 
 /**
- * Собирает payload для socket-события `nginx:create-config`.
- *
- * Принимает Site из Prisma + опциональный SslCertificate (если null/undefined —
- * отключённое SSL). Гарантирует что settings и customConfig попадут в агент,
- * иначе агент использует свои дефолты (что тоже ок, но менее предсказуемо).
+ * include-фрагмент: все основные домены сайта с их SSL-сертификатами,
+ * отсортированные по position. Достаточно для `buildMultiDomainNginxPayload`
+ * (тип `RawSiteForNginx`) и для сериализации `domains` в REST-ответах.
  */
-function buildNginxCreateConfigPayload(
-  site: {
-    name: string;
-    type: string;
-    domain: string;
-    aliases: string | unknown[];
-    rootPath: string;
-    filesRelPath: string | null;
-    phpVersion: string | null;
-    appPort: number | null;
-    systemUser: string | null;
-    httpsRedirect: boolean;
-    nginxCustomConfig?: string | null;
-  } & SiteNginxColumns,
-  sslActive: boolean,
-  ssl?: { certPath?: string | null; keyPath?: string | null } | null,
-): Record<string, unknown> {
-  const aliases = Array.isArray(site.aliases)
-    ? site.aliases
-    : (() => {
-        try { return JSON.parse(site.aliases || '[]'); } catch { return []; }
-      })();
-  return {
-    siteName: site.name,
-    siteType: site.type,
-    domain: site.domain,
-    aliases,
-    rootPath: site.rootPath,
-    filesRelPath: site.filesRelPath ?? 'www',
-    phpVersion: site.phpVersion ?? undefined,
-    phpEnabled: !!site.phpVersion,
-    appPort: site.appPort ?? undefined,
-    systemUser: site.systemUser ?? undefined,
-    sslEnabled: sslActive,
-    certPath: sslActive ? ssl?.certPath ?? undefined : undefined,
-    keyPath: sslActive ? ssl?.keyPath ?? undefined : undefined,
-    httpsRedirect: site.httpsRedirect,
-    settings: siteNginxOverrides(site),
-    customConfig: site.nginxCustomConfig ?? undefined,
-  };
-}
+const DOMAINS_WITH_SSL = {
+  domains: {
+    orderBy: { position: 'asc' as const },
+    include: { sslCertificate: true },
+  },
+} satisfies Prisma.SiteInclude;
 
 // Для MODX оба модуля (PHP + БД) включаются автоматически, вне зависимости от флагов в DTO.
 const MODX_TYPES: string[] = ['MODX_REVO', 'MODX_3'];
@@ -246,27 +215,13 @@ export class SitesService implements OnModuleInit {
 
     const sites = await this.prisma.site.findMany({
       where: { status: { not: SiteStatus.DEPLOYING } },
-      select: {
-        id: true, name: true, domain: true, type: true,
-        rootPath: true, filesRelPath: true, phpVersion: true,
-        appPort: true, systemUser: true, httpsRedirect: true,
-        aliases: true,
-        sslCertificate: {
-          select: { status: true, certPath: true, keyPath: true },
-        },
-      } as Prisma.SiteSelect,
+      include: DOMAINS_WITH_SSL,
     });
 
     let migrated = 0;
     let skipped = 0;
 
-    for (const s of sites as Array<{
-      id: string; name: string; domain: string; type: string;
-      rootPath: string; filesRelPath: string | null; phpVersion: string | null;
-      appPort: number | null; systemUser: string | null; httpsRedirect: boolean;
-      aliases: string;
-      sslCertificate: { status: string; certPath: string | null; keyPath: string | null } | null;
-    }>) {
+    for (const s of sites) {
       if (s.name === s.domain) {
         // Для сайтов где name совпадает с domain (legacy — имя = домен)
         // путь не менялся, миграция не нужна.
@@ -287,20 +242,25 @@ export class SitesService implements OnModuleInit {
         continue;
       }
 
-      // Нужно мигрировать. Собираем параметры конфига.
-      const ssl = s.sslCertificate;
-      const sslActive = !!(ssl && ssl.status === SslStatus.ACTIVE && ssl.certPath && ssl.keyPath);
-
+      // Нужно мигрировать. Собираем параметры конфига (мульти-доменный payload).
       try {
         this.logger.log(`Migrating artifacts for site "${s.name}" (${s.domain}) → siteName schema`);
 
         await this.agentRelay.emitToAgent(
           'nginx:create-config',
-          buildNginxCreateConfigPayload(s, sslActive, ssl),
+          buildMultiDomainNginxPayload(s as unknown as RawSiteForNginx),
           30_000,
         );
 
         if (s.phpVersion) {
+          // sslEnabled пула — по активному SSL главного домена (cookie_secure).
+          const primarySsl = s.domains.find((d) => d.isPrimary)?.sslCertificate;
+          const sslActive = !!(
+            primarySsl &&
+            primarySsl.status === SslStatus.ACTIVE &&
+            primarySsl.certPath &&
+            primarySsl.keyPath
+          );
           await this.agentRelay.emitToAgent('php:create-pool', {
             siteName: s.name,
             domain: s.domain,
@@ -485,7 +445,7 @@ export class SitesService implements OnModuleInit {
         skip,
         omit: { sshPasswordEnc: true, cmsAdminPasswordEnc: true },
         include: {
-          sslCertificate: { select: { status: true, expiresAt: true } },
+          ...DOMAINS_WITH_SSL,
           _count: { select: { databases: true, backups: true } },
         },
       }),
@@ -493,7 +453,7 @@ export class SitesService implements OnModuleInit {
     ]);
 
     return {
-      sites: sites.map((s) => mapSite(s)),
+      sites: sites.map((s) => this.serializeSite(s)),
       meta: {
         page,
         perPage: take,
@@ -508,7 +468,7 @@ export class SitesService implements OnModuleInit {
       where: { id },
       omit: { sshPasswordEnc: true, cmsAdminPasswordEnc: true },
       include: {
-        sslCertificate: true,
+        ...DOMAINS_WITH_SSL,
         databases: {
           select: { id: true, name: true, type: true, sizeBytes: true },
         },
@@ -524,10 +484,35 @@ export class SitesService implements OnModuleInit {
       throw new ForbiddenException('Access denied to this site');
     }
 
-    const mapped = mapSite(site) as unknown as Record<string, unknown>;
-    if ((site as { sslCertificate?: unknown }).sslCertificate) {
-      mapped.sslCertificate = mapSsl((site as { sslCertificate: unknown }).sslCertificate as never);
-    }
+    return this.serializeSite(site);
+  }
+
+  /**
+   * Нормализует Site (Prisma) в REST-форму. Добавляет:
+   *  - `domains: SiteDomain[]` — все основные домены с их SSL (serializeSiteDomain);
+   *  - legacy `sslCertificate` — сертификат ГЛАВНОГО домена (обратная
+   *    совместимость со старым single-domain клиентом / кодом).
+   *
+   * Принимает запись, загруженную с `include: DOMAINS_WITH_SSL`.
+   */
+  private serializeSite(site: unknown): Record<string, unknown> {
+    const s = site as Record<string, unknown>;
+    const mapped = mapSite(
+      s as Parameters<typeof mapSite>[0],
+    ) as unknown as Record<string, unknown>;
+    const rawDomains = Array.isArray(s.domains)
+      ? (s.domains as Array<Record<string, unknown>>)
+      : [];
+    mapped.domains = rawDomains.map((d) =>
+      serializeSiteDomain({
+        ...(d as unknown as Parameters<typeof serializeSiteDomain>[0]),
+        siteId: s.id as string,
+      }),
+    );
+    // Legacy top-level sslCertificate = серт главного домена.
+    const primary = rawDomains.find((d) => d.isPrimary === true);
+    const primarySsl = primary?.sslCertificate;
+    mapped.sslCertificate = primarySsl ? mapSsl(primarySsl as never) : null;
     return mapped;
   }
 
@@ -1080,12 +1065,13 @@ export class SitesService implements OnModuleInit {
     const sshPassword = randomBytes(16).toString('base64url');
     const sshPasswordEnc = encryptSshPassword(sshPassword);
 
-    // Атомарность: Site + SslCertificate создаются в одной транзакции. До
-    // этого падение между двумя вызовами оставляло сайт без SSL-placeholder'а —
-    // UI показывал "нет SSL-записи" и операции ssl:* ломались.
+    // Атомарность: Site + primary SiteDomain + SslCertificate создаются в одной
+    // транзакции. До этого падение между вызовами оставляло сайт без
+    // SSL-placeholder'а / без главного домена — UI ломался.
     const aliasList = aliasDomains(dto.aliases);
-    const [site] = await this.prisma.$transaction([
-      this.prisma.site.create({
+    const initialCustom = initialCustomConfigFor(dto.type);
+    const site = await this.prisma.$transaction(async (tx) => {
+      const created = await tx.site.create({
         data: {
           name: dto.name,
           displayName: dto.displayName?.trim() || null,
@@ -1108,26 +1094,40 @@ export class SitesService implements OnModuleInit {
           // Стартовый кастом-блок для CMS — кладётся в БД при создании,
           // оттуда же агент записывает в `/etc/nginx/meowbox/{name}/95-custom.conf`.
           // Юзер дальше редактирует через UI; панель не трогает.
-          nginxCustomConfig: initialCustomConfigFor(dto.type),
+          nginxCustomConfig: initialCustom,
           userId,
         },
-      }),
-    ]);
+      });
 
-    // SslCertificate создаётся во второй транзакции, т.к. зависит от siteId.
-    // Если эта часть упадёт — cleanup удалит сайт (см. runProvisioningAsync
-    // error handler).
-    await this.prisma.sslCertificate.create({
-      data: {
-        siteId: site.id,
-        domains: stringifyStringArray([dto.domain, ...aliasList]),
-        status: 'NONE',
-        issuer: '',
-      },
-    }).catch(async (err) => {
-      // Rollback: сайта без SSL быть не должно. Удаляем site и пробрасываем.
-      await this.prisma.site.delete({ where: { id: site.id } }).catch(() => {});
-      throw err;
+      // Главный домен (isPrimary, position=0) — зеркало Site.domain. Его
+      // 95-custom.conf инициализируется стартовым CMS-шаблоном; layered
+      // nginx-настройки остаются на дефолтах схемы (DTO их не несёт).
+      const primaryDomain = await tx.siteDomain.create({
+        data: {
+          siteId: created.id,
+          domain: dto.domain,
+          isPrimary: true,
+          position: 0,
+          aliases: stringifySiteAliases(dto.aliases || []),
+          filesRelPath: null,
+          appPort: dto.appPort || null,
+          httpsRedirect,
+          nginxCustomConfig: initialCustom,
+        },
+      });
+
+      // SslCertificate главного домена (placeholder NONE — выпуск отдельно).
+      await tx.sslCertificate.create({
+        data: {
+          siteId: created.id,
+          domainId: primaryDomain.id,
+          domains: stringifyStringArray([dto.domain, ...aliasList]),
+          status: 'NONE',
+          issuer: '',
+        },
+      });
+
+      return created;
     });
 
     // =========================================================================
@@ -1212,52 +1212,89 @@ export class SitesService implements OnModuleInit {
     const sshPassword = randomBytes(16).toString('base64url');
     const sshPasswordEnc = encryptSshPassword(sshPassword);
 
-    // 5) Собираем загружаемый source — phpVersion, type, httpsRedirect.
+    // 5) Собираем загружаемый source — phpVersion, type, httpsRedirect, домены.
     const sourceFull = await this.prisma.site.findUnique({
       where: { id: sourceId },
-      include: { databases: true },
+      include: { databases: true, ...DOMAINS_WITH_SSL },
     });
     if (!sourceFull) throw new NotFoundException('Source site not found');
+    // Главный домен источника — копируем его layered nginx-настройки.
+    const sourcePrimary = sourceFull.domains.find((d) => d.isPrimary);
 
-    // 6) Создаём новую запись. Алиасы не копируем (конфликт бы получился).
-    // Site создаётся первым, SSL-placeholder — сразу после, с rollback'ом при
-    // ошибке (см. create() для обоснования).
-    const site = await this.prisma.site.create({
-      data: {
-        name: dto.name,
-        displayName: dto.displayName?.trim() || null,
-        domain: dto.domain,
-        aliases: '[]',
-        type: sourceFull.type,
-        status: SiteStatus.DEPLOYING,
-        phpVersion: sourceFull.phpVersion,
-        gitRepository: sourceFull.gitRepository,
-        deployBranch: sourceFull.deployBranch,
-        appPort: sourceFull.appPort,
-        envVars: sourceFull.envVars || '{}',
-        rootPath,
-        filesRelPath,
-        nginxConfigPath,
-        systemUser,
-        sshPasswordEnc,
-        dbEnabled: sourceFull.dbEnabled,
-        httpsRedirect: sourceFull.httpsRedirect,
-        phpPoolCustom: sourceFull.phpPoolCustom,
-        userId,
-      },
-    });
+    // 6) Создаём новую запись + её главный SiteDomain + SSL-placeholder в одной
+    // транзакции. Алиасы не копируем (конфликт бы получился). Layered
+    // nginx-настройки главного домена наследуем от источника.
+    const site = await this.prisma.$transaction(async (tx) => {
+      const created = await tx.site.create({
+        data: {
+          name: dto.name,
+          displayName: dto.displayName?.trim() || null,
+          domain: dto.domain,
+          aliases: '[]',
+          type: sourceFull.type,
+          status: SiteStatus.DEPLOYING,
+          phpVersion: sourceFull.phpVersion,
+          gitRepository: sourceFull.gitRepository,
+          deployBranch: sourceFull.deployBranch,
+          appPort: sourceFull.appPort,
+          envVars: sourceFull.envVars || '{}',
+          rootPath,
+          filesRelPath,
+          nginxConfigPath,
+          systemUser,
+          sshPasswordEnc,
+          dbEnabled: sourceFull.dbEnabled,
+          httpsRedirect: sourceFull.httpsRedirect,
+          phpPoolCustom: sourceFull.phpPoolCustom,
+          nginxCustomConfig: sourceFull.nginxCustomConfig,
+          userId,
+        },
+      });
 
-    // SSL-placeholder (NONE — выпускается отдельно руками)
-    await this.prisma.sslCertificate.create({
-      data: {
-        siteId: site.id,
-        domains: stringifyStringArray([dto.domain]),
-        status: 'NONE',
-        issuer: '',
-      },
-    }).catch(async (err) => {
-      await this.prisma.site.delete({ where: { id: site.id } }).catch(() => {});
-      throw err;
+      // Главный домен дубликата. Алиасы не копируем; layered nginx-настройки и
+      // 95-custom.conf наследуем от главного домена источника (если был).
+      const primaryDomain = await tx.siteDomain.create({
+        data: {
+          siteId: created.id,
+          domain: dto.domain,
+          isPrimary: true,
+          position: 0,
+          aliases: '[]',
+          filesRelPath: null,
+          appPort: sourceFull.appPort,
+          httpsRedirect: sourceFull.httpsRedirect,
+          ...(sourcePrimary
+            ? {
+                nginxClientMaxBodySize: sourcePrimary.nginxClientMaxBodySize,
+                nginxFastcgiReadTimeout: sourcePrimary.nginxFastcgiReadTimeout,
+                nginxFastcgiSendTimeout: sourcePrimary.nginxFastcgiSendTimeout,
+                nginxFastcgiConnectTimeout: sourcePrimary.nginxFastcgiConnectTimeout,
+                nginxFastcgiBufferSizeKb: sourcePrimary.nginxFastcgiBufferSizeKb,
+                nginxFastcgiBufferCount: sourcePrimary.nginxFastcgiBufferCount,
+                nginxHttp2: sourcePrimary.nginxHttp2,
+                nginxHsts: sourcePrimary.nginxHsts,
+                nginxGzip: sourcePrimary.nginxGzip,
+                nginxRateLimitEnabled: sourcePrimary.nginxRateLimitEnabled,
+                nginxRateLimitRps: sourcePrimary.nginxRateLimitRps,
+                nginxRateLimitBurst: sourcePrimary.nginxRateLimitBurst,
+                nginxCustomConfig: sourcePrimary.nginxCustomConfig,
+              }
+            : {}),
+        },
+      });
+
+      // SSL-placeholder (NONE — выпускается отдельно руками).
+      await tx.sslCertificate.create({
+        data: {
+          siteId: created.id,
+          domainId: primaryDomain.id,
+          domains: stringifyStringArray([dto.domain]),
+          status: 'NONE',
+          issuer: '',
+        },
+      });
+
+      return created;
     });
 
     // 7) Запускаем фоновый провижининг дубликата.
@@ -1334,27 +1371,24 @@ export class SitesService implements OnModuleInit {
 
       const phpEnabled = !!source.phpVersion;
 
-      // 2) Nginx — собираем payload из source (для nginx-настроек) + override-ов
-      // переименования (siteName/domain/rootPath/etc).
+      // 2) Nginx — мульти-доменный payload нового сайта. Главный домен
+      // дубликата (с унаследованными layered nginx-настройками) уже создан в
+      // duplicate(); загружаем сайт со всеми доменами и собираем payload.
       // Перед созданием конфига регенерим meowbox-zones.conf — в нём должна
-      // появиться зона `site_<newName>`, иначе nginx -t упадёт.
+      // появиться rate-limit зона нового домена, иначе nginx -t упадёт.
       await this.regenerateGlobalZones();
       step(`Nginx-конфиг для ${ctx.newDomain}`);
-      const baseDup = buildNginxCreateConfigPayload(
-        { ...source, aliases: '[]' } as unknown as Parameters<typeof buildNginxCreateConfigPayload>[0],
-        false,
-        null,
-      );
-      const nginxRes = await this.agentRelay.emitToAgent('nginx:create-config', {
-        ...baseDup,
-        siteName: ctx.newName,
-        domain: ctx.newDomain,
-        rootPath: ctx.newRootPath,
-        filesRelPath: ctx.newFilesRelPath,
-        systemUser: ctx.newSystemUser,
-        appPort: null,
-        sslEnabled: false,
+      const dupSiteForNginx = await this.prisma.site.findUnique({
+        where: { id: siteId },
+        include: DOMAINS_WITH_SSL,
       });
+      if (!dupSiteForNginx) throw new Error('Duplicated site disappeared');
+      const nginxRes = await this.agentRelay.emitToAgent(
+        'nginx:create-config',
+        buildMultiDomainNginxPayload(dupSiteForNginx as unknown as RawSiteForNginx, {
+          forceWriteCustom: true,
+        }),
+      );
       if (!nginxRes.success) throw new Error(`Nginx failed: ${nginxRes.error}`);
       log('info', `✓ Nginx-конфиг создан`);
 
@@ -1577,31 +1611,29 @@ export class SitesService implements OnModuleInit {
           : { domain: a.domain, redirect: a.redirect === true },
       );
 
-      // 1. Nginx-конфиг — первая установка сайта.
-      // customConfig инициализируется CMS-стартовым шаблоном (initialCustomConfigFor):
-      // дальше юзер редактирует 95-custom.conf через UI; панель его не перетирает.
+      // 1. Nginx-конфиг — первая установка сайта (мульти-доменный payload).
+      // Главный домен (и его SiteDomain.aliases / 95-custom.conf) уже создан
+      // в create() — загружаем сайт со всеми доменами и собираем payload через
+      // buildMultiDomainNginxPayload. forceWriteCustom=true: при первой
+      // установке агент должен записать 95-custom.conf на диск.
       // ВАЖНО: сперва регенерим meowbox-zones.conf, чтобы в нём была объявлена
-      // shared-зона `site_<safeName>` для нового сайта. Иначе nginx -t упадёт
-      // при первом включении конфига сайта с ошибкой
-      // "zero size shared memory zone site_<safeName>".
+      // rate-limit зона нового домена. Иначе nginx -t упадёт при первом
+      // включении конфига сайта с ошибкой "zero size shared memory zone".
       await this.regenerateGlobalZones();
       step(`Nginx: конфиг для ${dto.domain}`);
-      const nginxResult = await this.agentRelay.emitToAgent('nginx:create-config', {
-        siteName: safeName,
-        siteType: dto.type,
-        domain: dto.domain,
-        aliases: aliasesForAgent,
-        rootPath,
-        filesRelPath,
-        phpVersion: phpEnabled ? (dto.phpVersion || '8.2') : undefined,
-        phpEnabled,
-        appPort: dto.appPort,
-        systemUser,
-        sslEnabled,
-        httpsRedirect,
-        // settings опускаем — все поля БД пока null → агент возьмёт дефолты.
-        customConfig: initialCustomConfigFor(dto.type),
+      const siteForNginx = await this.prisma.site.findUnique({
+        where: { id: siteId },
+        include: DOMAINS_WITH_SSL,
       });
+      if (!siteForNginx) {
+        throw new Error('Site disappeared before nginx config generation');
+      }
+      const nginxResult = await this.agentRelay.emitToAgent(
+        'nginx:create-config',
+        buildMultiDomainNginxPayload(siteForNginx as unknown as RawSiteForNginx, {
+          forceWriteCustom: true,
+        }),
+      );
       if (!nginxResult.success) {
         throw new Error(`Nginx config creation failed: ${nginxResult.error}`);
       }
@@ -2055,14 +2087,44 @@ export class SitesService implements OnModuleInit {
 
     const domainChanged = !!(dto.domain && dto.domain !== site.domain);
 
+    // Мульти-доменная модель: dto.domain / dto.aliases / dto.appPort /
+    // dto.httpsRedirect / dto.filesRelPath применяются и к ГЛАВНОМУ домену
+    // (SiteDomain isPrimary), а не только к зеркалу Site. Site.domain выше уже
+    // обновлён напрямую — но это лишь зеркало, источник правды — SiteDomain.
+    const primaryDomain = await this.prisma.siteDomain.findFirst({
+      where: { siteId: id, isPrimary: true },
+    });
+    if (primaryDomain) {
+      const primaryData: Prisma.SiteDomainUpdateInput = {};
+      if (dto.domain !== undefined) primaryData.domain = dto.domain;
+      if (dto.aliases !== undefined) {
+        primaryData.aliases = stringifySiteAliases(dto.aliases);
+      }
+      if (dto.appPort !== undefined) primaryData.appPort = dto.appPort ?? null;
+      if (dto.httpsRedirect !== undefined) {
+        primaryData.httpsRedirect = dto.httpsRedirect;
+      }
+      // filesRelPath: у ГЛАВНОГО домена держим null (наследует Site.filesRelPath,
+      // которое уже обновлено выше) — см. SiteDomainsService.updateDomain.
+      if (dto.filesRelPath !== undefined) primaryData.filesRelPath = null;
+      if (Object.keys(primaryData).length > 0) {
+        await this.prisma.siteDomain.update({
+          where: { id: primaryDomain.id },
+          data: primaryData,
+        });
+      }
+    } else {
+      this.logger.error(`Site ${id} has no primary domain — domain mirror only`);
+    }
+
     // Сменили главный домен → Let's Encrypt сертификат становится
     // невалидным (он выпущен на старый CN). nginx продолжит серверить этот
     // серт с новым server_name, браузеры будут ругаться. Правильный фикс:
-    // сбросить SSL в NONE, почистить пути в nginx (sslEnabled=false) и
-    // предложить админу выпустить новый серт вручную из UI (ну или импортнуть).
-    if (domainChanged) {
+    // сбросить SSL главного домена в NONE, почистить пути и предложить админу
+    // выпустить новый серт вручную из UI (ну или импортнуть).
+    if (domainChanged && primaryDomain) {
       await this.prisma.sslCertificate.updateMany({
-        where: { siteId: id, status: { not: SslStatus.NONE } },
+        where: { domainId: primaryDomain.id, status: { not: SslStatus.NONE } },
         data: {
           status: SslStatus.NONE,
           certPath: null,
@@ -2078,12 +2140,13 @@ export class SitesService implements OnModuleInit {
       this.logger.log(`SSL записи сброшены для сайта ${id} после смены домена`);
     }
 
-    // Вытаскиваем SSL-статус, чтобы передать в nginx-шаблон (для ssl-блока)
-    // и в PHP pool (для cookie_secure).
-    const sslCert = await this.prisma.sslCertificate.findUnique({
-      where: { siteId: id },
-      select: { status: true, certPath: true, keyPath: true },
-    });
+    // SSL-статус главного домена — нужен для PHP pool (cookie_secure).
+    const sslCert = primaryDomain
+      ? await this.prisma.sslCertificate.findFirst({
+          where: { domainId: primaryDomain.id },
+          select: { status: true, certPath: true, keyPath: true },
+        })
+      : null;
     const sslActive = !!(sslCert && sslCert.status === 'ACTIVE' && sslCert.certPath && sslCert.keyPath);
 
     // Список алиасов изменился? (сравниваем стабильный JSON)
@@ -2107,10 +2170,7 @@ export class SitesService implements OnModuleInit {
       // Смена filesRelPath тоже требует регенерации (root в 00-server.conf
       // собирается из rootPath/filesRelPath).
       try {
-        await this.agentRelay.emitToAgent(
-          'nginx:create-config',
-          buildNginxCreateConfigPayload(updated, sslActive, sslCert),
-        );
+        await this.regenerateSiteNginx(id);
       } catch (err) {
         this.logger.error(`Nginx reconfig failed: ${(err as Error).message}`);
       }
@@ -2163,10 +2223,7 @@ export class SitesService implements OnModuleInit {
           // PHP-версия меняет путь к сокету (в имени сокета — phpVersion),
           // поэтому nginx-конфиг тоже нужно перегенерить (fastcgi_pass).
           // Файл якорится на siteName — create-config идемпотентно перезаписывает.
-          await this.agentRelay.emitToAgent(
-            'nginx:create-config',
-            buildNginxCreateConfigPayload(updated, sslActive, sslCert),
-          );
+          await this.regenerateSiteNginx(id);
         }
         this.logger.log(`PHP version changed: ${site.phpVersion} → ${dto.phpVersion} for site "${updated.name}"`);
 
@@ -2286,12 +2343,13 @@ export class SitesService implements OnModuleInit {
       select: { id: true, name: true, type: true, dbUser: true },
     });
 
-    // SSL-сертификат (если был выпущен) — надо revoke + удалить из certbot,
-    // иначе /etc/letsencrypt/live/DOMAIN/ остаётся сиротой, и через 90 дней
-    // certbot на renew шумит в логи, а конфиг renewal/DOMAIN.conf — оркестратор.
-    const ssl = await this.prisma.sslCertificate.findUnique({
+    // SSL-сертификаты (если были выпущены) — у сайта по одному на каждый
+    // основной домен. Каждый надо revoke + удалить из certbot, иначе
+    // /etc/letsencrypt/live/DOMAIN/ остаётся сиротой и certbot на renew шумит.
+    // siteId в SslCertificate больше не unique — выбираем все записи сайта.
+    const sslCerts = await this.prisma.sslCertificate.findMany({
       where: { siteId: id },
-      select: { status: true },
+      select: { status: true, domainId: true },
     });
 
     // Все бэкапы сайта — включая удалённые копии (Yandex Disk, Mail.ru, restic).
@@ -2302,15 +2360,28 @@ export class SitesService implements OnModuleInit {
       include: { storageLocation: true },
     });
 
+    // Домены сайта (для revoke per-domain). site из findById включает `domains`.
+    const siteDomains = Array.isArray((site as { domains?: unknown[] }).domains)
+      ? ((site as { domains: Array<{ id: string; domain: string }> }).domains)
+      : [];
+
     if (this.agentRelay.isAgentConnected()) {
       try {
-        // 1) SSL revoke.
-        if (flags.removeSslCertificate && ssl && ssl.status !== 'NONE') {
-          await this.agentRelay.emitToAgent('ssl:revoke', {
-            domain: site.domain as string,
-          }, 90_000).catch((err) => {
-            this.logger.warn(`SSL revoke failed for "${site.domain}": ${(err as Error).message}`);
-          });
+        // 1) SSL revoke — для КАЖДОГО основного домена с активным сертификатом.
+        if (flags.removeSslCertificate) {
+          for (const cert of sslCerts) {
+            if (cert.status === 'NONE') continue;
+            // Имя домена резолвим по domainId; legacy-записи без domainId
+            // (backfill) — fallback на главный домен сайта.
+            const domainName =
+              siteDomains.find((d) => d.id === cert.domainId)?.domain ||
+              (site.domain as string);
+            await this.agentRelay.emitToAgent('ssl:revoke', {
+              domain: domainName,
+            }, 90_000).catch((err) => {
+              this.logger.warn(`SSL revoke failed for "${domainName}": ${(err as Error).message}`);
+            });
+          }
         }
 
         // 2) Бэкапы — каждый тип включается своим флагом, можно оставить
@@ -2411,7 +2482,7 @@ export class SitesService implements OnModuleInit {
         }
 
         this.logger.log(
-          `Site "${site.name}" cleanup (flags=${JSON.stringify(flags)}, ssl=${ssl?.status || 'none'}, backups=${backups.length})`,
+          `Site "${site.name}" cleanup (flags=${JSON.stringify(flags)}, sslCerts=${sslCerts.length}, backups=${backups.length})`,
         );
       } catch (err) {
         this.logger.error(`Cleanup failed for "${site.name}": ${(err as Error).message}`);
@@ -2435,29 +2506,47 @@ export class SitesService implements OnModuleInit {
 
   /**
    * Регенерирует глобальный `/etc/nginx/conf.d/meowbox-zones.conf` на агенте:
-   * один `limit_req_zone` на сайт + legacy zone `site_limit` для backwards-compat.
-   * Безопасно вызывать после create/delete/update сайта или при изменении
-   * rate-limit настроек.
+   * один `limit_req_zone` на КАЖДЫЙ основной домен (`SiteDomain`) среди всех
+   * сайтов. Имя зоны — `nginxZoneName(domainId)` (то же, что в payload
+   * `nginx:create-config`). Безопасно вызывать после create/delete/update.
    */
   private async regenerateGlobalZones(): Promise<void> {
     if (!this.agentRelay.isAgentConnected()) return;
     try {
-      const sites = await this.prisma.site.findMany({
+      const domains = await this.prisma.siteDomain.findMany({
         select: {
-          name: true,
+          id: true,
           nginxRateLimitEnabled: true,
           nginxRateLimitRps: true,
         },
       });
-      const zones = sites.map((s) => ({
-        siteName: s.name,
-        rps: s.nginxRateLimitRps && s.nginxRateLimitRps > 0 ? s.nginxRateLimitRps : 30,
-        enabled: s.nginxRateLimitEnabled !== false,
+      const zones = domains.map((d) => ({
+        zoneName: nginxZoneName(d.id),
+        rps: d.nginxRateLimitRps && d.nginxRateLimitRps > 0 ? d.nginxRateLimitRps : 30,
+        enabled: d.nginxRateLimitEnabled !== false,
       }));
       await this.agentRelay.emitToAgent('nginx:write-global-zones', { zones });
     } catch (err) {
       this.logger.warn(`regenerateGlobalZones: ${(err as Error).message}`);
     }
+  }
+
+  /**
+   * Регенерирует весь nginx-конфиг сайта (главный файл + чанки всех основных
+   * доменов) через `nginx:create-config` с мульти-доменным payload. Загружает
+   * сайт со всеми доменами и их SSL. Best-effort: при ошибке только логирует.
+   */
+  private async regenerateSiteNginx(siteId: string): Promise<void> {
+    if (!this.agentRelay.isAgentConnected()) return;
+    const site = await this.prisma.site.findUnique({
+      where: { id: siteId },
+      include: DOMAINS_WITH_SSL,
+    });
+    if (!site) return;
+    await this.agentRelay.emitToAgent(
+      'nginx:create-config',
+      buildMultiDomainNginxPayload(site as unknown as RawSiteForNginx),
+    );
   }
 
   /**

@@ -17,10 +17,8 @@ export class SitesNginxController {
   constructor(private readonly service: SitesNginxService) {}
 
   /**
-   * POST /sites/nginx/rebuild-all — массовая регенерация layered-конфигов.
-   * Используется после миграции с монолитного формата на layered.
-   * ВАЖНО: должен идти ПЕРЕД маршрутами с `:id`, иначе nest подумает что
-   * "nginx" — это id сайта.
+   * POST /sites/nginx/rebuild-all — массовая регенерация конфигов всех
+   * доменов всех сайтов. ВАЖНО: должен идти ПЕРЕД маршрутами с `:id`.
    */
   @Post('nginx/rebuild-all')
   @Roles(UserRole.ADMIN)
@@ -29,47 +27,68 @@ export class SitesNginxController {
     return { success: true, data };
   }
 
-  @Get(':id/nginx/settings')
+  // --- Per-domain nginx settings ---
+
+  @Get(':id/domains/:domainId/nginx/settings')
   @Roles(UserRole.ADMIN, UserRole.MANAGER)
   async getSettings(
     @Param('id', new ParseUUIDPipe()) id: string,
+    @Param('domainId', new ParseUUIDPipe()) domainId: string,
     @CurrentUser() user: AuthCtx,
   ) {
-    const data: NginxSettingsResponse = await this.service.getSettings(id, user.id, user.role);
+    const data: NginxSettingsResponse = await this.service.getSettings(
+      id,
+      domainId,
+      user.id,
+      user.role,
+    );
     return { success: true, data };
   }
 
-  @Put(':id/nginx/settings')
+  @Put(':id/domains/:domainId/nginx/settings')
   @Roles(UserRole.ADMIN, UserRole.MANAGER)
   async updateSettings(
     @Param('id', new ParseUUIDPipe()) id: string,
+    @Param('domainId', new ParseUUIDPipe()) domainId: string,
     @Body() dto: UpdateSiteNginxSettingsDto,
     @CurrentUser() user: AuthCtx,
   ) {
-    const data: NginxSettingsResponse = await this.service.updateSettings(id, dto, user.id, user.role);
+    const data: NginxSettingsResponse = await this.service.updateSettings(
+      id,
+      domainId,
+      dto,
+      user.id,
+      user.role,
+    );
     return { success: true, data };
   }
 
-  @Get(':id/nginx/custom')
+  // --- Per-domain custom config ---
+
+  @Get(':id/domains/:domainId/nginx/custom')
   @Roles(UserRole.ADMIN, UserRole.MANAGER)
   async getCustom(
     @Param('id', new ParseUUIDPipe()) id: string,
+    @Param('domainId', new ParseUUIDPipe()) domainId: string,
     @CurrentUser() user: AuthCtx,
   ) {
-    const data = await this.service.getCustomConfig(id, user.id, user.role);
+    const data = await this.service.getCustomConfig(id, domainId, user.id, user.role);
     return { success: true, data };
   }
 
-  @Put(':id/nginx/custom')
+  @Put(':id/domains/:domainId/nginx/custom')
   @Roles(UserRole.ADMIN, UserRole.MANAGER)
   async updateCustom(
     @Param('id', new ParseUUIDPipe()) id: string,
+    @Param('domainId', new ParseUUIDPipe()) domainId: string,
     @Body() dto: UpdateSiteNginxCustomDto,
     @CurrentUser() user: AuthCtx,
   ) {
-    const data = await this.service.updateCustomConfig(id, dto, user.id, user.role);
+    const data = await this.service.updateCustomConfig(id, domainId, dto, user.id, user.role);
     return { success: true, data };
   }
+
+  // --- Site-level test / reload ---
 
   @Post(':id/nginx/test')
   @Roles(UserRole.ADMIN, UserRole.MANAGER)

@@ -1591,6 +1591,22 @@ export class MigrationHostpanelService implements OnModuleInit {
       },
     });
 
+    // 1b) Основной домен (мульти-доменная модель). hostpanel-сайт переносится
+    // как один основной домен (главный). Алиасы / HSTS / custom-nginx — на нём.
+    const primaryDomain = await this.prisma.siteDomain.create({
+      data: {
+        siteId: site.id,
+        domain: plan.newDomain,
+        isPrimary: true,
+        position: 0,
+        aliases: stringifySiteAliases(aliasObjs),
+        filesRelPath: null, // null → наследует Site.filesRelPath
+        httpsRedirect: !!plan.ssl?.transfer,
+        nginxHsts: plan.nginxHsts === true,
+        nginxCustomConfig: plan.nginxCustomConfig || null,
+      },
+    });
+
     // 2) SslCertificate (всегда создаём — иначе UI ssl:* падает)
     const sslDomains = [plan.newDomain, ...plan.newAliases];
     const isLeTransfer = !!plan.ssl?.transfer;
@@ -1603,6 +1619,7 @@ export class MigrationHostpanelService implements OnModuleInit {
     await this.prisma.sslCertificate.create({
       data: {
         siteId: site.id,
+        domainId: primaryDomain.id,
         domains: stringifyStringArray(sslDomains),
         status: isLeTransfer ? 'ACTIVE' : 'NONE',
         issuer: isLeTransfer ? "Let's Encrypt" : '',

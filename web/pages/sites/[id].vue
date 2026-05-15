@@ -23,7 +23,12 @@
             <div>
               <h1 class="site-detail__title">{{ site.displayName || site.name }}</h1>
               <p class="site-detail__domain">
-                <a :href="domainUrl(site.domain)" target="_blank" rel="noopener noreferrer" class="domain-link">{{ site.domain }}</a>
+                <template v-if="siteDomains.length">
+                  <template v-for="(d, i) in siteDomains" :key="d.id">
+                    <a :href="domainHref(d, d.domain)" target="_blank" rel="noopener noreferrer" class="domain-link">{{ d.domain }}</a><span v-if="i < siteDomains.length - 1" class="site-detail__domain-sep">·</span>
+                  </template>
+                </template>
+                <a v-else :href="domainUrl(site.domain)" target="_blank" rel="noopener noreferrer" class="domain-link">{{ site.domain }}</a>
                 <span v-if="site.displayName" class="site-detail__sysname">· {{ site.name }}</span>
               </p>
             </div>
@@ -111,7 +116,10 @@
           v-for="t in tabs"
           :key="t.id"
           class="site-detail__tab"
-          :class="{ 'site-detail__tab--active': activeTab === t.id }"
+          :class="{
+            'site-detail__tab--active': activeTab === t.id,
+            'site-detail__tab--far-right': t.farRight,
+          }"
           @click="activeTab = t.id"
         >
           {{ t.label }}
@@ -188,29 +196,38 @@
             </div>
           </div>
 
-          <!-- 3. Домен и SSL -->
+          <!-- 3. Домены и SSL — по одному блоку на каждый основной домен -->
           <div class="info-card">
-            <h3 class="info-card__title">Домен и SSL</h3>
-            <div class="info-card__rows">
+            <h3 class="info-card__title">Домены и SSL</h3>
+            <div v-if="siteDomains.length" class="overview-domains">
+              <div
+                v-for="d in siteDomains"
+                :key="d.id"
+                class="overview-domain"
+              >
+                <div class="overview-domain__head">
+                  <svg v-if="d.isPrimary" class="overview-domain__crown" width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><path d="M2 7l5 5 5-8 5 8 5-5v11a1 1 0 0 1-1 1H3a1 1 0 0 1-1-1z" /></svg>
+                  <a :href="domainHref(d, d.domain)" target="_blank" rel="noopener noreferrer" class="domain-link overview-domain__name">{{ d.domain }}</a>
+                  <span
+                    class="ssl-pill"
+                    :class="`ssl-pill--${sslPillClass(d.sslCertificate?.status)}`"
+                  >{{ sslStatusLabel(d.sslCertificate?.status) }}</span>
+                </div>
+                <div v-if="d.aliases?.length" class="overview-domain__aliases">
+                  <span class="overview-domain__aliases-label">Алиасы:</span>
+                  <template v-for="(a, i) in d.aliases" :key="a.domain + i">
+                    <a :href="domainHref(d, a.domain)" target="_blank" rel="noopener noreferrer" class="domain-link">{{ a.domain }}</a><span v-if="a.redirect" class="info-row__aliases-arrow"> →</span><span v-if="i < d.aliases.length - 1">, </span>
+                  </template>
+                </div>
+                <div v-if="d.sslCertificate?.expiresAt" class="overview-domain__ssl-meta">
+                  SSL истекает: {{ formatDate(d.sslCertificate.expiresAt) }}
+                </div>
+              </div>
+            </div>
+            <div v-else class="info-card__rows">
               <div class="info-row">
                 <span class="info-row__label">Домен</span>
                 <a :href="domainUrl(site.domain)" target="_blank" rel="noopener noreferrer" class="info-row__value info-row__value--mono domain-link">{{ site.domain }}</a>
-              </div>
-              <div v-if="site.aliases?.length" class="info-row">
-                <span class="info-row__label">Алиасы</span>
-                <span class="info-row__value info-row__value--mono info-row__aliases">
-                  <template v-for="(a, i) in normalizedAliasList" :key="a.domain + i">
-                    <a :href="domainUrl(a.domain)" target="_blank" rel="noopener noreferrer" class="domain-link">{{ a.domain }}</a><span v-if="a.redirect" class="info-row__aliases-arrow"> →</span><span v-if="i < normalizedAliasList.length - 1">, </span>
-                  </template>
-                </span>
-              </div>
-              <div v-if="site.sslCertificate" class="info-row">
-                <span class="info-row__label">SSL</span>
-                <span class="info-row__value" :class="sslClass">{{ sslLabel }}</span>
-              </div>
-              <div v-if="site.sslCertificate?.expiresAt" class="info-row">
-                <span class="info-row__label">SSL истекает</span>
-                <span class="info-row__value">{{ formatDate(site.sslCertificate.expiresAt) }}</span>
               </div>
             </div>
           </div>
@@ -826,125 +843,12 @@ sudo mv {{ site?.rootPath }}/{{ site?.filesRelPath || 'www' }}/* {{ site?.rootPa
 
       <!-- Tab content: SSL -->
       <div v-if="activeTab === 'ssl'" class="tab-content">
-        <div class="ssl-section">
-          <!-- Current SSL status -->
-          <div v-if="site.sslCertificate" class="info-card">
-            <h3 class="info-card__title">Текущий сертификат</h3>
-            <div class="info-card__rows">
-              <div class="info-row">
-                <span class="info-row__label">Статус</span>
-                <span class="info-row__value" :class="sslClass">{{ sslLabel }}</span>
-              </div>
-              <div v-if="site.sslCertificate.expiresAt" class="info-row">
-                <span class="info-row__label">Истекает</span>
-                <span class="info-row__value">{{ formatDate(site.sslCertificate.expiresAt) }}</span>
-              </div>
-            </div>
-            <div v-if="sslCanRevoke" class="ssl-actions">
-              <button class="btn btn--danger btn--sm" :disabled="revokingSsl" @click="revokeSsl">
-                {{ revokingSsl ? 'Отзыв…' : 'Отозвать сертификат' }}
-              </button>
-              <span v-if="sslActionError" class="ssl-le__error">{{ sslActionError }}</span>
-              <span v-if="sslActionSuccess" class="ssl-le__progress">{{ sslActionSuccess }}</span>
-            </div>
-          </div>
-
-          <!-- Import existing cert (if present on disk but not in DB) -->
-          <div v-if="!sslCanRevoke" class="info-card">
-            <h3 class="info-card__title">Подхватить уже выпущенный</h3>
-            <p class="ssl-le__desc">Если сертификат для <strong>{{ site.domain }}</strong> уже лежит в <code>/etc/letsencrypt/live/</code> (выпущен вручную или остался с прошлой установки) — можно импортировать его в панель без нового запроса к Let's Encrypt.</p>
-            <div class="ssl-le__actions">
-              <button class="btn btn--secondary" :disabled="importingSsl" @click="importSsl">
-                {{ importingSsl ? 'Проверка…' : 'Импортировать с диска' }}
-              </button>
-              <span v-if="sslImportError" class="ssl-le__error">{{ sslImportError }}</span>
-            </div>
-          </div>
-
-          <!-- Let's Encrypt -->
-          <div class="info-card">
-            <h3 class="info-card__title">
-              <template v-if="sslCanRevoke">Перевыпуск сертификата</template>
-              <template v-else>Let's Encrypt</template>
-            </h3>
-
-            <!-- Алерт прямо в карточке: серт есть, но SAN не совпадает с текущим списком доменов -->
-            <div
-              v-if="sslCanRevoke && (missingAliasesInCert.length || mainDomainMissingInCert)"
-              class="domains-cert-alert ssl-le__mismatch"
-            >
-              <div class="domains-cert-alert__icon">
-                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
-                  <path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z" /><line x1="12" y1="9" x2="12" y2="13" /><line x1="12" y1="17" x2="12.01" y2="17" />
-                </svg>
-              </div>
-              <div class="domains-cert-alert__body">
-                <strong>SAN не совпадает с текущим списком доменов</strong>
-                <span v-if="mainDomainMissingInCert">
-                  Основной домен <code>{{ site.domain }}</code> отсутствует в SAN.
-                </span>
-                <span v-if="missingAliasesInCert.length">
-                  Не покрыт{{ missingAliasesInCert.length > 1 ? 'ы' : '' }}:
-                  <template v-for="(d, i) in missingAliasesInCert" :key="d"><code>{{ d }}</code><span v-if="i < missingAliasesInCert.length - 1">, </span></template>
-                </span>
-                <span>Нажми «Перевыпустить» — новый серт будет выпущен с актуальным SAN.</span>
-              </div>
-            </div>
-
-            <p v-if="sslCanRevoke" class="ssl-le__desc">
-              Текущий сертификат будет заменён: certbot переиздаст его с актуальным списком доменов (<strong>{{ site.domain }}</strong><template v-if="sslAliasesCount"> + {{ sslAliasesCount }} алиас{{ sslAliasesCount === 1 ? '' : (sslAliasesCount < 5 ? 'а' : 'ов') }}</template>). Используется <code>--expand</code>, revoke старой версии не нужен.
-            </p>
-            <p v-else class="ssl-le__desc">
-              Выпустить бесплатный SSL-сертификат для <strong>{{ site.domain }}</strong><template v-if="sslAliasesCount"> и {{ sslAliasesCount }} алиас{{ sslAliasesCount === 1 ? '' : (sslAliasesCount < 5 ? 'а' : 'ов') }}</template>. В SAN включаются все алиасы (в т. ч. redirect — иначе TLS-handshake падает на cert-mismatch до 301).
-            </p>
-
-            <div class="ssl-le__actions">
-              <button
-                class="btn btn--primary"
-                :disabled="issuingSsl"
-                @click="issueLetsEncrypt"
-              >
-                <svg v-if="!issuingSsl && !sslCanRevoke" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="11" width="18" height="11" rx="2" /><path d="M7 11V7a5 5 0 0 1 10 0v4" /></svg>
-                <svg v-else-if="!issuingSsl && sslCanRevoke" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><polyline points="23 4 23 10 17 10" /><polyline points="1 20 1 14 7 14" /><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15" /></svg>
-                {{ issuingSsl ? (sslCanRevoke ? 'Перевыпуск...' : 'Выпуск...') : (sslCanRevoke ? 'Перевыпустить сертификат' : 'Выпустить сертификат') }}
-              </button>
-              <span v-if="sslProgress" class="ssl-le__progress">
-                {{ sslProgress }}
-                <span v-if="issuingSsl" class="ssl-le__elapsed">({{ sslElapsed }}с)</span>
-              </span>
-              <span v-if="sslIssueError" class="ssl-le__error">{{ sslIssueError }}</span>
-            </div>
-          </div>
-
-          <!-- Upload custom certificate -->
-          <div class="ssl-upload">
-            <h3 class="ssl-upload__title">Загрузка сертификата</h3>
-            <p class="ssl-upload__desc">Вставьте PEM-кодированный сертификат, приватный ключ и цепочку (опционально).</p>
-            <div class="ssl-upload__fields">
-              <div class="form-group">
-                <label class="form-label">Сертификат (PEM)</label>
-                <textarea v-model="sslCertPem" class="ssl-textarea" placeholder="-----BEGIN CERTIFICATE-----" spellcheck="false" />
-              </div>
-              <div class="form-group">
-                <label class="form-label">Приватный ключ (PEM)</label>
-                <textarea v-model="sslKeyPem" class="ssl-textarea" placeholder="-----BEGIN PRIVATE KEY-----" spellcheck="false" />
-              </div>
-              <div class="form-group">
-                <label class="form-label">Цепочка (PEM, опционально)</label>
-                <textarea v-model="sslChainPem" class="ssl-textarea ssl-textarea--sm" placeholder="-----BEGIN CERTIFICATE-----" spellcheck="false" />
-              </div>
-            </div>
-            <div class="ssl-upload__actions">
-              <button
-                class="btn btn--primary"
-                :disabled="!sslCertPem.trim() || !sslKeyPem.trim() || uploadingSsl"
-                @click="uploadSsl"
-              >
-                {{ uploadingSsl ? 'Загрузка...' : 'Загрузить сертификат' }}
-              </button>
-            </div>
-          </div>
-        </div>
+        <SiteSslTab
+          :site-id="siteId"
+          :domains="siteDomains"
+          :initial-domain-id="sslActiveDomainId"
+          @changed="reloadSiteAfterDomainChange"
+        />
       </div>
 
       <!-- Tab content: DNS -->
@@ -954,203 +858,13 @@ sudo mv {{ site?.rootPath }}/{{ site?.filesRelPath || 'www' }}/* {{ site?.rootPa
 
       <!-- Tab content: Domains -->
       <div v-if="activeTab === 'domains'" class="tab-content">
-        <div class="domains-section">
-          <!-- Алерт: у сайта есть сертификат, но часть доменов им не покрыта -->
-          <div
-            v-if="hasActiveCert && (missingAliasesInCert.length || mainDomainMissingInCert)"
-            class="domains-cert-alert"
-          >
-            <div class="domains-cert-alert__icon">
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
-                <path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z" /><line x1="12" y1="9" x2="12" y2="13" /><line x1="12" y1="17" x2="12.01" y2="17" />
-              </svg>
-            </div>
-            <div class="domains-cert-alert__body">
-              <strong>Часть доменов не покрыта SSL-сертификатом</strong>
-              <span v-if="mainDomainMissingInCert">
-                Основной домен <code>{{ site.domain }}</code> отсутствует в SAN — перевыпусти серт.
-              </span>
-              <span v-if="missingAliasesInCert.length">
-                Алиас{{ missingAliasesInCert.length > 1 ? 'ы' : '' }}
-                <code v-for="(d, i) in missingAliasesInCert" :key="d">{{ d }}<span v-if="i < missingAliasesInCert.length - 1">, </span></code>
-                не в сертификате. Перевыпусти SSL во вкладке «Overview» → «SSL-сертификат».
-              </span>
-            </div>
-          </div>
-
-          <div class="info-card">
-            <h3 class="info-card__title">Основной домен</h3>
-            <div class="info-card__rows">
-              <div class="info-row">
-                <span class="domain-with-cert">
-                  <span
-                    v-if="coverageFor(site.domain) !== 'no-cert'"
-                    class="cert-badge"
-                    :class="`cert-badge--${coverageFor(site.domain)}`"
-                    :title="coverageFor(site.domain) === 'covered' ? 'Домен покрыт SSL-сертификатом' : 'Домена нет в SAN сертификата — перевыпусти SSL'"
-                  >
-                    <svg v-if="coverageFor(site.domain) === 'covered'" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round"><polyline points="20 6 9 17 4 12" /></svg>
-                    <svg v-else width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" /></svg>
-                  </span>
-                  <a :href="domainUrl(site.domain)" target="_blank" rel="noopener noreferrer" class="info-row__value info-row__value--mono domain-link">{{ site.domain }}</a>
-                </span>
-                <button class="info-row__btn info-row__btn--inline" :disabled="savingDomains" @click="openEditMainDomain">
-                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7" /><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z" /></svg>
-                  <span>Изменить</span>
-                </button>
-              </div>
-            </div>
-          </div>
-
-          <div class="info-card">
-            <div class="domains-header">
-              <h3 class="info-card__title">Алиасы</h3>
-              <span class="domains-hint">Тугл = редирект на основной домен</span>
-            </div>
-            <div v-if="domainAliases.length" class="domains-list">
-              <div v-for="(alias, idx) in domainAliases" :key="alias.domain + idx" class="domain-item">
-                <span
-                  v-if="coverageFor(alias.domain) !== 'no-cert'"
-                  class="cert-badge"
-                  :class="`cert-badge--${coverageFor(alias.domain)}`"
-                  :title="
-                    coverageFor(alias.domain) === 'covered' ? 'Алиас покрыт SSL-сертификатом' :
-                    'Алиас не в сертификате — перевыпусти SSL, чтобы добавить его в SAN (redirect-алиасы тоже должны быть в SAN, иначе TLS-handshake падает до 301)'
-                  "
-                >
-                  <svg v-if="coverageFor(alias.domain) === 'covered'" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round"><polyline points="20 6 9 17 4 12" /></svg>
-                  <svg v-else width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" /></svg>
-                </span>
-                <a :href="domainUrl(alias.domain)" target="_blank" rel="noopener noreferrer" class="domain-item__name domain-link">{{ alias.domain }}</a>
-                <label class="domain-item__toggle" :title="alias.redirect ? 'Редирект на основной домен (301)' : 'Алиас отдаёт сайт (200)'">
-                  <input
-                    type="checkbox"
-                    :checked="alias.redirect"
-                    :disabled="savingDomains"
-                    @change="toggleAliasRedirect(idx)"
-                  />
-                  <span class="domain-item__toggle-slider" />
-                  <span class="domain-item__toggle-label">{{ alias.redirect ? '301' : '200' }}</span>
-                </label>
-                <button class="domain-item__remove" title="Удалить алиас" :disabled="savingDomains" @click="removeAlias(idx)">
-                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" /></svg>
-                </button>
-              </div>
-            </div>
-            <div v-else class="domains-empty">Алиасы не настроены</div>
-
-            <div class="domains-add">
-              <input
-                v-model="newAlias"
-                type="text"
-                class="domains-add__input"
-                placeholder="alias.example.com"
-                @keyup.enter="addAlias"
-              />
-              <button class="btn btn--primary domains-add__btn" :disabled="!newAlias.trim() || savingDomains" @click="addAlias">
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="12" y1="5" x2="12" y2="19" /><line x1="5" y1="12" x2="19" y2="12" /></svg>
-                Добавить алиас
-              </button>
-            </div>
-          </div>
-        </div>
-
-        <!-- Modal: edit main domain -->
-        <Teleport to="body">
-          <div v-if="showEditMainDomain" class="modal-overlay" @mousedown.self="showEditMainDomain = false">
-            <div class="domain-modal">
-              <div class="domain-modal__header">
-                <div class="domain-modal__title-group">
-                  <div class="domain-modal__icon">
-                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
-                      <circle cx="12" cy="12" r="10" /><line x1="2" y1="12" x2="22" y2="12" /><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z" />
-                    </svg>
-                  </div>
-                  <div>
-                    <h3 class="domain-modal__title">Смена главного домена</h3>
-                    <p class="domain-modal__subtitle">Изменит <code>server_name</code> в nginx и сбросит SSL</p>
-                  </div>
-                </div>
-                <button class="domain-modal__close" :disabled="savingMainDomain" @click="showEditMainDomain = false">
-                  <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" /></svg>
-                </button>
-              </div>
-
-              <div class="domain-modal__body">
-                <div class="domain-modal__swap">
-                  <div class="domain-modal__swap-col">
-                    <label class="domain-modal__label">Сейчас</label>
-                    <div class="domain-modal__chip domain-modal__chip--current">
-                      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="10" /></svg>
-                      <code>{{ site?.domain }}</code>
-                    </div>
-                  </div>
-                  <div class="domain-modal__arrow">
-                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="5" y1="12" x2="19" y2="12" /><polyline points="12 5 19 12 12 19" /></svg>
-                  </div>
-                  <div class="domain-modal__swap-col">
-                    <label class="domain-modal__label">Новый домен</label>
-                    <div class="domain-modal__input-wrap" :class="{ 'domain-modal__input-wrap--error': !!editMainDomainError }">
-                      <svg class="domain-modal__input-icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7" /><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z" /></svg>
-                      <input
-                        v-model="editMainDomainValue"
-                        type="text"
-                        class="domain-modal__input"
-                        placeholder="new.example.com"
-                        :disabled="savingMainDomain"
-                        autocomplete="off"
-                        spellcheck="false"
-                        @keyup.enter="saveMainDomain"
-                      />
-                    </div>
-                    <span v-if="editMainDomainError" class="domain-modal__error">{{ editMainDomainError }}</span>
-                  </div>
-                </div>
-
-                <div class="domain-modal__impact">
-                  <div class="domain-modal__impact-title">
-                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="10" /><line x1="12" y1="8" x2="12" y2="12" /><line x1="12" y1="16" x2="12.01" y2="16" /></svg>
-                    Что произойдёт
-                  </div>
-                  <ul class="domain-modal__impact-list">
-                    <li>
-                      В nginx-конфиге обновится <code>server_name</code> на <code>{{ editMainDomainValue.trim() || 'new.example.com' }}</code>.
-                      Файл конфига якорится на имени сайта (<code>{{ site?.name }}.conf</code>) и не переименовывается.
-                    </li>
-                    <li v-if="site?.phpVersion">
-                      PHP-FPM pool <b>не трогается</b> — имя сокета и pool зависят от сайта, а не от домена.
-                    </li>
-                    <li v-if="site?.sslCertificate && site.sslCertificate.status && site.sslCertificate.status !== 'NONE'" class="domain-modal__impact-danger">
-                      <b>SSL сбросится в статус «Нет»</b> — старый серт выпущен на <code>{{ site?.domain }}</code>, для нового домена невалиден.
-                      Файлы в <code>/etc/letsencrypt/live/</code> остаются (на случай отката), но панель перестаёт считать их активными.
-                      После смены — выпусти новый серт кнопкой «Выпустить SSL».
-                    </li>
-                    <li>
-                      <b>DNS</b> нового домена должен уже указывать на этот сервер, иначе сайт станет недоступен (и выпуск SSL потом обломается).
-                    </li>
-                    <li>
-                      Ссылки в админке/БД сайта (<code>site_url</code>, MODX <code>system_settings</code>, хардкод в контенте) панель <b>не трогает</b> — правь руками.
-                    </li>
-                  </ul>
-                </div>
-              </div>
-
-              <div class="domain-modal__footer">
-                <button class="btn btn--ghost" :disabled="savingMainDomain" @click="showEditMainDomain = false">
-                  Отмена
-                </button>
-                <button
-                  class="btn btn--danger"
-                  :disabled="savingMainDomain || !editMainDomainValue.trim() || editMainDomainValue.trim() === site?.domain"
-                  @click="saveMainDomain"
-                >
-                  <svg v-if="!savingMainDomain" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><polyline points="20 6 9 17 4 12" /></svg>
-                  {{ savingMainDomain ? 'Применяю...' : 'Сменить домен' }}
-                </button>
-              </div>
-            </div>
-          </div>
-        </Teleport>
+        <SiteDomainsTab
+          :site-id="siteId"
+          :domains="siteDomains"
+          @changed="reloadSiteAfterDomainChange"
+          @navigate-ssl="navigateToDomainSsl"
+          @navigate-nginx="navigateToDomainNginx"
+        />
       </div>
 
       <!-- Tab content: Backups -->
@@ -2109,7 +1823,27 @@ sudo mv {{ site?.rootPath }}/{{ site?.filesRelPath || 'www' }}/* {{ site?.rootPa
 
       <!-- Tab content: Nginx -->
       <div v-if="activeTab === 'nginx'" class="tab-content">
-        <SiteNginxTab :site-id="siteId" :site-name="site.name" />
+        <!-- Per-domain subtab bar (главный — первым) -->
+        <div v-if="siteDomains.length" class="domain-subtab-bar">
+          <button
+            v-for="d in siteDomains"
+            :key="d.id"
+            class="domain-subtab"
+            :class="{ 'domain-subtab--active': nginxCurrentDomainId === d.id }"
+            @click="nginxActiveDomainId = d.id"
+          >
+            <svg v-if="d.isPrimary" class="domain-subtab__crown" width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><path d="M2 7l5 5 5-8 5 8 5-5v11a1 1 0 0 1-1 1H3a1 1 0 0 1-1-1z" /></svg>
+            <span>{{ d.domain }}</span>
+          </button>
+        </div>
+        <SiteNginxTab
+          v-if="nginxCurrentDomainId"
+          :key="nginxCurrentDomainId"
+          :site-id="siteId"
+          :site-name="site.name"
+          :domain-id="nginxCurrentDomainId"
+        />
+        <div v-else class="domain-subtab-empty">У сайта нет основных доменов.</div>
       </div>
 
       <!-- Tab content: PHP-FPM pool -->
@@ -2741,6 +2475,29 @@ interface SiteAlias {
   redirect: boolean;
 }
 
+interface SiteSslCert {
+  status: string;
+  expiresAt: string | null;
+  /** SAN-домены, реально покрытые сертификатом. Массив после mapSsl на бэке. */
+  domains?: string[];
+}
+
+/** Основной домен сайта (мульти-доменная модель). */
+interface SiteDomainDetail {
+  id: string;
+  siteId: string;
+  domain: string;
+  isPrimary: boolean;
+  position: number;
+  aliases: SiteAlias[];
+  filesRelPath: string | null;
+  appPort: number | null;
+  httpsRedirect: boolean;
+  sslCertificate: SiteSslCert | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
 interface SiteDetail {
   id: string;
   name: string;
@@ -2749,6 +2506,8 @@ interface SiteDetail {
   // API после маппинга отдаёт массив объектов. Для старых ответов (если сервер
   // ещё не задеплоен) поддерживаем и строковый формат.
   aliases: Array<SiteAlias | string>;
+  /** Все основные домены сайта (главный — первым, isPrimary=true). */
+  domains?: SiteDomainDetail[];
   type: string;
   status: string;
   phpVersion: string | null;
@@ -2923,16 +2682,91 @@ async function loadModxVersions(forceRefresh = false) {
   }
 }
 
-// Domains management
-const domainAliases = ref<SiteAlias[]>([]);
-const newAlias = ref('');
-const savingDomains = ref(false);
+// ─── Multi-domain model ───
+// Источник истины — массив `domains` в карточке сайта. Главный домен — первым.
+// Вкладки «Домены»/«SSL»/«Nginx» работают per-domain через дочерние компоненты.
+const siteDomains = computed<SiteDomainDetail[]>(() => {
+  const arr = site.value?.domains;
+  if (Array.isArray(arr) && arr.length) {
+    return [...arr].sort((a, b) => {
+      if (a.isPrimary !== b.isPrimary) return a.isPrimary ? -1 : 1;
+      return a.position - b.position;
+    });
+  }
+  return [];
+});
+/** Главный (primary) домен сайта или null. */
+const primaryDomain = computed<SiteDomainDetail | null>(
+  () => siteDomains.value.find((d) => d.isPrimary) || siteDomains.value[0] || null,
+);
 
-// Edit main domain modal
-const showEditMainDomain = ref(false);
-const editMainDomainValue = ref('');
-const editMainDomainError = ref('');
-const savingMainDomain = ref(false);
+// Subtab-навигация: какой домен открыт во вкладках SSL / Nginx.
+// `*ActiveDomainId` — явный выбор оператора; `*CurrentDomainId` — резолвит
+// его к валидному домену (фолбэк на главный, если выбор пуст/устарел).
+const sslActiveDomainId = ref<string | null>(null);
+const nginxActiveDomainId = ref<string | null>(null);
+
+const nginxCurrentDomainId = computed<string | null>(() => {
+  const list = siteDomains.value;
+  if (!list.length) return null;
+  if (nginxActiveDomainId.value && list.some((d) => d.id === nginxActiveDomainId.value)) {
+    return nginxActiveDomainId.value;
+  }
+  return (list.find((d) => d.isPrimary) || list[0]).id;
+});
+
+/** Перейти на вкладку SSL/Nginx конкретного домена (из вкладки «Домены»). */
+function navigateToDomainSsl(domainId: string) {
+  sslActiveDomainId.value = domainId;
+  activeTab.value = 'ssl';
+}
+function navigateToDomainNginx(domainId: string) {
+  nginxActiveDomainId.value = domainId;
+  activeTab.value = 'nginx';
+}
+
+/** Перезагрузка карточки сайта после доменных мутаций (дочерние компоненты эмитят `changed`). */
+async function reloadSiteAfterDomainChange() {
+  try {
+    site.value = await api.get<SiteDetail>(`/sites/${siteId}`);
+  } catch {
+    /* best-effort — оператор увидит свежие данные при следующей загрузке */
+  }
+}
+
+/**
+ * URL домена/алиаса для перехода: https только если у домена активный (не
+ * expired) серт И этот hostname реально в его SAN — иначе http (иначе браузер
+ * кинет cert-mismatch до того, как nginx ответит).
+ */
+function domainHref(d: SiteDomainDetail, hostname: string): string {
+  const s = d.sslCertificate?.status;
+  const valid = s === 'ACTIVE' || s === 'EXPIRING_SOON';
+  const covered = (d.sslCertificate?.domains || []).some(
+    (x) => x.toLowerCase() === hostname.toLowerCase(),
+  );
+  return `${valid && covered ? 'https' : 'http'}://${hostname}`;
+}
+
+/** Класс цветовой «пилюли» SSL-статуса домена. */
+function sslPillClass(status?: string): string {
+  if (status === 'ACTIVE') return 'ok';
+  if (status === 'EXPIRING_SOON') return 'warn';
+  if (status === 'EXPIRED') return 'err';
+  if (status === 'PENDING') return 'pending';
+  return 'none';
+}
+/** Человекочитаемый SSL-статус домена. */
+function sslStatusLabel(status?: string): string {
+  const labels: Record<string, string> = {
+    ACTIVE: 'SSL активен',
+    EXPIRING_SOON: 'SSL скоро истечёт',
+    EXPIRED: 'SSL истёк',
+    PENDING: 'SSL ожидание',
+    NONE: 'Без SSL',
+  };
+  return labels[status || ''] || 'Без SSL';
+}
 
 // Edit filesRelPath modal (web-root внутри homedir).
 // Меняет nginx root + (если есть PHP) пересобирает FPM pool — оба идут на агента
@@ -2942,72 +2776,16 @@ const editFilesRelPathValue = ref('');
 const editFilesRelPathError = ref('');
 const savingFilesRelPath = ref(false);
 
-/** Нормализатор: API может вернуть и string[], и объекты {domain,redirect}. */
-function normalizeAliases(raw: Array<SiteAlias | string> | null | undefined): SiteAlias[] {
-  if (!Array.isArray(raw)) return [];
-  const out: SiteAlias[] = [];
-  const seen = new Set<string>();
-  for (const item of raw) {
-    if (typeof item === 'string') {
-      const d = item.trim();
-      if (d && !seen.has(d)) { seen.add(d); out.push({ domain: d, redirect: false }); }
-    } else if (item && typeof item === 'object' && typeof item.domain === 'string') {
-      const d = item.domain.trim();
-      if (d && !seen.has(d)) { seen.add(d); out.push({ domain: d, redirect: item.redirect === true }); }
-    }
-  }
-  return out;
-}
-
-const aliasesSummary = computed(() => {
-  return normalizeAliases(site.value?.aliases)
-    .map((a) => (a.redirect ? `${a.domain} →` : a.domain))
-    .join(', ');
-});
-
-const normalizedAliasList = computed(() => normalizeAliases(site.value?.aliases));
-
-const sslAliasesCount = computed(() => {
-  // В SAN идут ВСЕ алиасы (включая redirect — иначе TLS-handshake падает с
-  // cert-mismatch до того, как nginx успеет вернуть 301).
-  return normalizeAliases(site.value?.aliases).length;
-});
-
-/**
- * Есть ли у сайта активный сертификат. Нужно, чтобы иконки "в сертификате/нет"
- * показывались только когда сертификат реально выпущен (иначе показывать
- * "не в сертификате" бессмысленно — у сайта серта вообще нет).
- */
-const hasActiveCert = computed(() => {
-  const s = site.value?.sslCertificate?.status;
-  return s === 'ACTIVE' || s === 'EXPIRING_SOON' || s === 'EXPIRED';
-});
-
-/** Set доменов, покрытых текущим сертификатом (lowercase для сравнения). */
+/** Set доменов, покрытых legacy-сертификатом главного домена (lowercase). */
 const certDomainsLower = computed(() => {
   const arr = site.value?.sslCertificate?.domains || [];
   return new Set(arr.map((d) => d.toLowerCase()));
 });
 
 /**
- * Статус покрытия домена сертификатом:
- *  - 'covered'      — в SAN
- *  - 'missing'      — сертификат есть, но домен не покрыт
- *  - 'no-cert'      — у сайта нет серта вообще, показывать нечего
- *
- * Redirect-алиасы тоже должны быть в SAN: TLS-handshake происходит ДО того,
- * как nginx может вернуть 301 — иначе браузер ругается на cert-mismatch.
- */
-type CertCoverage = 'covered' | 'missing' | 'no-cert';
-function coverageFor(domain: string, _isRedirectAlias = false): CertCoverage {
-  if (!hasActiveCert.value) return 'no-cert';
-  return certDomainsLower.value.has(domain.toLowerCase()) ? 'covered' : 'missing';
-}
-
-/**
- * URL домена для перехода: https если домен покрыт активным (не expired) сертом,
- * иначе http. Если запостить https на непокрытый домен — браузер кинет
- * NET::ERR_CERT_COMMON_NAME_INVALID до того, как nginx успеет ответить.
+ * URL главного домена сайта для legacy-фолбэка (когда `site.domains` ещё не
+ * пришёл со старого сервера). https — только если домен покрыт активным
+ * (не expired) сертом, иначе http (иначе браузер кинет cert-mismatch).
  */
 function domainUrl(domain: string): string {
   const s = site.value?.sslCertificate?.status;
@@ -3015,30 +2793,6 @@ function domainUrl(domain: string): string {
   const covered = certDomainsLower.value.has(domain.toLowerCase());
   return `${valid && covered ? 'https' : 'http'}://${domain}`;
 }
-
-/** Список ВСЕХ алиасов (вкл. redirect), не покрытых текущим сертификатом. */
-const missingAliasesInCert = computed(() => {
-  if (!hasActiveCert.value) return [] as string[];
-  return domainAliases.value
-    .filter((a) => !certDomainsLower.value.has(a.domain.toLowerCase()))
-    .map((a) => a.domain);
-});
-/** Основной домен не в сертификате (редкий, но возможный случай после смены домена). */
-const mainDomainMissingInCert = computed(() => {
-  if (!hasActiveCert.value || !site.value?.domain) return false;
-  return !certDomainsLower.value.has(site.value.domain.toLowerCase());
-});
-
-// SSL upload
-const sslCertPem = ref('');
-const sslKeyPem = ref('');
-const sslChainPem = ref('');
-const uploadingSsl = ref(false);
-const issuingSsl = ref(false);
-const sslIssueError = ref('');
-const sslProgress = ref('');
-const sslElapsed = ref(0);
-let sslElapsedTimer: ReturnType<typeof setInterval> | undefined;
 
 // Deploy state
 const deploying = ref(false);
@@ -3080,17 +2834,17 @@ const typeLabel = computed(() => typeLabels[site.value?.type || ''] || site.valu
 const tabs = computed(() => [
   { id: 'overview', label: 'Обзор' },
   { id: 'domains', label: 'Домены' },
-  { id: 'files', label: 'Файлы' },
-  { id: 'logs', label: 'Логи' },
-  { id: 'databases', label: 'Базы данных', count: site.value?.databases?.length || 0 },
-  { id: 'ssl', label: 'SSL' },
   { id: 'dns', label: 'DNS' },
-  { id: 'backups', label: 'Бэкапы', count: site.value?._count?.backups || 0 },
-  { id: 'cron', label: 'Крон', count: site.value?._count?.cronJobs || 0 },
+  { id: 'ssl', label: 'SSL' },
   { id: 'nginx', label: 'Nginx' },
   { id: 'php', label: 'PHP', hidden: !site.value?.phpVersion },
+  { id: 'databases', label: 'Базы данных', count: site.value?.databases?.length || 0 },
+  { id: 'files', label: 'Файлы' },
+  { id: 'backups', label: 'Бэкапы', count: site.value?._count?.backups || 0 },
+  { id: 'cron', label: 'Крон', count: site.value?._count?.cronJobs || 0 },
   { id: 'services', label: 'Сервисы' },
-  { id: 'danger', label: 'Опасная зона' },
+  { id: 'logs', label: 'Логи' },
+  { id: 'danger', label: 'Опасная зона', farRight: true },
 ].filter((t: { hidden?: boolean }) => !t.hidden));
 
 const envEntries = computed(() => {
@@ -3103,26 +2857,6 @@ const envNewVal = ref('');
 const envSaving = ref(false);
 const envOriginal = ref('');
 const envDirty = computed(() => JSON.stringify(site.value?.envVars || {}) !== envOriginal.value);
-
-const sslLabel = computed(() => {
-  const status = site.value?.sslCertificate?.status;
-  const labels: Record<string, string> = {
-    ACTIVE: 'Активен',
-    EXPIRING_SOON: 'Скоро истекает',
-    EXPIRED: 'Истёк',
-    PENDING: 'Ожидание',
-    NONE: 'Не настроен',
-  };
-  return labels[status || ''] || status || 'Неизвестно';
-});
-
-const sslClass = computed(() => {
-  const status = site.value?.sslCertificate?.status;
-  if (status === 'ACTIVE') return 'ssl-active';
-  if (status === 'EXPIRING_SOON') return 'ssl-warning';
-  if (status === 'EXPIRED') return 'ssl-error';
-  return '';
-});
 
 const sshHost = computed(() => {
   if (typeof window !== 'undefined') {
@@ -3727,107 +3461,6 @@ async function saveEnvVars() {
   }
 }
 
-// --- SSL revoke + import ---
-const revokingSsl = ref(false);
-const importingSsl = ref(false);
-const sslActionError = ref('');
-const sslActionSuccess = ref('');
-const sslImportError = ref('');
-// ACTIVE / EXPIRING_SOON / EXPIRED — значит серт выпущен, можно отозвать.
-// PENDING / NONE / FAILED — отзывать нечего, предлагаем импорт.
-const sslCanRevoke = computed(() => {
-  const st = site.value?.sslCertificate?.status;
-  return st === 'ACTIVE' || st === 'EXPIRING_SOON' || st === 'EXPIRED';
-});
-
-async function revokeSsl() {
-  if (revokingSsl.value) return;
-  const ok = await useMbConfirm().ask({
-    title: 'Отзыв SSL-сертификата',
-    message: 'Отозвать сертификат? Он будет revoke\'нут в Let\'s Encrypt и удалён с диска.',
-    confirmText: 'Отозвать',
-    danger: true,
-  });
-  if (!ok) return;
-  revokingSsl.value = true;
-  sslActionError.value = '';
-  sslActionSuccess.value = '';
-  try {
-    const r = await api.post<{ data?: { revoked: boolean; warning: string | null } }>(
-      `/sites/${siteId}/ssl/revoke`, {},
-    );
-    sslActionSuccess.value = r?.data?.warning || 'Сертификат отозван, сайт переключён на HTTP';
-    site.value = await api.get<SiteDetail>(`/sites/${siteId}`);
-  } catch (err: unknown) {
-    sslActionError.value = (err as Error).message || 'Ошибка отзыва';
-  } finally {
-    revokingSsl.value = false;
-  }
-}
-
-async function importSsl() {
-  if (importingSsl.value) return;
-  importingSsl.value = true;
-  sslImportError.value = '';
-  try {
-    await api.post(`/sites/${siteId}/ssl/import`, {});
-    site.value = await api.get<SiteDetail>(`/sites/${siteId}`);
-  } catch (err: unknown) {
-    sslImportError.value = (err as Error).message || 'Не удалось импортировать сертификат';
-  } finally {
-    importingSsl.value = false;
-  }
-}
-
-async function issueLetsEncrypt() {
-  if (issuingSsl.value) return;
-  issuingSsl.value = true;
-  sslIssueError.value = '';
-  sslProgress.value = 'Отправка запроса агенту...';
-  sslElapsed.value = 0;
-  sslElapsedTimer = setInterval(() => {
-    sslElapsed.value++;
-    if (sslElapsed.value === 3) {
-      sslProgress.value = 'Ожидание certbot (может занять до 2 минут)...';
-    }
-  }, 1000);
-  try {
-    await api.post(`/sites/${siteId}/ssl/issue`, {});
-    sslProgress.value = 'Сертификат успешно выпущен';
-    site.value = await api.get<SiteDetail>(`/sites/${siteId}`);
-    setTimeout(() => { sslProgress.value = ''; }, 3000);
-  } catch (err: unknown) {
-    sslIssueError.value = (err as Error).message || 'Ошибка выпуска сертификата';
-    sslProgress.value = '';
-  } finally {
-    issuingSsl.value = false;
-    clearInterval(sslElapsedTimer);
-    sslElapsedTimer = undefined;
-  }
-}
-
-async function uploadSsl() {
-  if (!sslCertPem.value.trim() || !sslKeyPem.value.trim() || uploadingSsl.value) return;
-  uploadingSsl.value = true;
-  try {
-    const body: Record<string, string> = {
-      certPem: sslCertPem.value,
-      keyPem: sslKeyPem.value,
-    };
-    if (sslChainPem.value.trim()) body.chainPem = sslChainPem.value;
-    await api.post(`/sites/${siteId}/ssl/custom`, body);
-    sslCertPem.value = '';
-    sslKeyPem.value = '';
-    sslChainPem.value = '';
-    // Reload site to reflect new SSL status
-    site.value = await api.get<SiteDetail>(`/sites/${siteId}`);
-  } catch {
-    // Upload failed
-  } finally {
-    uploadingSsl.value = false;
-  }
-}
-
 // ─── Nginx ───
 // Все операции с nginx-конфигами теперь обрабатывает компонент SiteNginxTab
 // (web/components/SiteNginxTab.vue): поля настроек + редактор 95-custom.conf.
@@ -3881,71 +3514,6 @@ async function savePhpPoolConfig() {
     phpPoolError.value = (err as Error).message || 'Не удалось сохранить PHP-конфиг';
   } finally {
     phpPoolSaving.value = false;
-  }
-}
-
-async function saveDomainAliases() {
-  savingDomains.value = true;
-  try {
-    // API принимает как string[], так и [{domain,redirect}]. Шлём новый формат.
-    await api.put(`/sites/${siteId}`, { aliases: domainAliases.value });
-    site.value = await api.get<SiteDetail>(`/sites/${siteId}`);
-    domainAliases.value = normalizeAliases(site.value?.aliases);
-  } catch {
-    // revert из серверного источника истины
-    domainAliases.value = normalizeAliases(site.value?.aliases);
-  } finally {
-    savingDomains.value = false;
-  }
-}
-
-function addAlias() {
-  const alias = newAlias.value.trim().toLowerCase();
-  if (!alias || domainAliases.value.some((a) => a.domain === alias)) return;
-  domainAliases.value.push({ domain: alias, redirect: false });
-  newAlias.value = '';
-  saveDomainAliases();
-}
-
-function removeAlias(idx: number) {
-  domainAliases.value.splice(idx, 1);
-  saveDomainAliases();
-}
-
-function toggleAliasRedirect(idx: number) {
-  const a = domainAliases.value[idx];
-  if (!a) return;
-  // Оптимистичный апдейт + сохранение. На ошибке saveDomainAliases откатит.
-  domainAliases.value[idx] = { ...a, redirect: !a.redirect };
-  saveDomainAliases();
-}
-
-function openEditMainDomain() {
-  editMainDomainValue.value = site.value?.domain || '';
-  editMainDomainError.value = '';
-  showEditMainDomain.value = true;
-}
-
-async function saveMainDomain() {
-  if (!site.value) return;
-  const next = editMainDomainValue.value.trim().toLowerCase();
-  editMainDomainError.value = '';
-  if (!next || next === site.value.domain) return;
-  // Лёгкая клиентская валидация; серьёзная — на API.
-  if (!/^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$/.test(next)) {
-    editMainDomainError.value = 'Невалидный домен';
-    return;
-  }
-  savingMainDomain.value = true;
-  try {
-    await api.put(`/sites/${siteId}`, { domain: next });
-    site.value = await api.get<SiteDetail>(`/sites/${siteId}`);
-    domainAliases.value = normalizeAliases(site.value?.aliases);
-    showEditMainDomain.value = false;
-  } catch (err: unknown) {
-    editMainDomainError.value = (err as Error).message || 'Не удалось сменить домен';
-  } finally {
-    savingMainDomain.value = false;
   }
 }
 
@@ -6077,7 +5645,6 @@ onMounted(async () => {
     } catch {
       /* ignore disabled storage */
     }
-    domainAliases.value = normalizeAliases(site.value?.aliases);
     envOriginal.value = JSON.stringify(site.value?.envVars || {});
     syncSiteExcludesFromSite();
     // Load deploy logs, site metrics, and servers in background
@@ -6122,9 +5689,6 @@ onMounted(async () => {
 onBeforeUnmount(() => {
   if (logAutoRefreshTimer) {
     clearInterval(logAutoRefreshTimer);
-  }
-  if (sslElapsedTimer) {
-    clearInterval(sslElapsedTimer);
   }
   if (migrationPollTimer) {
     clearInterval(migrationPollTimer);
@@ -6216,7 +5780,99 @@ onBeforeUnmount(() => {
   font-family: 'JetBrains Mono', monospace;
   color: var(--text-muted);
   margin: 0.1rem 0 0;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.35rem;
 }
+.site-detail__domain-sep { color: var(--text-faint); }
+
+/* Per-domain subtab bar (вкладки SSL / Nginx) */
+.domain-subtab-bar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  padding-bottom: 0.85rem;
+  margin-bottom: 1rem;
+  border-bottom: 1px solid var(--border-secondary);
+}
+.domain-subtab {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.4rem 0.8rem;
+  border-radius: 8px;
+  border: 1px solid var(--border-secondary);
+  background: var(--bg-elevated);
+  color: var(--text-muted);
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.78rem;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+.domain-subtab:hover { color: var(--text-secondary); border-color: var(--border); }
+.domain-subtab--active {
+  color: var(--primary-text);
+  border-color: var(--primary-text);
+  background: var(--primary-bg, rgba(99, 102, 241, 0.1));
+}
+.domain-subtab__crown { color: #fbbf24; flex-shrink: 0; }
+.domain-subtab-empty {
+  font-size: 0.85rem;
+  color: var(--text-muted);
+  padding: 1.5rem 0;
+}
+
+/* Overview: блок «Домены и SSL» (по строке на каждый основной домен) */
+.overview-domains { display: flex; flex-direction: column; gap: 0.7rem; }
+.overview-domain {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+  padding: 0.6rem 0.75rem;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-secondary);
+  border-radius: 9px;
+}
+.overview-domain__head {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  flex-wrap: wrap;
+}
+.overview-domain__crown { color: #fbbf24; flex-shrink: 0; }
+.overview-domain__name {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.82rem;
+  overflow-wrap: anywhere;
+}
+.overview-domain__aliases {
+  font-size: 0.74rem;
+  color: var(--text-muted);
+  font-family: 'JetBrains Mono', monospace;
+  overflow-wrap: anywhere;
+}
+.overview-domain__aliases-label { color: var(--text-faint); margin-right: 0.25rem; font-family: inherit; }
+.overview-domain__ssl-meta { font-size: 0.72rem; color: var(--text-faint); }
+
+.ssl-pill {
+  display: inline-flex;
+  align-items: center;
+  padding: 0.1rem 0.45rem;
+  border-radius: 6px;
+  font-size: 0.68rem;
+  font-weight: 600;
+  font-family: inherit;
+  white-space: nowrap;
+}
+.ssl-pill--ok { background: rgba(34, 197, 94, 0.15); color: #4ade80; }
+.ssl-pill--warn { background: rgba(251, 191, 36, 0.15); color: #fbbf24; }
+.ssl-pill--err { background: rgba(239, 68, 68, 0.15); color: #f87171; }
+.ssl-pill--pending { background: rgba(99, 102, 241, 0.15); color: var(--primary-text); }
+.ssl-pill--none { background: var(--border); color: var(--text-muted); }
+html.theme-light .ssl-pill--ok { color: #15803d; }
+html.theme-light .ssl-pill--warn { color: #b45309; }
+html.theme-light .ssl-pill--err { color: #b91c1c; }
 
 .site-detail__header-right {
   display: flex;
@@ -6365,6 +6021,10 @@ html.theme-light .site-detail__hp-banner-text code {
 .site-detail__tab--active {
   color: var(--primary-text);
   border-bottom-color: var(--primary);
+}
+
+.site-detail__tab--far-right {
+  margin-left: auto;
 }
 
 .site-detail__tab-count {

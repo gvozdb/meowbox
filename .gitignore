@@ -55,3 +55,6 @@ BACKLOG.md
 .DS_Store
 .vscode/
 .idea/
+
+# Agent workspace
+.fcklaw/

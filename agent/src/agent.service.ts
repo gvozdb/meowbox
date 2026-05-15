@@ -258,30 +258,37 @@ export class AgentService {
     const s = this.socket;
 
     // -- Nginx --
+    /**
+     * Регенерирует ВЕСЬ конфиг сайта (главный файл + чанки всех доменов).
+     * Много-доменная модель: у сайта N «основных» доменов, каждый — свой
+     * server-блок, SSL-серт и набор layered-чанков. См. agent/src/nginx/templates.ts.
+     */
     this.safeOn(s, 'nginx:create-config', async (
       params: {
         siteName: string;
-        siteType: string;
-        domain: string;
-        aliases: Array<string | { domain: string; redirect?: boolean }>;
         rootPath: string;
-        filesRelPath?: string;
+        phpEnabled: boolean;
         phpVersion?: string;
-        phpEnabled?: boolean;
-        appPort?: number;
         systemUser?: string;
-        sslEnabled?: boolean;
-        httpsRedirect?: boolean;
-        certPath?: string;
-        keyPath?: string;
-        // Layered nginx (см. agent/src/nginx/templates.ts)
-        settings?: import('@meowbox/shared').SiteNginxOverrides;
-        customConfig?: string | null;
-        forceWriteCustom?: boolean;
+        domains: Array<{
+          domainId: string;
+          domain: string;
+          aliases: Array<{ domain: string; redirect: boolean }>;
+          filesRelPath: string;
+          appPort?: number | null;
+          sslEnabled: boolean;
+          certPath?: string | null;
+          keyPath?: string | null;
+          httpsRedirect: boolean;
+          zoneName: string;
+          settings: import('@meowbox/shared').SiteNginxOverrides;
+          customConfig?: string | null;
+          forceWriteCustom?: boolean;
+        }>;
       },
       cb: Callback,
     ) => {
-      // Ensure root directory exists before creating config
+      // Ensure shared site root directory exists before creating config.
       const owner = params.systemUser ? `${params.systemUser}:${params.systemUser}` : 'www-data:www-data';
       await this.cmdExec.execute('mkdir', ['-p', params.rootPath]);
       await this.cmdExec.execute('chown', [owner, params.rootPath]);
@@ -290,44 +297,33 @@ export class AgentService {
     });
 
     /**
-     * Записать ТОЛЬКО `95-custom.conf` для сайта. Используется UI-вкладкой Nginx
-     * при сохранении кастом-блока. nginx -t + reload + автооткат при ошибке —
-     * внутри `setCustomConfig()`.
+     * Записать ТОЛЬКО `95-custom.conf` конкретного домена. Используется
+     * UI-вкладкой Nginx при сохранении кастом-блока. nginx -t + reload +
+     * автооткат при ошибке — внутри `setCustomConfig()`.
      */
     this.safeOn(s, 'nginx:set-custom', async (
-      params: { siteName: string; content: string },
+      params: { siteName: string; domainId: string; content: string },
       cb: Callback,
     ) => {
-      cb(await this.nginx.setCustomConfig(params.siteName, params.content ?? ''));
+      cb(await this.nginx.setCustomConfig(params.siteName, params.domainId, params.content ?? ''));
     });
 
-    /** Прочитать `95-custom.conf` для сайта (UI вкладка Nginx). */
+    /** Прочитать `95-custom.conf` конкретного домена (UI вкладка Nginx). */
     this.safeOn(s, 'nginx:read-custom', async (
-      params: { siteName: string },
+      params: { siteName: string; domainId: string },
       cb: Callback,
     ) => {
-      const content = await this.nginx.readCustomConfig(params.siteName);
+      const content = await this.nginx.readCustomConfig(params.siteName, params.domainId);
       cb({ success: true, data: content });
     });
 
-    this.safeOn(s, 'nginx:update-config', async (params: { siteName?: string; domain?: string; config: string }, cb: Callback) => {
-      const anchor = artifactAnchor({ siteName: params.siteName, domain: params.domain });
-      cb(await this.nginx.updateSiteConfig(anchor, params.config));
-    });
-
-    this.safeOn(s, 'nginx:remove-config', async (params: { siteName?: string; domain?: string }, cb: Callback) => {
-      const anchor = artifactAnchor({ siteName: params.siteName, domain: params.domain });
-      await this.nginx.removeSiteConfig(anchor);
-      // Legacy: если siteName задан и отличается от domain — чистим и старый файл
-      if (params.siteName && params.domain && params.domain !== anchor) {
-        await this.nginx.removeSiteConfig(params.domain);
-      }
+    this.safeOn(s, 'nginx:remove-config', async (params: { siteName: string }, cb: Callback) => {
+      await this.nginx.removeSiteConfig(params.siteName);
       cb({ success: true });
     });
 
-    this.safeOn(s, 'nginx:read-config', async (params: { siteName?: string; domain?: string }, cb: Callback) => {
-      const anchor = artifactAnchor({ siteName: params.siteName, domain: params.domain });
-      const config = await this.nginx.readSiteConfig(anchor);
+    this.safeOn(s, 'nginx:read-config', async (params: { siteName: string }, cb: Callback) => {
+      const config = await this.nginx.readSiteConfig(params.siteName);
       cb({ success: true, data: config });
     });
 
@@ -366,7 +362,7 @@ export class AgentService {
     });
 
     this.safeOn(s, 'nginx:write-global-zones', async (
-      params: { zones: Array<{ siteName: string; rps: number; enabled: boolean }> },
+      params: { zones: Array<{ zoneName: string; rps: number; enabled: boolean }> },
       cb: Callback,
     ) => {
       cb(await this.nginx.writeGlobalZones(params?.zones || []));

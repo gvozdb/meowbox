@@ -42,116 +42,177 @@ model User {
 }
 
 model Site {
-  id               String   @id @default(uuid())
+  id                         String   @id @default(uuid())
   // `name` — системное имя (= имя Linux-юзера, имя БД, имя БД-юзера). Уникально.
   // Должно начинаться с буквы, [a-z0-9_-], max 32 символов.
-  name             String   @unique
+  name                       String   @unique
   // `displayName` — человекочитаемое название для списка сайтов.
   // Необязательное: если null/пусто — UI показывает `name`.
-  displayName      String?  @map("display_name")
-  domain           String   @unique
-  aliases          String   @default("[]") // JSON string[]
-  type             String // SiteType
-  status           String   @default("STOPPED") // SiteStatus
+  displayName                String?  @map("display_name")
+  domain                     String   @unique
+  aliases                    String   @default("[]") // JSON string[]
+  type                       String // SiteType
+  status                     String   @default("STOPPED") // SiteStatus
   // Последнее сообщение об ошибке (для статуса ERROR). Пишется при провале
   // провижининга/деплоя, показывается в UI; очищается при успешном запуске.
-  errorMessage     String?  @map("error_message")
-  phpVersion       String?  @map("php_version")
-  gitRepository    String?  @map("git_repository")
-  deployBranch     String?  @map("deploy_branch")
-  appPort          Int?     @map("app_port")
-  envVars          String   @default("{}") @map("env_vars") // JSON object
-  rootPath         String   @map("root_path")
-  nginxConfigPath  String   @map("nginx_config_path")
-  systemUser       String?  @map("site_user")
+  errorMessage               String?  @map("error_message")
+  phpVersion                 String?  @map("php_version")
+  gitRepository              String?  @map("git_repository")
+  deployBranch               String?  @map("deploy_branch")
+  appPort                    Int?     @map("app_port")
+  envVars                    String   @default("{}") @map("env_vars") // JSON object
+  rootPath                   String   @map("root_path")
+  nginxConfigPath            String   @map("nginx_config_path")
+  systemUser                 String?  @map("site_user")
   /// AES-256-GCM, HKDF(master,'meowbox:ssh:v1'). См. spec master-key-unification.
-  sshPasswordEnc   String?  @map("ssh_password_enc")
-  cmsAdminUser     String?  @map("cms_admin_user")
+  sshPasswordEnc             String?  @map("ssh_password_enc")
+  cmsAdminUser               String?  @map("cms_admin_user")
   /// AES-256-GCM, HKDF(master,'meowbox:cms:v1').
-  cmsAdminPasswordEnc String? @map("cms_admin_password_enc")
-  managerPath      String?  @map("manager_path")
-  connectorsPath   String?  @map("connectors_path")
+  cmsAdminPasswordEnc        String?  @map("cms_admin_password_enc")
+  managerPath                String?  @map("manager_path")
+  connectorsPath             String?  @map("connectors_path")
   // Префикс таблиц в БД CMS (MODX). Задаётся ОДИН РАЗ при создании сайта,
   // дальше не меняется (read-only в UI) — иначе пришлось бы переименовывать
   // таблицы. Формат: ^[a-z][a-z0-9_]*_$ (например, `xkqzwfa_`). Если null —
   // fallback на MODX_DB_DEFAULTS.TABLE_PREFIX ("modx_").
-  cmsTablePrefix   String?  @map("cms_table_prefix")
+  cmsTablePrefix             String?  @map("cms_table_prefix")
   // Версия установленной CMS (для MODX: "2.8.8-pl", "3.1.2-pl" и т.п.).
-  modxVersion      String?  @map("modx_version")
+  modxVersion                String?  @map("modx_version")
   // Кастомный фрагмент php-fpm пула — дописывается в конец pool-конфига при
   // генерации на агенте. Переживает смену phpVersion (переносится в новый пул).
   // null/пусто — никаких кастомных overrides.
-  phpPoolCustom    String?  @map("php_pool_custom")
+  phpPoolCustom              String?  @map("php_pool_custom")
   // Модули CUSTOM-сайта (для MODX всегда true). PHP включён по наличию phpVersion.
-  dbEnabled        Boolean  @default(false) @map("db_enabled")
-  httpsRedirect    Boolean  @default(true) @map("https_redirect")
+  dbEnabled                  Boolean  @default(false) @map("db_enabled")
+  httpsRedirect              Boolean  @default(true) @map("https_redirect")
   // Относительный путь до web-root внутри rootPath (обычно "www", но можно "public_html" и т.п.).
-  filesRelPath     String   @default("www") @map("files_rel_path")
+  filesRelPath               String   @default("www") @map("files_rel_path")
   // -----------------------------------------------------------------------
   // Layered nginx settings — параметризуют шаблоны в meowbox/{siteName}/*.conf.
   // Перегенерируются при PUT /sites/:id/nginx/settings. null/0 → дефолты из
   // shared/nginx-defaults.ts.
   // -----------------------------------------------------------------------
   /// max body размер (значение в формате nginx: "32M", "100M", "1G"). Default "32M".
-  nginxClientMaxBodySize String? @map("nginx_client_max_body_size")
+  nginxClientMaxBodySize     String?  @map("nginx_client_max_body_size")
   /// fastcgi_read_timeout (сек). Default 60.
-  nginxFastcgiReadTimeout    Int? @map("nginx_fastcgi_read_timeout")
+  nginxFastcgiReadTimeout    Int?     @map("nginx_fastcgi_read_timeout")
   /// fastcgi_send_timeout (сек). Default 60.
-  nginxFastcgiSendTimeout    Int? @map("nginx_fastcgi_send_timeout")
+  nginxFastcgiSendTimeout    Int?     @map("nginx_fastcgi_send_timeout")
   /// fastcgi_connect_timeout (сек). Default 60.
-  nginxFastcgiConnectTimeout Int? @map("nginx_fastcgi_connect_timeout")
+  nginxFastcgiConnectTimeout Int?     @map("nginx_fastcgi_connect_timeout")
   /// fastcgi_buffer_size (KB). Default 32.
-  nginxFastcgiBufferSizeKb   Int? @map("nginx_fastcgi_buffer_size_kb")
+  nginxFastcgiBufferSizeKb   Int?     @map("nginx_fastcgi_buffer_size_kb")
   /// fastcgi_buffers count (штук, размер каждого = nginxFastcgiBufferSizeKb / 2). Default 16.
-  nginxFastcgiBufferCount    Int? @map("nginx_fastcgi_buffer_count")
+  nginxFastcgiBufferCount    Int?     @map("nginx_fastcgi_buffer_count")
   /// HTTP/2 включён (только при SSL). Default true.
-  nginxHttp2     Boolean @default(true) @map("nginx_http2")
+  nginxHttp2                 Boolean  @default(true) @map("nginx_http2")
   /// Strict-Transport-Security header (max-age=63072000; includeSubDomains). Default false.
-  nginxHsts      Boolean @default(false) @map("nginx_hsts")
+  nginxHsts                  Boolean  @default(false) @map("nginx_hsts")
   /// gzip компрессия. Default true.
-  nginxGzip      Boolean @default(true) @map("nginx_gzip")
+  nginxGzip                  Boolean  @default(true) @map("nginx_gzip")
   /// Per-site rate limiting (nginx limit_req). Если null/false — директива не пишется.
-  nginxRateLimitEnabled Boolean @default(true) @map("nginx_rate_limit_enabled")
+  nginxRateLimitEnabled      Boolean  @default(true) @map("nginx_rate_limit_enabled")
   /// requests-per-second в zone-объявлении (limit_req_zone ... rate=Xr/s). Default 30.
-  nginxRateLimitRps     Int?    @map("nginx_rate_limit_rps")
+  nginxRateLimitRps          Int?     @map("nginx_rate_limit_rps")
   /// burst для limit_req. Default 60.
-  nginxRateLimitBurst   Int?    @map("nginx_rate_limit_burst")
+  nginxRateLimitBurst        Int?     @map("nginx_rate_limit_burst")
   /// Кастомный конфиг — содержимое 95-custom.conf, инклюдится В ТЕЛО основного server-блока.
   /// Юзер редактирует через UI. Панель НЕ перезаписывает этот блок при операциях.
   /// При установке CMS (MODX) сюда автоматически дописываются её правила (try_files и т.п.) —
   /// пользователь дальше может править их под себя.
-  nginxCustomConfig String? @map("nginx_custom_config")
+  nginxCustomConfig          String?  @map("nginx_custom_config")
   // Per-site дефолтные excludes для бэкапов (JSON string[]). Пустой массив или
   // null — fallback на глобальные дефолты из panel_settings.backup-defaults.
-  backupExcludes        String?  @map("backup_excludes")
+  backupExcludes             String?  @map("backup_excludes")
   // Per-site список таблиц БД, которые дампятся БЕЗ данных (только структура).
   // JSON string[]. null/[] — fallback на глобальные.
-  backupExcludeTables   String?  @map("backup_exclude_tables")
+  backupExcludeTables        String?  @map("backup_exclude_tables")
   // Произвольный JSON для маркеров и meta-данных. Пример:
   //   { "migrationId": "<HostpanelMigration.id>", "importedFrom": "vm120", "originalUid": 1002 }
   // Используется hostpanel-миграцией для контракта cleanup'а: cleanup трогает
   // только сайты с metadata.migrationId === currentMigrationId.
-  metadata              String?  // JSON object
-  userId           String   @map("user_id")
-  createdAt        DateTime @default(now()) @map("created_at")
-  updatedAt        DateTime @updatedAt @map("updated_at")
+  metadata                   String? // JSON object
+  userId                     String   @map("user_id")
+  createdAt                  DateTime @default(now()) @map("created_at")
+  updatedAt                  DateTime @updatedAt @map("updated_at")
 
-  user           User               @relation(fields: [userId], references: [id], onDelete: Cascade)
-  databases      Database[]
-  sslCertificate SslCertificate?
-  deployLogs     DeployLog[]
-  backupConfigs  BackupConfig[]
-  backups        Backup[]
-  cronJobs       CronJob[]
-  diskSnapshots  SiteDiskSnapshot[]
-  healthPings    HealthCheckPing[]
-  dnsZones       DnsZone[]
-  services       SiteService[]
+  user            User               @relation(fields: [userId], references: [id], onDelete: Cascade)
+  databases       Database[]
+  domains         SiteDomain[]
+  sslCertificates SslCertificate[]
+  deployLogs      DeployLog[]
+  backupConfigs   BackupConfig[]
+  backups         Backup[]
+  cronJobs        CronJob[]
+  diskSnapshots   SiteDiskSnapshot[]
+  healthPings     HealthCheckPing[]
+  dnsZones        DnsZone[]
+  services        SiteService[]
 
   @@index([userId])
   @@index([status])
   @@index([type])
   @@map("sites")
+}
+
+// =============================================================================
+// Основной домен сайта. Один Site = N основных доменов (мульти-доменное
+// приложение: фронт / админка / API на разных доменах). Каждый основной домен —
+// собственный server-блок nginx, собственный SSL-сертификат, собственный набор
+// layered nginx-настроек и 95-custom.conf, собственный (опционально) web-root.
+//
+// Хомдира linux-юзера — ОБЩАЯ на весь сайт (Site.rootPath). Домены различаются
+// только относительным web-root (`filesRelPath`): null → наследует
+// Site.filesRelPath, иначе — собственная поддиректория внутри Site.rootPath.
+// На диске НИЧЕГО не переименовывается при смене домена.
+//
+// Ровно один домен помечен `isPrimary` ("главный", корона в UI) — он
+// зеркалируется в Site.domain для обратной совместимости со старым кодом.
+// =============================================================================
+model SiteDomain {
+  id                         String   @id @default(uuid())
+  siteId                     String   @map("site_id")
+  /// Доменное имя. Глобально уникально среди всех основных доменов.
+  domain                     String   @unique
+  /// Главный домен сайта (ровно один на сайт). position=0, корона в UI,
+  /// зеркалируется в Site.domain.
+  isPrimary                  Boolean  @default(false) @map("is_primary")
+  /// Порядок в списке доменов сайта (главный — 0).
+  position                   Int      @default(0)
+  /// Алиасы этого домена. JSON: [{ "domain": string, "redirect": boolean }].
+  /// redirect=true → 301 на этот основной домен; false → отдаёт тот же сайт.
+  aliases                    String   @default("[]")
+  /// web-root этого домена ОТНОСИТЕЛЬНО Site.rootPath. null → наследует
+  /// Site.filesRelPath (общий дефолт сайта). Заданное значение — собственная
+  /// поддиректория (разные домены одного сайта могут смотреть в разные папки).
+  filesRelPath               String?  @map("files_rel_path")
+  /// Порт приложения для reverse-proxy (Node и т.п.). null — нет proxy.
+  appPort                    Int?     @map("app_port")
+  /// 301 HTTP→HTTPS для этого домена (действует при активном SSL).
+  httpsRedirect              Boolean  @default(true) @map("https_redirect")
+  // --- Layered nginx settings (per-domain). null/0 → дефолты shared/nginx-defaults.ts ---
+  nginxClientMaxBodySize     String?  @map("nginx_client_max_body_size")
+  nginxFastcgiReadTimeout    Int?     @map("nginx_fastcgi_read_timeout")
+  nginxFastcgiSendTimeout    Int?     @map("nginx_fastcgi_send_timeout")
+  nginxFastcgiConnectTimeout Int?     @map("nginx_fastcgi_connect_timeout")
+  nginxFastcgiBufferSizeKb   Int?     @map("nginx_fastcgi_buffer_size_kb")
+  nginxFastcgiBufferCount    Int?     @map("nginx_fastcgi_buffer_count")
+  nginxHttp2                 Boolean  @default(true) @map("nginx_http2")
+  nginxHsts                  Boolean  @default(false) @map("nginx_hsts")
+  nginxGzip                  Boolean  @default(true) @map("nginx_gzip")
+  nginxRateLimitEnabled      Boolean  @default(true) @map("nginx_rate_limit_enabled")
+  nginxRateLimitRps          Int?     @map("nginx_rate_limit_rps")
+  nginxRateLimitBurst        Int?     @map("nginx_rate_limit_burst")
+  /// Содержимое 95-custom.conf этого домена (инклюдится в его server-блок).
+  nginxCustomConfig          String?  @map("nginx_custom_config")
+  createdAt                  DateTime @default(now()) @map("created_at")
+  updatedAt                  DateTime @updatedAt @map("updated_at")
+
+  site           Site            @relation(fields: [siteId], references: [id], onDelete: Cascade)
+  sslCertificate SslCertificate?
+
+  @@index([siteId])
+  @@map("site_domains")
 }
 
 // =============================================================================
@@ -184,14 +245,14 @@ model ServerService {
 /// ERROR — последняя операция упала; STARTING — переходное состояние.
 /// `config` хранит per-site overrides (например, memoryMaxMb) — пусто = дефолт.
 model SiteService {
-  id          String    @id @default(uuid())
-  siteId      String    @map("site_id")
-  serviceKey  String    @map("service_key")
-  status      String    @default("STOPPED") // STARTING | RUNNING | STOPPED | ERROR
-  config      String    @default("{}") // JSON: per-site overrides
-  lastError   String?   @map("last_error")
-  installedAt DateTime  @default(now()) @map("installed_at")
-  updatedAt   DateTime  @updatedAt @map("updated_at")
+  id          String   @id @default(uuid())
+  siteId      String   @map("site_id")
+  serviceKey  String   @map("service_key")
+  status      String   @default("STOPPED") // STARTING | RUNNING | STOPPED | ERROR
+  config      String   @default("{}") // JSON: per-site overrides
+  lastError   String?  @map("last_error")
+  installedAt DateTime @default(now()) @map("installed_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
 
   site Site @relation(fields: [siteId], references: [id], onDelete: Cascade)
 
@@ -231,24 +292,24 @@ model Database {
 // от `type`). `resticPassword` — пароль репы Restic на этом хранилище;
 // генерируется при создании, показывается юзеру один раз.
 model StorageLocation {
-  id              String   @id @default(uuid())
-  name            String   @unique
-  type            String   // BackupStorageType: LOCAL | S3 | YANDEX_DISK | CLOUD_MAIL_RU
-  config          String   @default("{}") // JSON object (креды + опции)
-  resticPassword  String?  @map("restic_password")
+  id             String   @id @default(uuid())
+  name           String   @unique
+  type           String // BackupStorageType: LOCAL | S3 | YANDEX_DISK | CLOUD_MAIL_RU
+  config         String   @default("{}") // JSON object (креды + опции)
+  resticPassword String?  @map("restic_password")
   // Поддерживает ли это хранилище Restic-движок (LOCAL и S3 — да; Y.Disk/Mail.ru — нет)
-  resticEnabled   Boolean  @default(false) @map("restic_enabled")
-  createdAt       DateTime @default(now()) @map("created_at")
-  updatedAt       DateTime @updatedAt @map("updated_at")
+  resticEnabled  Boolean  @default(false) @map("restic_enabled")
+  createdAt      DateTime @default(now()) @map("created_at")
+  updatedAt      DateTime @updatedAt @map("updated_at")
 
-  backups                    Backup[]
-  backupConfigs              BackupConfig[]
-  resticChecks               ResticCheck[]
-  serverPathBackupConfigs    ServerPathBackupConfig[] @relation("ServerPathBackupConfigToStorageLocation")
-  serverPathBackups          ServerPathBackup[]       @relation("ServerPathBackupToStorageLocation")
-  panelDataBackupConfigs     PanelDataBackupConfig[]  @relation("PanelDataBackupConfigToStorageLocation")
-  panelDataBackups           PanelDataBackup[]        @relation("PanelDataBackupToStorageLocation")
-  siteBackupSchedules        SiteBackupSchedule[]     @relation("SiteBackupScheduleToStorageLocation")
+  backups                 Backup[]
+  backupConfigs           BackupConfig[]
+  resticChecks            ResticCheck[]
+  serverPathBackupConfigs ServerPathBackupConfig[] @relation("ServerPathBackupConfigToStorageLocation")
+  serverPathBackups       ServerPathBackup[]       @relation("ServerPathBackupToStorageLocation")
+  panelDataBackupConfigs  PanelDataBackupConfig[]  @relation("PanelDataBackupConfigToStorageLocation")
+  panelDataBackups        PanelDataBackup[]        @relation("PanelDataBackupToStorageLocation")
+  siteBackupSchedules     SiteBackupSchedule[]     @relation("SiteBackupScheduleToStorageLocation")
 
   @@map("storage_locations")
 }
@@ -257,21 +318,21 @@ model StorageLocation {
 // Репа = (siteName, storageLocation) — поэтому одна пара хранит свою историю.
 // Пишется при ручном запуске из UI и при плановом запуске (scheduler).
 model ResticCheck {
-  id                String   @id @default(uuid())
-  storageLocationId String   @map("storage_location_id")
+  id                String    @id @default(uuid())
+  storageLocationId String    @map("storage_location_id")
   // Денормализованное имя сайта (репа именуется по нему).
   // Не FK на Site, чтобы история выжила, если сайт удалят.
-  siteName          String   @map("site_name")
-  siteId            String?  @map("site_id") // опциональная связь для быстрого join'а
-  success           Boolean  @default(false)
-  errorMessage      String?  @map("error_message")
-  output            String?  // stdout restic'а, первые ~4KB
-  readData          Boolean  @default(false) @map("read_data")
-  readDataSubset    String?  @map("read_data_subset")
-  durationMs        Int?     @map("duration_ms")
+  siteName          String    @map("site_name")
+  siteId            String?   @map("site_id") // опциональная связь для быстрого join'а
+  success           Boolean   @default(false)
+  errorMessage      String?   @map("error_message")
+  output            String? // stdout restic'а, первые ~4KB
+  readData          Boolean   @default(false) @map("read_data")
+  readDataSubset    String?   @map("read_data_subset")
+  durationMs        Int?      @map("duration_ms")
   // Причина запуска: manual | scheduled
-  source            String   @default("manual")
-  startedAt         DateTime @default(now()) @map("started_at")
+  source            String    @default("manual")
+  startedAt         DateTime  @default(now()) @map("started_at")
   completedAt       DateTime? @map("completed_at")
 
   storageLocation StorageLocation @relation(fields: [storageLocationId], references: [id], onDelete: Cascade)
@@ -321,38 +382,38 @@ model BackupConfig {
 // Один путь = один config. См. docs/specs/2026-05-10-unified-backups.md.
 // =============================================================================
 model ServerPathBackupConfig {
-  id                   String   @id @default(uuid())
+  id                  String   @id @default(uuid())
   /// Имя конфига для UI и логов: "etc daily", "opt weekly", ...
-  name                 String
+  name                String
   /// Абсолютный путь. Один путь на конфиг — если нужны разные расписания,
   /// создаёшь второй config с тем же path.
-  path                 String
+  path                String
   /// Подтверждение, что юзер прочитал warning'и о пути из warnlist
   /// (`/var/log`, `/var/lib/mysql`, ...). Для аудита.
-  warningAcknowledged  Boolean  @default(false) @map("warning_acknowledged")
+  warningAcknowledged Boolean  @default(false) @map("warning_acknowledged")
   /// Движок: TAR (классический tar.gz) | RESTIC (дедупликация).
-  engine               String   @default("RESTIC")
+  engine              String   @default("RESTIC")
   /// Список StorageLocation.id (JSON-массив).
-  storageLocationIds   String   @default("[]") @map("storage_location_ids")
-  schedule             String?  // cron expression
-  retention            Int      @default(7)
-  keepDaily            Int      @default(7) @map("keep_daily")
-  keepWeekly           Int      @default(4) @map("keep_weekly")
-  keepMonthly          Int      @default(6) @map("keep_monthly")
-  keepYearly           Int      @default(1) @map("keep_yearly")
+  storageLocationIds  String   @default("[]") @map("storage_location_ids")
+  schedule            String? // cron expression
+  retention           Int      @default(7)
+  keepDaily           Int      @default(7) @map("keep_daily")
+  keepWeekly          Int      @default(4) @map("keep_weekly")
+  keepMonthly         Int      @default(6) @map("keep_monthly")
+  keepYearly          Int      @default(1) @map("keep_yearly")
   /// Restic-exclude паттерны (относительно path).
-  excludePaths         String   @default("[]") @map("exclude_paths")
-  enabled              Boolean  @default(true)
+  excludePaths        String   @default("[]") @map("exclude_paths")
+  enabled             Boolean  @default(true)
   /// Режим уведомлений: INSTANT (по каждому), DIGEST (накапливать и слать по
   /// cron), FAILURES_ONLY (только при ошибке). См. NotificationDigestQueue.
-  notificationMode     String   @default("INSTANT") @map("notification_mode")
+  notificationMode    String   @default("INSTANT") @map("notification_mode")
   /// cron для отправки дайджеста (используется только при notificationMode=DIGEST).
-  digestSchedule       String?  @map("digest_schedule")
-  createdAt            DateTime @default(now()) @map("created_at")
-  updatedAt            DateTime @updatedAt @map("updated_at")
+  digestSchedule      String?  @map("digest_schedule")
+  createdAt           DateTime @default(now()) @map("created_at")
+  updatedAt           DateTime @updatedAt @map("updated_at")
 
-  backups              ServerPathBackup[]
-  storageLocations     StorageLocation[]  @relation("ServerPathBackupConfigToStorageLocation")
+  backups          ServerPathBackup[]
+  storageLocations StorageLocation[]  @relation("ServerPathBackupConfigToStorageLocation")
 
   @@index([enabled])
   @@map("server_path_backup_configs")
@@ -373,8 +434,8 @@ model ServerPathBackup {
   completedAt       DateTime? @map("completed_at")
   createdAt         DateTime  @default(now()) @map("created_at")
 
-  config            ServerPathBackupConfig @relation(fields: [configId], references: [id], onDelete: Cascade)
-  storageLocation   StorageLocation?       @relation("ServerPathBackupToStorageLocation", fields: [storageLocationId], references: [id], onDelete: SetNull)
+  config          ServerPathBackupConfig @relation(fields: [configId], references: [id], onDelete: Cascade)
+  storageLocation StorageLocation?       @relation("ServerPathBackupToStorageLocation", fields: [storageLocationId], references: [id], onDelete: SetNull)
 
   @@index([configId])
   @@index([status])
@@ -386,25 +447,25 @@ model ServerPathBackup {
 // Путей юзер не выбирает — preset защищает от ошибки "забыл .master-key".
 // =============================================================================
 model PanelDataBackupConfig {
-  id                   String   @id @default(uuid())
-  name                 String
-  engine               String   @default("RESTIC")
-  storageLocationIds   String   @default("[]") @map("storage_location_ids")
-  schedule             String?
-  retention            Int      @default(7)
-  keepDaily            Int      @default(24) @map("keep_daily")     // 24 hourly = day
-  keepWeekly           Int      @default(7) @map("keep_weekly")     // 7 days
-  keepMonthly          Int      @default(12) @map("keep_monthly")
-  keepYearly           Int      @default(5) @map("keep_yearly")
-  enabled              Boolean  @default(true)
+  id                 String   @id @default(uuid())
+  name               String
+  engine             String   @default("RESTIC")
+  storageLocationIds String   @default("[]") @map("storage_location_ids")
+  schedule           String?
+  retention          Int      @default(7)
+  keepDaily          Int      @default(24) @map("keep_daily") // 24 hourly = day
+  keepWeekly         Int      @default(7) @map("keep_weekly") // 7 days
+  keepMonthly        Int      @default(12) @map("keep_monthly")
+  keepYearly         Int      @default(5) @map("keep_yearly")
+  enabled            Boolean  @default(true)
   /// Режим уведомлений (см. ServerPathBackupConfig.notificationMode).
-  notificationMode     String   @default("INSTANT") @map("notification_mode")
-  digestSchedule       String?  @map("digest_schedule")
-  createdAt            DateTime @default(now()) @map("created_at")
-  updatedAt            DateTime @updatedAt @map("updated_at")
+  notificationMode   String   @default("INSTANT") @map("notification_mode")
+  digestSchedule     String?  @map("digest_schedule")
+  createdAt          DateTime @default(now()) @map("created_at")
+  updatedAt          DateTime @updatedAt @map("updated_at")
 
-  backups              PanelDataBackup[]
-  storageLocations     StorageLocation[] @relation("PanelDataBackupConfigToStorageLocation")
+  backups          PanelDataBackup[]
+  storageLocations StorageLocation[] @relation("PanelDataBackupConfigToStorageLocation")
 
   @@index([enabled])
   @@map("panel_data_backup_configs")
@@ -425,8 +486,8 @@ model PanelDataBackup {
   completedAt       DateTime? @map("completed_at")
   createdAt         DateTime  @default(now()) @map("created_at")
 
-  config            PanelDataBackupConfig @relation(fields: [configId], references: [id], onDelete: Cascade)
-  storageLocation   StorageLocation?      @relation("PanelDataBackupToStorageLocation", fields: [storageLocationId], references: [id], onDelete: SetNull)
+  config          PanelDataBackupConfig @relation(fields: [configId], references: [id], onDelete: Cascade)
+  storageLocation StorageLocation?      @relation("PanelDataBackupToStorageLocation", fields: [storageLocationId], references: [id], onDelete: SetNull)
 
   @@index([configId])
   @@index([status])
@@ -441,42 +502,42 @@ model PanelDataBackup {
 // Логика старого `backup-defaults` (одна форма на всю панель) переехала сюда.
 // =============================================================================
 model SiteBackupSchedule {
-  id                     String   @id @default(uuid())
+  id                    String   @id @default(uuid())
   /// Имя для UI: "hourly DB to local", "daily FULL to S3", ...
-  name                   String
-  enabled                Boolean  @default(true)
+  name                  String
+  enabled               Boolean  @default(true)
   /// BackupType (FULL | FILES_ONLY | DB_ONLY | DIFFERENTIAL)
-  type                   String   @default("FULL")
+  type                  String   @default("FULL")
   /// BackupEngine (TAR | RESTIC)
-  engine                 String   @default("RESTIC")
+  engine                String   @default("RESTIC")
   /// JSON string[] — StorageLocation.id
-  storageLocationIds     String   @default("[]") @map("storage_location_ids")
+  storageLocationIds    String   @default("[]") @map("storage_location_ids")
   /// cron-расписание основного запуска
-  schedule               String?
+  schedule              String?
   /// Для RESTIC — keep-политика
-  keepDaily              Int      @default(7) @map("keep_daily")
-  keepWeekly             Int      @default(4) @map("keep_weekly")
-  keepMonthly            Int      @default(6) @map("keep_monthly")
-  keepYearly             Int      @default(1) @map("keep_yearly")
+  keepDaily             Int      @default(7) @map("keep_daily")
+  keepWeekly            Int      @default(4) @map("keep_weekly")
+  keepMonthly           Int      @default(6) @map("keep_monthly")
+  keepYearly            Int      @default(1) @map("keep_yearly")
   /// Для TAR — кол-во последних бэкапов
-  retentionDays          Int      @default(7) @map("retention_days")
+  retentionDays         Int      @default(7) @map("retention_days")
   /// JSON string[]
-  excludePaths           String   @default("[]") @map("exclude_paths")
-  excludeTableData       String   @default("[]") @map("exclude_table_data")
+  excludePaths          String   @default("[]") @map("exclude_paths")
+  excludeTableData      String   @default("[]") @map("exclude_table_data")
   /// Restic integrity check
-  checkEnabled           Boolean  @default(false) @map("check_enabled")
-  checkSchedule          String?  @map("check_schedule")
-  checkReadData          Boolean  @default(false) @map("check_read_data")
-  checkReadDataSubset    String?  @map("check_read_data_subset")
-  checkMinIntervalHours  Int      @default(168) @map("check_min_interval_hours")
+  checkEnabled          Boolean  @default(false) @map("check_enabled")
+  checkSchedule         String?  @map("check_schedule")
+  checkReadData         Boolean  @default(false) @map("check_read_data")
+  checkReadDataSubset   String?  @map("check_read_data_subset")
+  checkMinIntervalHours Int      @default(168) @map("check_min_interval_hours")
   /// Режим уведомлений: INSTANT | DIGEST | FAILURES_ONLY
-  notificationMode       String   @default("INSTANT") @map("notification_mode")
-  digestSchedule         String?  @map("digest_schedule")
-  createdAt              DateTime @default(now()) @map("created_at")
-  updatedAt              DateTime @updatedAt @map("updated_at")
+  notificationMode      String   @default("INSTANT") @map("notification_mode")
+  digestSchedule        String?  @map("digest_schedule")
+  createdAt             DateTime @default(now()) @map("created_at")
+  updatedAt             DateTime @updatedAt @map("updated_at")
 
-  storageLocations       StorageLocation[] @relation("SiteBackupScheduleToStorageLocation")
-  backups                Backup[]
+  storageLocations StorageLocation[] @relation("SiteBackupScheduleToStorageLocation")
+  backups          Backup[]
 
   @@index([enabled])
   @@map("site_backup_schedules")
@@ -542,12 +603,12 @@ model Backup {
   baseBackupId      String?   @map("base_backup_id")
   createdAt         DateTime  @default(now()) @map("created_at")
 
-  site            Site                 @relation(fields: [siteId], references: [id], onDelete: Cascade)
-  config          BackupConfig?        @relation(fields: [configId], references: [id], onDelete: SetNull)
-  schedule        SiteBackupSchedule?  @relation(fields: [scheduleId], references: [id], onDelete: SetNull)
-  storageLocation StorageLocation?     @relation(fields: [storageLocationId], references: [id], onDelete: SetNull)
-  baseBackup      Backup?              @relation("DiffBase", fields: [baseBackupId], references: [id], onDelete: SetNull)
-  differentials   Backup[]             @relation("DiffBase")
+  site            Site                @relation(fields: [siteId], references: [id], onDelete: Cascade)
+  config          BackupConfig?       @relation(fields: [configId], references: [id], onDelete: SetNull)
+  schedule        SiteBackupSchedule? @relation(fields: [scheduleId], references: [id], onDelete: SetNull)
+  storageLocation StorageLocation?    @relation(fields: [storageLocationId], references: [id], onDelete: SetNull)
+  baseBackup      Backup?             @relation("DiffBase", fields: [baseBackupId], references: [id], onDelete: SetNull)
+  differentials   Backup[]            @relation("DiffBase")
   exports         BackupExport[]
 
   @@index([siteId])
@@ -566,25 +627,25 @@ model Backup {
 // expiresAt — время истечения. Cron каждый час смотрит истекшие, удаляет
 // S3-объект и помечает запись EXPIRED. Для STREAM — просто чистится запись.
 model BackupExport {
-  id            String    @id @default(uuid())
-  backupId      String    @map("backup_id")
-  mode          String    @default("STREAM") // BackupExportMode: STREAM | S3_PRESIGNED
-  status        String    @default("PENDING") // BackupExportStatus: PENDING | PROCESSING | READY | FAILED | EXPIRED
+  id              String   @id @default(uuid())
+  backupId        String   @map("backup_id")
+  mode            String   @default("STREAM") // BackupExportMode: STREAM | S3_PRESIGNED
+  status          String   @default("PENDING") // BackupExportStatus: PENDING | PROCESSING | READY | FAILED | EXPIRED
   // Для S3_PRESIGNED: ключ объекта в bucket (`exports/<uuid>.tar`).
-  s3Key         String?   @map("s3_key")
+  s3Key           String?  @map("s3_key")
   // URL для скачивания: либо API-роут (STREAM), либо pre-signed URL (S3).
-  downloadUrl   String?   @map("download_url")
+  downloadUrl     String?  @map("download_url")
   // Когда истекает экспорт. Cron-cleaner смотрит на это поле.
-  expiresAt     DateTime  @map("expires_at")
-  sizeBytes     BigInt?   @map("size_bytes")
-  errorMessage  String?   @map("error_message")
+  expiresAt       DateTime @map("expires_at")
+  sizeBytes       BigInt?  @map("size_bytes")
+  errorMessage    String?  @map("error_message")
   // Юзер, инициировавший экспорт (для аудита и проверки прав на скачивание).
-  createdByUserId String  @map("created_by_user_id")
-  createdAt     DateTime  @default(now()) @map("created_at")
-  updatedAt     DateTime  @updatedAt @map("updated_at")
+  createdByUserId String   @map("created_by_user_id")
+  createdAt       DateTime @default(now()) @map("created_at")
+  updatedAt       DateTime @updatedAt @map("updated_at")
 
-  backup        Backup    @relation(fields: [backupId], references: [id], onDelete: Cascade)
-  createdByUser User      @relation(fields: [createdByUserId], references: [id], onDelete: Cascade)
+  backup        Backup @relation(fields: [backupId], references: [id], onDelete: Cascade)
+  createdByUser User   @relation(fields: [createdByUserId], references: [id], onDelete: Cascade)
 
   @@index([backupId])
   @@index([status])
@@ -594,7 +655,12 @@ model BackupExport {
 
 model SslCertificate {
   id            String    @id @default(uuid())
-  siteId        String    @unique @map("site_id")
+  // Денормализованная ссылка на сайт (для каскада и быстрых выборок). НЕ unique:
+  // у сайта теперь несколько сертификатов — по одному на основной домен.
+  siteId        String    @map("site_id")
+  // Основной домен, которому принадлежит сертификат (1:1). nullable — backfill
+  // системной миграцией для legacy-записей; новые записи всегда с domainId.
+  domainId      String?   @unique @map("domain_id")
   domains       String    @default("[]") // JSON string[]
   status        String    @default("NONE") // SslStatus
   issuer        String    @default("")
@@ -607,8 +673,10 @@ model SslCertificate {
   createdAt     DateTime  @default(now()) @map("created_at")
   updatedAt     DateTime  @updatedAt @map("updated_at")
 
-  site Site @relation(fields: [siteId], references: [id], onDelete: Cascade)
+  site   Site        @relation(fields: [siteId], references: [id], onDelete: Cascade)
+  domain SiteDomain? @relation(fields: [domainId], references: [id], onDelete: Cascade)
 
+  @@index([siteId])
   @@map("ssl_certificates")
 }
 
@@ -759,19 +827,19 @@ model AuditLog {
 //   - serverId/serverName — snapshot, чтобы при удалении сервера лог не терялся
 //   - быстрый отбор по серверу (в /servers покажем history последних действий)
 model ProxyAuditLog {
-  id          String   @id @default(uuid())
-  direction   String // "OUT" | "IN"
-  userId      String?  @map("user_id") // master-side: кто инициировал; slave-side: null
-  serverId    String?  @map("server_id") // master-side: цель; slave-side: null
-  serverName  String?  @map("server_name") // snapshot имени на момент действия
-  method      String // HTTP метод (GET/POST/...)
-  path        String // path без префикса /api (e.g. "/sites/123")
-  statusCode  Int?     @map("status_code") // HTTP-код ответа slave (или null если запрос упал на сети)
-  durationMs  Int      @default(0) @map("duration_ms")
-  ipAddress   String   @map("ip_address") // IP клиента (master-side) / IP master (slave-side)
-  userAgent   String?  @map("user_agent")
-  errorMsg    String?  @map("error_msg") // сообщение об ошибке если запрос упал
-  createdAt   DateTime @default(now()) @map("created_at")
+  id         String   @id @default(uuid())
+  direction  String // "OUT" | "IN"
+  userId     String?  @map("user_id") // master-side: кто инициировал; slave-side: null
+  serverId   String?  @map("server_id") // master-side: цель; slave-side: null
+  serverName String?  @map("server_name") // snapshot имени на момент действия
+  method     String // HTTP метод (GET/POST/...)
+  path       String // path без префикса /api (e.g. "/sites/123")
+  statusCode Int?     @map("status_code") // HTTP-код ответа slave (или null если запрос упал на сети)
+  durationMs Int      @default(0) @map("duration_ms")
+  ipAddress  String   @map("ip_address") // IP клиента (master-side) / IP master (slave-side)
+  userAgent  String?  @map("user_agent")
+  errorMsg   String?  @map("error_msg") // сообщение об ошибке если запрос упал
+  createdAt  DateTime @default(now()) @map("created_at")
 
   @@index([direction])
   @@index([serverId])
@@ -981,16 +1049,16 @@ model SystemMigration {
 /// если status=running и pid жив, второй запуск отклоняется.
 /// История прошлых обновлений — в `panel_update_history`.
 model PanelUpdateState {
-  id            String    @id @default("current") // всегда "current"
-  status        String    @default("idle") // idle | running | succeeded | failed | rolled_back
-  fromVersion   String?   @map("from_version")
-  toVersion     String?   @map("to_version")
-  startedAt     DateTime? @map("started_at")
-  finishedAt    DateTime? @map("finished_at")
-  pid           Int? // pid running update.sh — для проверки живости
-  currentStage  String?   @map("current_stage") // preflight|snapshot|download|verify|migrate|build|switch|reload|healthcheck
-  errorMessage  String?   @map("error_message")
-  logTail       String?   @map("log_tail") // последние 16 KB stdout/stderr
+  id           String    @id @default("current") // всегда "current"
+  status       String    @default("idle") // idle | running | succeeded | failed | rolled_back
+  fromVersion  String?   @map("from_version")
+  toVersion    String?   @map("to_version")
+  startedAt    DateTime? @map("started_at")
+  finishedAt   DateTime? @map("finished_at")
+  pid          Int? // pid running update.sh — для проверки живости
+  currentStage String?   @map("current_stage") // preflight|snapshot|download|verify|migrate|build|switch|reload|healthcheck
+  errorMessage String?   @map("error_message")
+  logTail      String?   @map("log_tail") // последние 16 KB stdout/stderr
 
   @@map("panel_update_state")
 }
@@ -1020,7 +1088,7 @@ model PanelUpdateHistory {
 model SystemCronJob {
   id           String    @id @default(uuid())
   name         String
-  schedule     String                // cron expression: "* * * * *"
+  schedule     String // cron expression: "* * * * *"
   command      String
   status       String    @default("ACTIVE") // ACTIVE | DISABLED
   // Источник записи: MANUAL — оператор создал из UI; IMPORTED_HOSTPANEL —
@@ -1052,7 +1120,7 @@ model SystemCronJob {
 // =============================================================================
 
 model HostpanelMigration {
-  id          String   @id @default(uuid())
+  id           String    @id @default(uuid())
   // PLANNED — создан, ещё не запускался
   // DISCOVERING — идёт пробинг источника
   // READY — discovery закончен, оператор редактирует план
@@ -1061,26 +1129,26 @@ model HostpanelMigration {
   // FAILED — все упали или фатальная ошибка
   // PARTIAL — часть успешно, часть упала
   // CANCELLED — отменён оператором
-  status      String   @default("PLANNED")
+  status       String    @default("PLANNED")
   // JSON: { host, port, sshUser, sshPassEnc, mysqlHost, mysqlPort, mysqlUser,
   //         mysqlPassEnc, hostpanelDb, hostpanelTablePrefix }
   // Пароли в *Enc — base64(iv|tag|ciphertext) под MIGRATION_SECRET.
   // Миграция всегда локальна слейву, на котором живёт эта запись (master
   // проксирует REST-запросы по `/proxy/{serverId}/...` в выбранный slave).
-  source      String
+  source       String
   // JSON: snapshot источника на момент discover (sites[], manticore, php-versions, ...)
   // null до завершения discovery.
-  discovery   String?
-  totalSites  Int      @default(0) @map("total_sites")
-  doneSites   Int      @default(0) @map("done_sites")
-  failedSites Int      @default(0) @map("failed_sites")
+  discovery    String?
+  totalSites   Int       @default(0) @map("total_sites")
+  doneSites    Int       @default(0) @map("done_sites")
+  failedSites  Int       @default(0) @map("failed_sites")
   // Append-only лог стрима. Хранится последние 500 KB.
-  log         String   @default("")
-  errorMessage String? @map("error_message")
-  createdAt   DateTime @default(now()) @map("created_at")
-  startedAt   DateTime? @map("started_at")
-  finishedAt  DateTime? @map("finished_at")
-  createdBy   String   @map("created_by") // User.id
+  log          String    @default("")
+  errorMessage String?   @map("error_message")
+  createdAt    DateTime  @default(now()) @map("created_at")
+  startedAt    DateTime? @map("started_at")
+  finishedAt   DateTime? @map("finished_at")
+  createdBy    String    @map("created_by") // User.id
 
   items HostpanelMigrationItem[]
 
@@ -1167,31 +1235,31 @@ model HostpanelMigrationSource {
 // =============================================================================
 
 model VpnService {
-  id        String   @id @default(uuid())
+  id               String    @id @default(uuid())
   /// Произвольное имя сервиса для UI ("Reality Main", "Резервный WG", ...).
   /// Если null — UI рендерит "<protocol>:<port>".
-  label     String?
+  label            String?
   /// VpnProtocol enum: VLESS_REALITY | AMNEZIA_WG.
-  protocol  String
-  port      Int
+  protocol         String
+  port             Int
   /// VpnServiceStatus enum: RUNNING | STOPPED | ERROR | DEPLOYING.
-  status    String   @default("DEPLOYING")
+  status           String    @default("DEPLOYING")
   /// Сообщение об ошибке для статуса ERROR (показывается в UI).
-  errorMessage     String?  @map("error_message")
+  errorMessage     String?   @map("error_message")
   /// Зашифрованный JSON: VpnRealityServiceConfig | VpnAmneziaWgServiceConfig.
   /// Включает приватный ключ сервера + детали обфускации.
-  configBlob       String   @map("config_blob")
+  configBlob       String    @map("config_blob")
   /// Только для VLESS_REALITY: SNI-маска отдельным полем для индексации
   /// и быстрого UI-рендера без дешифровки.
-  sniMask          String?  @map("sni_mask")
+  sniMask          String?   @map("sni_mask")
   /// Результат последней автоматической проверки SNI (cron раз в 6 ч).
-  sniLastCheckOk   Boolean? @map("sni_last_check_ok")
+  sniLastCheckOk   Boolean?  @map("sni_last_check_ok")
   sniLastCheckedAt DateTime? @map("sni_last_checked_at")
-  sniLastError     String?  @map("sni_last_error")
+  sniLastError     String?   @map("sni_last_error")
   /// Имя egress-интерфейса для AmneziaWG (eth0/ens3) — кешируем чтобы при
   /// рестарте/обновлении не считать заново.
-  createdAt DateTime @default(now()) @map("created_at")
-  updatedAt DateTime @updatedAt @map("updated_at")
+  createdAt        DateTime  @default(now()) @map("created_at")
+  updatedAt        DateTime  @updatedAt @map("updated_at")
 
   userCreds VpnUserCreds[]
 
@@ -1216,7 +1284,7 @@ model VpnUser {
   createdAt DateTime @default(now()) @map("created_at")
   updatedAt DateTime @updatedAt @map("updated_at")
 
-  creds     VpnUserCreds[]
+  creds VpnUserCreds[]
 
   @@map("vpn_users")
 }

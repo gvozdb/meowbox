@@ -1,17 +1,19 @@
 /**
- * Per-site nginx settings + 95-custom.conf редактор.
+ * Per-domain nginx settings + 95-custom.conf редактор.
  *
- * UI вкладка «Nginx» страницы сайта дёргает:
- *  GET  /sites/:id/nginx/settings   → все nginx*-поля + effective дефолты + custom
- *  PUT  /sites/:id/nginx/settings   → сохраняет поля в БД + регенерирует чанки 00..50 на агенте
- *  GET  /sites/:id/nginx/custom     → возвращает 95-custom.conf (БД, fallback на диск)
- *  PUT  /sites/:id/nginx/custom     → сохраняет 95-custom.conf в БД + на диск (force-write)
- *  POST /sites/:id/nginx/test       → nginx -t
- *  POST /sites/:id/nginx/reload     → reload nginx
+ * 13 `nginx*` колонок и `nginxCustomConfig` теперь живут на `SiteDomain`
+ * (каждый основной домен — собственный server-блок). UI вкладка «Nginx»
+ * страницы домена дёргает:
+ *  GET  /sites/:id/domains/:domainId/nginx/settings
+ *  PUT  /sites/:id/domains/:domainId/nginx/settings
+ *  GET  /sites/:id/domains/:domainId/nginx/custom
+ *  PUT  /sites/:id/domains/:domainId/nginx/custom
+ *  POST /sites/:id/nginx/test     — site-level
+ *  POST /sites/:id/nginx/reload   — site-level
+ *  POST /sites/nginx/rebuild-all  — все домены всех сайтов
  *
- * Регенерация чанков идёт через тот же agent-event `nginx:create-config` —
- * агент идемпотентно перезапишет 00..50 файлов, а 95-custom.conf не тронет
- * (если не передан `forceWriteCustom: true`).
+ * Регенерация конфигов идёт через `SiteDomainsService.regenerateNginx`
+ * (мульти-доменный `nginx:create-config`).
  */
 
 import {
@@ -32,7 +34,7 @@ import {
 
 import { PrismaService } from '../common/prisma.service';
 import { AgentRelayService } from '../gateway/agent-relay.service';
-import { SslStatus } from '../common/enums';
+import { SiteDomainsService } from './site-domains.service';
 
 import { UpdateSiteNginxSettingsDto, UpdateSiteNginxCustomDto } from './sites.dto';
 
@@ -56,15 +58,21 @@ export class SitesNginxService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly agentRelay: AgentRelayService,
+    private readonly siteDomains: SiteDomainsService,
   ) {}
 
   // ---------------------------------------------------------------------------
-  // SETTINGS
+  // SETTINGS (per-domain)
   // ---------------------------------------------------------------------------
 
-  async getSettings(siteId: string, userId: string, role: string): Promise<NginxSettingsResponse> {
-    const site = await this.requireSite(siteId, userId, role);
-    const overrides = siteNginxOverrides(site);
+  async getSettings(
+    siteId: string,
+    domainId: string,
+    userId: string,
+    role: string,
+  ): Promise<NginxSettingsResponse> {
+    const domain = await this.requireDomain(siteId, domainId, userId, role);
+    const overrides = siteNginxOverrides(domain);
     const effective = resolveNginxSettings(overrides);
     return {
       raw: overrides,
@@ -78,11 +86,12 @@ export class SitesNginxService {
 
   async updateSettings(
     siteId: string,
+    domainId: string,
     dto: UpdateSiteNginxSettingsDto,
     userId: string,
     role: string,
   ): Promise<NginxSettingsResponse> {
-    const site = await this.requireSite(siteId, userId, role);
+    await this.requireDomain(siteId, domainId, userId, role);
 
     const data: Record<string, unknown> = {};
     if (dto.clientMaxBodySize !== undefined) {
@@ -119,106 +128,79 @@ export class SitesNginxService {
     }
 
     if (Object.keys(data).length === 0) {
-      // Ничего не меняем, просто отдаём текущие значения.
-      return this.getSettings(siteId, userId, role);
+      return this.getSettings(siteId, domainId, userId, role);
     }
 
-    const updated = await this.prisma.site.update({ where: { id: siteId }, data });
+    await this.prisma.siteDomain.update({ where: { id: domainId }, data });
 
-    // Если изменились rate-limit поля — обновляем глобальный zones-файл
-    // (он содержит limit_req_zone для всех сайтов одной строкой каждый).
+    // Изменились rate-limit поля → обновляем глобальный zones-файл
+    // (limit_req_zone на каждый SiteDomain).
     const rateLimitChanged =
       dto.rateLimitEnabled !== undefined ||
       dto.rateLimitRps !== undefined ||
       dto.rateLimitBurst !== undefined;
     if (rateLimitChanged) {
-      await this.regenerateGlobalZones();
+      await this.siteDomains.regenerateGlobalZones();
     }
 
-    // Регенерация чанков сайта на агенте (chunk50Security возьмёт обновлённые
-    // настройки и выдаст limit_req директиву под новый zone).
-    await this.regenerateConfigOnAgent(updated.id);
+    await this.siteDomains.regenerateNginx(siteId);
 
-    return this.getSettings(siteId, userId, role);
+    return this.getSettings(siteId, domainId, userId, role);
   }
 
   // ---------------------------------------------------------------------------
-  // GLOBAL ZONES (limit_req_zone)
+  // GLOBAL ZONES (limit_req_zone) — делегирование
   // ---------------------------------------------------------------------------
 
-  /**
-   * Перегенерирует `/etc/nginx/conf.d/meowbox-zones.conf` из БД: один
-   * `limit_req_zone` на каждый сайт + legacy zone `site_limit` для совместимости
-   * с не-регенерированными конфигами. Вызывается при изменении rate-limit
-   * настроек и при создании/удалении сайта.
-   *
-   * Безопасно к параллельному вызову — последний выигрывает.
-   */
   async regenerateGlobalZones(): Promise<void> {
-    if (!this.agentRelay.isAgentConnected()) {
-      this.logger.warn('Agent not connected — global zones not regenerated');
-      return;
-    }
-    const sites = await this.prisma.site.findMany({
-      select: {
-        name: true,
-        nginxRateLimitEnabled: true,
-        nginxRateLimitRps: true,
-      },
-    });
-    const zones = sites.map((s) => {
-      const overrides: SiteNginxOverrides = {
-        rateLimitEnabled: s.nginxRateLimitEnabled,
-        rateLimitRps: s.nginxRateLimitRps,
-      };
-      const eff = resolveNginxSettings(overrides);
-      return { siteName: s.name, rps: eff.rateLimitRps, enabled: eff.rateLimitEnabled };
-    });
-    const r = await this.agentRelay.emitToAgent<unknown>('nginx:write-global-zones', { zones });
-    if (!r.success) {
-      this.logger.error(`write-global-zones failed: ${r.error ?? 'unknown'}`);
-    }
+    await this.siteDomains.regenerateGlobalZones();
   }
 
   // ---------------------------------------------------------------------------
-  // CUSTOM CONFIG
+  // CUSTOM CONFIG (per-domain)
   // ---------------------------------------------------------------------------
 
-  /** GET — отдаёт значение из БД (источник истины). На диске может быть синхронизировано позже. */
-  async getCustomConfig(siteId: string, userId: string, role: string): Promise<{ content: string; updatedAt: Date }> {
-    const site = await this.requireSite(siteId, userId, role);
+  async getCustomConfig(
+    siteId: string,
+    domainId: string,
+    userId: string,
+    role: string,
+  ): Promise<{ content: string; updatedAt: Date }> {
+    const domain = await this.requireDomain(siteId, domainId, userId, role);
     return {
-      content: (site as { nginxCustomConfig?: string | null }).nginxCustomConfig ?? '',
-      updatedAt: site.updatedAt,
+      content: domain.nginxCustomConfig ?? '',
+      updatedAt: domain.updatedAt,
     };
   }
 
-  /** PUT — сохраняем в БД + force-write на диск через агент. */
+  /** PUT — сохраняем в БД + force-write на диск через агент (после nginx -t). */
   async updateCustomConfig(
     siteId: string,
+    domainId: string,
     dto: UpdateSiteNginxCustomDto,
     userId: string,
     role: string,
   ): Promise<{ content: string; testResult: { success: boolean; error?: string } }> {
-    const site = await this.requireSite(siteId, userId, role);
-    const content = (dto.content ?? '').slice(0, 256 * 1024); // 256KB sanity-cap
+    const domain = await this.requireDomain(siteId, domainId, userId, role);
+    const content = (dto.content ?? '').slice(0, 256 * 1024);
 
-    // Атомарность: сначала пишем на агент (валидируется nginx -t), потом — БД.
-    // Если nginx -t упадёт — БД не обновляем, юзер увидит ошибку и сможет починить.
     if (!this.agentRelay.isAgentConnected()) {
       throw new InternalServerErrorException('Агент не подключён — невозможно применить кастомный конфиг.');
     }
 
+    // Валидируем через агент (nginx:set-custom → nginx -t). domainId — агент
+    // знает, какой именно server-блок переписать.
     const result = await this.agentRelay.emitToAgent<unknown>('nginx:set-custom', {
-      siteName: site.name,
+      siteName: domain.site.name,
+      domainId,
       content,
     });
     if (!result.success) {
       throw new BadRequestException(result.error || 'nginx -t failed (custom config invalid)');
     }
 
-    await this.prisma.site.update({
-      where: { id: siteId },
+    await this.prisma.siteDomain.update({
+      where: { id: domainId },
       data: { nginxCustomConfig: content },
     });
 
@@ -226,7 +208,7 @@ export class SitesNginxService {
   }
 
   // ---------------------------------------------------------------------------
-  // TEST / RELOAD
+  // TEST / RELOAD (site-level)
   // ---------------------------------------------------------------------------
 
   async testConfig(siteId: string, userId: string, role: string): Promise<{ success: boolean; error?: string }> {
@@ -242,81 +224,16 @@ export class SitesNginxService {
   }
 
   // ---------------------------------------------------------------------------
-  // BULK REGENERATE (admin)
+  // BULK REGENERATE (admin) — все домены всех сайтов
   // ---------------------------------------------------------------------------
 
-  /**
-   * Перегенерирует layered-конфиги для ВСЕХ сайтов. Используется после миграции
-   * с монолитного формата на layered, либо при смене глобальных шаблонов nginx.
-   * Возвращает summary {ok, failed, skipped} + per-site детали.
-   */
   async regenerateAll(role: string): Promise<{
     total: number;
     ok: number;
     failed: number;
-    skipped: number;
-    details: Array<{ siteName: string; status: 'ok' | 'failed' | 'skipped'; error?: string }>;
+    details: Array<{ siteName: string; status: 'ok' | 'failed'; error?: string }>;
   }> {
-    if (role !== 'ADMIN') {
-      throw new ForbiddenException('Only ADMIN can regenerate all nginx configs');
-    }
-    if (!this.agentRelay.isAgentConnected()) {
-      throw new InternalServerErrorException('Агент не подключён');
-    }
-
-    const sites = await this.prisma.site.findMany({
-      include: { sslCertificate: true },
-    });
-    const details: Array<{ siteName: string; status: 'ok' | 'failed' | 'skipped'; error?: string }> = [];
-    let ok = 0;
-    let failed = 0;
-    let skipped = 0;
-
-    for (const site of sites) {
-      try {
-        const ssl = site.sslCertificate;
-        const sslActive = !!(ssl && ssl.status === SslStatus.ACTIVE && ssl.certPath && ssl.keyPath);
-        const aliases = (() => {
-          try { return JSON.parse(site.aliases || '[]'); } catch { return []; }
-        })();
-
-        const r = await this.agentRelay.emitToAgent('nginx:create-config', {
-          siteName: site.name,
-          siteType: site.type,
-          domain: site.domain,
-          aliases,
-          rootPath: site.rootPath,
-          filesRelPath: site.filesRelPath,
-          phpVersion: site.phpVersion ?? undefined,
-          phpEnabled: !!site.phpVersion,
-          appPort: site.appPort ?? undefined,
-          systemUser: site.systemUser ?? undefined,
-          sslEnabled: sslActive,
-          certPath: sslActive ? ssl!.certPath ?? undefined : undefined,
-          keyPath: sslActive ? ssl!.keyPath ?? undefined : undefined,
-          httpsRedirect: site.httpsRedirect,
-          settings: siteNginxOverrides(site),
-          // Если nginxCustomConfig в БД есть — пишем его на диск (force-write)
-          // чтобы синхронизировать. Это переедет старые сайты с монолита.
-          customConfig: site.nginxCustomConfig ?? undefined,
-          forceWriteCustom: !!site.nginxCustomConfig,
-        });
-
-        if (r.success) {
-          ok++;
-          details.push({ siteName: site.name, status: 'ok' });
-        } else {
-          failed++;
-          details.push({ siteName: site.name, status: 'failed', error: r.error || 'unknown' });
-        }
-      } catch (e) {
-        failed++;
-        details.push({ siteName: site.name, status: 'failed', error: (e as Error).message });
-      }
-    }
-
-    this.logger.log(`Bulk nginx regenerate: total=${sites.length}, ok=${ok}, failed=${failed}, skipped=${skipped}`);
-    return { total: sites.length, ok, failed, skipped, details };
+    return this.siteDomains.rebuildAll(role);
   }
 
   // ---------------------------------------------------------------------------
@@ -337,10 +254,7 @@ export class SitesNginxService {
   }
 
   private async requireSite(siteId: string, userId: string, role: string) {
-    const site = await this.prisma.site.findUnique({
-      where: { id: siteId },
-      include: { sslCertificate: true },
-    });
+    const site = await this.prisma.site.findUnique({ where: { id: siteId } });
     if (!site) throw new NotFoundException('Site not found');
     if (role !== 'ADMIN' && site.userId !== userId) {
       throw new ForbiddenException('Access denied');
@@ -348,45 +262,17 @@ export class SitesNginxService {
     return site;
   }
 
-  /**
-   * Дёргает агент `nginx:create-config` со всеми текущими параметрами сайта —
-   * чанки 00..50 будут перезаписаны. 95-custom.conf не трогается (агент пишет
-   * его только если файла нет на диске).
-   */
-  private async regenerateConfigOnAgent(siteId: string): Promise<void> {
-    const site = await this.prisma.site.findUnique({
-      where: { id: siteId },
-      include: { sslCertificate: true },
+  private async requireDomain(siteId: string, domainId: string, userId: string, role: string) {
+    const domain = await this.prisma.siteDomain.findUnique({
+      where: { id: domainId },
+      include: { site: { select: { id: true, name: true, userId: true } } },
     });
-    if (!site) return;
-    if (!this.agentRelay.isAgentConnected()) {
-      this.logger.warn(`Agent not connected — settings saved in DB but not applied to nginx (site ${siteId})`);
-      return;
+    if (!domain || domain.siteId !== siteId) {
+      throw new NotFoundException('Domain not found');
     }
-
-    const ssl = site.sslCertificate;
-    const sslActive = !!(ssl && ssl.status === SslStatus.ACTIVE && ssl.certPath && ssl.keyPath);
-    const aliases = (() => {
-      try { return JSON.parse(site.aliases || '[]'); } catch { return []; }
-    })();
-
-    await this.agentRelay.emitToAgent('nginx:create-config', {
-      siteName: site.name,
-      siteType: site.type,
-      domain: site.domain,
-      aliases,
-      rootPath: site.rootPath,
-      filesRelPath: site.filesRelPath,
-      phpVersion: site.phpVersion ?? undefined,
-      phpEnabled: !!site.phpVersion,
-      appPort: site.appPort ?? undefined,
-      systemUser: site.systemUser ?? undefined,
-      sslEnabled: sslActive,
-      certPath: sslActive ? ssl!.certPath ?? undefined : undefined,
-      keyPath: sslActive ? ssl!.keyPath ?? undefined : undefined,
-      httpsRedirect: site.httpsRedirect,
-      settings: siteNginxOverrides(site),
-      // customConfig не передаём → агент не тронет существующий 95-custom.conf.
-    });
+    if (role !== 'ADMIN' && domain.site.userId !== userId) {
+      throw new ForbiddenException('Access denied');
+    }
+    return domain;
   }
 }

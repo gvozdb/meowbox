@@ -46,6 +46,7 @@ export {
   NGINX_DEFAULTS,
   resolveNginxSettings,
   siteNginxOverrides,
+  nginxZoneName,
   CMS_INITIAL_CUSTOM_CONFIG,
   initialCustomConfigFor,
 } from './nginx-defaults';
@@ -80,6 +81,7 @@ export type {
   User,
   Site,
   SiteAlias,
+  SiteDomain,
   Database,
   Backup,
   BackupConfig,

@@ -52,18 +52,63 @@ export interface SiteAlias {
 export interface Site {
   id: string;
   name: string;
+  /**
+   * Главный домен сайта. Зеркало `domains[].domain` того элемента, у которого
+   * `isPrimary=true`. Поддерживается синхронно с SiteDomain ради обратной
+   * совместимости (шапка, списки, ссылки). Источник правды — `domains`.
+   */
   domain: string;
+  /** Алиасы ГЛАВНОГО домена (зеркало primary `SiteDomain.aliases`). */
   aliases: SiteAlias[];
+  /** Все основные домены сайта (главный — первым, `isPrimary=true`). */
+  domains: SiteDomain[];
   type: SiteType;
   status: SiteStatus;
   phpVersion: PhpVersion | null;
   gitRepository: string | null;
   deployBranch: string | null;
+  /** Зеркало `appPort` главного домена. */
   appPort: number | null;
   envVars: Record<string, string>;
+  /** Хомдира linux-юзера — ОБЩАЯ на весь сайт (одна на все основные домены). */
   rootPath: string;
   nginxConfigPath: string;
   userId: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/**
+ * Основной домен сайта. Один Site = N основных доменов (мульти-доменное
+ * приложение: фронт / админка / API на разных доменах).
+ *
+ * Каждый основной домен — отдельный server-блок nginx, отдельный
+ * SSL-сертификат, собственный набор layered nginx-настроек и 95-custom.conf.
+ * Хомдира linux-юзера общая (Site.rootPath); домены различаются только
+ * относительным web-root (`filesRelPath`).
+ *
+ * Ровно один домен в сайте помечен `isPrimary` («главный», корона в UI).
+ */
+export interface SiteDomain {
+  id: string;
+  siteId: string;
+  domain: string;
+  /** Главный домен сайта (ровно один, position=0, корона в UI). */
+  isPrimary: boolean;
+  /** Порядок в списке доменов сайта (главный — 0). */
+  position: number;
+  aliases: SiteAlias[];
+  /**
+   * web-root этого домена ОТНОСИТЕЛЬНО Site.rootPath.
+   * null → наследует `Site` (общий дефолт filesRelPath сайта).
+   */
+  filesRelPath: string | null;
+  /** Порт приложения для reverse-proxy (Node и т.п.). null — нет proxy. */
+  appPort: number | null;
+  /** 301 HTTP→HTTPS для этого домена (действует при активном SSL). */
+  httpsRedirect: boolean;
+  /** SSL-сертификат этого домена (null — не выпущен). */
+  sslCertificate: SslCertificate | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -156,6 +201,8 @@ export interface Backup {
 export interface SslCertificate {
   id: string;
   siteId: string;
+  /** Основной домен (SiteDomain), которому принадлежит сертификат (1:1). */
+  domainId: string | null;
   domains: string[];
   status: SslStatus;
   issuer: string;

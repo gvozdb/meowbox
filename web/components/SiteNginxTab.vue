@@ -23,6 +23,16 @@
       </div>
     </div>
 
+    <!-- ─────── Уведомление об ошибках/успехе (вверху, рядом с действиями) ─────── -->
+    <div v-if="banner" class="site-nginx__banner" :class="`site-nginx__banner--${banner.kind}`">
+      <svg v-if="banner.kind === 'ok'" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><polyline points="20 6 9 17 4 12" /></svg>
+      <svg v-else width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="10" /><line x1="12" y1="8" x2="12" y2="12" /><line x1="12" y1="16" x2="12.01" y2="16" /></svg>
+      <span class="site-nginx__banner-text">{{ banner.text }}</span>
+      <button class="site-nginx__banner-close" @click="banner = null">
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" /></svg>
+      </button>
+    </div>
+
     <div v-if="loading" class="site-nginx__loading">
       <div class="spinner" /> Загрузка настроек…
     </div>
@@ -171,6 +181,10 @@
           </div>
         </div>
 
+        <div v-if="settingsNotice" class="site-nginx__notice" :class="`site-nginx__notice--${settingsNotice.kind}`">
+          {{ settingsNotice.text }}
+        </div>
+
         <div class="site-nginx__settings-actions">
           <button class="btn btn--ghost btn--sm" :disabled="settingsSaving || !settingsDirty" @click="resetSettings">
             Сбросить изменения
@@ -204,6 +218,10 @@ location /api/ {
 }"
         />
 
+        <div v-if="customNotice" class="site-nginx__notice" :class="`site-nginx__notice--${customNotice.kind}`">
+          {{ customNotice.text }}
+        </div>
+
         <div class="site-nginx__custom-actions">
           <button class="btn btn--ghost btn--sm" :disabled="customSaving || !customDirty" @click="resetCustom">
             Сбросить
@@ -215,11 +233,6 @@ location /api/ {
         </div>
       </div>
     </template>
-
-    <!-- ─────── Уведомление об ошибках/успехе ─────── -->
-    <div v-if="banner" class="site-nginx__banner" :class="`site-nginx__banner--${banner.kind}`">
-      {{ banner.text }}
-    </div>
   </div>
 </template>
 
@@ -266,9 +279,12 @@ interface NginxSettingsResponse {
 const props = defineProps<{
   siteId: string;
   siteName: string;
+  /** Основной домен, чей nginx-конфиг редактируется. */
+  domainId: string;
 }>();
 
 const api = useApi();
+const toast = useMbToast();
 
 const loading = ref(false);
 const settingsSaving = ref(false);
@@ -302,6 +318,10 @@ const customOriginal = ref('');
 const banner = ref<{ kind: 'ok' | 'err'; text: string } | null>(null);
 let bannerTimer: ReturnType<typeof setTimeout> | null = null;
 
+// Локальные нотисы рядом с действиями секции — видны прямо у кнопки сохранения.
+const settingsNotice = ref<{ kind: 'ok' | 'err'; text: string } | null>(null);
+const customNotice = ref<{ kind: 'ok' | 'err'; text: string } | null>(null);
+
 function blankForm(): FormShape {
   return {
     clientMaxBodySize: '',
@@ -328,12 +348,21 @@ function showBanner(kind: 'ok' | 'err', text: string, ttl = 4000) {
   bannerTimer = setTimeout(() => { banner.value = null; }, ttl);
 }
 
+/** База per-domain nginx-эндпоинтов (settings / custom). */
+function nginxBase(): string {
+  return `/sites/${props.siteId}/domains/${props.domainId}/nginx`;
+}
+
 async function loadAll() {
+  if (!props.domainId) {
+    loading.value = false;
+    return;
+  }
   loading.value = true;
   try {
     const [settings, custom] = await Promise.all([
-      api.get<NginxSettingsResponse>(`/sites/${props.siteId}/nginx/settings`),
-      api.get<{ content: string }>(`/sites/${props.siteId}/nginx/custom`),
+      api.get<NginxSettingsResponse>(`${nginxBase()}/settings`),
+      api.get<{ content: string }>(`${nginxBase()}/custom`),
     ]);
 
     defaults.value = settings.defaults;
@@ -385,12 +414,14 @@ async function saveSettings() {
   if (!settingsDirty.value) return;
   settingsSaving.value = true;
   try {
-    const r = await api.put<NginxSettingsResponse>(`/sites/${props.siteId}/nginx/settings`, buildSettingsPayload());
+    const r = await api.put<NginxSettingsResponse>(`${nginxBase()}/settings`, buildSettingsPayload());
     defaults.value = r.defaults;
     formOriginal.value = JSON.parse(JSON.stringify(form.value));
     showBanner('ok', 'Параметры сохранены, конфиг nginx обновлён.');
+    toast.success('Nginx-параметры сохранены, конфиг обновлён');
   } catch (e) {
     showBanner('err', `Не удалось сохранить: ${(e as Error).message}`, 8000);
+    toast.error(`Не удалось сохранить nginx-параметры: ${(e as Error).message}`);
   } finally {
     settingsSaving.value = false;
   }
@@ -404,14 +435,16 @@ async function saveCustom() {
   if (!customDirty.value) return;
   customSaving.value = true;
   try {
-    const r = await api.put<{ content: string }>(`/sites/${props.siteId}/nginx/custom`, {
+    const r = await api.put<{ content: string }>(`${nginxBase()}/custom`, {
       content: customDraft.value,
     });
     customOriginal.value = r.content ?? customDraft.value;
     customDraft.value = customOriginal.value;
     showBanner('ok', 'Кастом-блок сохранён и применён.');
+    toast.success('Кастомный nginx-блок сохранён и применён');
   } catch (e) {
     showBanner('err', `nginx -t упал: ${(e as Error).message}`, 10000);
+    toast.error(`Кастом-блок не применён: ${(e as Error).message}`);
   } finally {
     customSaving.value = false;
   }
@@ -427,10 +460,16 @@ async function onTest() {
     const r = await api.post<{ success: boolean; error?: string }>(
       `/sites/${props.siteId}/nginx/test`, {},
     );
-    if (r.success) showBanner('ok', 'nginx -t: OK');
-    else showBanner('err', `nginx -t failed: ${r.error}`, 8000);
+    if (r.success) {
+      showBanner('ok', 'nginx -t: OK');
+      toast.success('nginx -t: конфигурация валидна');
+    } else {
+      showBanner('err', `nginx -t failed: ${r.error}`, 8000);
+      toast.error(`nginx -t упал: ${r.error}`);
+    }
   } catch (e) {
     showBanner('err', `Test failed: ${(e as Error).message}`, 8000);
+    toast.error(`Проверка nginx упала: ${(e as Error).message}`);
   } finally {
     testRunning.value = false;
   }
@@ -442,16 +481,22 @@ async function onReload() {
     const r = await api.post<{ success: boolean; error?: string }>(
       `/sites/${props.siteId}/nginx/reload`, {},
     );
-    if (r.success) showBanner('ok', 'Nginx reloaded.');
-    else showBanner('err', `Reload failed: ${r.error}`, 8000);
+    if (r.success) {
+      showBanner('ok', 'Nginx reloaded.');
+      toast.success('Nginx перезагружен');
+    } else {
+      showBanner('err', `Reload failed: ${r.error}`, 8000);
+      toast.error(`Reload nginx упал: ${r.error}`);
+    }
   } catch (e) {
     showBanner('err', `Reload failed: ${(e as Error).message}`, 8000);
+    toast.error(`Reload nginx упал: ${(e as Error).message}`);
   } finally {
     reloadRunning.value = false;
   }
 }
 
-watch(() => props.siteId, () => loadAll());
+watch(() => [props.siteId, props.domainId], () => loadAll());
 onMounted(() => loadAll());
 </script>
 
@@ -603,12 +648,33 @@ onMounted(() => loadAll());
 }
 
 .site-nginx__banner {
-  padding: 0.6rem 0.9rem;
-  border-radius: 8px;
+  display: flex;
+  align-items: flex-start;
+  gap: 0.5rem;
+  padding: 0.7rem 0.9rem;
+  border-radius: 10px;
   font-size: 0.82rem;
   line-height: 1.45;
   word-break: break-word;
 }
+.site-nginx__banner svg { flex-shrink: 0; margin-top: 0.1rem; }
+.site-nginx__banner-text { flex: 1; min-width: 0; }
+.site-nginx__banner-close {
+  flex-shrink: 0;
+  width: 22px;
+  height: 22px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  background: transparent;
+  color: currentColor;
+  opacity: 0.65;
+  cursor: pointer;
+  border-radius: 6px;
+  transition: opacity 0.15s, background 0.15s;
+}
+.site-nginx__banner-close:hover { opacity: 1; background: rgba(255, 255, 255, 0.08); }
 .site-nginx__banner--ok {
   background: rgba(34, 197, 94, 0.1);
   border: 1px solid rgba(34, 197, 94, 0.35);
@@ -618,6 +684,8 @@ onMounted(() => loadAll());
   background: rgba(239, 68, 68, 0.1);
   border: 1px solid rgba(239, 68, 68, 0.35);
   color: #fca5a5;
+}
+.site-nginx__banner--err .site-nginx__banner-text {
   white-space: pre-wrap;
   font-family: 'JetBrains Mono', monospace;
 }

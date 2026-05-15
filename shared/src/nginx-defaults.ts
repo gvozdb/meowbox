@@ -160,6 +160,17 @@ export function siteNginxOverrides(site: SiteNginxColumns): SiteNginxOverrides {
 }
 
 /**
+ * Имя rate-limit зоны nginx для конкретного основного домена (`SiteDomain`).
+ * Одна зона на домен. Единая точка истины: имя используется и при генерации
+ * server-блока (`limit_req zone=`), и при записи глобального файла зон
+ * (`limit_req_zone ... zone=`) — они ОБЯЗАНЫ совпадать, иначе `nginx -t`
+ * падает с "unknown limit_req zone".
+ */
+export function nginxZoneName(domainId: string): string {
+  return 'mb_' + domainId.replace(/[^a-z0-9]/gi, '').toLowerCase().slice(0, 24);
+}
+
+/**
  * CMS-стартовые правила для 95-custom.conf — пишутся при первой установке сайта,
  * дальше юзер сам редактирует. Панель НИКОГДА их не перетирает после.
  */

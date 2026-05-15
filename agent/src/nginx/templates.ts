@@ -1,28 +1,33 @@
 /**
- * Layered nginx config templates.
+ * Layered nginx config templates — МНОГО-ДОМЕННАЯ модель.
+ *
+ * Один сайт (`Site`) имеет N «основных» доменов (`SiteDomain`). Каждый домен —
+ * это отдельный server-блок, отдельный SSL-серт, отдельный набор layered-чанков
+ * и собственный 95-custom.conf. Linux-домашка у сайта общая; домены различаются
+ * только `filesRelPath` (web-root относительно общего `Site.rootPath`).
  *
  * Структура на диске:
  *
  *   /etc/nginx/sites-available/{siteName}.conf   ← главный файл (генерится панелью)
- *       содержит:
- *         server { listen 80; ... return 301 https; }                  (если SSL on)
+ *       содержит для КАЖДОГО домена:
+ *         server { listen 80; ... return 301 https; }            (если SSL+redirect)
  *         server { listen 443 ssl http2; ...
- *             include /etc/nginx/meowbox/{siteName}/*.conf;            (тело)
+ *             include /etc/nginx/meowbox/{siteName}/{domainId}/*.conf;
  *         }
  *         server { ... }   (alias-redirects, если есть)
  *
- *   /etc/nginx/meowbox/{siteName}/   ← фрагменты тела основного server-блока
+ *   /etc/nginx/meowbox/{siteName}/{domainId}/   ← чанки тела server-блока домена
  *       ├── 00-server.conf      root, index, charset, body size, log paths, ACME
- *       ├── 10-ssl.conf         ssl_protocols, ciphers, stapling, HSTS (если SSL on)
- *       ├── 20-php.conf         location ~ \.php$ { fastcgi_pass ... }   (если phpEnabled)
+ *       ├── 10-ssl.conf         ssl_protocols, ciphers, stapling, HSTS (если SSL)
+ *       ├── 20-php.conf         location ~ \.php$ { fastcgi_pass ... } (если phpEnabled)
  *       ├── 40-static.conf      gzip, cache headers для статики
  *       ├── 50-security.conf    deny dotfiles, rate limit, security headers
  *       └── 95-custom.conf      ← редактируется юзером в UI
  *
- *   Главный файл инклюдит meowbox/{siteName}/*.conf — nginx сам отсортирует по имени.
- *   Файлы 00–90 принадлежат панели и регенерируются при настройках/SSL/смене домена.
+ *   `domainId` — стабильный uuid; директория чанков НИКОГДА не переименовывается.
+ *   Файлы 00–50 принадлежат панели и регенерируются при настройках/SSL/смене домена.
  *   Файл 95-custom.conf принадлежит юзеру — НИКОГДА не перезаписывается панелью
- *   после первоначальной установки CMS.
+ *   после первоначальной установки (кроме явного forceWriteCustom).
  */
 
 import { resolveNginxSettings, type SiteNginxOverrides } from '@meowbox/shared';
@@ -32,67 +37,91 @@ import { DEFAULT_PHP_VERSION } from '../config';
 // Public types
 // =============================================================================
 
-export type NginxAliasInput = string | { domain: string; redirect?: boolean };
-
-export interface NginxLayeredParams {
-  siteName: string;
+/** Алиас домена: redirect=true → 301 на основной домен, иначе — server_name. */
+export interface NginxDomainAlias {
   domain: string;
-  aliases: NginxAliasInput[];
-  rootPath: string;
-  filesRelPath?: string;
-  phpVersion?: string;
-  phpEnabled?: boolean;
-  appPort?: number;
-  sslEnabled?: boolean;
-  httpsRedirect?: boolean;
-  certPath?: string;
-  keyPath?: string;
-  /** Per-site overrides → resolveNginxSettings подставит дефолты для null/0. */
-  settings?: SiteNginxOverrides;
+  redirect: boolean;
 }
 
-/**
- * Результат рендеринга — карта `имя_файла → содержимое`. NginxManager пишет
- * каждый файл в нужное место; перед reload делает `nginx -t`.
- */
-export interface RenderedNginxBundle {
-  /** Главный файл — `/etc/nginx/sites-available/{siteName}.conf`. */
-  mainConfig: string;
-  /** Чанки внутри meowbox/{siteName}/ — ключ = filename типа `00-server.conf`. */
+/** Один «основной» домен сайта — собственный server-блок + чанки. */
+export interface NginxDomainParams {
+  /** Стабильный uuid домена — имя директории чанков. */
+  domainId: string;
+  domain: string;
+  aliases: NginxDomainAlias[];
+  /** Web-root относительно `Site.rootPath`. Уже разрешён API, не бывает null. */
+  filesRelPath: string;
+  /** Если задан — добавляем reverse-proxy `location /` на 127.0.0.1:{appPort}. */
+  appPort?: number | null;
+  sslEnabled: boolean;
+  certPath?: string | null;
+  keyPath?: string | null;
+  httpsRedirect: boolean;
+  /** Имя rate-limit зоны для этого домена — приходит из API, НЕ вычисляем. */
+  zoneName: string;
+  /** Per-site overrides → resolveNginxSettings подставит дефолты для null/0. */
+  settings: SiteNginxOverrides;
+  /** Стартовый кастом-блок — пишется только при первой установке домена. */
+  customConfig?: string | null;
+  /** Если true — существующий 95-custom.conf будет перезаписан. */
+  forceWriteCustom?: boolean;
+}
+
+/** Параметры рендеринга всего сайта (все домены сразу). */
+export interface NginxSiteParams {
+  siteName: string;
+  /** Общий корень сайта; web-root домена = rootPath + '/' + filesRelPath. */
+  rootPath: string;
+  phpEnabled: boolean;
+  phpVersion?: string;
+  systemUser?: string;
+  domains: NginxDomainParams[];
+}
+
+/** Отрендеренные чанки одного домена. */
+export interface RenderedDomain {
+  domainId: string;
+  /** Управляемые чанки 00..50 — ключ = filename. */
   chunks: Record<string, string>;
   /**
    * Кастом-файл выделен отдельно — пишется ТОЛЬКО при первой установке
-   * сайта (если на диске нет файла или БД-значение отличается). При
-   * регенерации после смены настроек существующий 95-custom.conf не трогается.
+   * домена (если на диске нет файла) либо при forceWriteCustom=true.
    */
   customChunk?: { filename: '95-custom.conf'; content: string };
+}
+
+/**
+ * Результат рендеринга всего сайта. NginxManager пишет главный файл и чанки
+ * каждого домена; перед reload делает `nginx -t` с откатом.
+ */
+export interface RenderedNginxSite {
+  /** Главный файл — `/etc/nginx/sites-available/{siteName}.conf`. */
+  mainConfig: string;
+  /** Отрендеренные домены в порядке payload. */
+  domains: RenderedDomain[];
 }
 
 // =============================================================================
 // Helpers
 // =============================================================================
 
-function splitAliases(aliases: NginxAliasInput[] | undefined): {
+function splitAliases(aliases: NginxDomainAlias[] | undefined): {
   serverAliases: string[];
   redirectAliases: string[];
 } {
   const serverAliases: string[] = [];
   const redirectAliases: string[] = [];
   for (const item of aliases || []) {
-    if (typeof item === 'string') {
-      const d = item.trim();
-      if (d) serverAliases.push(d);
-    } else if (item && typeof item === 'object' && typeof item.domain === 'string') {
-      const d = item.domain.trim();
-      if (!d) continue;
-      if (item.redirect === true) redirectAliases.push(d);
-      else serverAliases.push(d);
-    }
+    if (!item || typeof item.domain !== 'string') continue;
+    const d = item.domain.trim();
+    if (!d) continue;
+    if (item.redirect === true) redirectAliases.push(d);
+    else serverAliases.push(d);
   }
   return { serverAliases, redirectAliases };
 }
 
-function resolveWebRoot(rootPath: string, filesRelPath?: string): string {
+function resolveWebRoot(rootPath: string, filesRelPath: string): string {
   const rel = (filesRelPath || 'www').replace(/^\/+/, '').replace(/\.\.+/g, '').replace(/\/+$/, '');
   return `${rootPath}/${rel || 'www'}`;
 }
@@ -105,24 +134,41 @@ function phpSocketPath(phpVersion: string, anchor: string): string {
   return `/var/run/php/php${phpVersion}-fpm-${anchor}.sock`;
 }
 
+/** Санитайзит домен под имя файла лога (no slashes/dots-as-path). */
+function sanitizeForFilename(domain: string): string {
+  return String(domain).toLowerCase().replace(/[^a-z0-9._-]/g, '_') || 'domain';
+}
+
 const MEOWBOX_INCLUDE_DIR = '/etc/nginx/meowbox';
 
+/** Директория чанков домена: meowbox/{siteName}/{domainId}/ */
+export function domainChunkDir(siteName: string, domainId: string): string {
+  return `${MEOWBOX_INCLUDE_DIR}/${siteName}/${domainId}`;
+}
+
 // =============================================================================
-// Chunk renderers (содержимое meowbox/{siteName}/*.conf)
+// Chunk renderers (содержимое meowbox/{siteName}/{domainId}/*.conf)
 // =============================================================================
 
 /** 00-server.conf — root, index, charset, client_max_body_size, log paths, ACME. */
-function chunk00Server(p: NginxLayeredParams, webRoot: string, settings: ReturnType<typeof resolveNginxSettings>): string {
-  const phpEnabled = !!p.phpEnabled && !!p.phpVersion;
+function chunk00Server(
+  site: NginxSiteParams,
+  d: NginxDomainParams,
+  webRoot: string,
+  settings: ReturnType<typeof resolveNginxSettings>,
+): string {
+  const phpEnabled = !!site.phpEnabled;
   const indexDirective = phpEnabled ? 'index.php index.html' : 'index.html index.htm';
+  // Лог-файл включает домен → у каждого домена сайта свои логи.
+  const logBase = `${site.siteName}__${sanitizeForFilename(d.domain)}`;
   return `# === 00-server.conf — базовые директивы (управляется Meowbox) ===
 root ${webRoot};
 index ${indexDirective};
 charset utf-8;
 client_max_body_size ${settings.clientMaxBodySize};
 
-access_log /var/log/nginx/${p.siteName}-access.log;
-error_log /var/log/nginx/${p.siteName}-error.log;
+access_log /var/log/nginx/${logBase}-access.log;
+error_log /var/log/nginx/${logBase}-error.log;
 
 # ACME HTTP-01 (Let's Encrypt). Должно быть ВЫШЕ deny /\\. (regex, который
 # в 50-security.conf), чтобы валидация LE не упёрлась в deny.
@@ -148,11 +194,14 @@ ssl_stapling_verify on;
 ${settings.hsts ? 'add_header Strict-Transport-Security "max-age=63072000; includeSubDomains; preload" always;\n' : ''}`;
 }
 
-/** 20-php.conf — fastcgi для .php. Только если phpEnabled. */
-function chunk20Php(p: NginxLayeredParams, settings: ReturnType<typeof resolveNginxSettings>): string {
-  const phpVersion = p.phpVersion || DEFAULT_PHP_VERSION;
-  const sock = phpSocketPath(phpVersion, p.siteName);
-  // Размер каждого fastcgi_buffer = bufferSize / 2 (классическая формула, но не меньше 4k).
+/** 20-php.conf — fastcgi для .php. Только если phpEnabled. Socket per-SITE. */
+function chunk20Php(
+  site: NginxSiteParams,
+  settings: ReturnType<typeof resolveNginxSettings>,
+): string {
+  const phpVersion = site.phpVersion || DEFAULT_PHP_VERSION;
+  // Socket — один на сайт (один php-fpm pool на сайт), имя по siteName.
+  const sock = phpSocketPath(phpVersion, site.siteName);
   const bufSizeKb = settings.fastcgiBufferSizeKb;
   const subBufKb = Math.max(4, Math.floor(bufSizeKb / 2));
   return `# === 20-php.conf — PHP-FPM handler (управляется Meowbox) ===
@@ -195,11 +244,14 @@ location ~* \\.(?:js|css|png|jpg|jpeg|gif|ico|svg|webp|avif|woff|woff2|ttf|eot|o
 }
 
 /** 50-security.conf — deny dotfiles + security headers + rate limit. */
-function chunk50Security(p: NginxLayeredParams, settings: ReturnType<typeof resolveNginxSettings>): string {
-  // Per-site rate limit. Зона объявлена в /etc/nginx/conf.d/meowbox-zones.conf
-  // (агент пишет файл на основе настроек всех сайтов из БД).
-  const zoneName = `site_${p.siteName}`;
-  const rateLimitLine = settings.rateLimitEnabled
+function chunk50Security(
+  d: NginxDomainParams,
+  settings: ReturnType<typeof resolveNginxSettings>,
+): string {
+  // Per-domain rate limit. Зона объявлена в /etc/nginx/conf.d/meowbox-zones.conf;
+  // имя зоны приходит из API в payload — НЕ вычисляем здесь.
+  const zoneName = d.zoneName;
+  const rateLimitLine = settings.rateLimitEnabled && zoneName
     ? `limit_req zone=${zoneName} burst=${settings.rateLimitBurst} nodelay;`
     : `# Rate limiting отключён в настройках сайта.`;
   return `# === 50-security.conf — security (управляется Meowbox) ===
@@ -232,12 +284,12 @@ function listenDirective(sslEnabled: boolean, http2: boolean): string {
     listen [::]:80;`;
 }
 
-function httpRedirectServer(p: NginxLayeredParams, webRoot: string, serverAliases: string[]): string {
+function httpRedirectServer(d: NginxDomainParams, webRoot: string, serverAliases: string[]): string {
   return `# Auto-generated HTTP→HTTPS redirect (Meowbox).
 server {
     listen 80;
     listen [::]:80;
-    server_name ${serverNames(p.domain, serverAliases)};
+    server_name ${serverNames(d.domain, serverAliases)};
 
     location ^~ /.well-known/acme-challenge/ {
         root ${webRoot};
@@ -257,8 +309,8 @@ function aliasRedirectServer(
   redirectAliases: string[],
   mainDomain: string,
   sslEnabled: boolean,
-  certPath?: string,
-  keyPath?: string,
+  certPath?: string | null,
+  keyPath?: string | null,
 ): string {
   if (!redirectAliases.length) return '';
   const names = redirectAliases.join(' ');
@@ -288,20 +340,25 @@ server {
 ${ssl443}`;
 }
 
-function mainServerBlock(p: NginxLayeredParams, serverAliases: string[]): string {
-  const sslEnabled = !!p.sslEnabled && !!p.certPath && !!p.keyPath;
-  const settings = resolveNginxSettings(p.settings || {});
+/** Главный server-блок одного домена. */
+function mainServerBlock(
+  site: NginxSiteParams,
+  d: NginxDomainParams,
+  serverAliases: string[],
+  settings: ReturnType<typeof resolveNginxSettings>,
+): string {
+  const sslEnabled = !!d.sslEnabled && !!d.certPath && !!d.keyPath;
   const sslLines = sslEnabled
-    ? `    ssl_certificate ${p.certPath};
-    ssl_certificate_key ${p.keyPath};
+    ? `    ssl_certificate ${d.certPath};
+    ssl_certificate_key ${d.keyPath};
 `
     : '';
-  // appPort proxy_pass — если задан, добавляем как кастомный location перед include
-  const proxyBlock = p.appPort
+  // appPort proxy_pass — если задан, добавляем как кастомный location перед include.
+  const proxyBlock = d.appPort
     ? `
     # Reverse proxy на приложение (порт задан в настройках сайта)
     location / {
-        proxy_pass http://127.0.0.1:${p.appPort};
+        proxy_pass http://127.0.0.1:${d.appPort};
         proxy_http_version 1.1;
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
@@ -315,10 +372,10 @@ function mainServerBlock(p: NginxLayeredParams, serverAliases: string[]): string
     : '';
   return `server {
 ${listenDirective(sslEnabled, settings.http2)}
-    server_name ${serverNames(p.domain, serverAliases)};
+    server_name ${serverNames(d.domain, serverAliases)};
 ${sslLines}${proxyBlock}
     # Подключаем все управляемые чанки + 95-custom.conf — сортировка по имени файла.
-    include ${MEOWBOX_INCLUDE_DIR}/${p.siteName}/*.conf;
+    include ${domainChunkDir(site.siteName, d.domainId)}/*.conf;
 }
 `;
 }
@@ -327,57 +384,69 @@ ${sslLines}${proxyBlock}
 // Public API
 // =============================================================================
 
-/**
- * Рендерит полный набор файлов для сайта. Главный файл всегда есть; чанки
- * заполнены по настройкам/SSL; customChunk возвращается только если в БД
- * нет существующего значения и нужно проинициализировать стартовым CMS-шаблоном
- * (NginxManager сам решит, писать ли его на диск).
- */
-export function renderNginxBundle(p: NginxLayeredParams): RenderedNginxBundle {
-  const { serverAliases, redirectAliases } = splitAliases(p.aliases);
-  const webRoot = resolveWebRoot(p.rootPath, p.filesRelPath);
-  const settings = resolveNginxSettings(p.settings || {});
-  const sslEnabled = !!p.sslEnabled && !!p.certPath && !!p.keyPath;
-  const doHttpRedirect = sslEnabled && p.httpsRedirect !== false;
+/** Рендерит чанки одного домена. */
+function renderDomainChunks(
+  site: NginxSiteParams,
+  d: NginxDomainParams,
+  settings: ReturnType<typeof resolveNginxSettings>,
+): RenderedDomain {
+  const webRoot = resolveWebRoot(site.rootPath, d.filesRelPath);
+  const sslEnabled = !!d.sslEnabled && !!d.certPath && !!d.keyPath;
 
   const chunks: Record<string, string> = {
-    '00-server.conf': chunk00Server(p, webRoot, settings),
+    '00-server.conf': chunk00Server(site, d, webRoot, settings),
   };
   if (sslEnabled) chunks['10-ssl.conf'] = chunk10Ssl(settings);
-  // appPort proxy_pass убирает необходимость в php-локации — но если оба, php имеет приоритет
-  // (проксируется только корень, php-файлы матчатся раньше регекспом).
-  if (!!p.phpEnabled && !!p.phpVersion) chunks['20-php.conf'] = chunk20Php(p, settings);
+  // appPort proxy_pass и php могут сосуществовать — php матчится регекспом раньше.
+  if (site.phpEnabled) chunks['20-php.conf'] = chunk20Php(site, settings);
   chunks['40-static.conf'] = chunk40Static(settings);
-  chunks['50-security.conf'] = chunk50Security(p, settings);
+  chunks['50-security.conf'] = chunk50Security(d, settings);
 
+  const rendered: RenderedDomain = { domainId: d.domainId, chunks };
+  if (typeof d.customConfig === 'string') {
+    rendered.customChunk = { filename: '95-custom.conf', content: d.customConfig };
+  }
+  return rendered;
+}
+
+/**
+ * Рендерит полный конфиг сайта со ВСЕМИ доменами: главный файл + чанки каждого
+ * домена. `customChunk` возвращается в каждом домене только если в payload
+ * передан `customConfig` (NginxManager сам решит, писать ли его на диск —
+ * только при первой установке или forceWriteCustom).
+ */
+export function renderNginxSite(site: NginxSiteParams): RenderedNginxSite {
+  const domains: RenderedDomain[] = [];
   const serverBlocks: string[] = [];
-  if (doHttpRedirect) serverBlocks.push(httpRedirectServer(p, webRoot, serverAliases));
-  serverBlocks.push(mainServerBlock(p, serverAliases));
-  const aliasBlock = aliasRedirectServer(redirectAliases, p.domain, sslEnabled, p.certPath, p.keyPath);
-  if (aliasBlock) serverBlocks.push(aliasBlock);
 
-  const mainConfig = `# Сгенерировано Meowbox для сайта ${p.siteName} (${p.domain}).
+  for (const d of site.domains) {
+    const settings = resolveNginxSettings(d.settings || {});
+    const { serverAliases, redirectAliases } = splitAliases(d.aliases);
+    const webRoot = resolveWebRoot(site.rootPath, d.filesRelPath);
+    const sslEnabled = !!d.sslEnabled && !!d.certPath && !!d.keyPath;
+    const doHttpRedirect = sslEnabled && d.httpsRedirect !== false;
+
+    domains.push(renderDomainChunks(site, d, settings));
+
+    const blocks: string[] = [`# --- Домен: ${d.domain} (${d.domainId}) ---`];
+    if (doHttpRedirect) blocks.push(httpRedirectServer(d, webRoot, serverAliases));
+    blocks.push(mainServerBlock(site, d, serverAliases, settings));
+    const aliasBlock = aliasRedirectServer(redirectAliases, d.domain, sslEnabled, d.certPath, d.keyPath);
+    if (aliasBlock) blocks.push(aliasBlock);
+    serverBlocks.push(blocks.join('\n'));
+  }
+
+  const domainList = site.domains.map((d) => d.domain).join(', ') || '(нет доменов)';
+  const mainConfig = `# Сгенерировано Meowbox для сайта ${site.siteName}.
+# Домены: ${domainList}
 # НЕ редактировать вручную: файл перезаписывается при изменении настроек сайта.
-# Кастомные правила пиши в /etc/nginx/meowbox/${p.siteName}/95-custom.conf
+# Кастомные правила пиши в /etc/nginx/meowbox/${site.siteName}/{domainId}/95-custom.conf
 # (вкладка «Nginx» на странице сайта в панели).
 
 ${serverBlocks.join('\n')}`;
 
-  return { mainConfig, chunks };
-}
-
-/**
- * Backward-compat обёртка: старый API `generateNginxConfig(siteType, params)`
- * возвращал одну строку. Кое-где в кодовой базе он ещё может вызываться
- * (legacy), поэтому даём упрощённую совместимость — возвращает mainConfig.
- *
- * Лучше — везде переходить на `renderNginxBundle()`.
- */
-export function generateNginxConfig(_siteType: string, params: NginxLayeredParams): string {
-  return renderNginxBundle(params).mainConfig;
+  return { mainConfig, domains };
 }
 
 export const NGINX_LAYERED_INCLUDE_DIR = MEOWBOX_INCLUDE_DIR;
-
-// Re-exports (legacy)
 export { MEOWBOX_INCLUDE_DIR };
