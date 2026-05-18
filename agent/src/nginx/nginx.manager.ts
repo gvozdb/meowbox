@@ -35,6 +35,7 @@ import {
   NginxSiteParams,
   renderNginxSite,
 } from './templates';
+import { sanitizeCustomNginxConfig } from './sanitize-custom';
 
 const ZONES_PATH = '/etc/nginx/conf.d/meowbox-zones.conf';
 
@@ -180,7 +181,9 @@ export class NginxManager {
         await fs.copyFile(customPath, backupPath);
       } catch { /* нет файла */ }
 
-      await fs.writeFile(customPath, content, 'utf8');
+      // Срезаем директивы, ломающие `nginx -t` в server-контексте, до записи —
+      // иначе сразу попадём в rollback ниже без внятной причины.
+      await fs.writeFile(customPath, sanitizeCustomNginxConfig(content), 'utf8');
       await fs.chmod(customPath, 0o644).catch(() => {});
 
       const test = await this.testConfig();

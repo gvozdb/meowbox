@@ -32,6 +32,7 @@
 
 import { resolveNginxSettings, type SiteNginxOverrides } from '@meowbox/shared';
 import { DEFAULT_PHP_VERSION } from '../config';
+import { sanitizeCustomNginxConfig } from './sanitize-custom';
 
 // =============================================================================
 // Public types
@@ -404,7 +405,12 @@ function renderDomainChunks(
 
   const rendered: RenderedDomain = { domainId: d.domainId, chunks };
   if (typeof d.customConfig === 'string') {
-    rendered.customChunk = { filename: '95-custom.conf', content: d.customConfig };
+    // Срезаем директивы, которые ломают `nginx -t` в server-контексте
+    // (чужие limit_*/cache-зоны из hostpanel-миграции и т.п.).
+    rendered.customChunk = {
+      filename: '95-custom.conf',
+      content: sanitizeCustomNginxConfig(d.customConfig),
+    };
   }
   return rendered;
 }

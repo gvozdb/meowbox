@@ -11,6 +11,8 @@
  * простая state-машина для server { ... } блоков.
  */
 
+import { isUnsafeCustomDirective } from '../../../nginx/sanitize-custom';
+
 export interface ParsedNginx {
   /** Главный домен (server_name первый). */
   mainDomain: string | null;
@@ -200,6 +202,11 @@ function extractUnknownSnippet(raw: string, modxFriendlyUrls: boolean): string {
     // location/if/server мы тоже хотим пропустить как стандартные (их обработка
     // ниже + аналог в нашем layered):
     if (directive === 'location' || directive === 'if' || directive === 'server' || directive === 'upstream') continue;
+    // Чужие rate-limit/cache-директивы (limit_req zone=..., *_cache_path и т.п.):
+    // зоны объявлены в глобальном nginx.conf источника, к нам не переносятся —
+    // в server-контексте дадут "zero size shared memory zone". У meowbox свой
+    // rate-limit (чанк 50-security.conf). Не тащим в custom-сниппет.
+    if (isUnsafeCustomDirective(directive.toLowerCase())) continue;
     result.push(line);
   }
   if (result.length === 0) return '';
