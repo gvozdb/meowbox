@@ -763,22 +763,35 @@ interface GunzipToFileArgs {
 }
 
 /**
- * sed-выражение совместимости MySQL 8.0 → MariaDB.
+ * sed-правила совместимости MySQL 8.0 → MariaDB. Прогоняются потоково
+ * на распаковке дампа (gunzip | sed). Закрывают весь класс
+ * MySQL-8-специфики, а не отдельный кейс.
  *
- * MySQL 8.0+ по умолчанию использует коллации семейства utf8mb4_0900_*
- * (utf8mb4_0900_ai_ci и язык-специфичные вроде utf8mb4_ja_0900_as_cs),
- * которых в MariaDB нет вообще. Каждый `CREATE TABLE ... COLLATE=utf8mb4_0900_ai_ci`
- * падает с `ERROR 1273 Unknown collation`, таблица не создаётся, дальше
- * сыпется каскад `ERROR 1146 Table doesn't exist` на LOCK/ALTER/INSERT.
+ * 1. Коллации utf8mb4_*0900* (utf8mb4_0900_ai_ci и язык-специфичные
+ *    вроде utf8mb4_ja_0900_as_cs) — в MariaDB их нет вообще. CREATE TABLE
+ *    падает `ERROR 1273 Unknown collation`, таблица не создаётся, дальше
+ *    каскад `ERROR 1146 Table doesn't exist` на LOCK/ALTER/INSERT.
+ *    Переписываем на utf8mb4_unicode_ci — доступна в любой MariaDB,
+ *    семантически ближайшая (Unicode-сортировка, accent/case-insensitive).
  *
- * Переписываем любую utf8mb4_*0900* коллацию на utf8mb4_unicode_ci —
- * она доступна в любой версии MariaDB и семантически ближайшая
- * (Unicode-сортировка, accent/case-insensitive). Класс [A-Za-z0-9_]
- * не содержит пробела, поэтому матч ограничен одним токеном и не
- * заденет соседние слова.
+ * 2. Версионные executable-комментарии `/*!8NNNN ... *​/`. MySQL кодирует
+ *    версию как MMmmpp (8.0.16 → 80016). MariaDB 10.x внутренне это
+ *    100xxx, т.е. БОЛЬШЕ 8NNNN → MariaDB ВЫПОЛНЯЕТ MySQL-8-специфичный
+ *    код внутри такого комментария (DEFAULT ENCRYPTION и пр.) и падает
+ *    на незнакомом синтаксисе. Переписываем версию на 99999 — её нет ни
+ *    у одной MariaDB, блок гарантированно пропускается. Безобидный
+ *    session-tuning внутри таких комментов теряется, но для импорта
+ *    данных он некритичен. Низкие диапазоны (/*!40xxx, /*!50xxx —
+ *    совместимость с MySQL 4/5, триггеры) НЕ трогаем — их MariaDB
+ *    обязана выполнить.
+ *
+ * Класс [A-Za-z0-9_] не содержит пробела — матч коллации ограничен
+ * одним токеном и не заденет соседние слова.
  */
-const SQL_MYSQL8_COMPAT_SED =
-  's/utf8mb4_[A-Za-z0-9_]*0900[A-Za-z0-9_]*/utf8mb4_unicode_ci/g';
+const SQL_MYSQL8_COMPAT_RULES = [
+  's/utf8mb4_[A-Za-z0-9_]*0900[A-Za-z0-9_]*/utf8mb4_unicode_ci/g',
+  's,/\\*!8[0-9]{4},/*!99999,g',
+];
 
 function runGunzipToFile(args: GunzipToFileArgs): Promise<{
   exitCode: number;
@@ -787,14 +800,15 @@ function runGunzipToFile(args: GunzipToFileArgs): Promise<{
   return new Promise((resolve, reject) => {
     // Pipeline: gunzip -c <gz> | sed -E '<compat>' > <out>.
     // gunzip пишет в pipe (не на диск напрямую), sed на лету чинит
-    // несовместимость коллаций MySQL 8.0 → MariaDB (см. коммент к
-    // SQL_MYSQL8_COMPAT_SED) и пишет результат через redirect на fd.
+    // несовместимости MySQL 8.0 → MariaDB (см. коммент к
+    // SQL_MYSQL8_COMPAT_RULES) и пишет результат через redirect на fd.
     // Отдельного прохода по распакованному файлу нет — sed потоковый.
     const outFd = openSync(args.outputPath, 'w');
     const gunzip = spawn('gunzip', ['-c', args.inputPath], {
       stdio: ['ignore', 'pipe', 'pipe'],
     });
-    const sed = spawn('sed', ['-E', SQL_MYSQL8_COMPAT_SED], {
+    const sedArgs = ['-E', ...SQL_MYSQL8_COMPAT_RULES.flatMap((r) => ['-e', r])];
+    const sed = spawn('sed', sedArgs, {
       stdio: ['pipe', outFd, 'pipe'],
     });
     // stdio задан явно ('pipe') — потоки гарантированно не null.
