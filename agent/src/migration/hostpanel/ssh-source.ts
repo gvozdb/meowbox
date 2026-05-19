@@ -762,42 +762,82 @@ interface GunzipToFileArgs {
   isCancelled?: () => boolean;
 }
 
+/**
+ * sed-выражение совместимости MySQL 8.0 → MariaDB.
+ *
+ * MySQL 8.0+ по умолчанию использует коллации семейства utf8mb4_0900_*
+ * (utf8mb4_0900_ai_ci и язык-специфичные вроде utf8mb4_ja_0900_as_cs),
+ * которых в MariaDB нет вообще. Каждый `CREATE TABLE ... COLLATE=utf8mb4_0900_ai_ci`
+ * падает с `ERROR 1273 Unknown collation`, таблица не создаётся, дальше
+ * сыпется каскад `ERROR 1146 Table doesn't exist` на LOCK/ALTER/INSERT.
+ *
+ * Переписываем любую utf8mb4_*0900* коллацию на utf8mb4_unicode_ci —
+ * она доступна в любой версии MariaDB и семантически ближайшая
+ * (Unicode-сортировка, accent/case-insensitive). Класс [A-Za-z0-9_]
+ * не содержит пробела, поэтому матч ограничен одним токеном и не
+ * заденет соседние слова.
+ */
+const SQL_MYSQL8_COMPAT_SED =
+  's/utf8mb4_[A-Za-z0-9_]*0900[A-Za-z0-9_]*/utf8mb4_unicode_ci/g';
+
 function runGunzipToFile(args: GunzipToFileArgs): Promise<{
   exitCode: number;
   stderr: string;
 }> {
   return new Promise((resolve, reject) => {
-    // gunzip -c <gz> > <out> — пишем через redirect на дескриптор файла,
-    // никакого pipe в Node-сторону. gunzip сам пишет на диск.
+    // Pipeline: gunzip -c <gz> | sed -E '<compat>' > <out>.
+    // gunzip пишет в pipe (не на диск напрямую), sed на лету чинит
+    // несовместимость коллаций MySQL 8.0 → MariaDB (см. коммент к
+    // SQL_MYSQL8_COMPAT_SED) и пишет результат через redirect на fd.
+    // Отдельного прохода по распакованному файлу нет — sed потоковый.
     const outFd = openSync(args.outputPath, 'w');
-    const proc = spawn('gunzip', ['-c', args.inputPath], {
-      stdio: ['ignore', outFd, 'pipe'],
+    const gunzip = spawn('gunzip', ['-c', args.inputPath], {
+      stdio: ['ignore', 'pipe', 'pipe'],
     });
+    const sed = spawn('sed', ['-E', SQL_MYSQL8_COMPAT_SED], {
+      stdio: ['pipe', outFd, 'pipe'],
+    });
+    // stdio задан явно ('pipe') — потоки гарантированно не null.
+    const gunzipOut = gunzip.stdout!;
+    const sedIn = sed.stdin!;
+    gunzipOut.pipe(sedIn);
 
     let stderrBuf = '';
     let resolved = false;
+    let gunzipExit: number | null = null;
+    let sedExit: number | null = null;
     let timer: NodeJS.Timeout | null = null;
     let cancelTimer: NodeJS.Timeout | null = null;
 
-    proc.stderr?.on('data', (chunk: Buffer) => {
+    const appendStderr = (tag: string, chunk: Buffer) => {
       const s = chunk.toString();
       if (stderrBuf.length < 64 * 1024) stderrBuf += s;
-      if (args.onLog) args.onLog(`[gunzip-stderr] ${s.trimEnd()}`);
-    });
+      if (args.onLog) args.onLog(`[${tag}-stderr] ${s.trimEnd()}`);
+    };
+    gunzip.stderr?.on('data', (c: Buffer) => appendStderr('gunzip', c));
+    sed.stderr?.on('data', (c: Buffer) => appendStderr('sed', c));
+
+    // Если sed умрёт первым — gunzip словит EPIPE в stdout. Глушим
+    // 'error' на потоках, чтобы не было uncaught exception.
+    gunzipOut.on('error', () => { /* EPIPE при падении sed */ });
+    sedIn.on('error', () => { /* EPIPE при падении sed */ });
+
+    const killAll = (sig: NodeJS.Signals) => {
+      try { gunzip.kill(sig); } catch { /* dead */ }
+      try { sed.kill(sig); } catch { /* dead */ }
+    };
 
     if (args.timeoutMs) {
       timer = setTimeout(() => {
-        try { proc.kill('SIGTERM'); } catch { /* dead */ }
-        setTimeout(() => {
-          try { proc.kill('SIGKILL'); } catch { /* dead */ }
-        }, 5_000);
+        killAll('SIGTERM');
+        setTimeout(() => killAll('SIGKILL'), 5_000);
       }, args.timeoutMs);
     }
     if (args.isCancelled) {
       cancelTimer = setInterval(() => {
         if (args.isCancelled?.()) {
-          if (args.onLog) args.onLog('  ⚠ cancel-token поднят — SIGTERM gunzip');
-          try { proc.kill('SIGTERM'); } catch { /* dead */ }
+          if (args.onLog) args.onLog('  ⚠ cancel-token поднят — SIGTERM gunzip|sed');
+          killAll('SIGTERM');
         }
       }, 2_000);
     }
@@ -808,18 +848,28 @@ function runGunzipToFile(args: GunzipToFileArgs): Promise<{
       try { closeSync(outFd); } catch { /* already closed */ }
     };
 
-    proc.on('exit', (code) => {
+    const tryResolve = () => {
+      if (resolved) return;
+      if (gunzipExit === null || sedExit === null) return;
+      resolved = true;
+      cleanup();
+      // Битый gz (gunzip != 0) важнее ошибки sed — рапортуем его первым.
+      const exitCode = gunzipExit !== 0 ? gunzipExit : sedExit;
+      resolve({ exitCode, stderr: stderrBuf });
+    };
+
+    const onError = (err: Error) => {
       if (resolved) return;
       resolved = true;
       cleanup();
-      resolve({ exitCode: code ?? 1, stderr: stderrBuf });
-    });
-    proc.on('error', (err) => {
-      if (resolved) return;
-      resolved = true;
-      cleanup();
+      killAll('SIGKILL');
       reject(err);
-    });
+    };
+
+    gunzip.on('exit', (code) => { gunzipExit = code ?? 1; tryResolve(); });
+    sed.on('exit', (code) => { sedExit = code ?? 1; tryResolve(); });
+    gunzip.on('error', onError);
+    sed.on('error', onError);
   });
 }
 
