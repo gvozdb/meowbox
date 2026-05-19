@@ -40,6 +40,7 @@ import { ServicesModule } from './services/services.module';
 import { PanelUpdateModule } from './panel-update/panel-update.module';
 import { AdminSecurityModule } from './admin-security/admin-security.module';
 import { VpnModule } from './vpn/vpn.module';
+import { SiteNodeModule } from './site-node/site-node.module';
 import { IpAllowlistGuard } from './admin-security/ip-allowlist.guard';
 import { GlobalExceptionFilter } from './common/filters/http-exception.filter';
 import { AuditInterceptor } from './common/interceptors/audit.interceptor';
@@ -120,6 +121,7 @@ import { CustomThrottlerGuard } from './common/guards/throttler-tracker.guard';
     PanelUpdateModule,
     AdminSecurityModule,
     VpnModule,
+    SiteNodeModule,
   ],
   providers: [
     {

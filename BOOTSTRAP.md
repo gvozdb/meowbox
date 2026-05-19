@@ -19,4 +19,4 @@
 1. Код не правится напрямую на сервере. Изменения идут через релиз: `git tag vX.Y.Z` → workflow собирает tarball → `make update`.
 2. Persistent данные — в `/opt/meowbox/state/` (data, .env, logs). Никогда не пиши их внутри `releases/` или `current/`.
 3. Перед любой опасной операцией — `make snapshot` (бэкап БД + конфигов панели в `state/data/snapshots/`).
-
+4. Перед commit + tag + release сначала подними версию в файле VERSION (лежит в корне).

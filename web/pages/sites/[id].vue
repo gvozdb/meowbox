@@ -404,6 +404,9 @@
           </div>
         </div>
 
+        <!-- Быстрый доступ — one-shot команды (build/deploy/lint) -->
+        <SiteQuickAccess :site-id="siteId" />
+
         <!-- 6. Состояние и мониторинг — широкий блок на всю ширину с графиками -->
         <section class="overview-block overview-block--monitor">
           <div class="overview-block__header">
@@ -2013,6 +2016,11 @@ php_value[max_execution_time] = 300"
         <SiteServicesTab :site-id="siteId" :active="activeTab === 'services'" />
       </div>
 
+      <!-- Tab content: Node.js -->
+      <div v-if="activeTab === 'node'" class="tab-content">
+        <SiteNodeTab :site-id="siteId" :active="activeTab === 'node'" />
+      </div>
+
       <!-- Tab content: Danger Zone -->
       <div v-if="activeTab === 'danger'" class="tab-content">
         <div class="danger-zone">
@@ -2602,7 +2610,7 @@ async function reloadSiteAfterDbChange() {
   }
 }
 const activeTab = useTabQuery(
-  ['overview', 'domains', 'files', 'logs', 'databases', 'ssl', 'dns', 'backups', 'cron', 'nginx', 'php', 'env', 'deploy', 'services', 'danger'],
+  ['overview', 'domains', 'files', 'logs', 'databases', 'ssl', 'dns', 'backups', 'cron', 'nginx', 'php', 'env', 'deploy', 'services', 'node', 'danger'],
   'overview',
 );
 // Старая raw-textarea убрана — вкладка Nginx теперь рендерится компонентом
@@ -2843,6 +2851,7 @@ const tabs = computed(() => [
   { id: 'backups', label: 'Бэкапы', count: site.value?._count?.backups || 0 },
   { id: 'cron', label: 'Крон', count: site.value?._count?.cronJobs || 0 },
   { id: 'services', label: 'Сервисы' },
+  { id: 'node', label: 'Node.js' },
   { id: 'logs', label: 'Логи' },
   { id: 'danger', label: 'Опасная зона', farRight: true },
 ].filter((t: { hidden?: boolean }) => !t.hidden));

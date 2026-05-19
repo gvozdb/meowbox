@@ -90,6 +90,10 @@ export class CommandExecutor {
     'yarn',
     'pnpm',
     'node',
+    // make — для блока «Быстрый доступ»: запуск make-таргетов сайта. Имя
+    // таргета валидируется отдельно (NODE_TARGET_REGEX), запуск — от имени
+    // системного пользователя сайта через sudo -u.
+    'make',
     'ufw',
     'df',
     'free',

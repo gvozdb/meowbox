@@ -169,6 +169,24 @@ export {
   IPV4_CIDR_REGEX,
 } from './vpn-defaults';
 
+// Node.js / PM2 application management
+export {
+  NODE_COMMAND_SOURCES,
+  PM2_ECOSYSTEM_FILENAMES,
+} from './node-app';
+export type {
+  NodeCommandSource,
+  NodeAppDefinition,
+  NodeProcessRuntime,
+  NodeProcessView,
+  NodeEcosystemGroup,
+  NodeProcessesResult,
+  DiscoveredCommand,
+  DiscoveredCommandGroup,
+  QuickCommand,
+  QuickCommandRunResult,
+} from './node-app';
+
 // WebSocket types
 export { WsEvents } from './ws';
 

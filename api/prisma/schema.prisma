@@ -148,11 +148,36 @@ model Site {
   healthPings     HealthCheckPing[]
   dnsZones        DnsZone[]
   services        SiteService[]
+  quickCommands   SiteQuickCommand[]
 
   @@index([userId])
   @@index([status])
   @@index([type])
   @@map("sites")
+}
+
+/// Быстрая команда сайта (блок «Быстрый доступ» на вкладке «Обзор»).
+/// Запускается одним кликом от имени системного пользователя сайта.
+/// Это НЕ PM2-процесс — one-shot команда (build/deploy/lint и т.п.).
+model SiteQuickCommand {
+  id        String   @id @default(uuid())
+  siteId    String   @map("site_id")
+  /// Человекочитаемая подпись кнопки.
+  label     String
+  /// Источник: 'npm' (npm run <target>) или 'make' (make <target>).
+  source    String
+  /// Имя npm-скрипта или make-таргета.
+  target    String
+  /// Абсолютная рабочая директория (директория Makefile/package.json).
+  cwd       String
+  /// Порядок отображения в блоке.
+  sortOrder Int      @default(0) @map("sort_order")
+  createdAt DateTime @default(now()) @map("created_at")
+
+  site Site @relation(fields: [siteId], references: [id], onDelete: Cascade)
+
+  @@index([siteId])
+  @@map("site_quick_commands")
 }
 
 // =============================================================================

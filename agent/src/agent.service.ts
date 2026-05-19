@@ -2,6 +2,7 @@ import { io, Socket } from 'socket.io-client';
 import { NginxManager } from './nginx/nginx.manager';
 import { PhpFpmManager } from './php/phpfpm.manager';
 import { Pm2Manager } from './pm2/pm2.manager';
+import { NodeAppManager } from './node/node-app.manager';
 import { MetricsCollector } from './system/metrics.collector';
 import { DeployExecutor } from './deploy/deploy.executor';
 import { DatabaseManager } from './database/database.manager';
@@ -78,6 +79,7 @@ export class AgentService {
   private nginx: NginxManager;
   private php: PhpFpmManager;
   private pm2: Pm2Manager;
+  private nodeApp: NodeAppManager;
   private metrics: MetricsCollector;
   private deployer: DeployExecutor;
   private db: DatabaseManager;
@@ -125,6 +127,7 @@ export class AgentService {
     this.nginx = new NginxManager();
     this.php = new PhpFpmManager();
     this.pm2 = new Pm2Manager();
+    this.nodeApp = new NodeAppManager();
     this.metrics = new MetricsCollector();
     this.deployer = new DeployExecutor();
     this.db = new DatabaseManager();
@@ -534,6 +537,45 @@ export class AgentService {
     this.safeOn(s, 'pm2:logs', async (params: { name: string; lines?: number }, cb: Callback) => {
       cb({ success: true, data: await this.pm2.getLogs(params.name, params.lines) });
     });
+
+    // -- Node.js apps (per-site PM2) --
+    // Управление Node-приложениями сайта: ecosystem-файлы как источник правды,
+    // PM2-демон сайта (от имени системного юзера), быстрые команды.
+    this.safeOn(s, 'node:processes', async (params: { systemUser: string; filesRelPath: string }, cb: Callback) => {
+      cb({ success: true, data: await this.nodeApp.getProcesses(params.systemUser, params.filesRelPath) });
+    });
+
+    this.safeOn(s, 'node:ecosystem-start', async (params: { systemUser: string; file: string; only?: string }, cb: Callback) => {
+      await this.nodeApp.startEcosystem(params.systemUser, params.file, params.only);
+      cb({ success: true });
+    });
+
+    this.safeOn(s, 'node:process-control', async (params: { systemUser: string; action: 'stop' | 'restart' | 'reload' | 'delete'; name: string }, cb: Callback) => {
+      await this.nodeApp.controlProcess(params.systemUser, params.action, params.name);
+      cb({ success: true });
+    });
+
+    this.safeOn(s, 'node:process-logs', async (params: { systemUser: string; name: string; lines?: number }, cb: Callback) => {
+      cb({ success: true, data: await this.nodeApp.getLogs(params.systemUser, params.name, params.lines) });
+    });
+
+    this.safeOn(s, 'node:autostart-get', async (params: { systemUser: string }, cb: Callback) => {
+      cb({ success: true, data: { enabled: await this.nodeApp.getAutostart(params.systemUser) } });
+    });
+
+    this.safeOn(s, 'node:autostart-set', async (params: { systemUser: string; enable: boolean }, cb: Callback) => {
+      await this.nodeApp.setAutostart(params.systemUser, params.enable);
+      cb({ success: true });
+    });
+
+    this.safeOn(s, 'node:commands-discover', async (params: { systemUser: string; filesRelPath: string }, cb: Callback) => {
+      cb({ success: true, data: await this.nodeApp.scanCommands(params.systemUser, params.filesRelPath) });
+    });
+
+    // Долгая операция (build/deploy) — handler-timeout выше дефолтного.
+    this.safeOn(s, 'node:command-run', async (params: { systemUser: string; source: 'npm' | 'make'; target: string; cwd: string }, cb: Callback) => {
+      cb({ success: true, data: await this.nodeApp.runQuickCommand(params.systemUser, params.source, params.target, params.cwd) });
+    }, 630_000);
 
     // -- Deploy --
     this.safeOn(s, 'deploy:execute', async (params: {
