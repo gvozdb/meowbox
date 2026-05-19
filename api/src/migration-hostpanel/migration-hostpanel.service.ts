@@ -1221,9 +1221,16 @@ export class MigrationHostpanelService implements OnModuleInit {
       }
     }
 
+    // totalSites = число реально запускаемых сайтов (а не всех найденных на
+    // источнике на фазе shortlist). Иначе счётчик «Готово: X/Y» показывает
+    // лишние сайты, которые оператор не выбирал.
     await this.prisma.hostpanelMigration.update({
       where: { id },
-      data: { status: 'RUNNING', startedAt: new Date() },
+      data: {
+        status: 'RUNNING',
+        startedAt: new Date(),
+        totalSites: selectedItems.length,
+      },
     });
 
     const decoded = this.decodeSource(JSON.parse(migration.source));

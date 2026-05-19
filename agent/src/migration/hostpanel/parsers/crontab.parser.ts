@@ -87,6 +87,9 @@ export function parseCrontab(
       fromUser,
       target,
       noteStripped,
+      // По дефолту все импортируемые задачи отключены — оператор сам
+      // включает нужные на шаге «План».
+      enabled: false,
     };
 
     if (target === 'this-site' && attachToUser) {

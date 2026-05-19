@@ -17,7 +17,8 @@
       <div v-for="(label, idx) in steps" :key="idx" class="stepper__item" :class="{
         'stepper__item--active': step === idx + 1,
         'stepper__item--done': step > idx + 1,
-      }">
+        'stepper__item--clickable': canGoToStep(idx + 1),
+      }" @click="goToStep(idx + 1)">
         <span class="stepper__num">{{ idx + 1 }}</span>
         <span class="stepper__label">{{ label }}</span>
       </div>
@@ -696,7 +697,7 @@
               class="form-textarea form-textarea--mono"
               rows="5"
               spellcheck="false"
-              placeholder="modx_session&#10;modx_manager_log&#10;modx_register_messages"
+              placeholder="modx_session&#10;modx_manager_log&#10;modx_smart_sessions"
               @blur="saveDbExcludes(item)"
             />
 
@@ -729,6 +730,20 @@
                   </select>
                 </div>
                 <pre class="cron-card__cmd">{{ j.command }}</pre>
+                <div v-if="j.target === 'this-site'" class="cron-card__foot">
+                  <button
+                    type="button"
+                    class="toggle"
+                    :class="{ 'toggle--on': j.enabled }"
+                    :title="j.enabled ? 'Будет включена сразу после миграции' : 'Будет создана отключённой'"
+                    @click="j.enabled = !j.enabled; savePlan(item)"
+                  >
+                    <span class="toggle__knob" />
+                  </button>
+                  <span class="cron-card__foot-label">
+                    {{ j.enabled ? 'Включить после миграции' : 'Отключена после миграции' }}
+                  </span>
+                </div>
               </div>
             </div>
             <p v-else class="hint">Cron-задач для этого сайта не нашлось.</p>
@@ -755,9 +770,16 @@
                 <span class="fpm-preview__k">memory_limit</span>
                 <code>{{ item.plan.phpFpm.memoryLimit }}</code>
               </div>
-              <div v-if="item.plan.phpFpm.custom" class="fpm-preview__row fpm-preview__row--full">
+              <div class="fpm-preview__row fpm-preview__row--full">
                 <span class="fpm-preview__k">custom-блок (php_admin_value, env, ...)</span>
-                <pre class="fpm-preview__custom">{{ item.plan.phpFpm.custom }}</pre>
+                <textarea
+                  v-model="item.plan.phpFpm.custom"
+                  class="form-textarea form-textarea--mono"
+                  rows="4"
+                  spellcheck="false"
+                  placeholder="php_admin_value[opcache.enable]=1"
+                  @blur="savePlan(item)"
+                />
               </div>
               <p class="hint">
                 Параметры скопируются на slave. Кастом-блок переживает смену PHP-версии в UI.
@@ -765,6 +787,21 @@
               </p>
             </div>
             <p v-else class="hint">PHP-FPM пул на источнике не найден — будут дефолты meowbox.</p>
+
+            <h4>Nginx custom-конфиг</h4>
+            <p class="hint hint--inline">
+              Кастомные nginx-директивы сайта (файл <code>95-custom.conf</code>).
+              Небезопасные директивы (<code>limit_req</code>, кэш-зоны) при применении срезаются автоматически.
+            </p>
+            <textarea
+              :value="item.plan.nginxCustomConfig || ''"
+              class="form-textarea form-textarea--mono"
+              rows="6"
+              spellcheck="false"
+              placeholder="# свои location / add_header ..."
+              @input="(e: any) => { item.plan.nginxCustomConfig = e.target.value; }"
+              @blur="savePlan(item)"
+            />
 
             <h4>SSL</h4>
             <div v-if="item.plan.ssl">
@@ -1000,7 +1037,7 @@ interface PlanItem {
   homeIncludes: { name: string; kind: 'file' | 'dir'; bytes: number; checked: boolean }[];
   rsyncExtraExcludes: string[];
   dbExcludeDataTables: string[];
-  cronJobs: { schedule: string; command: string; target: string; raw: string }[];
+  cronJobs: { schedule: string; command: string; target: string; raw: string; enabled?: boolean }[];
   ssl: { transfer: boolean; domainsInCert: string[] } | null;
   manticore: { enable: boolean };
   phpFpm?: {
@@ -1011,6 +1048,7 @@ interface PlanItem {
     memoryLimit: string;
     custom: string;
   };
+  nginxCustomConfig?: string;
   fsBytes: number;
   dbBytes: number;
   warnings: string[];
@@ -1363,6 +1401,39 @@ const canStart = computed(() => {
 });
 
 /**
+ * Максимально доступный шаг визарда — зависит от состояния миграции.
+ * Прыгать вперёд за пределы уже собранных данных нельзя.
+ */
+const maxStep = computed(() => {
+  const m = discovery.value;
+  if (!m) return 1;
+  if (m.items.some((i) => ['RUNNING', 'DONE', 'FAILED'].includes(i.status))) return 4;
+  if (m.status === 'READY' || m.status === 'PARTIAL') return 3;
+  if (m.status === 'SHORTLIST_READY' || m.status === 'PROBING') return 2;
+  return 1;
+});
+
+/**
+ * Можно ли перейти на шаг визарда кликом по степперу. Назад — в пределах
+ * пройденного, вперёд — не дальше maxStep. Блокируем во время фоновых
+ * discover/probe, чтобы не сбить поллинг.
+ */
+function canGoToStep(target: number): boolean {
+  if (discovering.value || probing.value) return false;
+  if (target === step.value) return false;
+  return target >= 1 && target <= maxStep.value;
+}
+
+/**
+ * Переход по шагам визарда без сайд-эффектов. Конфигурация (источник,
+ * выбор сайтов, план) живёт в src/discovery и при навигации не сбрасывается.
+ */
+function goToStep(target: number) {
+  if (!canGoToStep(target)) return;
+  step.value = target;
+}
+
+/**
  * Версия для Force PHP — берём первую установленную НА SLAVE (а не на источнике —
  * это была давняя бага: показывали source.phpVersionsInstalled, и если на slave
  * этой версии не было, миграция падала на стейдже nginx/php-fpm). Если slave
@@ -1687,6 +1758,10 @@ async function startMigration() {
     await api.post(`/admin/migrate-hostpanel/${discovery.value.id}/start`, {
       itemIds: Array.from(selectedItems.value),
     });
+    // Счётчик «Готово: X/Y» — Y это число реально запускаемых сайтов,
+    // а не всех найденных на источнике. Бэкенд выставит totalSites при start,
+    // здесь — оптимистично, чтобы не было мигания до первого поллинга.
+    discovery.value.totalSites = selectedItems.value.size;
     step.value = 4;
     subscribeProgress();
     pollDiscovery();
@@ -1789,6 +1864,7 @@ function pollDiscovery() {
       const m = await api.get<Migration>(`/admin/migrate-hostpanel/${discovery.value.id}`);
       // Общие поля
       discovery.value.status = m.status;
+      discovery.value.totalSites = m.totalSites;
       discovery.value.doneSites = m.doneSites;
       discovery.value.failedSites = m.failedSites;
       discovery.value.paused = m.paused;
@@ -2068,6 +2144,9 @@ onUnmounted(() => {
 .stepper__item--active .stepper__num { background: var(--primary); color: #fff; border-color: var(--primary); }
 .stepper__item--done .stepper__num { background: rgba(34, 197, 94, 0.3); }
 .stepper__label { font-size: 0.85rem; font-weight: 500; }
+.stepper__item--clickable { cursor: pointer; }
+.stepper__item--clickable:hover .stepper__num { border-color: var(--primary); }
+.stepper__item--clickable:hover .stepper__label { color: var(--primary); }
 
 .card {
   background: var(--bg-surface); border: 1px solid var(--border);
@@ -2466,6 +2545,24 @@ onUnmounted(() => {
   word-break: break-all;
   overflow-x: auto;
 }
+.cron-card__foot {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-top: 0.5rem;
+}
+.cron-card__foot-label { font-size: 0.78rem; color: var(--text-secondary); }
+.toggle {
+  width: 36px; height: 20px; border-radius: 10px; border: none; padding: 2px;
+  background: var(--border-strong); cursor: pointer; position: relative;
+  transition: background 0.3s; flex-shrink: 0;
+}
+.toggle--on { background: rgba(34, 197, 94, 0.3); }
+.toggle__knob {
+  display: block; width: 16px; height: 16px; border-radius: 50%;
+  background: var(--text-tertiary); transition: all 0.3s;
+}
+.toggle--on .toggle__knob { transform: translateX(16px); background: #4ade80; }
 
 /* ────── Текстарии (rsync/db excludes) ────── */
 .form-textarea {

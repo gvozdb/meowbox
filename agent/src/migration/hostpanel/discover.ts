@@ -66,9 +66,7 @@ const HOME_OFF_BY_DEFAULT = new Set([
 ]);
 
 const DB_TABLE_NO_DATA_SUFFIXES = [
-  'manager_log', 'session', 'smart_session',
-  'register_messages', 'register_queues', 'register_topics',
-  'active_users',
+  'manager_log', 'session', 'smart_sessions',
 ];
 
 /**
@@ -643,9 +641,6 @@ async function buildPlanItem(
   // 9) rsyncExtraExcludes — preset из dumper + наши defaults
   const baseExcludes = [
     '/www/core/cache/*',
-    '/www/core/logs/*',
-    '/www/_modxbackup/*',
-    '/www/assets/components/*/tmp/*',
   ];
   const dumperExcludes = (dumper?.exclude || []).filter((s) => !!s);
   const rsyncExtraExcludes = Array.from(new Set([...baseExcludes, ...dumperExcludes]));

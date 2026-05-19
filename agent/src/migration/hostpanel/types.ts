@@ -19,6 +19,8 @@ export interface PlanItemCronJob {
   fromUser: string;
   target: 'this-site' | 'system-root' | 'skip';
   noteStripped?: string;
+  /** Включить задачу сразу после миграции. По дефолту false. */
+  enabled?: boolean;
 }
 
 export interface PlanItemPhpFpmSettings {

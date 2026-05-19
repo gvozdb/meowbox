@@ -29,6 +29,11 @@ export interface PlanItemCronJob {
   target: 'this-site' | 'system-root' | 'skip';
   /** Если есть префикс `sudo -u<user>` — после его зачистки. Информационно. */
   noteStripped?: string;
+  /**
+   * Включить задачу сразу после миграции. По дефолту false — оператор
+   * сам решает на шаге «План», какие cron'ы активировать.
+   */
+  enabled?: boolean;
 }
 
 export interface PlanItemPhpFpmSettings {

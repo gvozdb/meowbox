@@ -988,7 +988,9 @@ async function importCronStage(ctx: RunCtx) {
       id,
       schedule: job.schedule,
       command: job.command,
-      enabled: true,
+      // Импортируем в том состоянии, что оператор выбрал на шаге «План».
+      // Старые планы без поля enabled → создаём отключённой.
+      enabled: job.enabled === true,
       user: ctx.plan.newName,
     });
     if (!r.success) {
