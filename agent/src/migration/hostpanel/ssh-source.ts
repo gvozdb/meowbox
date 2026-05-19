@@ -207,7 +207,14 @@ export class SshSourceBridge {
     return { SSHPASS: this.cfg.password };
   }
 
-  /** Для mysqldump через ssh — собираем команду. */
+  /**
+   * Для mysqldump через ssh — собираем команду.
+   *
+   * Селекция таблиц делается ТОЛЬКО через --ignore-table в extraArgs
+   * (позиционные имена таблиц намеренно не поддерживаем: дамп всегда идёт
+   * на уровне всей БД, а «пропуск данных» реализуется двухпроходно — см.
+   * dbDumpImportStage в run-item.ts).
+   */
   buildMysqldumpRemote(args: {
     user: string;
     password: string;
@@ -215,16 +222,6 @@ export class SshSourceBridge {
     port: number;
     database: string;
     extraArgs: string[];
-    /**
-     * Опционально — список таблиц для дампа. mysqldump-синтаксис:
-     *   mysqldump [opts] <db> [<tbl> ...]
-     * Имена ТОЛЬКО позиционно ПОСЛЕ имени БД. Если запихнуть имя таблицы
-     * в extraArgs, mysqldump прочитает первое такое имя как имя БД и упадёт
-     * (или, что хуже, тихо отдаст пустой дамп с exit=2).
-     * Имена должны быть уже провалидированы whitelist'ом (validateSqlIdentifier),
-     * иначе ssh-команда сломается на спецсимволе.
-     */
-    tables?: string[];
   }): string {
     // На источнике — пишем `.my.cnf`-style options в tmp-file, чтобы пароль не
     // утёк в `ps`. Однако через ssh это сложнее (надо записать → удалить).
@@ -232,9 +229,6 @@ export class SshSourceBridge {
     // Простейший вариант (для READ-ONLY): MYSQL_PWD env-var, не показывается в ps.
     const safe = (s: string) => s.replace(/[\\$`"]/g, '\\$&');
     const extras = args.extraArgs.map(safe).join(' ');
-    const tablesPart = args.tables?.length
-      ? ' ' + args.tables.map((t) => `'${safe(t)}'`).join(' ')
-      : '';
     // Флаги, которые лечат типовой кейс «MODX dump → MariaDB не парсится»:
     //   --default-character-set=utf8mb4 — старые MySQL-клиенты по умолчанию
     //     используют latin1 для соединения; с utf8mb4-данными это рожает
@@ -254,7 +248,7 @@ export class SshSourceBridge {
       `-P ${args.port} -u '${safe(args.user)}' --single-transaction --quick ` +
       `--no-tablespaces --default-character-set=utf8mb4 --hex-blob ` +
       `--skip-extended-insert --skip-comments ` +
-      `${extras} '${safe(args.database)}'${tablesPart}`
+      `${extras} '${safe(args.database)}'`
     );
   }
 }

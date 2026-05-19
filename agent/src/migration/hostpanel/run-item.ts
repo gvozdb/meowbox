@@ -6,8 +6,9 @@
  *   2. create-user       — useradd + setPassword (тот же sftp_pass из hostpanel)
  *   3. rsync-files       — rsync через sshpass от источника на slave
  *   4. db-create         — CREATE DATABASE + CREATE USER (тот же mysql_pass)
- *   5. db-dump-import    — ssh src "mysqldump --ignore-table=..." | mysql <new>
- *                         + отдельный --no-data dump для tables-no-data
+ *   5. db-dump-import    — dump+import БД. Если есть «таблицы с пропуском
+ *                         данных» — 2 прохода: схема ВСЕХ таблиц (--no-data),
+ *                         затем данные кроме исключённых (--no-create-info).
  *   6. patch-modx        — sed -i по config.core.php (root + connectors + manager)
  *                          + правка core/config/config.inc.php (db creds, paths)
  *   7. apply-nginx       — генерация layered-конфига + (если есть) custom snippet
@@ -535,9 +536,11 @@ async function dbCreateStage(ctx: RunCtx) {
 async function dbDumpImportStage(ctx: RunCtx) {
   const src = await fetchHostpanelDbCreds(ctx);
 
-  // Готовим список --ignore-table для tables-no-data.
-  // Имена таблиц — строго whitelist (spec §17.2). Кривые отбрасываем
-  // молча: оператор сам увидит warning в логе если таблица не пропустится.
+  // Список dbExcludeDataTables («таблицы с пропуском данных») влияет ТОЛЬКО
+  // на дамп INSERT'ов. Структура (CREATE TABLE) дампится отдельным проходом
+  // БЕЗ единого исключения — поэтому исключённая таблица физически не может
+  // пропасть из целевой БД, теряются лишь её строки. Имена — строго whitelist
+  // (spec §17.2); кривые отбрасываем молча, оператор увидит warning в логе.
   validateSqlIdentifier(src.dbName, 'src.dbName');
   const ignoreArgs: string[] = [];
   for (const t of ctx.plan.dbExcludeDataTables) {
@@ -549,28 +552,32 @@ async function dbDumpImportStage(ctx: RunCtx) {
     }
     ignoreArgs.push(`--ignore-table=${src.dbName}.${t}`);
   }
-
-  const remoteCmd = (ctx.ssh as SshSourceBridge).buildMysqldumpRemote({
-    user: ctx.creds.mysqlUser,
-    password: ctx.creds.mysqlPassword,
-    host: ctx.creds.mysqlHost,
-    port: ctx.creds.mysqlPort,
-    database: src.dbName,
-    extraArgs: ignoreArgs,
-  });
+  const hasExcludes = ignoreArgs.length > 0;
 
   // Локальный mysql/mariadb для импорта
   const localOpts = await writeMysqlOptsFile({
     user: 'root',
     password: '', // root-сокет, mariadb на ubuntu — без пароля для root@unix
   });
+  // Args импорта одни и те же для всех проходов (DRY).
+  //   --default-character-set=utf8mb4 — должен совпадать с dump'ом.
+  //   --init-command — снимаем strict-режим/FK-проверки на время импорта:
+  //     старые дампы содержат строки длиннее новых VARCHAR, нулевые DATE и
+  //     т.п.; FK выключаем, чтобы порядок таблиц не имел значения.
+  const importLocalArgs = [
+    `--defaults-extra-file=${localOpts}`,
+    '--max-allowed-packet=1G',
+    '--default-character-set=utf8mb4',
+    `--init-command=SET sql_mode='', SESSION FOREIGN_KEY_CHECKS=0, SESSION UNIQUE_CHECKS=0`,
+    ctx.plan.newName,
+  ];
 
   // Куда складывать .sql.gz: /var/lib для durability (не tmpfs!).
   // Имя: <new>-<itemId>.sql.gz — itemId уникален, retry перезапишет файл.
   const dumpDir = '/var/lib/meowbox-migration';
   await fs.mkdir(dumpDir, { recursive: true, mode: 0o700 }).catch(() => {});
-  const dumpFile = path.join(dumpDir, `${ctx.plan.newName}-${ctx.itemId}.sql.gz`);
-  const noDataDumpFile = path.join(dumpDir, `${ctx.plan.newName}-${ctx.itemId}-schema.sql.gz`);
+  const dataDumpFile = path.join(dumpDir, `${ctx.plan.newName}-${ctx.itemId}.sql.gz`);
+  const schemaDumpFile = path.join(dumpDir, `${ctx.plan.newName}-${ctx.itemId}-schema.sql.gz`);
 
   // Внутренний retry для dump-стадии: если ssh умер посередине — у нас
   // частичный gzip-файл, попытка №2 перезапишет его. До 3 попыток с
@@ -638,149 +645,132 @@ async function dbDumpImportStage(ctx: RunCtx) {
     return { ok: false, bytes, lastError };
   };
 
+  // Хелпер импорта одного .sql.gz файла. mariadb на ошибке echo'ит failing
+  // query, а ERROR-строку — после; extractMariaDbError вытаскивает её наверх.
+  const runImport = (file: string, timeoutMs: number) =>
+    importFromGzFile({
+      inputPath: file,
+      localCommand: 'mariadb',
+      localArgs: importLocalArgs,
+      onLog: (line) => log(ctx, line),
+      timeoutMs,
+      isCancelled: ctx.isCancelled,
+    });
+  const buildDumpRemote = (extraArgs: string[]) =>
+    (ctx.ssh as SshSourceBridge).buildMysqldumpRemote({
+      user: ctx.creds.mysqlUser,
+      password: ctx.creds.mysqlPassword,
+      host: ctx.creds.mysqlHost,
+      port: ctx.creds.mysqlPort,
+      database: src.dbName,
+      extraArgs,
+    });
+
   // На failure импорта НЕ удаляем dump-файл — оператор может посмотреть
   // содержимое (`zcat | head -n N` от падающей строки) и понять что не так.
   // Помечаем `keepDumpOnFailure=true` если упал именно import, чтобы finally
   // оставил файл. Удаляются файлы только при успехе.
   let keepDumpOnFailure = false;
   try {
-    log(
-      ctx,
-      `  Stage 1/2: dump в файл ${dumpFile} (gzip-1, ssh-keepalive, stall 10min)`,
-    );
-    const dumpRes = await dumpAttempt(
-      'data',
-      remoteCmd,
-      dumpFile,
-      2 * 60 * 60 * 1000, // 2 ч на одну попытку — большие dumps укладываются
-      3,
-    );
-    if (!dumpRes.ok) {
-      throw new Error(
-        `Dump→file failed после 3 попыток: ${dumpRes.lastError || 'unknown'}`,
+    if (hasExcludes) {
+      // ── Двухпроходная схема (есть таблицы с пропуском данных) ──────────
+      // Проход 1 — СТРУКТУРА всех таблиц (--no-data), список пропуска не
+      //   применяется → CREATE TABLE исключённой таблицы выгружается всегда.
+      // Проход 2 — ДАННЫЕ всех таблиц КРОМЕ исключённых (--no-create-info +
+      //   --ignore-table). --skip-triggers: триггеры уже в schema-дампе.
+      log(ctx, `  Stage 1/4: schema dump — структура ВСЕХ таблиц (--no-data)`);
+      const schemaRes = await dumpAttempt(
+        'schema',
+        buildDumpRemote(['--no-data']),
+        schemaDumpFile,
+        30 * 60 * 1000, // 30 мин — schema-only без данных
+        3,
       );
-    }
-    if (dumpRes.bytes < 32) {
-      throw new Error(
-        `Dump→file: подозрительно маленький файл (${dumpRes.bytes} B), возможно ssh не подключился`,
-      );
-    }
-
-    log(ctx, `  Stage 2/2: import gunzip ${dumpFile} → mariadb ${ctx.plan.newName}`);
-    // --default-character-set=utf8mb4 — должен совпадать с dump'ом.
-    // --init-command — снимаем strict-режим/FK-проверки на время импорта:
-    //   старые MODX-дампы часто содержат строки длиннее новых VARCHAR-колонок,
-    //   нулевые DATE, и т.п. — без релакса strict-режима MariaDB их режектит.
-    //   FK выключаем на время импорта, чтобы порядок таблиц не имел значения.
-    const importRes = await importFromGzFile({
-      inputPath: dumpFile,
-      localCommand: 'mariadb',
-      localArgs: [
-        `--defaults-extra-file=${localOpts}`,
-        '--max-allowed-packet=1G',
-        '--default-character-set=utf8mb4',
-        `--init-command=SET sql_mode='', SESSION FOREIGN_KEY_CHECKS=0, SESSION UNIQUE_CHECKS=0`,
-        ctx.plan.newName,
-      ],
-      onLog: (line) => log(ctx, line),
-      timeoutMs: 4 * 60 * 60 * 1000,
-      isCancelled: ctx.isCancelled,
-    });
-    if (importRes.exitCode !== 0) {
-      // mariadb на ошибке echo'ит failing query внутри `--------------\n<sql>\n--------------\n`,
-      // и уже потом строку `ERROR <code> ...`. Slice(0, 500) часто отрезается на
-      // самом dump'е, не доходя до ERROR-строки. Вытаскиваем именно ERROR-line
-      // (если есть) и пишем её первой, чтобы оператор видел причину сразу.
-      keepDumpOnFailure = true;
-      log(ctx, `  ⚠ dump оставлен на диске для диагностики: ${dumpFile}`);
-      throw new Error(`Import failed: ${extractMariaDbError(importRes.stderr)}`);
-    }
-    log(ctx, `  ✓ data dump+import OK`);
-
-    // Отдельным проходом — schema-only для tables-no-data.
-    // Цель: для таблиц из dbExcludeDataTables забираем CREATE TABLE
-    // (структура), но БЕЗ данных. На stage 1 они уже исключены целиком
-    // через --ignore-table, иначе попали бы туда с данными.
-    if (ctx.plan.dbExcludeDataTables.length > 0) {
-      // Имена таблиц для позиционных аргументов — снова прогоняем через
-      // whitelist (DRY с stage 1, но дешевле перепроверить, чем словить
-      // injection в ssh-командной строке через спецсимвол в имени таблицы).
-      const safeTables: string[] = [];
-      for (const t of ctx.plan.dbExcludeDataTables) {
-        try {
-          validateSqlIdentifier(t, 'tableName');
-          safeTables.push(t);
-        } catch {
-          log(ctx, `  ⚠ schema-only: пропускаем невалидное имя таблицы '${t}'`);
-        }
-      }
-      if (safeTables.length === 0) {
-        log(ctx, `  WARN: schema-only пропущен — все имена таблиц невалидны`);
-      } else {
-        const noDataCmd = (ctx.ssh as SshSourceBridge).buildMysqldumpRemote({
-          user: ctx.creds.mysqlUser,
-          password: ctx.creds.mysqlPassword,
-          host: ctx.creds.mysqlHost,
-          port: ctx.creds.mysqlPort,
-          database: src.dbName,
-          // --no-data — только CREATE TABLE без INSERT'ов.
-          extraArgs: ['--no-data'],
-          // Имена таблиц — позиционные args ПОСЛЕ имени БД, иначе mysqldump
-          // воспринимает первый такой arg как имя БД и падает (или отдаёт
-          // пустой дамп). Раньше был тут баг: имена шли в extraArgs.
-          tables: safeTables,
-        });
-        log(ctx, `  schema-only dump для ${safeTables.length} таблиц (структура без данных)`);
-        const sd = await dumpAttempt(
-          'schema',
-          noDataCmd,
-          noDataDumpFile,
-          15 * 60 * 1000, // 15 мин — schema-only маленький
-          2,
+      if (!schemaRes.ok) {
+        throw new Error(
+          `Schema dump→file failed после 3 попыток: ${schemaRes.lastError || 'unknown'}`,
         );
-        if (!sd.ok) {
-          // Раньше было WARN — но это значит, что таблиц-исключений в
-          // целевой БД физически НЕТ (CREATE не отработал), и MODX/приложение
-          // упадёт на первом обращении. Считаем это hard-failure.
-          throw new Error(
-            `Schema-only dump для исключённых таблиц упал: ${sd.lastError}. ` +
-              `Без структуры этих таблиц БД-импорт НЕ ПОЛНЫЙ.`,
-          );
-        }
-        if (sd.bytes < 32) {
-          throw new Error(
-            `Schema-only dump: подозрительно маленький файл (${sd.bytes} B), ` +
-              `вероятно не нашлось ни одной таблицы из списка: ${safeTables.join(', ')}`,
-          );
-        }
-        const ir = await importFromGzFile({
-          inputPath: noDataDumpFile,
-          localCommand: 'mariadb',
-          localArgs: [
-            `--defaults-extra-file=${localOpts}`,
-            '--max-allowed-packet=1G',
-            '--default-character-set=utf8mb4',
-            `--init-command=SET sql_mode='', SESSION FOREIGN_KEY_CHECKS=0, SESSION UNIQUE_CHECKS=0`,
-            ctx.plan.newName,
-          ],
-          onLog: (line) => log(ctx, line),
-          timeoutMs: 15 * 60 * 1000,
-          isCancelled: ctx.isCancelled,
-        });
-        if (ir.exitCode !== 0) {
-          keepDumpOnFailure = true;
-          throw new Error(
-            `Schema-only import упал: ${extractMariaDbError(ir.stderr)}`,
-          );
-        }
-        log(ctx, `  ✓ schema-only dump+import OK (${safeTables.length} таблиц)`);
       }
+      if (schemaRes.bytes < 32) {
+        throw new Error(
+          `Schema dump→file: подозрительно маленький файл (${schemaRes.bytes} B), возможно ssh не подключился`,
+        );
+      }
+      log(ctx, `  Stage 2/4: import schema → mariadb ${ctx.plan.newName}`);
+      const schemaImp = await runImport(schemaDumpFile, 60 * 60 * 1000);
+      if (schemaImp.exitCode !== 0) {
+        keepDumpOnFailure = true;
+        log(ctx, `  ⚠ schema dump оставлен на диске для диагностики: ${schemaDumpFile}`);
+        throw new Error(`Schema import failed: ${extractMariaDbError(schemaImp.stderr)}`);
+      }
+      log(ctx, `  ✓ schema import OK — структура всех таблиц создана`);
+
+      log(ctx, `  Stage 3/4: data dump — INSERT'ы кроме ${ignoreArgs.length} исключённых таблиц`);
+      const dataRes = await dumpAttempt(
+        'data',
+        buildDumpRemote(['--no-create-info', '--skip-triggers', ...ignoreArgs]),
+        dataDumpFile,
+        2 * 60 * 60 * 1000, // 2 ч на одну попытку — большие dumps укладываются
+        3,
+      );
+      if (!dataRes.ok) {
+        throw new Error(
+          `Data dump→file failed после 3 попыток: ${dataRes.lastError || 'unknown'}`,
+        );
+      }
+      if (dataRes.bytes < 32) {
+        throw new Error(
+          `Data dump→file: подозрительно маленький файл (${dataRes.bytes} B), возможно ssh не подключился`,
+        );
+      }
+      log(ctx, `  Stage 4/4: import data → mariadb ${ctx.plan.newName}`);
+      const dataImp = await runImport(dataDumpFile, 4 * 60 * 60 * 1000);
+      if (dataImp.exitCode !== 0) {
+        keepDumpOnFailure = true;
+        log(ctx, `  ⚠ data dump оставлен на диске для диагностики: ${dataDumpFile}`);
+        throw new Error(`Data import failed: ${extractMariaDbError(dataImp.stderr)}`);
+      }
+      log(
+        ctx,
+        `  ✓ dump+import OK — структура: все таблицы; данные: кроме ${ignoreArgs.length} исключённых`,
+      );
+    } else {
+      // ── Один проход (нет таблиц с пропуском данных) ───────────────────
+      log(
+        ctx,
+        `  Stage 1/2: dump в файл ${dataDumpFile} (gzip-1, ssh-keepalive, stall 10min)`,
+      );
+      const dumpRes = await dumpAttempt(
+        'data',
+        buildDumpRemote([]),
+        dataDumpFile,
+        2 * 60 * 60 * 1000,
+        3,
+      );
+      if (!dumpRes.ok) {
+        throw new Error(
+          `Dump→file failed после 3 попыток: ${dumpRes.lastError || 'unknown'}`,
+        );
+      }
+      if (dumpRes.bytes < 32) {
+        throw new Error(
+          `Dump→file: подозрительно маленький файл (${dumpRes.bytes} B), возможно ssh не подключился`,
+        );
+      }
+      log(ctx, `  Stage 2/2: import gunzip ${dataDumpFile} → mariadb ${ctx.plan.newName}`);
+      const importRes = await runImport(dataDumpFile, 4 * 60 * 60 * 1000);
+      if (importRes.exitCode !== 0) {
+        keepDumpOnFailure = true;
+        log(ctx, `  ⚠ dump оставлен на диске для диагностики: ${dataDumpFile}`);
+        throw new Error(`Import failed: ${extractMariaDbError(importRes.stderr)}`);
+      }
+      log(ctx, `  ✓ data dump+import OK`);
     }
   } finally {
     await fs.unlink(localOpts).catch(() => {});
     if (!keepDumpOnFailure) {
-      await fs.unlink(dumpFile).catch(() => {});
-      await fs.unlink(noDataDumpFile).catch(() => {});
+      await fs.unlink(dataDumpFile).catch(() => {});
+      await fs.unlink(schemaDumpFile).catch(() => {});
     }
   }
 }

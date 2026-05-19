@@ -6,6 +6,7 @@ import { spawn } from 'child_process';
 import { createHash, randomBytes } from 'crypto';
 import { BACKUP_LOCAL_PATH, S3_DEFAULTS, BACKUP_S3, RESTIC_OPS } from '../config';
 import { childProcessRegistry } from '../process-registry';
+import { dumpDatabaseToFile } from './db-dump';
 
 // Strict allowlist для имён БД — попадает в argv `mysql ... <name>` и
 // `psql -d <name>`. Защищает от arg-flag smuggling в случае некорректных
@@ -1760,35 +1761,8 @@ export class ResticExecutor {
     outputPath: string,
     excludeTableData?: string[],
   ): Promise<void> {
-    const excluded = excludeTableData?.length ? excludeTableData : [];
-
-    if (type === 'POSTGRESQL') {
-      const args = ['-U', 'postgres', '-Fp', '-f', outputPath];
-      for (const t of excluded) args.push(`--exclude-table-data=${t}`);
-      args.push(name);
-      const r = await this.executor.execute('pg_dump', args, { timeout: 600_000, allowFailure: true });
-      if (r.exitCode !== 0) throw new Error(`pg_dump failed: ${r.stderr}`);
-    } else {
-      const cmd = type === 'MARIADB' ? 'mariadb-dump' : 'mysqldump';
-      if (excluded.length) {
-        const args1 = ['-u', 'root', '--single-transaction', '--quick', '--routines', '--triggers'];
-        for (const t of excluded) args1.push(`--ignore-table=${name}.${t}`);
-        args1.push(`--result-file=${outputPath}`, name);
-        const r1 = await this.executor.execute(cmd, args1, { timeout: 600_000, allowFailure: true });
-        if (r1.exitCode !== 0) throw new Error(`${cmd} failed: ${r1.stderr}`);
-
-        const args2 = ['-u', 'root', '--no-data', name, ...excluded];
-        const r2 = await this.executor.execute(cmd, args2, { timeout: 600_000, allowFailure: true });
-        if (r2.exitCode === 0) fs.appendFileSync(outputPath, r2.stdout);
-      } else {
-        const args = [
-          '-u', 'root',
-          '--single-transaction', '--quick', '--routines', '--triggers',
-          `--result-file=${outputPath}`, name,
-        ];
-        const r = await this.executor.execute(cmd, args, { timeout: 600_000, allowFailure: true });
-        if (r.exitCode !== 0) throw new Error(`${cmd} failed: ${r.stderr}`);
-      }
-    }
+    // Логика дампа (вкл. двухпроходную схему «пропуск данных, но не CREATE»)
+    // вынесена в shared-хелпер — общий с BackupExecutor (DRY).
+    await dumpDatabaseToFile(this.executor, name, type, outputPath, excludeTableData);
   }
 }

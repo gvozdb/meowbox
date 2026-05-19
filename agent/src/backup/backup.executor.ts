@@ -3,6 +3,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as https from 'https';
 import { BACKUP_LOCAL_PATH, BACKUP_HOSTS } from '../config';
+import { dumpDatabaseToFile } from './db-dump';
 
 interface BackupParams {
   backupId: string;
@@ -581,60 +582,9 @@ export class BackupExecutor {
     outputPath: string,
     excludeTableData?: string[],
   ): Promise<void> {
-    const excluded = excludeTableData?.length ? excludeTableData : [];
-
-    if (type === 'POSTGRESQL') {
-      const args = ['-U', 'postgres', '-Fp', '-f', outputPath];
-      for (const table of excluded) {
-        args.push(`--exclude-table-data=${table}`);
-      }
-      args.push(name);
-
-      const result = await this.executor.execute('pg_dump', args, { timeout: 600_000, allowFailure: true });
-      if (result.exitCode !== 0) {
-        throw new Error(`Database dump failed for ${name}: ${result.stderr}`);
-      }
-    } else {
-      // MariaDB / MySQL
-      const cmd = type === 'MARIADB' ? 'mariadb-dump' : 'mysqldump';
-
-      if (excluded.length > 0) {
-        // Pass 1: full dump except excluded tables
-        const args1 = [
-          '-u', 'root',
-          '--single-transaction', '--quick', '--routines', '--triggers',
-        ];
-        for (const table of excluded) {
-          args1.push(`--ignore-table=${name}.${table}`);
-        }
-        args1.push(`--result-file=${outputPath}`, name);
-
-        const r1 = await this.executor.execute(cmd, args1, { timeout: 600_000, allowFailure: true });
-        if (r1.exitCode !== 0) {
-          throw new Error(`Database dump failed for ${name}: ${r1.stderr}`);
-        }
-
-        // Pass 2: schema-only for excluded tables (append)
-        const args2 = ['-u', 'root', '--no-data', name, ...excluded];
-        const r2 = await this.executor.execute(cmd, args2, { timeout: 600_000, allowFailure: true });
-        if (r2.exitCode !== 0) {
-          throw new Error(`Schema dump failed for ${name}: ${r2.stderr}`);
-        }
-        // Append schema-only output to the dump file
-        fs.appendFileSync(outputPath, r2.stdout);
-      } else {
-        // No exclusions — single pass
-        const args = [
-          '-u', 'root',
-          '--single-transaction', '--quick', '--routines', '--triggers',
-          `--result-file=${outputPath}`, name,
-        ];
-        const result = await this.executor.execute(cmd, args, { timeout: 600_000, allowFailure: true });
-        if (result.exitCode !== 0) {
-          throw new Error(`Database dump failed for ${name}: ${result.stderr}`);
-        }
-      }
-    }
+    // Логика дампа (вкл. двухпроходную схему «пропуск данных, но не CREATE»)
+    // вынесена в shared-хелпер — общий с ResticExecutor (DRY).
+    await dumpDatabaseToFile(this.executor, name, type, outputPath, excludeTableData);
   }
 
   // ===========================================================================
