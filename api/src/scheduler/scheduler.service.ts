@@ -31,6 +31,12 @@ const HIGH_LOAD_MEM_THRESHOLD = envInt('ALERT_MEM_THRESHOLD', 95);
 const HIGH_LOAD_COOLDOWN_MS = envInt('ALERT_COOLDOWN_MS', 30 * 60 * 1000);
 const DISK_ALERT_HIGH_THRESHOLD = envInt('ALERT_DISK_THRESHOLD', 80);
 const DISK_ALERT_CRITICAL_THRESHOLD = envInt('ALERT_DISK_CRITICAL_THRESHOLD', 90);
+// Reminder cadence для disk-алёрта когда уровень держится без изменений.
+// Edge-trigger при переходе below→high / high→critical, иначе — раз в N часов.
+// Высокий (80–89%) — это медленное накопление, дёргаем раз в сутки.
+// Критический (>=90%) — раньше уронит сервис, напоминаем чаще.
+const DISK_REMINDER_HIGH_MS = envInt('ALERT_DISK_REMINDER_HOURS', 24) * 60 * 60 * 1000;
+const DISK_REMINDER_CRITICAL_MS = envInt('ALERT_DISK_CRITICAL_REMINDER_HOURS', 6) * 60 * 60 * 1000;
 // Watchdog cutoffs — за сколько считаем «зависшие» бэкапы/деплои/health-pings.
 const WATCHDOG_BACKUP_TIMEOUT_MS = envInt('WATCHDOG_BACKUP_TIMEOUT_MS', 4 * 60 * 60 * 1000);
 const WATCHDOG_DEPLOY_TIMEOUT_MS = envInt('WATCHDOG_DEPLOY_TIMEOUT_MS', 60 * 60 * 1000);
@@ -41,7 +47,10 @@ const DISK_SNAPSHOT_RETENTION_MS = envInt('DISK_SNAPSHOT_RETENTION_DAYS', 90) * 
 export class SchedulerService {
   private readonly logger = new Logger('Scheduler');
   private lastHighLoadAlert = 0;
-  private lastDiskAlert = 0;
+  // Disk-алёрт хранит уровень + время последнего уведомления, чтобы
+  // не спамить раз в 30 минут пока диск стабильно держится выше порога.
+  private lastDiskLevel: 'ok' | 'high' | 'critical' = 'ok';
+  private lastDiskAlertAt = 0;
 
   constructor(
     private readonly prisma: PrismaService,
@@ -587,19 +596,45 @@ export class SchedulerService {
       this.logger.warn(`High load detected: ${alerts.join(', ')}`);
     }
 
-    // Disk space alert (separate from CPU/memory with own cooldown)
-    if (metrics.diskPercent >= DISK_ALERT_HIGH_THRESHOLD && now - this.lastDiskAlert >= HIGH_LOAD_COOLDOWN_MS) {
-      this.lastDiskAlert = now;
-      const diskTitle = metrics.diskPercent >= DISK_ALERT_CRITICAL_THRESHOLD ? 'Disk Almost Full' : 'Disk Usage High';
+    // Disk space alert — edge-triggered с reminder-таймером.
+    // Стреляем когда:
+    //   • уровень повысился (ok→high, ok→critical, high→critical), либо
+    //   • уровень не изменился, но прошло >= reminder-окна (24ч / 6ч).
+    // Это убирает спам каждые 30 минут пока диск стабильно держится выше порога.
+    const level: 'ok' | 'high' | 'critical' =
+      metrics.diskPercent >= DISK_ALERT_CRITICAL_THRESHOLD ? 'critical'
+      : metrics.diskPercent >= DISK_ALERT_HIGH_THRESHOLD ? 'high'
+      : 'ok';
 
-      this.notifier.dispatch({
-        event: 'DISK_FULL',
-        title: diskTitle,
-        message: `Disk usage at ${Math.round(metrics.diskPercent)}%`,
-        timestamp: new Date(),
-      }).catch((err) => this.logger.error(`Notification failed: ${(err as Error).message}`));
+    if (level === 'ok') {
+      // Перешли в норму — сбрасываем состояние, следующий заход выше порога
+      // снова считается edge-событием.
+      this.lastDiskLevel = 'ok';
+      this.lastDiskAlertAt = 0;
+    } else {
+      const escalated =
+        this.lastDiskLevel === 'ok' ||
+        (this.lastDiskLevel === 'high' && level === 'critical');
+      const reminderMs = level === 'critical' ? DISK_REMINDER_CRITICAL_MS : DISK_REMINDER_HIGH_MS;
+      const reminderDue = this.lastDiskAlertAt > 0 && now - this.lastDiskAlertAt >= reminderMs;
 
-      this.logger.warn(`Disk usage high: ${Math.round(metrics.diskPercent)}%`);
+      if (escalated || reminderDue) {
+        this.lastDiskLevel = level;
+        this.lastDiskAlertAt = now;
+
+        this.notifier.dispatch({
+          event: 'DISK_FULL',
+          title: level === 'critical' ? 'Disk Almost Full' : 'Disk Usage High',
+          message: `Disk usage at ${Math.round(metrics.diskPercent)}%`,
+          timestamp: new Date(),
+        }).catch((err) => this.logger.error(`Notification failed: ${(err as Error).message}`));
+
+        this.logger.warn(`Disk usage ${level}: ${Math.round(metrics.diskPercent)}%`);
+      } else {
+        // Уровень держится, reminder ещё не подошёл — молчим. Уровень не апдейтим
+        // (он и так совпадает с прошлым).
+        this.lastDiskLevel = level;
+      }
     }
   }
 
