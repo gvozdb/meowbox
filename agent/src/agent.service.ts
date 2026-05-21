@@ -9,6 +9,7 @@ import { DatabaseManager } from './database/database.manager';
 import { SslManager } from './ssl/ssl.manager';
 import { BackupExecutor } from './backup/backup.executor';
 import { ResticExecutor, ResticStorage, RetentionPolicy } from './backup/restic.executor';
+import { pgDumpToFile, pgRestoreFromFile } from './backup/db-dump';
 import { FirewallManager } from './firewall/firewall.manager';
 import { CountryBlockManager, CountryBlockRule, CountrySource } from './country-block/country-block.manager';
 import { CronManager } from './cron/cron.manager';
@@ -1788,24 +1789,31 @@ export class AgentService {
         const tmpFile = path.join(tmpDir, 'dump.sql');
         try {
           if (params.type === 'POSTGRESQL') {
-            // pg_dump -U postgres -Fp -f /tmp/x.sql srcName
-            const dump = await this.cmdExec.execute(
-              'pg_dump',
-              ['-U', 'postgres', '--no-owner', '--no-privileges', '-Fp', '-f', tmpFile, params.srcName],
-              { timeout: 600_000, allowFailure: true },
-            );
-            if (dump.exitCode !== 0) {
-              cb({ success: false, error: dump.stderr || 'pg_dump failed' });
+            // pg_dump/psql под root падают на peer-auth для роли postgres.
+            // Хелперы оборачивают в `sudo -u postgres` + используют /tmp с
+            // правильными правами (mkdtemp здесь 0700 root-owned → postgres
+            // не прочитает). Свой tmpFile нам тут не нужен, хелпер ведёт
+            // собственный.
+            try {
+              await pgDumpToFile(
+                this.cmdExec,
+                params.srcName,
+                tmpFile,
+                ['--no-owner', '--no-privileges'],
+              );
+            } catch (err) {
+              cb({ success: false, error: (err as Error).message });
               return;
             }
-            // psql -U postgres -d dstName -f /tmp/x.sql
-            const restore = await this.cmdExec.execute(
-              'psql',
-              ['-U', 'postgres', '-d', params.dstName, '-v', 'ON_ERROR_STOP=1', '-f', tmpFile],
-              { timeout: 600_000, allowFailure: true },
-            );
-            if (restore.exitCode !== 0) {
-              cb({ success: false, error: restore.stderr || 'psql restore failed' });
+            try {
+              await pgRestoreFromFile(
+                this.cmdExec,
+                params.dstName,
+                tmpFile,
+                ['-v', 'ON_ERROR_STOP=1'],
+              );
+            } catch (err) {
+              cb({ success: false, error: (err as Error).message });
               return;
             }
           } else {

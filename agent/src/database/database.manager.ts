@@ -2,6 +2,7 @@ import { CommandExecutor } from '../command-executor';
 import * as fs from 'fs';
 import * as path from 'path';
 import { isUnderBackupStorage, DB_EXPORTS_DIR } from '../config';
+import { pgDumpToFile } from '../backup/db-dump';
 
 /**
  * Валидация пути к SQL-дампу перед передачей в `mysql -e "source …"` /
@@ -130,10 +131,11 @@ export class DatabaseManager {
 
     if (type === 'POSTGRESQL') {
       const filePath = `${dumpDir}/${name}_${timestamp}.sql`;
-      const result = await this.executor.execute('pg_dump', [
-        '-U', 'postgres', '-f', filePath, name,
-      ], { timeout: 600_000, allowFailure: true });
-      if (result.exitCode !== 0) return { success: false, error: result.stderr };
+      try {
+        await pgDumpToFile(this.executor, name, filePath);
+      } catch (err) {
+        return { success: false, error: (err as Error).message };
+      }
       return { success: true, filePath };
     } else {
       const cmd = type === 'MARIADB' ? 'mariadb-dump' : 'mysqldump';

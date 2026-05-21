@@ -1,8 +1,78 @@
 import * as fs from 'fs';
+import * as os from 'os';
+import * as path from 'path';
+import { randomBytes } from 'crypto';
 
 import { CommandExecutor } from '../command-executor';
 
 const DUMP_TIMEOUT_MS = 600_000;
+
+/**
+ * pg_dump конкретной БД в указанный файл.
+ *
+ * Особенность PostgreSQL на хосте: роль `postgres` использует peer-auth →
+ * подключиться к ней можно ТОЛЬКО из OS-юзера `postgres`. Агент крутится под
+ * root → `pg_dump -U postgres` без sudo упадёт с «Peer authentication failed».
+ * Поэтому всегда оборачиваем в `sudo -u postgres`.
+ *
+ * Второе следствие: postgres-юзер не имеет прав писать в директорию вызывающего
+ * (например `/var/meowbox/backups/*` принадлежит root) → дампим во временный
+ * файл в `/tmp` (доступно postgres), затем под root копируем в outputPath и
+ * чистим temp. copy+unlink вместо rename — потому что /tmp может быть на
+ * отдельном tmpfs/устройстве (rename вернёт EXDEV).
+ */
+export async function pgDumpToFile(
+  executor: CommandExecutor,
+  dbName: string,
+  outputPath: string,
+  extraArgs: string[] = [],
+): Promise<void> {
+  const tmpFile = path.join(os.tmpdir(), `meowbox-pgdump-${randomBytes(8).toString('hex')}.sql`);
+  const sudoArgs = ['-u', 'postgres', 'pg_dump', '-Fp', '-f', tmpFile, ...extraArgs, dbName];
+  try {
+    const r = await executor.execute('sudo', sudoArgs, {
+      timeout: DUMP_TIMEOUT_MS,
+      allowFailure: true,
+    });
+    if (r.exitCode !== 0) {
+      throw new Error(`pg_dump failed for ${dbName}: ${r.stderr}`);
+    }
+    await fs.promises.copyFile(tmpFile, outputPath);
+  } finally {
+    fs.rmSync(tmpFile, { force: true });
+  }
+}
+
+/**
+ * Залить дамп .sql в указанную PostgreSQL-БД через `psql -f`.
+ *
+ * Та же ловушка peer-auth → запуск через `sudo -u postgres`. Дополнительно
+ * postgres-юзеру нужен доступ на чтение к sourcePath. Вызывающий обычно держит
+ * файл в root-owned директории (0600/0700) → копируем в /tmp с правами 0644,
+ * чтобы postgres гарантированно прочитал, а после restore зачищаем.
+ *
+ * extraArgs позволяют каллеру дописать флаги вроде `-v ON_ERROR_STOP=1`.
+ */
+export async function pgRestoreFromFile(
+  executor: CommandExecutor,
+  dbName: string,
+  sourcePath: string,
+  extraArgs: string[] = [],
+): Promise<void> {
+  const tmpFile = path.join(os.tmpdir(), `meowbox-pgrestore-${randomBytes(8).toString('hex')}.sql`);
+  try {
+    await fs.promises.copyFile(sourcePath, tmpFile);
+    fs.chmodSync(tmpFile, 0o644);
+    const r = await executor.execute('sudo', [
+      '-u', 'postgres', 'psql', '-d', dbName, ...extraArgs, '-f', tmpFile,
+    ], { timeout: DUMP_TIMEOUT_MS, allowFailure: true });
+    if (r.exitCode !== 0) {
+      throw new Error(`psql restore failed for ${dbName}: ${r.stderr}`);
+    }
+  } finally {
+    fs.rmSync(tmpFile, { force: true });
+  }
+}
 
 /**
  * Дамп одной БД в единый `.sql`-файл (используется и бэкапами, и restic).
@@ -34,16 +104,9 @@ export async function dumpDatabaseToFile(
   const excluded = excludeTableData?.length ? excludeTableData : [];
 
   if (type === 'POSTGRESQL') {
-    const args = ['-U', 'postgres', '-Fp', '-f', outputPath];
-    for (const t of excluded) args.push(`--exclude-table-data=${t}`);
-    args.push(name);
-    const r = await executor.execute('pg_dump', args, {
-      timeout: DUMP_TIMEOUT_MS,
-      allowFailure: true,
-    });
-    if (r.exitCode !== 0) {
-      throw new Error(`pg_dump failed for ${name}: ${r.stderr}`);
-    }
+    const extra: string[] = [];
+    for (const t of excluded) extra.push(`--exclude-table-data=${t}`);
+    await pgDumpToFile(executor, name, outputPath, extra);
     return;
   }
 
