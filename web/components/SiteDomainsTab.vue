@@ -59,14 +59,30 @@
             <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7" /><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z" /></svg>
           </button>
 
-          <!-- Алиасы (comma-separated) -->
+          <!-- Алиасы (comma-separated) + web-root badge -->
           <span class="domain-row__aliases">
+            <span
+              class="domain-row__webroot"
+              :class="{ 'domain-row__webroot--inherited': !d.filesRelPath }"
+              :title="d.filesRelPath
+                ? 'Собственная папка домена (отдельный web-root)'
+                : (d.isPrimary
+                  ? 'Общий дефолт сайта (web-root этого домена = общий дефолт)'
+                  : 'Наследует общий дефолт сайта')"
+            >
+              <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" /></svg>
+              {{ resolvedRelPath(d) }}
+            </span>
             <template v-if="d.aliases?.length">
+              <span class="domain-row__aliases-sep">·</span>
               <template v-for="(a, i) in d.aliases" :key="a.domain + i">
                 <span class="domain-row__alias">{{ a.domain }}<span v-if="a.redirect" class="domain-row__alias-arrow"> →</span></span><span v-if="i < d.aliases.length - 1">, </span>
               </template>
             </template>
-            <span v-else class="domain-row__aliases-empty">без алиасов</span>
+            <template v-else>
+              <span class="domain-row__aliases-sep">·</span>
+              <span class="domain-row__aliases-empty">без алиасов</span>
+            </template>
           </span>
 
           <!-- Действия -->
@@ -121,8 +137,8 @@
                 </svg>
               </div>
               <div>
-                <h3 class="domain-modal__title">Смена домена</h3>
-                <p class="domain-modal__subtitle">Изменит <code>server_name</code> в nginx и сбросит SSL домена</p>
+                <h3 class="domain-modal__title">Редактирование домена</h3>
+                <p class="domain-modal__subtitle">Имя домена и его собственный web-root</p>
               </div>
             </div>
             <button class="domain-modal__close" :disabled="busy" @click="closeEditDomain">
@@ -161,27 +177,72 @@
               </div>
             </div>
 
+            <!-- Web-root домена -->
+            <div class="domain-modal__field">
+              <label class="domain-modal__label">
+                Папка с файлами (web-root относительно <code>{{ ' ' }}{{ siteRootHint }}</code>)
+              </label>
+              <div class="domain-modal__input-wrap" :class="{ 'domain-modal__input-wrap--error': !!editFilesRelPathError }">
+                <svg class="domain-modal__input-icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" /></svg>
+                <input
+                  v-model="editFilesRelPathValue"
+                  type="text"
+                  class="domain-modal__input"
+                  :placeholder="editTarget.isPrimary ? 'www' : `наследует «${siteDefaultRelPath || 'www'}»`"
+                  :disabled="busy"
+                  autocomplete="off"
+                  spellcheck="false"
+                  @keyup.enter="saveEditDomain"
+                />
+              </div>
+              <span class="domain-modal__hint">
+                <template v-if="editTarget.isPrimary">
+                  Главный домен — это поле задаёт <b>общий дефолт сайта</b>
+                  (используется неглавными доменами без своего web-root).
+                  Пустое значение трактуется как <code>www</code>.
+                </template>
+                <template v-else>
+                  Пустое поле — наследует общий дефолт сайта
+                  (<code>{{ siteDefaultRelPath || 'www' }}</code>).
+                  Своё значение — отдельный web-root внутри той же домашней директории сайта.
+                </template>
+              </span>
+              <span v-if="editFilesRelPathError" class="domain-modal__error">{{ editFilesRelPathError }}</span>
+            </div>
+
             <div class="domain-modal__impact">
               <div class="domain-modal__impact-title">
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="10" /><line x1="12" y1="8" x2="12" y2="12" /><line x1="12" y1="16" x2="12.01" y2="16" /></svg>
                 Что произойдёт
               </div>
               <ul class="domain-modal__impact-list">
-                <li>
+                <li v-if="domainChanged">
                   В nginx-конфиге обновится <code>server_name</code> на <code>{{ editDomainValue.trim() || 'new.example.com' }}</code>.
                   Конфиг будет проверен <code>nginx -t</code> и перезагружен.
                 </li>
-                <li v-if="editTarget.sslCertificate && editTarget.sslCertificate.status !== 'NONE'" class="domain-modal__impact-danger">
+                <li v-if="domainChanged && editTarget.sslCertificate && editTarget.sslCertificate.status !== 'NONE'" class="domain-modal__impact-danger">
                   <b>SSL домена сбросится в статус «Нет»</b> — старый серт выпущен на <code>{{ editTarget.domain }}</code>,
                   для нового домена невалиден. После смены — выпусти новый серт на вкладке «SSL».
                 </li>
-                <li>
+                <li v-if="domainChanged">
                   <b>DNS</b> нового домена должен уже указывать на этот сервер, иначе сайт станет недоступен
                   (и выпуск SSL потом обломается).
                 </li>
-                <li>
+                <li v-if="filesRelPathChanged" class="domain-modal__impact-danger">
+                  В nginx-конфиге обновится <code>root</code> на <code>{{ siteRootHint }}/{{ filesRelPathPreview }}</code>.
+                  <b>Файлы панель не перекладывает</b> — если новая папка пустая, сайт ляжет в 404.
+                  Перенеси содержимое вручную:
+                  <pre class="domain-modal__cmd">sudo mv {{ siteRootHint }}/{{ currentResolvedRelPath }}/* {{ siteRootHint }}/{{ filesRelPathPreview }}/</pre>
+                </li>
+                <li v-if="filesRelPathChanged && editTarget.isPrimary" class="domain-modal__impact-danger">
+                  Это <b>общий дефолт сайта</b> — изменится web-root и у всех неглавных доменов, которые его наследуют.
+                </li>
+                <li v-if="domainChanged">
                   Ссылки в админке/БД сайта (<code>site_url</code>, MODX <code>system_settings</code>, хардкод в контенте)
                   панель <b>не трогает</b> — правь руками.
+                </li>
+                <li v-if="!domainChanged && !filesRelPathChanged" class="domain-modal__impact-quiet">
+                  Изменений нет — измени домен или папку, чтобы сохранить.
                 </li>
               </ul>
             </div>
@@ -191,11 +252,11 @@
             <button class="btn btn--ghost" :disabled="busy" @click="closeEditDomain">Отмена</button>
             <button
               class="btn btn--danger"
-              :disabled="busy || !editDomainValue.trim() || editDomainValue.trim().toLowerCase() === editTarget.domain"
+              :disabled="busy || !editDirty || !editDomainValue.trim()"
               @click="saveEditDomain"
             >
               <svg v-if="!busy" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><polyline points="20 6 9 17 4 12" /></svg>
-              {{ busy ? 'Применяю...' : 'Сменить домен' }}
+              {{ busy ? 'Применяю...' : 'Сохранить' }}
             </button>
           </div>
         </div>
@@ -335,6 +396,11 @@ interface SiteDomain {
 const props = defineProps<{
   siteId: string;
   domains: SiteDomain[];
+  /** Общий дефолт web-root сайта (Site.filesRelPath). Нужен для отображения
+   *  «наследует» в строке и плейсхолдеров в модалке. Может быть пустым/null. */
+  siteDefaultRelPath?: string | null;
+  /** Site.rootPath — нужен только для подсказки команды mv в модалке. */
+  siteRootPath?: string | null;
 }>();
 
 const emit = defineEmits<{
@@ -379,6 +445,15 @@ function domainUrl(d: SiteDomain): string {
   return `${valid && covered ? 'https' : 'http'}://${d.domain}`;
 }
 const anyCoverageProblem = computed(() => props.domains.some((d) => coverageState(d) === 'missing'));
+
+/** Резолв web-root домена → собственный, либо общий дефолт сайта, либо 'www'. */
+function resolvedRelPath(d: SiteDomain): string {
+  const own = (d.filesRelPath || '').trim();
+  if (own) return own;
+  const siteDefault = (props.siteDefaultRelPath || '').trim();
+  return siteDefault || 'www';
+}
+const siteRootHint = computed(() => props.siteRootPath || '/var/www/&lt;site&gt;');
 
 // --- domain CRUD ---
 async function onAddDomain() {
@@ -448,33 +523,109 @@ async function onMakePrimary(d: SiteDomain) {
 const editTarget = ref<SiteDomain | null>(null);
 const editDomainValue = ref('');
 const editDomainError = ref('');
+const editFilesRelPathValue = ref('');
+const editFilesRelPathError = ref('');
+
+/** Изначальное значение поля web-root: для primary — общий дефолт сайта;
+ *  для не-primary — собственный filesRelPath (или пусто, если наследует). */
+function initialRelPathFor(d: SiteDomain): string {
+  if (d.isPrimary) return (props.siteDefaultRelPath || '').trim() || 'www';
+  return (d.filesRelPath || '').trim();
+}
 
 function openEditDomain(d: SiteDomain) {
   editTarget.value = d;
   editDomainValue.value = d.domain;
+  editFilesRelPathValue.value = initialRelPathFor(d);
   editDomainError.value = '';
+  editFilesRelPathError.value = '';
 }
 function closeEditDomain() {
   if (busy.value) return;
   editTarget.value = null;
 }
+
+/** Текущий web-root домена (резолвленный) для подсказки команды mv. */
+const currentResolvedRelPath = computed(() => {
+  const d = editTarget.value;
+  return d ? resolvedRelPath(d) : 'www';
+});
+/** Предпросмотр будущего web-root: что введено || общий дефолт сайта (для не-primary). */
+const filesRelPathPreview = computed(() => {
+  const v = editFilesRelPathValue.value.trim();
+  if (v) return v;
+  if (editTarget.value?.isPrimary) return 'www';
+  return (props.siteDefaultRelPath || '').trim() || 'www';
+});
+const domainChanged = computed(() => {
+  const d = editTarget.value;
+  if (!d) return false;
+  const next = editDomainValue.value.trim().toLowerCase();
+  return !!next && next !== d.domain;
+});
+const filesRelPathChanged = computed(() => {
+  const d = editTarget.value;
+  if (!d) return false;
+  return editFilesRelPathValue.value.trim() !== initialRelPathFor(d);
+});
+const editDirty = computed(() => domainChanged.value || filesRelPathChanged.value);
+
+const REL_PATH_RE = /^[A-Za-z0-9_][A-Za-z0-9_.\-/]*$/;
+
 async function saveEditDomain() {
   if (!editTarget.value) return;
-  const next = editDomainValue.value.trim().toLowerCase();
   editDomainError.value = '';
-  if (!next || next === editTarget.value.domain) return;
-  if (!/^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$/.test(next)) {
-    editDomainError.value = 'Невалидный домен';
-    return;
+  editFilesRelPathError.value = '';
+
+  const payload: { domain?: string; filesRelPath?: string | null } = {};
+
+  if (domainChanged.value) {
+    const next = editDomainValue.value.trim().toLowerCase();
+    if (!/^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$/.test(next)) {
+      editDomainError.value = 'Невалидный домен';
+      return;
+    }
+    payload.domain = next;
   }
+
+  if (filesRelPathChanged.value) {
+    const raw = editFilesRelPathValue.value.trim();
+    if (raw) {
+      if (raw.startsWith('/') || raw.includes('..') || !REL_PATH_RE.test(raw) || raw.length > 255) {
+        editFilesRelPathError.value =
+          'Относительный путь: только латиница/цифры/_/-/./слэш, без ".." и ведущего "/"';
+        return;
+      }
+      payload.filesRelPath = raw;
+    } else {
+      // Пусто для не-primary → наследовать (null). Для primary бэк сам подставит 'www'.
+      payload.filesRelPath = editTarget.value.isPrimary ? 'www' : null;
+    }
+  }
+
+  if (!payload.domain && payload.filesRelPath === undefined) return;
+
   busy.value = true;
   try {
-    await api.put(`/sites/${props.siteId}/domains/${editTarget.value.id}`, { domain: next });
-    toast.success(`Домен изменён на ${next}`);
+    await api.put(`/sites/${props.siteId}/domains/${editTarget.value.id}`, payload);
+    if (payload.domain && payload.filesRelPath !== undefined) {
+      toast.success('Домен и web-root обновлены');
+    } else if (payload.domain) {
+      toast.success(`Домен изменён на ${payload.domain}`);
+    } else {
+      toast.success('Web-root обновлён');
+    }
     editTarget.value = null;
     emit('changed');
   } catch (e) {
-    editDomainError.value = (e as Error).message || 'Не удалось сменить домен';
+    const msg = (e as Error).message || 'Не удалось сохранить';
+    // Эвристика: ошибка по домену или по пути — кладём в соответствующее поле.
+    if (payload.domain && /домен|domain/i.test(msg)) {
+      editDomainError.value = msg;
+    } else {
+      editFilesRelPathError.value = msg;
+    }
+    toast.error(msg);
   } finally {
     busy.value = false;
   }
@@ -668,6 +819,28 @@ async function saveAliases() {
 }
 .domain-row__alias-arrow { color: var(--text-faint); }
 .domain-row__aliases-empty { font-style: italic; opacity: 0.7; font-family: inherit; }
+.domain-row__aliases-sep { color: var(--text-faint); margin: 0 0.4rem; font-family: inherit; }
+.domain-row__webroot {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  padding: 0.05rem 0.4rem;
+  border-radius: 5px;
+  background: rgba(99, 102, 241, 0.1);
+  color: var(--primary-text);
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.7rem;
+  border: 1px solid rgba(99, 102, 241, 0.18);
+  cursor: help;
+}
+.domain-row__webroot--inherited {
+  background: var(--bg-elevated);
+  color: var(--text-muted);
+  border-color: var(--border-secondary);
+  font-style: italic;
+}
+html.theme-light .domain-row__webroot { color: #4338ca; }
+html.theme-light .domain-row__webroot--inherited { color: var(--text-muted); }
 
 .domain-row__actions {
   display: flex;
@@ -1070,8 +1243,35 @@ html.theme-light .domains-cert-alert__body code { background: rgba(239, 68, 68, 
 }
 .domain-modal__impact-danger { color: #fca5a5; }
 .domain-modal__impact-danger code { background: rgba(239, 68, 68, 0.12); color: #fca5a5; }
+.domain-modal__impact-quiet { color: var(--text-muted); font-style: italic; }
 html.theme-light .domain-modal__impact-danger { color: #b91c1c; }
 html.theme-light .domain-modal__impact-danger code { background: rgba(239, 68, 68, 0.08); color: #b91c1c; }
+.domain-modal__field { display: flex; flex-direction: column; gap: 0.4rem; }
+.domain-modal__hint {
+  font-size: 0.72rem;
+  color: var(--text-muted);
+  line-height: 1.5;
+}
+.domain-modal__hint code {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.9em;
+  background: var(--bg-elevated);
+  padding: 0.05em 0.3em;
+  border-radius: 4px;
+}
+.domain-modal__cmd {
+  margin: 0.4rem 0 0;
+  padding: 0.55rem 0.7rem;
+  background: rgba(0, 0, 0, 0.25);
+  border: 1px solid var(--border-secondary);
+  border-radius: 8px;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.72rem;
+  color: var(--text-secondary);
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+html.theme-light .domain-modal__cmd { background: rgba(0, 0, 0, 0.04); }
 .domain-modal__footer {
   display: flex;
   justify-content: flex-end;

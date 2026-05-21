@@ -864,6 +864,8 @@ sudo mv {{ site?.rootPath }}/{{ site?.filesRelPath || 'www' }}/* {{ site?.rootPa
         <SiteDomainsTab
           :site-id="siteId"
           :domains="siteDomains"
+          :site-default-rel-path="site?.filesRelPath || 'www'"
+          :site-root-path="site?.rootPath || null"
           @changed="reloadSiteAfterDomainChange"
           @navigate-ssl="navigateToDomainSsl"
           @navigate-nginx="navigateToDomainNginx"
