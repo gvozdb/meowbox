@@ -5,7 +5,9 @@ import {
   Logger,
 } from '@nestjs/common';
 import { randomUUID } from 'crypto';
+import * as dns from 'dns/promises';
 import * as fs from 'fs';
+import * as net from 'net';
 import * as path from 'path';
 import { Readable } from 'stream';
 import { pipeline } from 'stream/promises';
@@ -18,7 +20,6 @@ import { SiteDomainsService } from '../sites/site-domains.service';
 import { ServicesService } from '../services/services.service';
 import { SiteNodeService } from '../site-node/site-node.service';
 import { assertSafeFilePath } from '../common/validators/safe-path';
-import { assertPublicHttpUrl } from '../common/validators/safe-url';
 import { decryptJson, encryptJson } from '../common/crypto/credentials-cipher';
 import { hashPassword } from '../common/crypto/argon2.helper';
 import { parseSiteAliases, parseStringArray, stringifyStringArray } from '../common/json-array';
@@ -231,7 +232,84 @@ const RESTORE_TIMEOUT_MS = Number(
   process.env.MIGRATION_RESTORE_TIMEOUT_MS,
 ) || 6 * 60 * 60 * 1000;
 
-const MIN_MIGRATION_VERSION = 'v0.6.55';
+const MIN_MIGRATION_VERSION = 'v0.6.56';
+
+const MIGRATION_DOWNLOAD_PATH_RE =
+  /^\/api\/migration\/download\/[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+function isBlockedMigrationIPv4(ip: string): boolean {
+  const parts = ip.split('.').map((p) => parseInt(p, 10));
+  if (parts.length !== 4 || parts.some((p) => Number.isNaN(p) || p < 0 || p > 255)) return true;
+  const [a, b] = parts;
+  if (a === 0) return true;
+  if (a === 127) return true;
+  if (a === 169 && b === 254) return true;
+  if (a === 192 && b === 0 && parts[2] === 0) return true;
+  if (a >= 224) return true;
+  return false;
+}
+
+function isBlockedMigrationIPv6(ip: string): boolean {
+  const lower = ip.toLowerCase();
+  if (lower === '::1' || lower === '::') return true;
+  if (/^fe[89ab][0-9a-f]:/.test(lower)) return true;
+  if (lower.startsWith('ff')) return true;
+  const mapped = lower.match(/^::ffff:([0-9.]+)$/);
+  return mapped ? isBlockedMigrationIPv4(mapped[1]) : false;
+}
+
+function isBlockedMigrationHost(host: string): boolean {
+  const lower = host.toLowerCase().replace(/^\[|\]$/g, '');
+  if (lower === 'localhost' || lower.endsWith('.localhost')) return true;
+  const family = net.isIP(lower);
+  if (family === 4) return isBlockedMigrationIPv4(lower);
+  if (family === 6) return isBlockedMigrationIPv6(lower);
+  return false;
+}
+
+async function assertMigrationDownloadUrl(input: string): Promise<URL> {
+  if (!input || typeof input !== 'string') {
+    throw new BadRequestException('URL is required');
+  }
+  if (input.length > 2048 || /[\s\0\r\n]/.test(input)) {
+    throw new BadRequestException('Invalid migration download URL');
+  }
+
+  let url: URL;
+  try {
+    url = new URL(input);
+  } catch {
+    throw new BadRequestException('Invalid migration download URL');
+  }
+
+  if (!['http:', 'https:'].includes(url.protocol)) {
+    throw new BadRequestException('Migration download URL must be http(s)');
+  }
+  if (url.username || url.password || url.search || url.hash) {
+    throw new BadRequestException('Migration download URL must not contain credentials, query or fragment');
+  }
+  if (!MIGRATION_DOWNLOAD_PATH_RE.test(url.pathname)) {
+    throw new BadRequestException('Migration download URL has invalid path');
+  }
+  const hostname = url.hostname.replace(/^\[|\]$/g, '');
+  if (!hostname || isBlockedMigrationHost(hostname)) {
+    throw new BadRequestException('Migration download URL points to a blocked address');
+  }
+
+  try {
+    const records = await dns.lookup(hostname, { all: true, verbatim: true });
+    for (const record of records) {
+      if (isBlockedMigrationHost(record.address)) {
+        throw new BadRequestException('Migration download URL resolves to a blocked address');
+      }
+    }
+  } catch (err) {
+    if (err instanceof BadRequestException) throw err;
+    throw new BadRequestException('Unable to resolve migration download URL hostname');
+  }
+
+  return url;
+}
 
 @Injectable()
 export class MigrationService {
@@ -376,7 +454,7 @@ export class MigrationService {
     if (sourceServerId === 'main') {
       const tokenResult = this.createDownloadToken(backupFilePath);
       downloadToken = tokenResult.token;
-      sourceBaseUrl = panelUrl!;
+      sourceBaseUrl = panelUrl!.replace(/\/+$/, '');
     } else {
       const server = this.proxy.getServer(sourceServerId)!;
       const { status, data } = await this.proxy.proxyRequest(server, 'POST', '/migration/download-token', {
@@ -1620,10 +1698,7 @@ export class MigrationService {
       fs.mkdirSync(BACKUP_DIR, { recursive: true });
     }
 
-    // SSRF guard: запрещаем приватные/loopback/link-local адреса.
-    // Без этого attacker c ADMIN-правами мог направить import-pull на
-    // http://127.0.0.1:... или AWS IMDS и выкачать ответ на диск.
-    const safeUrl = await assertPublicHttpUrl(sourceUrl);
+    const safeUrl = await assertMigrationDownloadUrl(sourceUrl);
 
     const response = await fetch(safeUrl.toString());
 
