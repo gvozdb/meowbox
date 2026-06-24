@@ -10,16 +10,19 @@ import * as path from 'path';
 import { Readable } from 'stream';
 import { pipeline } from 'stream/promises';
 import { Prisma } from '@prisma/client';
-import { BackupStatus, BackupStorageType, CronJobStatus, DatabaseType, UserRole } from '../common/enums';
+import { BackupStatus, BackupStorageType, CronJobStatus, DatabaseType, SslStatus, UserRole } from '../common/enums';
 import { PrismaService } from '../common/prisma.service';
 import { ProxyService } from '../proxy/proxy.service';
 import { AgentRelayService } from '../gateway/agent-relay.service';
 import { SiteDomainsService } from '../sites/site-domains.service';
+import { ServicesService } from '../services/services.service';
+import { SiteNodeService } from '../site-node/site-node.service';
 import { assertSafeFilePath } from '../common/validators/safe-path';
 import { assertPublicHttpUrl } from '../common/validators/safe-url';
 import { decryptJson, encryptJson } from '../common/crypto/credentials-cipher';
 import { hashPassword } from '../common/crypto/argon2.helper';
-import { parseSiteAliases } from '../common/json-array';
+import { parseSiteAliases, parseStringArray, stringifyStringArray } from '../common/json-array';
+import type { NodeProcessesResult } from '@meowbox/shared';
 
 // ─── Interfaces ───
 
@@ -94,10 +97,63 @@ export interface SiteDomainSnapshot {
   nginxCustomConfig: string | null;
 }
 
+export interface BackupConfigSnapshot {
+  type: string;
+  engine: string;
+  storageLocationNames: string[];
+  storageType: string | null;
+  storageConfig: string | null;
+  schedule: string | null;
+  retention: number;
+  keepDaily: number;
+  keepWeekly: number;
+  keepMonthly: number;
+  keepYearly: number;
+  excludePaths: string;
+  excludeTableData: string;
+  keepLocalCopy: boolean;
+  enabled: boolean;
+}
+
+export interface SiteServiceSnapshot {
+  serviceKey: string;
+  status: string;
+  config: string;
+}
+
+export interface DnsZoneSnapshot {
+  domain: string;
+  status: string;
+}
+
+export interface SslCertificateSnapshot {
+  domains: string;
+  status: string;
+  issuer: string;
+  isWildcard: boolean;
+}
+
+export interface NodeEcosystemSnapshot {
+  file: string;
+  only?: string;
+}
+
+export interface NodeRuntimeSnapshot {
+  autostartEnabled: boolean;
+  ecosystems: NodeEcosystemSnapshot[];
+  processesToStop: string[];
+  orphanProcesses: string[];
+}
+
 export interface SiteSnapshot {
   site: Record<string, unknown>;
   domains: SiteDomainSnapshot[];
   databases: DatabaseSnapshot[];
+  backupConfigs: BackupConfigSnapshot[];
+  services: SiteServiceSnapshot[];
+  dnsZones: DnsZoneSnapshot[];
+  sslCertificates: SslCertificateSnapshot[];
+  node: NodeRuntimeSnapshot;
   cronJobs: Array<{ name: string; schedule: string; command: string; status: string }>;
   quickCommands: Array<{
     label: string;
@@ -119,7 +175,7 @@ const STEPS = [
   { key: 'create_site', label: 'Создание сайта на целевом сервере' },
   { key: 'import_pull', label: 'Передача и восстановление из бэкапа' },
   { key: 'waiting_pull', label: 'Ожидание завершения передачи' },
-  { key: 'apply_config', label: 'Перенос cron и быстрых команд' },
+  { key: 'apply_config', label: 'Перенос настроек сайта и runtime' },
   { key: 'ssl', label: 'Перевыпуск SSL-сертификата' },
   { key: 'cleanup', label: 'Остановка оригинала' },
   { key: 'done', label: 'Миграция завершена' },
@@ -164,7 +220,7 @@ const RESTORE_TIMEOUT_MS = Number(
   process.env.MIGRATION_RESTORE_TIMEOUT_MS,
 ) || 6 * 60 * 60 * 1000;
 
-const MIN_MIGRATION_VERSION = 'v0.6.51';
+const MIN_MIGRATION_VERSION = 'v0.6.52';
 
 @Injectable()
 export class MigrationService {
@@ -178,6 +234,8 @@ export class MigrationService {
     private readonly proxy: ProxyService,
     private readonly agentRelay: AgentRelayService,
     private readonly siteDomains: SiteDomainsService,
+    private readonly services: ServicesService,
+    private readonly siteNode: SiteNodeService,
   ) {}
 
   // ═══════════════════════════════════════════════════════════════════════════
@@ -261,6 +319,7 @@ export class MigrationService {
     const siteSnapshot = this.normalizeSnapshot(
       await this.getSiteSnapshotFromServer(sourceServerId, siteId),
     );
+    this.assertSslPlan(siteSnapshot, reissueSsl);
     await this.assertTargetConflicts(targetServerId, siteSnapshot);
 
     // ══════════ Step 1: Trigger LOCAL backup on source ══════════
@@ -390,6 +449,7 @@ export class MigrationService {
 
     if (!targetSiteId) throw new Error('Не удалось создать сайт на целевом сервере');
     this.updateState(migrationId, 'create_site', undefined, { targetSiteId });
+    await this.waitTargetSiteProvisioned(targetServerId, targetSiteId);
 
     // ══════════ Step 6: Tell target to pull from source ══════════
     this.updateState(migrationId, 'import_pull');
@@ -505,6 +565,22 @@ export class MigrationService {
           },
         },
         databases: true,
+        backupConfigs: {
+          include: {
+            storageLocations: {
+              select: { id: true, name: true },
+            },
+          },
+        },
+        services: {
+          select: { serviceKey: true, status: true, config: true },
+        },
+        dnsZones: {
+          select: { domain: true, status: true },
+        },
+        sslCertificates: {
+          select: { domains: true, status: true, issuer: true, isWildcard: true },
+        },
         cronJobs: {
           select: { name: true, schedule: true, command: true, status: true },
         },
@@ -527,6 +603,10 @@ export class MigrationService {
       cmsAdminPasswordEnc: _cms,
       domains,
       databases,
+      backupConfigs,
+      services,
+      dnsZones,
+      sslCertificates,
       cronJobs,
       quickCommands,
       ...safeSite
@@ -542,6 +622,34 @@ export class MigrationService {
         dbUser: db.dbUser,
         dbPassword: this.decryptDbPassword(db),
       })),
+      backupConfigs: backupConfigs.map((config) => {
+        const locationById = new Map(
+          config.storageLocations.map((location) => [location.id, location.name]),
+        );
+        return {
+          type: config.type,
+          engine: config.engine,
+          storageLocationNames: parseStringArray(config.storageLocationIds)
+            .map((id) => locationById.get(id))
+            .filter((name): name is string => !!name),
+          storageType: config.storageType,
+          storageConfig: config.storageConfig,
+          schedule: config.schedule,
+          retention: config.retention,
+          keepDaily: config.keepDaily,
+          keepWeekly: config.keepWeekly,
+          keepMonthly: config.keepMonthly,
+          keepYearly: config.keepYearly,
+          excludePaths: config.excludePaths,
+          excludeTableData: config.excludeTableData,
+          keepLocalCopy: config.keepLocalCopy,
+          enabled: config.enabled,
+        };
+      }),
+      services,
+      dnsZones,
+      sslCertificates,
+      node: await this.getNodeRuntimeSnapshot(site.id, safeSite.filesRelPath),
       cronJobs,
       quickCommands,
     };
@@ -558,6 +666,66 @@ export class MigrationService {
       throw new BadRequestException(`Не удалось расшифровать пароль БД "${db.name}"`);
     }
     return value.password;
+  }
+
+  private async getNodeRuntimeSnapshot(
+    siteId: string,
+    filesRelPath: string,
+  ): Promise<NodeRuntimeSnapshot> {
+    const snapshot: NodeRuntimeSnapshot = {
+      autostartEnabled: false,
+      ecosystems: [],
+      processesToStop: [],
+      orphanProcesses: [],
+    };
+
+    let processes: NodeProcessesResult;
+    try {
+      processes = await this.siteNode.getProcesses(siteId);
+      snapshot.autostartEnabled = processes.autostartEnabled === true;
+    } catch (err) {
+      throw new BadRequestException(
+        `Не удалось прочитать Node/PM2 runtime сайта: ${(err as Error).message}`,
+      );
+    }
+
+    const loadedByFile = new Map<string, Array<{ name: string; status: string | null }>>();
+    const definedCountByFile = new Map<string, number>();
+
+    for (const group of processes.groups || []) {
+      if (!group.ecosystemFile) {
+        for (const proc of group.processes || []) {
+          if (proc.loaded && proc.name) snapshot.orphanProcesses.push(proc.name);
+        }
+        continue;
+      }
+
+      const file = buildTargetEcosystemPath(filesRelPath, group.dir, group.ecosystemFile);
+      if (!file) continue;
+
+      const defined = (group.processes || []).filter((proc) => proc.defined && proc.name);
+      const loaded = (group.processes || [])
+        .filter((proc) => proc.loaded && proc.name)
+        .map((proc) => ({ name: proc.name, status: proc.runtime?.status || null }));
+
+      definedCountByFile.set(file, defined.length);
+      if (loaded.length > 0) loadedByFile.set(file, loaded);
+    }
+
+    for (const [file, loaded] of loadedByFile.entries()) {
+      const definedCount = definedCountByFile.get(file) || 0;
+      if (definedCount > 0 && loaded.length === definedCount) {
+        snapshot.ecosystems.push({ file });
+      } else {
+        for (const proc of loaded) snapshot.ecosystems.push({ file, only: proc.name });
+      }
+
+      for (const proc of loaded) {
+        if (proc.status === 'stopped') snapshot.processesToStop.push(proc.name);
+      }
+    }
+
+    return snapshot;
   }
 
   private async getSiteSnapshotFromServer(serverId: string, siteId: string): Promise<SiteSnapshot> {
@@ -616,6 +784,78 @@ export class MigrationService {
           .filter((db) => db.name && db.type)
       : [];
 
+    const backupConfigs = Array.isArray(raw.backupConfigs)
+      ? raw.backupConfigs
+          .filter(isObjectRecord)
+          .map((config) => ({
+            type: String(config.type || ''),
+            engine: String(config.engine || 'TAR'),
+            storageLocationNames: stringArrayValue(config.storageLocationNames),
+            storageType: nullableString(config.storageType),
+            storageConfig: nullableString(config.storageConfig),
+            schedule: nullableString(config.schedule),
+            retention: numberValue(config.retention, 7),
+            keepDaily: numberValue(config.keepDaily, 7),
+            keepWeekly: numberValue(config.keepWeekly, 4),
+            keepMonthly: numberValue(config.keepMonthly, 6),
+            keepYearly: numberValue(config.keepYearly, 1),
+            excludePaths: stringJsonArrayValue(config.excludePaths),
+            excludeTableData: stringJsonArrayValue(config.excludeTableData),
+            keepLocalCopy: boolValue(config.keepLocalCopy, false),
+            enabled: boolValue(config.enabled, true),
+          }))
+          .filter((config) => config.type)
+      : [];
+
+    const services = Array.isArray(raw.services)
+      ? raw.services
+          .filter(isObjectRecord)
+          .map((service) => ({
+            serviceKey: String(service.serviceKey || ''),
+            status: String(service.status || 'STOPPED'),
+            config: jsonObjectStringValue(service.config),
+          }))
+          .filter((service) => service.serviceKey)
+      : [];
+
+    const dnsZones = Array.isArray(raw.dnsZones)
+      ? raw.dnsZones
+          .filter(isObjectRecord)
+          .map((zone) => ({
+            domain: String(zone.domain || '').trim().toLowerCase(),
+            status: String(zone.status || ''),
+          }))
+          .filter((zone) => zone.domain)
+      : [];
+
+    const sslCertificates = Array.isArray(raw.sslCertificates)
+      ? raw.sslCertificates
+          .filter(isObjectRecord)
+          .map((cert) => ({
+            domains: stringJsonArrayValue(cert.domains),
+            status: String(cert.status || SslStatus.NONE),
+            issuer: String(cert.issuer || ''),
+            isWildcard: boolValue(cert.isWildcard, false),
+          }))
+          .filter((cert) => cert.status !== SslStatus.NONE)
+      : [];
+
+    const nodeRaw = isObjectRecord(raw.node) ? raw.node : {};
+    const node: NodeRuntimeSnapshot = {
+      autostartEnabled: boolValue(nodeRaw.autostartEnabled, false),
+      ecosystems: Array.isArray(nodeRaw.ecosystems)
+        ? nodeRaw.ecosystems
+            .filter(isObjectRecord)
+            .map((eco) => ({
+              file: String(eco.file || ''),
+              only: typeof eco.only === 'string' && eco.only ? eco.only : undefined,
+            }))
+            .filter((eco) => eco.file)
+        : [],
+      processesToStop: stringArrayValue(nodeRaw.processesToStop),
+      orphanProcesses: stringArrayValue(nodeRaw.orphanProcesses),
+    };
+
     const cronJobs = Array.isArray(raw.cronJobs)
       ? raw.cronJobs
           .filter(isObjectRecord)
@@ -641,7 +881,18 @@ export class MigrationService {
           .filter((cmd) => cmd.label && cmd.target && cmd.cwd)
       : [];
 
-    return { site, domains, databases, cronJobs, quickCommands };
+    return {
+      site,
+      domains,
+      databases,
+      backupConfigs,
+      services,
+      dnsZones,
+      sslCertificates,
+      node,
+      cronJobs,
+      quickCommands,
+    };
   }
 
   private snapshotDomainNames(snapshot: SiteSnapshot): string[] {
@@ -660,6 +911,17 @@ export class MigrationService {
   async preflightTarget(snapshot: SiteSnapshot): Promise<{ ok: true }> {
     await this.assertLocalTargetConflicts(this.normalizeSnapshot(snapshot));
     return { ok: true };
+  }
+
+  private assertSslPlan(snapshot: SiteSnapshot, reissueSsl: boolean): void {
+    const activeCerts = snapshot.sslCertificates.filter((cert) =>
+      cert.status === SslStatus.ACTIVE || cert.status === SslStatus.EXPIRING_SOON,
+    );
+    if (activeCerts.length > 0 && !reissueSsl) {
+      throw new BadRequestException(
+        'У исходного сайта активен SSL. Приватные ключи не копируются; включи перевыпуск SSL на целевом сервере.',
+      );
+    }
   }
 
   private async assertTargetConflicts(targetServerId: string, snapshot: SiteSnapshot): Promise<void> {
@@ -709,12 +971,56 @@ export class MigrationService {
       }
     }
 
+    const storageNames = uniqueStrings(
+      snapshot.backupConfigs.flatMap((config) => config.storageLocationNames),
+    );
+    if (storageNames.length > 0) {
+      const existingStorages = await this.prisma.storageLocation.findMany({
+        where: { name: { in: storageNames } },
+        select: { name: true },
+      });
+      const existingNames = new Set(existingStorages.map((storage) => storage.name));
+      for (const name of storageNames) {
+        if (!existingNames.has(name)) {
+          errors.push(`на целевом сервере нет backup-хранилища "${name}"`);
+        }
+      }
+    }
+
+    const serviceKeys = uniqueStrings(snapshot.services.map((service) => service.serviceKey));
+    if (serviceKeys.length > 0) {
+      for (const key of serviceKeys) {
+        const service = await this.services.getServerService(key).catch(() => null);
+        if (!service?.installed) {
+          errors.push(`на целевом сервере не установлен сервис "${key}"`);
+        }
+      }
+    }
+
+    if (snapshot.dnsZones.length > 0) {
+      errors.push(
+        `у сайта есть привязанные DNS-зоны (${snapshot.dnsZones.map((z) => z.domain).join(', ')}); DNS-провайдеры не переносятся автоматически`,
+      );
+    }
+
+    if (snapshot.node.orphanProcesses.length > 0) {
+      errors.push(
+        `у сайта есть PM2-процессы без ecosystem-файла (${snapshot.node.orphanProcesses.join(', ')}); опиши их в ecosystem.config.js перед миграцией`,
+      );
+    }
+
     if (errors.length > 0) {
       throw new BadRequestException(`Preflight failed: ${errors.join('; ')}`);
     }
   }
 
-  async applySiteExtras(siteId: string, snapshot: SiteSnapshot): Promise<{ cronJobs: number; quickCommands: number }> {
+  async applySiteExtras(siteId: string, snapshot: SiteSnapshot): Promise<{
+    cronJobs: number;
+    quickCommands: number;
+    backupConfigs: number;
+    services: number;
+    nodeApps: number;
+  }> {
     snapshot = this.normalizeSnapshot(snapshot);
 
     const site = await this.prisma.site.findUnique({
@@ -729,6 +1035,8 @@ export class MigrationService {
       data: this.buildSiteConfigUpdate(snapshot.site),
     });
     await this.applySiteDomains(siteId, site.userId, snapshot.domains);
+    const backupConfigs = await this.applyBackupConfigs(siteId, snapshot.backupConfigs);
+    const services = await this.applySiteServices(siteId, snapshot.services);
 
     await this.prisma.$transaction([
       this.prisma.siteQuickCommand.deleteMany({ where: { siteId } }),
@@ -778,10 +1086,112 @@ export class MigrationService {
       cronCount += 1;
     }
 
+    const nodeApps = await this.applyNodeRuntime(siteId, snapshot.node);
+
     return {
       cronJobs: cronCount,
       quickCommands: snapshot.quickCommands.length,
+      backupConfigs,
+      services,
+      nodeApps,
     };
+  }
+
+  private async applyBackupConfigs(
+    siteId: string,
+    configs: BackupConfigSnapshot[],
+  ): Promise<number> {
+    await this.prisma.backupConfig.deleteMany({ where: { siteId } });
+    let count = 0;
+
+    for (const config of configs) {
+      const storageLocationIds: string[] = [];
+      if (config.storageLocationNames.length > 0) {
+        const locations = await this.prisma.storageLocation.findMany({
+          where: { name: { in: config.storageLocationNames } },
+          select: { id: true, name: true },
+        });
+        const byName = new Map(locations.map((location) => [location.name, location.id]));
+        for (const name of config.storageLocationNames) {
+          const id = byName.get(name);
+          if (!id) throw new Error(`Backup-хранилище "${name}" не найдено на target`);
+          storageLocationIds.push(id);
+        }
+      }
+
+      await this.prisma.backupConfig.create({
+        data: {
+          siteId,
+          type: config.type,
+          engine: config.engine,
+          storageLocationIds: stringifyStringArray(storageLocationIds),
+          storageType: config.storageType,
+          storageConfig: config.storageConfig,
+          schedule: config.schedule,
+          retention: config.retention,
+          keepDaily: config.keepDaily,
+          keepWeekly: config.keepWeekly,
+          keepMonthly: config.keepMonthly,
+          keepYearly: config.keepYearly,
+          excludePaths: config.excludePaths,
+          excludeTableData: config.excludeTableData,
+          keepLocalCopy: config.keepLocalCopy,
+          enabled: config.enabled,
+          ...(storageLocationIds.length > 0
+            ? { storageLocations: { connect: storageLocationIds.map((id) => ({ id })) } }
+            : {}),
+        },
+      });
+      count += 1;
+    }
+
+    return count;
+  }
+
+  private async applySiteServices(
+    siteId: string,
+    services: SiteServiceSnapshot[],
+  ): Promise<number> {
+    let count = 0;
+    for (const service of services) {
+      const config = parseJsonObjectString(service.config);
+      const existing = await this.prisma.siteService.findUnique({
+        where: { siteId_serviceKey: { siteId, serviceKey: service.serviceKey } },
+        select: { id: true },
+      });
+
+      if (!existing) {
+        await this.services.enableSiteService(siteId, service.serviceKey, config);
+      } else {
+        await this.services.reconfigureSiteService(siteId, service.serviceKey, config);
+      }
+
+      if (service.status === 'STOPPED') {
+        await this.services.stopSiteService(siteId, service.serviceKey);
+      } else if (service.status === 'RUNNING' || service.status === 'STARTING') {
+        await this.services.startSiteService(siteId, service.serviceKey);
+      }
+      count += 1;
+    }
+    return count;
+  }
+
+  private async applyNodeRuntime(
+    siteId: string,
+    node: NodeRuntimeSnapshot,
+  ): Promise<number> {
+    let count = 0;
+    for (const ecosystem of node.ecosystems) {
+      await this.siteNode.startEcosystem(siteId, ecosystem.file, ecosystem.only);
+      count += 1;
+    }
+    for (const name of node.processesToStop) {
+      await this.siteNode.controlProcess(siteId, 'stop', name);
+    }
+    if (node.autostartEnabled) {
+      await this.siteNode.setAutostart(siteId, true);
+    }
+    return count;
   }
 
   private async applySiteDomains(
@@ -1167,6 +1577,45 @@ export class MigrationService {
     }
   }
 
+  private async waitTargetSiteProvisioned(serverId: string, siteId: string): Promise<void> {
+    const maxAttempts = 150;
+    for (let i = 0; i < maxAttempts; i++) {
+      const status = await this.getTargetSiteStatus(serverId, siteId);
+      if (status === 'RUNNING') return;
+      if (status === 'ERROR') {
+        throw new Error('Создание сайта на целевом сервере завершилось ошибкой');
+      }
+      await this.sleep(2000);
+    }
+    throw new Error('Целевой сайт слишком долго не переходит в RUNNING');
+  }
+
+  private async getTargetSiteStatus(serverId: string, siteId: string): Promise<string> {
+    if (serverId === 'main') {
+      const site = await this.prisma.site.findUnique({
+        where: { id: siteId },
+        select: { status: true, errorMessage: true },
+      });
+      if (!site) throw new Error('Целевой сайт не найден');
+      if (site.status === 'ERROR' && site.errorMessage) {
+        throw new Error(`Создание сайта на target: ${site.errorMessage}`);
+      }
+      return site.status;
+    }
+
+    const server = this.proxy.getServer(serverId);
+    if (!server) throw new Error('Целевой сервер не найден');
+    const { status, data } = await this.proxy.proxyRequest(server, 'GET', `/sites/${siteId}`);
+    if (status >= 400) {
+      throw new Error('Не удалось получить статус целевого сайта');
+    }
+    const site = (data as { data?: { status?: string; errorMessage?: string | null } })?.data;
+    if (site?.status === 'ERROR' && site.errorMessage) {
+      throw new Error(`Создание сайта на target: ${site.errorMessage}`);
+    }
+    return site?.status || 'UNKNOWN';
+  }
+
   // ═══════════════════════════════════════════════════════════════════════════
   // Helpers
   // ═══════════════════════════════════════════════════════════════════════════
@@ -1365,4 +1814,69 @@ function numberValue(value: unknown, fallback: number): number {
 
 function boolValue(value: unknown, fallback: boolean): boolean {
   return typeof value === 'boolean' ? value : fallback;
+}
+
+function uniqueStrings(values: string[]): string[] {
+  return [...new Set(values.map((value) => value.trim()).filter(Boolean))];
+}
+
+function stringArrayValue(value: unknown): string[] {
+  if (Array.isArray(value)) {
+    return uniqueStrings(value.filter((item): item is string => typeof item === 'string'));
+  }
+  if (typeof value === 'string') {
+    return uniqueStrings(parseStringArray(value));
+  }
+  return [];
+}
+
+function stringJsonArrayValue(value: unknown): string {
+  if (typeof value === 'string') {
+    return stringifyStringArray(parseStringArray(value));
+  }
+  if (Array.isArray(value)) {
+    return stringifyStringArray(value.filter((item): item is string => typeof item === 'string'));
+  }
+  return '[]';
+}
+
+function jsonObjectStringValue(value: unknown): string {
+  if (typeof value === 'string') {
+    const parsed = parseJsonObjectString(value);
+    return JSON.stringify(parsed);
+  }
+  if (isObjectRecord(value)) {
+    return JSON.stringify(value);
+  }
+  return '{}';
+}
+
+function parseJsonObjectString(value: string): Record<string, unknown> {
+  try {
+    const parsed = JSON.parse(value);
+    return isObjectRecord(parsed) ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+function buildTargetEcosystemPath(
+  filesRelPath: string,
+  sourceDir: string | null,
+  sourceFile: string,
+): string | null {
+  const root = safeRelativePath(filesRelPath) || 'www';
+  const dir = safeRelativePath(sourceDir);
+  const fileName = path.posix.basename(sourceFile.replace(/\\/g, '/'));
+  if (!fileName || !/^[A-Za-z0-9._-]+$/.test(fileName)) return null;
+  return [root, dir, fileName].filter((part): part is string => !!part).join('/');
+}
+
+function safeRelativePath(value: string | null | undefined): string | null {
+  if (!value) return null;
+  const trimmed = value.replace(/\\/g, '/').replace(/^\/+|\/+$/g, '');
+  if (!trimmed || trimmed === '.') return null;
+  const parts = trimmed.split('/').filter(Boolean);
+  if (parts.some((part) => part === '.' || part === '..')) return null;
+  return parts.join('/');
 }

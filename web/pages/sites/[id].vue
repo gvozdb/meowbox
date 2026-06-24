@@ -2029,7 +2029,7 @@ php_value[max_execution_time] = 300"
           <div v-if="serverStore.hasMultipleServers" class="danger-item danger-item--migrate">
             <div class="danger-item__info">
               <h4 class="danger-item__title">Мигрировать на другой сервер</h4>
-              <p class="danger-item__desc">Перенос файлов, базы данных, cron и быстрых команд на другой сервер.</p>
+              <p class="danger-item__desc">Прямой перенос файлов, БД, доменов, nginx/PHP-настроек, backup configs, services, cron, quick commands и PM2 runtime.</p>
             </div>
             <button
               class="danger-item__btn danger-item__btn--migrate"
@@ -2288,7 +2288,7 @@ php_value[max_execution_time] = 300"
           <!-- Form (before migration starts) -->
           <template v-if="!migrationId">
             <p class="modal__text">
-              Перенос <strong>{{ site?.name }}</strong> на другой сервер. Файлы передаются напрямую между серверами.
+              Перенос <strong>{{ site?.name }}</strong> на другой сервер. Файлы передаются напрямую между серверами; SSL перевыпускается на target.
             </p>
 
             <div class="migrate-form">
@@ -5532,6 +5532,7 @@ const migrationRunning = ref(false);
 let migrationPollTimer: ReturnType<typeof setInterval> | undefined;
 
 const migrationSteps = [
+  { key: 'preflight', label: 'Проверка серверов и конфликтов' },
   { key: 'backup', label: 'Создание бэкапа' },
   { key: 'waiting_backup', label: 'Ожидание завершения бэкапа' },
   { key: 'download_token', label: 'Подготовка передачи файла' },
@@ -5539,6 +5540,7 @@ const migrationSteps = [
   { key: 'create_site', label: 'Создание сайта на целевом сервере' },
   { key: 'import_pull', label: 'Передача и восстановление из бэкапа' },
   { key: 'waiting_pull', label: 'Ожидание завершения передачи' },
+  { key: 'apply_config', label: 'Перенос настроек сайта и runtime' },
   { key: 'ssl', label: 'Перевыпуск SSL-сертификата' },
   { key: 'cleanup', label: 'Остановка оригинала' },
   { key: 'done', label: 'Миграция завершена' },
@@ -5547,6 +5549,20 @@ const migrationSteps = [
 const migrateTargetServers = computed(() => {
   const currentId = serverStore.currentServerId || 'main';
   return serverStore.servers.filter(s => s.id !== currentId);
+});
+
+const siteHasActiveSsl = computed(() => {
+  const statuses = [
+    site.value?.sslCertificate?.status,
+    ...(site.value?.domains || []).map((d) => d.sslCertificate?.status),
+  ];
+  return statuses.some((status) => status === 'ACTIVE' || status === 'EXPIRING_SOON');
+});
+
+watch(showMigrateModal, (open) => {
+  if (!open) return;
+  migrateReissueSsl.value = siteHasActiveSsl.value;
+  migrateError.value = '';
 });
 
 async function startMigration() {
