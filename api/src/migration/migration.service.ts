@@ -127,10 +127,16 @@ export interface DnsZoneSnapshot {
 }
 
 export interface SslCertificateSnapshot {
+  domain: string;
   domains: string;
   status: string;
   issuer: string;
   isWildcard: boolean;
+  issuedAt: string | null;
+  expiresAt: string | null;
+  daysRemaining: number | null;
+  certPem: string | null;
+  keyPem: string | null;
 }
 
 export interface NodeEcosystemSnapshot {
@@ -220,7 +226,7 @@ const RESTORE_TIMEOUT_MS = Number(
   process.env.MIGRATION_RESTORE_TIMEOUT_MS,
 ) || 6 * 60 * 60 * 1000;
 
-const MIN_MIGRATION_VERSION = 'v0.6.52';
+const MIN_MIGRATION_VERSION = 'v0.6.53';
 
 @Injectable()
 export class MigrationService {
@@ -319,7 +325,6 @@ export class MigrationService {
     const siteSnapshot = this.normalizeSnapshot(
       await this.getSiteSnapshotFromServer(sourceServerId, siteId),
     );
-    this.assertSslPlan(siteSnapshot, reissueSsl);
     await this.assertTargetConflicts(targetServerId, siteSnapshot);
 
     // ══════════ Step 1: Trigger LOCAL backup on source ══════════
@@ -579,7 +584,18 @@ export class MigrationService {
           select: { domain: true, status: true },
         },
         sslCertificates: {
-          select: { domains: true, status: true, issuer: true, isWildcard: true },
+          select: {
+            domains: true,
+            status: true,
+            issuer: true,
+            isWildcard: true,
+            issuedAt: true,
+            expiresAt: true,
+            daysRemaining: true,
+            certPath: true,
+            keyPath: true,
+            domain: { select: { domain: true } },
+          },
         },
         cronJobs: {
           select: { name: true, schedule: true, command: true, status: true },
@@ -612,6 +628,22 @@ export class MigrationService {
       ...safeSite
     } = site;
     void _ssh; void _cms;
+
+    const sslSnapshot = await Promise.all(sslCertificates.map(async (cert) => {
+      const pem = await this.readSslPemBundle(cert.status, cert.certPath, cert.keyPath);
+      return {
+        domain: cert.domain?.domain || firstDomainFromJson(cert.domains),
+        domains: cert.domains,
+        status: cert.status,
+        issuer: cert.issuer,
+        isWildcard: cert.isWildcard,
+        issuedAt: cert.issuedAt?.toISOString() || null,
+        expiresAt: cert.expiresAt?.toISOString() || null,
+        daysRemaining: cert.daysRemaining,
+        certPem: pem.certPem,
+        keyPem: pem.keyPem,
+      };
+    }));
 
     return {
       site: safeSite as unknown as Record<string, unknown>,
@@ -648,7 +680,7 @@ export class MigrationService {
       }),
       services,
       dnsZones,
-      sslCertificates,
+      sslCertificates: sslSnapshot,
       node: await this.getNodeRuntimeSnapshot(site.id, safeSite.filesRelPath),
       cronJobs,
       quickCommands,
@@ -666,6 +698,44 @@ export class MigrationService {
       throw new BadRequestException(`Не удалось расшифровать пароль БД "${db.name}"`);
     }
     return value.password;
+  }
+
+  private snapshotHasSsl(snapshot: SiteSnapshot): boolean {
+    return snapshot.sslCertificates.some((cert) => isMigratableSslStatus(cert.status));
+  }
+
+  private withSslReissueWarning(metadata: string | null): string {
+    const current = metadata ? parseJsonObjectString(metadata) : {};
+    return JSON.stringify({
+      ...current,
+      requiresSslReissue: true,
+      sslMigrationSource: current.importedFrom === 'hostpanel' ? 'hostpanel' : 'meowbox',
+      sslReissueWarningCreatedAt:
+        typeof current.sslReissueWarningCreatedAt === 'string'
+          ? current.sslReissueWarningCreatedAt
+          : new Date().toISOString(),
+    });
+  }
+
+  private async readSslPemBundle(
+    status: string,
+    certPath: string | null,
+    keyPath: string | null,
+  ): Promise<{ certPem: string | null; keyPem: string | null }> {
+    if (!isMigratableSslStatus(status) || !certPath || !keyPath) {
+      return { certPem: null, keyPem: null };
+    }
+
+    try {
+      const [certPem, keyPem] = await Promise.all([
+        readAllowedSslFile(certPath),
+        readAllowedSslFile(keyPath),
+      ]);
+      return { certPem, keyPem };
+    } catch (err) {
+      this.logger.warn(`SSL certificate read skipped during migration snapshot: ${(err as Error).message}`);
+      return { certPem: null, keyPem: null };
+    }
   }
 
   private async getNodeRuntimeSnapshot(
@@ -832,10 +902,16 @@ export class MigrationService {
       ? raw.sslCertificates
           .filter(isObjectRecord)
           .map((cert) => ({
+            domain: String(cert.domain || firstDomainFromJson(cert.domains)).trim().toLowerCase(),
             domains: stringJsonArrayValue(cert.domains),
             status: String(cert.status || SslStatus.NONE),
             issuer: String(cert.issuer || ''),
             isWildcard: boolValue(cert.isWildcard, false),
+            issuedAt: nullableDateIso(cert.issuedAt),
+            expiresAt: nullableDateIso(cert.expiresAt),
+            daysRemaining: nullableNumber(cert.daysRemaining),
+            certPem: nullableString(cert.certPem),
+            keyPem: nullableString(cert.keyPem),
           }))
           .filter((cert) => cert.status !== SslStatus.NONE)
       : [];
@@ -911,17 +987,6 @@ export class MigrationService {
   async preflightTarget(snapshot: SiteSnapshot): Promise<{ ok: true }> {
     await this.assertLocalTargetConflicts(this.normalizeSnapshot(snapshot));
     return { ok: true };
-  }
-
-  private assertSslPlan(snapshot: SiteSnapshot, reissueSsl: boolean): void {
-    const activeCerts = snapshot.sslCertificates.filter((cert) =>
-      cert.status === SslStatus.ACTIVE || cert.status === SslStatus.EXPIRING_SOON,
-    );
-    if (activeCerts.length > 0 && !reissueSsl) {
-      throw new BadRequestException(
-        'У исходного сайта активен SSL. Приватные ключи не копируются; включи перевыпуск SSL на целевом сервере.',
-      );
-    }
   }
 
   private async assertTargetConflicts(targetServerId: string, snapshot: SiteSnapshot): Promise<void> {
@@ -1019,22 +1084,29 @@ export class MigrationService {
     quickCommands: number;
     backupConfigs: number;
     services: number;
+    sslCertificates: number;
     nodeApps: number;
   }> {
     snapshot = this.normalizeSnapshot(snapshot);
 
     const site = await this.prisma.site.findUnique({
       where: { id: siteId },
-      select: { id: true, name: true, systemUser: true, userId: true },
+      select: { id: true, name: true, systemUser: true, userId: true, metadata: true },
     });
     if (!site) throw new BadRequestException('Целевой сайт не найден');
     const systemUser = site.systemUser || site.name;
 
+    const siteUpdate = this.buildSiteConfigUpdate(snapshot.site);
+    if (this.snapshotHasSsl(snapshot)) {
+      siteUpdate.metadata = this.withSslReissueWarning(site.metadata);
+    }
+
     await this.prisma.site.update({
       where: { id: siteId },
-      data: this.buildSiteConfigUpdate(snapshot.site),
+      data: siteUpdate,
     });
     await this.applySiteDomains(siteId, site.userId, snapshot.domains);
+    const sslCertificates = await this.applySslCertificates(siteId, snapshot.sslCertificates);
     const backupConfigs = await this.applyBackupConfigs(siteId, snapshot.backupConfigs);
     const services = await this.applySiteServices(siteId, snapshot.services);
 
@@ -1093,8 +1165,106 @@ export class MigrationService {
       quickCommands: snapshot.quickCommands.length,
       backupConfigs,
       services,
+      sslCertificates,
       nodeApps,
     };
+  }
+
+  private async applySslCertificates(
+    siteId: string,
+    certificates: SslCertificateSnapshot[],
+  ): Promise<number> {
+    const importable = certificates.filter((cert) =>
+      isMigratableSslStatus(cert.status) && !!cert.certPem && !!cert.keyPem,
+    );
+    if (importable.length === 0) return 0;
+
+    const targetDomains = await this.prisma.siteDomain.findMany({
+      where: { siteId },
+      select: { id: true, domain: true },
+    });
+    const byDomain = new Map(targetDomains.map((domain) => [domain.domain.toLowerCase(), domain]));
+    let count = 0;
+
+    for (const cert of importable) {
+      const names = uniqueStrings([cert.domain, ...parseStringArray(cert.domains)])
+        .map((domain) => domain.toLowerCase());
+      const targetDomain = names.map((domain) => byDomain.get(domain)).find(Boolean);
+      if (!targetDomain) {
+        this.logger.warn(`SSL certificate skipped during migration: target domain not found for ${cert.domain || names[0] || 'unknown'}`);
+        continue;
+      }
+
+      try {
+        const raw = await this.agentRelay.emitToAgent<unknown>('ssl:install-custom', {
+          domain: targetDomain.domain,
+          certPem: cert.certPem,
+          keyPem: cert.keyPem,
+        });
+        const ack = raw as unknown as {
+          success?: boolean;
+          certPath?: string;
+          keyPath?: string;
+          expiresAt?: string;
+          domains?: string[];
+          error?: string;
+        };
+
+        if (!ack.success || !ack.certPath || !ack.keyPath) {
+          this.logger.warn(`SSL certificate skipped during migration for ${targetDomain.domain}: ${ack.error || raw.error || 'install failed'}`);
+          continue;
+        }
+
+        const sanDomains = uniqueStrings(
+          Array.isArray(ack.domains) && ack.domains.length
+            ? ack.domains
+            : parseStringArray(cert.domains),
+        );
+        const expiresAt = dateFromIsoOrNull(ack.expiresAt) || dateFromIsoOrNull(cert.expiresAt);
+        const issuedAt = dateFromIsoOrNull(cert.issuedAt) || new Date();
+        const data = {
+          domains: stringifyStringArray(sanDomains.length ? sanDomains : names),
+          status: SslStatus.ACTIVE,
+          issuer: cert.issuer || 'Custom',
+          isWildcard: cert.isWildcard,
+          issuedAt,
+          expiresAt,
+          daysRemaining: calcDaysRemaining(expiresAt),
+          certPath: ack.certPath,
+          keyPath: ack.keyPath,
+        };
+
+        const existing = await this.prisma.sslCertificate.findFirst({
+          where: { siteId, domainId: targetDomain.id },
+          select: { id: true },
+        });
+        if (existing) {
+          await this.prisma.sslCertificate.update({
+            where: { id: existing.id },
+            data,
+          });
+        } else {
+          await this.prisma.sslCertificate.create({
+            data: {
+              siteId,
+              domainId: targetDomain.id,
+              ...data,
+            },
+          });
+        }
+        count += 1;
+      } catch (err) {
+        this.logger.warn(`SSL certificate skipped during migration for ${targetDomain.domain}: ${(err as Error).message}`);
+      }
+    }
+
+    if (count > 0) {
+      await this.siteDomains.regenerateNginx(siteId).catch((err) => {
+        this.logger.warn(`SSL nginx reconfigure after migration failed: ${(err as Error).message}`);
+      });
+    }
+
+    return count;
   }
 
   private async applyBackupConfigs(
@@ -1808,6 +1978,17 @@ function nullableNumber(value: unknown): number | null {
   return typeof value === 'number' && Number.isFinite(value) ? value : null;
 }
 
+function nullableDateIso(value: unknown): string | null {
+  if (typeof value === 'string') {
+    const date = new Date(value);
+    return Number.isNaN(date.getTime()) ? null : date.toISOString();
+  }
+  if (value instanceof Date && !Number.isNaN(value.getTime())) {
+    return value.toISOString();
+  }
+  return null;
+}
+
 function numberValue(value: unknown, fallback: number): number {
   return typeof value === 'number' && Number.isFinite(value) ? value : fallback;
 }
@@ -1858,6 +2039,69 @@ function parseJsonObjectString(value: string): Record<string, unknown> {
   } catch {
     return {};
   }
+}
+
+function firstDomainFromJson(value: unknown): string {
+  return parseStringArray(typeof value === 'string' ? value : '[]')[0]?.trim().toLowerCase() || '';
+}
+
+function isMigratableSslStatus(status: string): boolean {
+  return status === SslStatus.ACTIVE
+    || status === SslStatus.EXPIRING_SOON
+    || status === SslStatus.EXPIRED;
+}
+
+function dateFromIsoOrNull(value?: string | null): Date | null {
+  if (!value) return null;
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? null : date;
+}
+
+function calcDaysRemaining(expiresAt: Date | null): number | null {
+  if (!expiresAt) return null;
+  return Math.floor((expiresAt.getTime() - Date.now()) / 86_400_000);
+}
+
+const SSL_FILE_ALLOWED_PREFIXES = [
+  '/etc/letsencrypt/live',
+  '/etc/letsencrypt/archive',
+  '/etc/ssl/meowbox',
+];
+const MAX_SSL_FILE_BYTES = 512 * 1024;
+
+async function readAllowedSslFile(input: string): Promise<string> {
+  if (!input || typeof input !== 'string') {
+    throw new Error('SSL path is empty');
+  }
+  if (input.includes('\0') || !path.isAbsolute(input)) {
+    throw new Error('SSL path is invalid');
+  }
+  const resolved = path.resolve(input);
+  if (!isUnderAnyPrefix(resolved, SSL_FILE_ALLOWED_PREFIXES)) {
+    throw new Error('SSL path is outside allowed directories');
+  }
+
+  const real = await fs.promises.realpath(resolved);
+  if (!isUnderAnyPrefix(real, SSL_FILE_ALLOWED_PREFIXES)) {
+    throw new Error('SSL path resolves outside allowed directories');
+  }
+
+  const stat = await fs.promises.stat(real);
+  if (!stat.isFile()) {
+    throw new Error('SSL path is not a file');
+  }
+  if (stat.size > MAX_SSL_FILE_BYTES) {
+    throw new Error('SSL file is too large');
+  }
+
+  return fs.promises.readFile(real, 'utf8');
+}
+
+function isUnderAnyPrefix(filePath: string, prefixes: string[]): boolean {
+  return prefixes.some((prefix) => {
+    const normalizedPrefix = path.resolve(prefix);
+    return filePath === normalizedPrefix || filePath.startsWith(normalizedPrefix + path.sep);
+  });
 }
 
 function buildTargetEcosystemPath(

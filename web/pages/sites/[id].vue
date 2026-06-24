@@ -76,24 +76,24 @@
         </div>
       </div>
 
-      <!-- Hostpanel migration banner: SSL reissue (spec §9.4) -->
-      <div v-if="hostpanelMigrationBanner" class="site-detail__hp-banner">
+      <!-- Migration banner: SSL reissue after DNS switch -->
+      <div v-if="sslReissueMigrationBanner" class="site-detail__hp-banner">
         <div class="site-detail__hp-banner-head">
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
             <path d="M12 2 L2 22 L22 22 Z" /><line x1="12" y1="9" x2="12" y2="13" /><line x1="12" y1="17" x2="12.01" y2="17" />
           </svg>
-          <strong>Сайт перенесён со старой hostPanel</strong>
+          <strong>Сайт перенесён с активным SSL</strong>
         </div>
         <p class="site-detail__hp-banner-text">
-          Сертификат скопирован с источника. После того как привяжешь новый IP к домену
-          <code>{{ site.domain }}</code> — нажми <strong>«Выпустить»</strong> на вкладке SSL,
-          чтобы получить свежий сертификат от Let's Encrypt.
+          После того как привяжешь новый IP к домену <code>{{ site.domain }}</code>,
+          проверь HTTPS и при необходимости нажми <strong>«Выпустить»</strong> на вкладке SSL,
+          чтобы получить новый сертификат от Let's Encrypt.
         </p>
         <div class="site-detail__hp-banner-actions">
           <button class="btn btn--primary btn--sm" @click="activeTab = 'ssl'">
             🔒 Перейти к SSL →
           </button>
-          <button class="btn btn--ghost btn--sm" @click="dismissHostpanelBanner">
+          <button class="btn btn--ghost btn--sm" @click="dismissSslReissueBanner">
             Скрыть до перевыпуска
           </button>
         </div>
@@ -2288,7 +2288,7 @@ php_value[max_execution_time] = 300"
           <!-- Form (before migration starts) -->
           <template v-if="!migrationId">
             <p class="modal__text">
-              Перенос <strong>{{ site?.name }}</strong> на другой сервер. Файлы передаются напрямую между серверами; SSL перевыпускается на target.
+              Перенос <strong>{{ site?.name }}</strong> на другой сервер. Файлы, БД, настройки и текущий SSL передаются напрямую между серверами; новый Let's Encrypt выпускается вручную после переключения DNS.
             </p>
 
             <div class="migrate-form">
@@ -2307,7 +2307,7 @@ php_value[max_execution_time] = 300"
               <div class="migrate-form__checkboxes">
                 <label class="migrate-form__checkbox">
                   <input v-model="migrateReissueSsl" type="checkbox" />
-                  <span>Перевыпустить SSL на целевом сервере</span>
+                  <span>Сразу перевыпустить SSL на целевом сервере (только если DNS уже смотрит на target)</span>
                 </label>
                 <label class="migrate-form__checkbox">
                   <input v-model="migrateStopSource" type="checkbox" disabled />
@@ -2535,9 +2535,9 @@ interface SiteDetail {
   envVars: Record<string, string>;
   errorMessage?: string | null;
   /**
-   * JSON-строка с произвольной мета-инфой о сайте. hostpanel-миграция
-   * пишет сюда `requiresSslReissue: true` — UI показывает баннер
-   * «после переключения DNS перевыпусти SSL» (spec §9.4).
+   * JSON-строка с произвольной мета-инфой о сайте. Миграции пишут сюда
+   * `requiresSslReissue: true` — UI показывает баннер «после переключения DNS
+   * перевыпусти SSL».
    */
   metadata?: string | null;
   createdAt: string;
@@ -2571,31 +2571,30 @@ const site = ref<SiteDetail | null>(null);
 const loading = ref(true);
 
 /**
- * Баннер «после переключения DNS перевыпусти SSL» (spec §9.4) — показываем,
- * если в `Site.metadata.requiresSslReissue === true` и оператор не нажал
- * «Скрыть» (флаг хранится в localStorage по siteId).
+ * Баннер «после переключения DNS перевыпусти SSL» — показываем, если в
+ * `Site.metadata.requiresSslReissue === true` и оператор не нажал «Скрыть»
+ * (флаг хранится в localStorage по siteId).
  */
-const hostpanelBannerDismissed = ref(false);
-const hostpanelMigrationBanner = computed(() => {
+const sslReissueBannerDismissed = ref(false);
+const sslReissueMigrationBanner = computed(() => {
   if (!site.value?.metadata) return false;
-  if (hostpanelBannerDismissed.value) return false;
+  if (sslReissueBannerDismissed.value) return false;
   try {
     const meta = JSON.parse(site.value.metadata) as Record<string, unknown>;
-    if (meta.importedFrom !== 'hostpanel') return false;
     if (meta.requiresSslReissue !== true) return false;
     return true;
   } catch {
     return false;
   }
 });
-function dismissHostpanelBanner() {
+function dismissSslReissueBanner() {
   if (!site.value) return;
   try {
-    localStorage.setItem(`hp-banner-dismissed-${site.value.id}`, '1');
+    localStorage.setItem(`ssl-reissue-banner-dismissed-${site.value.id}`, '1');
   } catch {
     /* ignore quota / disabled storage */
   }
-  hostpanelBannerDismissed.value = true;
+  sslReissueBannerDismissed.value = true;
 }
 
 /**
@@ -5551,17 +5550,9 @@ const migrateTargetServers = computed(() => {
   return serverStore.servers.filter(s => s.id !== currentId);
 });
 
-const siteHasActiveSsl = computed(() => {
-  const statuses = [
-    site.value?.sslCertificate?.status,
-    ...(site.value?.domains || []).map((d) => d.sslCertificate?.status),
-  ];
-  return statuses.some((status) => status === 'ACTIVE' || status === 'EXPIRING_SOON');
-});
-
 watch(showMigrateModal, (open) => {
   if (!open) return;
-  migrateReissueSsl.value = siteHasActiveSsl.value;
+  migrateReissueSsl.value = false;
   migrateError.value = '';
 });
 
@@ -5663,11 +5654,10 @@ async function deleteSite() {
 onMounted(async () => {
   try {
     site.value = await api.get<SiteDetail>(`/sites/${siteId}`);
-    // Восстанавливаем dismissed-флаг hostpanel-баннера (spec §9.4) из
-    // localStorage по siteId — иначе после refresh оператор увидит баннер
-    // снова, хоть и нажал «скрыть».
+    // Восстанавливаем dismissed-флаг SSL-warning баннера из localStorage.
     try {
-      hostpanelBannerDismissed.value =
+      sslReissueBannerDismissed.value =
+        localStorage.getItem(`ssl-reissue-banner-dismissed-${siteId}`) === '1' ||
         localStorage.getItem(`hp-banner-dismissed-${siteId}`) === '1';
     } catch {
       /* ignore disabled storage */
