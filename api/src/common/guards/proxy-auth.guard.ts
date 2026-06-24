@@ -9,6 +9,7 @@ import { ConfigService } from '@nestjs/config';
 import { timingSafeEqual } from 'crypto';
 import { Reflector } from '@nestjs/core';
 import { IS_PUBLIC_KEY } from '../decorators/public.decorator';
+import { PrismaService } from '../prisma.service';
 
 /**
  * Allows requests authenticated with X-Proxy-Token header.
@@ -28,11 +29,12 @@ export class ProxyAuthGuard implements CanActivate {
   constructor(
     private readonly config: ConfigService,
     private readonly reflector: Reflector,
+    private readonly prisma: PrismaService,
   ) {
     this.proxyToken = this.config.get<string>('PROXY_TOKEN', '') || null;
   }
 
-  canActivate(context: ExecutionContext): boolean {
+  async canActivate(context: ExecutionContext): Promise<boolean> {
     // Skip for public routes
     const isPublic = this.reflector.getAllAndOverride<boolean>(IS_PUBLIC_KEY, [
       context.getHandler(),
@@ -65,11 +67,21 @@ export class ProxyAuthGuard implements CanActivate {
 
     // Constant-time comparison
     if (this.constantTimeCompare(token, this.proxyToken)) {
-      // Set synthetic admin user so JWT guard and roles guard pass
+      const admin = await this.prisma.user.findFirst({
+        where: { role: 'ADMIN' },
+        orderBy: { createdAt: 'asc' },
+        select: { id: true, username: true, role: true },
+      });
+      if (!admin) {
+        throw new UnauthorizedException('No admin user configured for proxy auth');
+      }
+
+      // Set target-local admin user so JWT guard, roles guard and owner fields pass.
       req.user = {
-        sub: 'proxy',
-        username: 'proxy',
-        role: 'ADMIN',
+        id: admin.id,
+        sub: admin.id,
+        username: admin.username,
+        role: admin.role,
       };
       return true;
     }

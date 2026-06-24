@@ -231,7 +231,7 @@ const RESTORE_TIMEOUT_MS = Number(
   process.env.MIGRATION_RESTORE_TIMEOUT_MS,
 ) || 6 * 60 * 60 * 1000;
 
-const MIN_MIGRATION_VERSION = 'v0.6.53';
+const MIN_MIGRATION_VERSION = 'v0.6.55';
 
 @Injectable()
 export class MigrationService {
