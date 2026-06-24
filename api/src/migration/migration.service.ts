@@ -170,6 +170,11 @@ export interface SiteSnapshot {
   }>;
 }
 
+interface TargetDomainForSslReissue {
+  id: string;
+  domain: string;
+}
+
 // ─── Steps ───
 
 const STEPS = [
@@ -509,12 +514,7 @@ export class MigrationService {
     if (reissueSsl) {
       this.updateState(migrationId, 'ssl');
       try {
-        if (targetServerId === 'main') {
-          await this.localPost(`/sites/${targetSiteId}/ssl/issue`, {}, userId);
-        } else {
-          const server = this.proxy.getServer(targetServerId)!;
-          await this.proxy.proxyRequest(server, 'POST', `/sites/${targetSiteId}/ssl/issue`, {});
-        }
+        await this.reissueTargetSsl(targetServerId, targetSiteId, userId);
       } catch (err) {
         this.logger.warn(`SSL reissue failed during migration: ${(err as Error).message}`);
       }
@@ -1047,7 +1047,7 @@ export class MigrationService {
       const existingNames = new Set(existingStorages.map((storage) => storage.name));
       for (const name of storageNames) {
         if (!existingNames.has(name)) {
-          errors.push(`на целевом сервере нет backup-хранилища "${name}"`);
+          this.logger.warn(`Backup storage "${name}" not found on target during migration preflight`);
         }
       }
     }
@@ -1063,8 +1063,8 @@ export class MigrationService {
     }
 
     if (snapshot.dnsZones.length > 0) {
-      errors.push(
-        `у сайта есть привязанные DNS-зоны (${snapshot.dnsZones.map((z) => z.domain).join(', ')}); DNS-провайдеры не переносятся автоматически`,
+      this.logger.warn(
+        `Site has linked DNS zones (${snapshot.dnsZones.map((z) => z.domain).join(', ')}); DNS providers are not migrated automatically`,
       );
     }
 
@@ -1222,14 +1222,15 @@ export class MigrationService {
         );
         const expiresAt = dateFromIsoOrNull(ack.expiresAt) || dateFromIsoOrNull(cert.expiresAt);
         const issuedAt = dateFromIsoOrNull(cert.issuedAt) || new Date();
+        const daysRemaining = calcDaysRemaining(expiresAt);
         const data = {
           domains: stringifyStringArray(sanDomains.length ? sanDomains : names),
-          status: SslStatus.ACTIVE,
+          status: sslStatusFromDaysRemaining(daysRemaining, cert.status),
           issuer: cert.issuer || 'Custom',
           isWildcard: cert.isWildcard,
           issuedAt,
           expiresAt,
-          daysRemaining: calcDaysRemaining(expiresAt),
+          daysRemaining,
           certPath: ack.certPath,
           keyPath: ack.keyPath,
         };
@@ -1284,8 +1285,11 @@ export class MigrationService {
         const byName = new Map(locations.map((location) => [location.name, location.id]));
         for (const name of config.storageLocationNames) {
           const id = byName.get(name);
-          if (!id) throw new Error(`Backup-хранилище "${name}" не найдено на target`);
-          storageLocationIds.push(id);
+          if (id) {
+            storageLocationIds.push(id);
+          } else {
+            this.logger.warn(`Backup storage "${name}" not found on target during migration; skipping link`);
+          }
         }
       }
 
@@ -1861,6 +1865,83 @@ export class MigrationService {
     return (data as { data?: Record<string, unknown> })?.data || {};
   }
 
+  private async reissueTargetSsl(targetServerId: string, siteId: string, userId: string): Promise<void> {
+    const domains = await this.getTargetDomainsForSslReissue(targetServerId, siteId);
+    if (domains.length === 0) {
+      throw new Error('У целевого сайта нет доменов для SSL');
+    }
+
+    const errors: string[] = [];
+    for (const domain of domains) {
+      try {
+        await this.issueTargetDomainSsl(targetServerId, siteId, domain.id, userId);
+      } catch (err) {
+        errors.push(`${domain.domain}: ${(err as Error).message}`);
+      }
+    }
+
+    if (errors.length === domains.length) {
+      throw new Error(errors.join('; '));
+    }
+    if (errors.length > 0) {
+      this.logger.warn(`Partial SSL reissue during migration: ${errors.join('; ')}`);
+    }
+  }
+
+  private async getTargetDomainsForSslReissue(
+    targetServerId: string,
+    siteId: string,
+  ): Promise<TargetDomainForSslReissue[]> {
+    if (targetServerId === 'main') {
+      return this.prisma.siteDomain.findMany({
+        where: { siteId },
+        orderBy: { position: 'asc' },
+        select: { id: true, domain: true },
+      });
+    }
+
+    const server = this.proxy.getServer(targetServerId);
+    if (!server) throw new Error('Целевой сервер не найден');
+
+    const { status, data } = await this.proxy.proxyRequest(server, 'GET', `/sites/${siteId}`);
+    if (status >= 400) {
+      const errMsg = (data as { error?: { message?: string } })?.error?.message || `HTTP ${status}`;
+      throw new Error(errMsg);
+    }
+
+    const domains = (data as { data?: { domains?: unknown[] } })?.data?.domains || [];
+    return domains
+      .map((domain) => {
+        const item = domain as { id?: unknown; domain?: unknown };
+        return typeof item.id === 'string' && typeof item.domain === 'string'
+          ? { id: item.id, domain: item.domain }
+          : null;
+      })
+      .filter((domain): domain is TargetDomainForSslReissue => domain !== null);
+  }
+
+  private async issueTargetDomainSsl(
+    targetServerId: string,
+    siteId: string,
+    domainId: string,
+    userId: string,
+  ): Promise<void> {
+    const path = `/sites/${siteId}/domains/${domainId}/ssl/issue`;
+    if (targetServerId === 'main') {
+      await this.localPost(path, {}, userId);
+      return;
+    }
+
+    const server = this.proxy.getServer(targetServerId);
+    if (!server) throw new Error('Целевой сервер не найден');
+
+    const { status, data } = await this.proxy.proxyRequest(server, 'POST', path, {});
+    if (status >= 400) {
+      const errMsg = (data as { error?: { message?: string } })?.error?.message || `HTTP ${status}`;
+      throw new Error(errMsg);
+    }
+  }
+
   private async pollBackupStatus(
     serverId: string,
     siteId: string,
@@ -2060,6 +2141,15 @@ function dateFromIsoOrNull(value?: string | null): Date | null {
 function calcDaysRemaining(expiresAt: Date | null): number | null {
   if (!expiresAt) return null;
   return Math.floor((expiresAt.getTime() - Date.now()) / 86_400_000);
+}
+
+function sslStatusFromDaysRemaining(daysRemaining: number | null, fallback: string): SslStatus {
+  if (daysRemaining === null) {
+    return isMigratableSslStatus(fallback) ? fallback as SslStatus : SslStatus.ACTIVE;
+  }
+  if (daysRemaining <= 0) return SslStatus.EXPIRED;
+  if (daysRemaining <= 30) return SslStatus.EXPIRING_SOON;
+  return SslStatus.ACTIVE;
 }
 
 const SSL_FILE_ALLOWED_PREFIXES = [
