@@ -26,6 +26,7 @@ import {
   IsOptional,
   IsBoolean,
   IsArray,
+  IsObject,
 } from 'class-validator';
 
 // ─── DTOs ───
@@ -73,7 +74,21 @@ class ImportPullDto {
 
   @IsOptional()
   @IsArray()
-  databases?: Array<{ name: string; type: string }>;
+  databases?: Array<{ name: string; type: string; dbUser: string; dbPassword: string }>;
+}
+
+class ApplySiteExtrasDto {
+  @IsString()
+  @IsNotEmpty()
+  siteId!: string;
+
+  @IsObject()
+  snapshot!: Record<string, unknown>;
+}
+
+class TargetPreflightDto {
+  @IsObject()
+  snapshot!: Record<string, unknown>;
 }
 
 // ─── Controller ───
@@ -110,8 +125,8 @@ export class MigrationController {
   /** Poll migration progress. */
   @Get(':id/status')
   @Roles(UserRole.ADMIN)
-  getStatus(@Param('id') id: string) {
-    const state = this.migrationService.getStatus(id);
+  async getStatus(@Param('id') id: string) {
+    const state = await this.migrationService.getStatus(id);
     if (!state) {
       throw new BadRequestException('Миграция не найдена');
     }
@@ -119,6 +134,14 @@ export class MigrationController {
   }
 
   // ─── Source server endpoints ───
+
+  /** Create a temporary single-use download token for a backup file. */
+  @Get('site-snapshot/:siteId')
+  @Roles(UserRole.ADMIN)
+  async getSiteSnapshot(@Param('siteId') siteId: string) {
+    const result = await this.migrationService.getSiteSnapshot(siteId);
+    return { success: true, data: result };
+  }
 
   /** Create a temporary single-use download token for a backup file. */
   @Post('download-token')
@@ -169,6 +192,25 @@ export class MigrationController {
       dto.siteId,
       dto.sourceUrl,
       dto.databases || [],
+    );
+    return { success: true, data: result };
+  }
+
+  /** Check target conflicts using target-local DB state. */
+  @Post('target-preflight')
+  @Roles(UserRole.ADMIN)
+  async targetPreflight(@Body() dto: TargetPreflightDto) {
+    const result = await this.migrationService.preflightTarget(dto.snapshot as never);
+    return { success: true, data: result };
+  }
+
+  /** Apply non-archive site extras on target (cron, quick commands). */
+  @Post('apply-site-extras')
+  @Roles(UserRole.ADMIN)
+  async applySiteExtras(@Body() dto: ApplySiteExtrasDto) {
+    const result = await this.migrationService.applySiteExtras(
+      dto.siteId,
+      dto.snapshot as never,
     );
     return { success: true, data: result };
   }

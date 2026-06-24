@@ -2029,7 +2029,7 @@ php_value[max_execution_time] = 300"
           <div v-if="serverStore.hasMultipleServers" class="danger-item danger-item--migrate">
             <div class="danger-item__info">
               <h4 class="danger-item__title">Мигрировать на другой сервер</h4>
-              <p class="danger-item__desc">Перенос файлов, базы данных и конфигурации на другой сервер через облачное хранилище.</p>
+              <p class="danger-item__desc">Перенос файлов, базы данных, cron и быстрых команд на другой сервер.</p>
             </div>
             <button
               class="danger-item__btn danger-item__btn--migrate"
@@ -2310,8 +2310,8 @@ php_value[max_execution_time] = 300"
                   <span>Перевыпустить SSL на целевом сервере</span>
                 </label>
                 <label class="migrate-form__checkbox">
-                  <input v-model="migrateStopSource" type="checkbox" />
-                  <span>Остановить оригинал после миграции</span>
+                  <input v-model="migrateStopSource" type="checkbox" disabled />
+                  <span>Остановить оригинал после миграции (после ручной проверки)</span>
                 </label>
               </div>
             </div>
@@ -5520,7 +5520,7 @@ watch(activeTab, (tab) => {
 
 const showMigrateModal = ref(false);
 const migrateTarget = ref('');
-const migrateReissueSsl = ref(true);
+const migrateReissueSsl = ref(false);
 const migrateStopSource = ref(false);
 const migrateStarting = ref(false);
 const migrateError = ref('');
@@ -5559,9 +5559,9 @@ async function startMigration() {
       sourceServerId: serverStore.currentServerId || 'main',
       targetServerId: migrateTarget.value,
       reissueSsl: migrateReissueSsl.value,
-      stopSource: migrateStopSource.value,
+      stopSource: false,
       panelUrl: window.location.origin,
-    });
+    }, { noProxy: true });
     migrationId.value = res?.migrationId || '';
     migrationRunning.value = true;
     migrationStepIndex.value = 0;
@@ -5586,7 +5586,7 @@ function pollMigrationStatus() {
         message: string;
         error?: string;
         completedAt?: string;
-      }>(`/migration/${migrationId.value}/status`);
+      }>(`/migration/${migrationId.value}/status`, { noProxy: true });
       if (!state) return;
       migrationStepIndex.value = state.stepIndex;
       if (state.step === 'done') {

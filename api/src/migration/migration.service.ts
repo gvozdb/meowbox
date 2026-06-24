@@ -9,12 +9,17 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { Readable } from 'stream';
 import { pipeline } from 'stream/promises';
-import { BackupStatus, BackupStorageType } from '../common/enums';
+import { Prisma } from '@prisma/client';
+import { BackupStatus, BackupStorageType, CronJobStatus, DatabaseType, UserRole } from '../common/enums';
 import { PrismaService } from '../common/prisma.service';
 import { ProxyService } from '../proxy/proxy.service';
 import { AgentRelayService } from '../gateway/agent-relay.service';
+import { SiteDomainsService } from '../sites/site-domains.service';
 import { assertSafeFilePath } from '../common/validators/safe-path';
 import { assertPublicHttpUrl } from '../common/validators/safe-url';
+import { decryptJson, encryptJson } from '../common/crypto/credentials-cipher';
+import { hashPassword } from '../common/crypto/argon2.helper';
+import { parseSiteAliases } from '../common/json-array';
 
 // ─── Interfaces ───
 
@@ -59,9 +64,54 @@ export interface PullState {
   error?: string;
 }
 
+export interface DatabaseSnapshot {
+  name: string;
+  type: string;
+  dbUser: string;
+  dbPassword: string;
+}
+
+export interface SiteDomainSnapshot {
+  domain: string;
+  isPrimary: boolean;
+  position: number;
+  aliases: string;
+  filesRelPath: string | null;
+  appPort: number | null;
+  httpsRedirect: boolean;
+  nginxClientMaxBodySize: string | null;
+  nginxFastcgiReadTimeout: number | null;
+  nginxFastcgiSendTimeout: number | null;
+  nginxFastcgiConnectTimeout: number | null;
+  nginxFastcgiBufferSizeKb: number | null;
+  nginxFastcgiBufferCount: number | null;
+  nginxHttp2: boolean;
+  nginxHsts: boolean;
+  nginxGzip: boolean;
+  nginxRateLimitEnabled: boolean;
+  nginxRateLimitRps: number | null;
+  nginxRateLimitBurst: number | null;
+  nginxCustomConfig: string | null;
+}
+
+export interface SiteSnapshot {
+  site: Record<string, unknown>;
+  domains: SiteDomainSnapshot[];
+  databases: DatabaseSnapshot[];
+  cronJobs: Array<{ name: string; schedule: string; command: string; status: string }>;
+  quickCommands: Array<{
+    label: string;
+    source: string;
+    target: string;
+    cwd: string;
+    sortOrder: number;
+  }>;
+}
+
 // ─── Steps ───
 
 const STEPS = [
+  { key: 'preflight', label: 'Проверка серверов и конфликтов' },
   { key: 'backup', label: 'Создание бэкапа' },
   { key: 'waiting_backup', label: 'Ожидание завершения бэкапа' },
   { key: 'download_token', label: 'Подготовка передачи файла' },
@@ -69,6 +119,7 @@ const STEPS = [
   { key: 'create_site', label: 'Создание сайта на целевом сервере' },
   { key: 'import_pull', label: 'Передача и восстановление из бэкапа' },
   { key: 'waiting_pull', label: 'Ожидание завершения передачи' },
+  { key: 'apply_config', label: 'Перенос cron и быстрых команд' },
   { key: 'ssl', label: 'Перевыпуск SSL-сертификата' },
   { key: 'cleanup', label: 'Остановка оригинала' },
   { key: 'done', label: 'Миграция завершена' },
@@ -109,6 +160,12 @@ const AGENT_POLL_INTERVAL_MS = Number(
   process.env.MIGRATION_AGENT_POLL_INTERVAL_MS,
 ) || 5000;
 
+const RESTORE_TIMEOUT_MS = Number(
+  process.env.MIGRATION_RESTORE_TIMEOUT_MS,
+) || 6 * 60 * 60 * 1000;
+
+const MIN_MIGRATION_VERSION = 'v0.6.51';
+
 @Injectable()
 export class MigrationService {
   private readonly logger = new Logger('MigrationService');
@@ -120,19 +177,25 @@ export class MigrationService {
     private readonly prisma: PrismaService,
     private readonly proxy: ProxyService,
     private readonly agentRelay: AgentRelayService,
+    private readonly siteDomains: SiteDomainsService,
   ) {}
 
   // ═══════════════════════════════════════════════════════════════════════════
   // Migration orchestration (runs on main server)
   // ═══════════════════════════════════════════════════════════════════════════
 
-  getStatus(migrationId: string): MigrationState | undefined {
+  async getStatus(migrationId: string): Promise<MigrationState | undefined> {
     return this.migrations.get(migrationId);
   }
 
   async startMigration(params: MigrateParams, userId: string): Promise<string> {
     if (params.sourceServerId === params.targetServerId) {
       throw new BadRequestException('Исходный и целевой серверы совпадают');
+    }
+    if (params.stopSource) {
+      throw new BadRequestException(
+        'Авто-остановка исходного сайта временно отключена: нужен отдельный verify после миграции',
+      );
     }
 
     if (params.sourceServerId === 'main' && !params.panelUrl) {
@@ -148,6 +211,8 @@ export class MigrationService {
       if (!source) throw new BadRequestException('Исходный сервер не найден');
     }
 
+    await this.assertServerVersions(params);
+
     const migrationId = randomUUID().slice(0, 12);
 
     const state: MigrationState = {
@@ -155,7 +220,7 @@ export class MigrationService {
       siteId: params.siteId,
       sourceServerId: params.sourceServerId,
       targetServerId: params.targetServerId,
-      step: 'backup',
+      step: 'preflight',
       stepIndex: 0,
       totalSteps: STEPS.length,
       message: STEPS[0].label,
@@ -191,6 +256,12 @@ export class MigrationService {
 
   private async runMigration(migrationId: string, params: MigrateParams, userId: string) {
     const { siteId, sourceServerId, targetServerId, reissueSsl, stopSource, panelUrl } = params;
+
+    this.updateState(migrationId, 'preflight');
+    const siteSnapshot = this.normalizeSnapshot(
+      await this.getSiteSnapshotFromServer(sourceServerId, siteId),
+    );
+    await this.assertTargetConflicts(targetServerId, siteSnapshot);
 
     // ══════════ Step 1: Trigger LOCAL backup on source ══════════
     this.updateState(migrationId, 'backup');
@@ -255,20 +326,7 @@ export class MigrationService {
     // ══════════ Step 4: Get site metadata ══════════
     this.updateState(migrationId, 'metadata');
 
-    let siteMeta: Record<string, unknown>;
-
-    if (sourceServerId === 'main') {
-      const site = await this.prisma.site.findUnique({
-        where: { id: siteId },
-        include: { databases: { select: { name: true, type: true } } },
-      });
-      if (!site) throw new Error('Сайт не найден');
-      siteMeta = site as unknown as Record<string, unknown>;
-    } else {
-      const server = this.proxy.getServer(sourceServerId)!;
-      const { data } = await this.proxy.proxyRequest(server, 'GET', `/sites/${siteId}`);
-      siteMeta = ((data as { data?: Record<string, unknown> })?.data || {}) as Record<string, unknown>;
-    }
+    const siteMeta = siteSnapshot.site;
 
     // ══════════ Step 5: Create site on target (skipInstall) ══════════
     this.updateState(migrationId, 'create_site');
@@ -291,12 +349,27 @@ export class MigrationService {
 
     const createBody = {
       name: siteMeta.name,
+      displayName: siteMeta.displayName || undefined,
       domain: siteMeta.domain,
       aliases,
       type: siteMeta.type,
+      phpEnabled: !!siteMeta.phpVersion,
       phpVersion: siteMeta.phpVersion || undefined,
+      dbEnabled: siteSnapshot.databases.length > 0 || siteMeta.dbEnabled === true,
+      dbType: siteSnapshot.databases[0]?.type,
+      dbName: siteSnapshot.databases[0]?.name,
+      dbUser: siteSnapshot.databases[0]?.dbUser,
+      dbPassword: siteSnapshot.databases[0]?.dbPassword,
+      httpsRedirect: siteMeta.httpsRedirect !== false,
+      gitRepository: siteMeta.gitRepository || undefined,
+      deployBranch: siteMeta.deployBranch || undefined,
       appPort: siteMeta.appPort || undefined,
       envVars,
+      filesRelPath: siteMeta.filesRelPath || undefined,
+      modxVersion: siteMeta.modxVersion || undefined,
+      cmsTablePrefix: siteMeta.cmsTablePrefix || undefined,
+      managerPath: siteMeta.managerPath || undefined,
+      connectorsPath: siteMeta.connectorsPath || undefined,
       skipInstall: true,
     };
 
@@ -321,7 +394,7 @@ export class MigrationService {
     // ══════════ Step 6: Tell target to pull from source ══════════
     this.updateState(migrationId, 'import_pull');
 
-    const databases = (siteMeta.databases || []) as Array<{ name: string; type: string }>;
+    const databases = siteSnapshot.databases;
     let pullId: string;
 
     if (targetServerId === 'main') {
@@ -349,6 +422,22 @@ export class MigrationService {
     const pullResult = await this.pollPullStatus(targetServerId, pullId);
     if (!pullResult.success) {
       throw new Error(`Передача не удалась: ${pullResult.error || 'неизвестная ошибка'}`);
+    }
+
+    // ══════════ Step 8: Copy DB-only extras that are not inside archive ══════════
+    this.updateState(migrationId, 'apply_config');
+    if (targetServerId === 'main') {
+      await this.applySiteExtras(targetSiteId, siteSnapshot);
+    } else {
+      const server = this.proxy.getServer(targetServerId)!;
+      const { status, data } = await this.proxy.proxyRequest(server, 'POST', '/migration/apply-site-extras', {
+        siteId: targetSiteId,
+        snapshot: siteSnapshot,
+      });
+      if (status >= 400) {
+        const errMsg = (data as { error?: { message?: string } })?.error?.message || 'Ошибка переноса настроек сайта';
+        throw new Error(errMsg);
+      }
     }
 
     // ══════════ Step 8: Optional SSL ══════════
@@ -384,6 +473,445 @@ export class MigrationService {
     // ══════════ Done ══════════
     this.updateState(migrationId, 'done', 'Миграция завершена успешно', { targetSiteId });
     this.logger.log(`Migration ${migrationId} completed: site ${siteId} → ${targetSiteId}`);
+  }
+
+  async getSiteSnapshot(siteId: string): Promise<SiteSnapshot> {
+    const site = await this.prisma.site.findUnique({
+      where: { id: siteId },
+      include: {
+        domains: {
+          orderBy: { position: 'asc' },
+          select: {
+            domain: true,
+            isPrimary: true,
+            position: true,
+            aliases: true,
+            filesRelPath: true,
+            appPort: true,
+            httpsRedirect: true,
+            nginxClientMaxBodySize: true,
+            nginxFastcgiReadTimeout: true,
+            nginxFastcgiSendTimeout: true,
+            nginxFastcgiConnectTimeout: true,
+            nginxFastcgiBufferSizeKb: true,
+            nginxFastcgiBufferCount: true,
+            nginxHttp2: true,
+            nginxHsts: true,
+            nginxGzip: true,
+            nginxRateLimitEnabled: true,
+            nginxRateLimitRps: true,
+            nginxRateLimitBurst: true,
+            nginxCustomConfig: true,
+          },
+        },
+        databases: true,
+        cronJobs: {
+          select: { name: true, schedule: true, command: true, status: true },
+        },
+        quickCommands: {
+          select: {
+            label: true,
+            source: true,
+            target: true,
+            cwd: true,
+            sortOrder: true,
+          },
+          orderBy: { sortOrder: 'asc' },
+        },
+      },
+    });
+    if (!site) throw new NotFoundException('Сайт не найден');
+
+    const {
+      sshPasswordEnc: _ssh,
+      cmsAdminPasswordEnc: _cms,
+      domains,
+      databases,
+      cronJobs,
+      quickCommands,
+      ...safeSite
+    } = site;
+    void _ssh; void _cms;
+
+    return {
+      site: safeSite as unknown as Record<string, unknown>,
+      domains,
+      databases: databases.map((db) => ({
+        name: db.name,
+        type: db.type,
+        dbUser: db.dbUser,
+        dbPassword: this.decryptDbPassword(db),
+      })),
+      cronJobs,
+      quickCommands,
+    };
+  }
+
+  private decryptDbPassword(db: { dbPasswordEnc: string | null; name: string }): string {
+    if (!db.dbPasswordEnc) {
+      throw new BadRequestException(
+        `У базы "${db.name}" нет зашифрованного пароля. Сначала сделай reset password у БД.`,
+      );
+    }
+    const value = decryptJson<{ password?: string }>(db.dbPasswordEnc);
+    if (!value?.password) {
+      throw new BadRequestException(`Не удалось расшифровать пароль БД "${db.name}"`);
+    }
+    return value.password;
+  }
+
+  private async getSiteSnapshotFromServer(serverId: string, siteId: string): Promise<SiteSnapshot> {
+    if (serverId === 'main') return this.getSiteSnapshot(siteId);
+
+    const server = this.proxy.getServer(serverId);
+    if (!server) throw new Error('Исходный сервер не найден');
+    const { status, data } = await this.proxy.proxyRequest(server, 'GET', `/migration/site-snapshot/${siteId}`);
+    if (status >= 400) {
+      throw new Error((data as { error?: { message?: string } })?.error?.message || 'Ошибка получения snapshot сайта');
+    }
+    return (data as { data?: SiteSnapshot })?.data as SiteSnapshot;
+  }
+
+  private normalizeSnapshot(input: SiteSnapshot): SiteSnapshot {
+    const raw = (input || {}) as unknown as Record<string, unknown>;
+    const site = isObjectRecord(raw.site) ? raw.site : {};
+
+    const domains = Array.isArray(raw.domains)
+      ? raw.domains
+          .filter(isObjectRecord)
+          .map((d, idx) => ({
+            domain: String(d.domain || '').trim().toLowerCase(),
+            isPrimary: d.isPrimary === true,
+            position: numberValue(d.position, idx),
+            aliases: typeof d.aliases === 'string' ? d.aliases : '[]',
+            filesRelPath: nullableString(d.filesRelPath),
+            appPort: nullableNumber(d.appPort),
+            httpsRedirect: boolValue(d.httpsRedirect, true),
+            nginxClientMaxBodySize: nullableString(d.nginxClientMaxBodySize),
+            nginxFastcgiReadTimeout: nullableNumber(d.nginxFastcgiReadTimeout),
+            nginxFastcgiSendTimeout: nullableNumber(d.nginxFastcgiSendTimeout),
+            nginxFastcgiConnectTimeout: nullableNumber(d.nginxFastcgiConnectTimeout),
+            nginxFastcgiBufferSizeKb: nullableNumber(d.nginxFastcgiBufferSizeKb),
+            nginxFastcgiBufferCount: nullableNumber(d.nginxFastcgiBufferCount),
+            nginxHttp2: boolValue(d.nginxHttp2, true),
+            nginxHsts: boolValue(d.nginxHsts, false),
+            nginxGzip: boolValue(d.nginxGzip, true),
+            nginxRateLimitEnabled: boolValue(d.nginxRateLimitEnabled, true),
+            nginxRateLimitRps: nullableNumber(d.nginxRateLimitRps),
+            nginxRateLimitBurst: nullableNumber(d.nginxRateLimitBurst),
+            nginxCustomConfig: nullableString(d.nginxCustomConfig),
+          }))
+          .filter((d) => d.domain)
+      : [];
+
+    const databases = Array.isArray(raw.databases)
+      ? raw.databases
+          .filter(isObjectRecord)
+          .map((db) => ({
+            name: String(db.name || ''),
+            type: String(db.type || ''),
+            dbUser: String(db.dbUser || ''),
+            dbPassword: String(db.dbPassword || ''),
+          }))
+          .filter((db) => db.name && db.type)
+      : [];
+
+    const cronJobs = Array.isArray(raw.cronJobs)
+      ? raw.cronJobs
+          .filter(isObjectRecord)
+          .map((cron) => ({
+            name: String(cron.name || ''),
+            schedule: String(cron.schedule || ''),
+            command: String(cron.command || ''),
+            status: String(cron.status || CronJobStatus.ACTIVE),
+          }))
+          .filter((cron) => cron.name && cron.schedule && cron.command)
+      : [];
+
+    const quickCommands = Array.isArray(raw.quickCommands)
+      ? raw.quickCommands
+          .filter(isObjectRecord)
+          .map((cmd, idx) => ({
+            label: String(cmd.label || ''),
+            source: String(cmd.source || 'npm'),
+            target: String(cmd.target || ''),
+            cwd: String(cmd.cwd || ''),
+            sortOrder: numberValue(cmd.sortOrder, idx),
+          }))
+          .filter((cmd) => cmd.label && cmd.target && cmd.cwd)
+      : [];
+
+    return { site, domains, databases, cronJobs, quickCommands };
+  }
+
+  private snapshotDomainNames(snapshot: SiteSnapshot): string[] {
+    const names = new Set<string>();
+    const primaryDomain = String(snapshot.site.domain || '').trim().toLowerCase();
+    if (primaryDomain) names.add(primaryDomain);
+    for (const domain of snapshot.domains) {
+      if (domain.domain) names.add(domain.domain);
+      for (const alias of parseSiteAliases(domain.aliases)) {
+        names.add(alias.domain.trim().toLowerCase());
+      }
+    }
+    return [...names].filter(Boolean);
+  }
+
+  async preflightTarget(snapshot: SiteSnapshot): Promise<{ ok: true }> {
+    await this.assertLocalTargetConflicts(this.normalizeSnapshot(snapshot));
+    return { ok: true };
+  }
+
+  private async assertTargetConflicts(targetServerId: string, snapshot: SiteSnapshot): Promise<void> {
+    if (targetServerId === 'main') {
+      await this.assertLocalTargetConflicts(snapshot);
+      return;
+    }
+
+    const server = this.proxy.getServer(targetServerId);
+    if (!server) throw new Error('Целевой сервер не найден');
+    const { status, data } = await this.proxy.proxyRequest(server, 'POST', '/migration/target-preflight', {
+      snapshot,
+    });
+    if (status >= 400) {
+      const errMsg = (data as { error?: { message?: string } })?.error?.message || 'Ошибка preflight целевого сервера';
+      throw new BadRequestException(errMsg);
+    }
+  }
+
+  private async assertLocalTargetConflicts(snapshot: SiteSnapshot): Promise<void> {
+    const siteName = String(snapshot.site.name || '');
+    const domainNames = this.snapshotDomainNames(snapshot);
+    const errors: string[] = [];
+
+    const siteByName = await this.prisma.site.findUnique({
+      where: { name: siteName },
+      select: { name: true },
+    });
+    if (siteByName) errors.push(`на целевом сервере уже есть сайт с именем "${siteName}"`);
+
+    for (const domain of domainNames) {
+      const [siteByDomain, siteDomain] = await Promise.all([
+        this.prisma.site.findFirst({ where: { domain }, select: { name: true } }),
+        this.prisma.siteDomain.findFirst({ where: { domain }, select: { domain: true } }),
+      ]);
+      if (siteByDomain) errors.push(`на целевом сервере уже занят домен "${domain}"`);
+      if (siteDomain) errors.push(`на целевом сервере уже есть основной домен "${domain}"`);
+    }
+
+    for (const db of snapshot.databases) {
+      const existing = await this.prisma.database.findFirst({
+        where: { name: db.name, type: db.type },
+        select: { name: true, type: true },
+      });
+      if (existing) {
+        errors.push(`на целевом сервере уже есть БД "${db.name}" (${db.type})`);
+      }
+    }
+
+    if (errors.length > 0) {
+      throw new BadRequestException(`Preflight failed: ${errors.join('; ')}`);
+    }
+  }
+
+  async applySiteExtras(siteId: string, snapshot: SiteSnapshot): Promise<{ cronJobs: number; quickCommands: number }> {
+    snapshot = this.normalizeSnapshot(snapshot);
+
+    const site = await this.prisma.site.findUnique({
+      where: { id: siteId },
+      select: { id: true, name: true, systemUser: true, userId: true },
+    });
+    if (!site) throw new BadRequestException('Целевой сайт не найден');
+    const systemUser = site.systemUser || site.name;
+
+    await this.prisma.site.update({
+      where: { id: siteId },
+      data: this.buildSiteConfigUpdate(snapshot.site),
+    });
+    await this.applySiteDomains(siteId, site.userId, snapshot.domains);
+
+    await this.prisma.$transaction([
+      this.prisma.siteQuickCommand.deleteMany({ where: { siteId } }),
+      ...(snapshot.quickCommands.length > 0
+        ? [
+            this.prisma.siteQuickCommand.createMany({
+              data: snapshot.quickCommands.map((cmd, idx) => ({
+                siteId,
+                label: String(cmd.label).slice(0, 60),
+                source: cmd.source === 'make' ? 'make' : 'npm',
+                target: String(cmd.target).slice(0, 100),
+                cwd: String(cmd.cwd).slice(0, 512),
+                sortOrder: typeof cmd.sortOrder === 'number' ? cmd.sortOrder : idx,
+              })),
+            }),
+          ]
+        : []),
+    ]);
+
+    await this.prisma.cronJob.deleteMany({ where: { siteId } });
+    let cronCount = 0;
+    for (const cron of snapshot.cronJobs) {
+      const status = cron.status === CronJobStatus.DISABLED
+        ? CronJobStatus.DISABLED
+        : CronJobStatus.ACTIVE;
+      const created = await this.prisma.cronJob.create({
+        data: {
+          siteId,
+          name: cron.name,
+          schedule: cron.schedule,
+          command: cron.command,
+          status,
+        },
+      });
+
+      const result = await this.agentRelay.emitToAgent('cron:add', {
+        id: created.id,
+        schedule: cron.schedule,
+        command: cron.command,
+        enabled: status === CronJobStatus.ACTIVE,
+        user: systemUser,
+      });
+      if (!result.success) {
+        await this.prisma.cronJob.delete({ where: { id: created.id } }).catch(() => {});
+        throw new Error(`Cron "${cron.name}" не применён: ${result.error || 'unknown error'}`);
+      }
+      cronCount += 1;
+    }
+
+    return {
+      cronJobs: cronCount,
+      quickCommands: snapshot.quickCommands.length,
+    };
+  }
+
+  private async applySiteDomains(
+    siteId: string,
+    userId: string,
+    sourceDomains: SiteDomainSnapshot[],
+  ): Promise<void> {
+    if (sourceDomains.length === 0) {
+      await this.siteDomains.regenerateGlobalZones();
+      await this.siteDomains.regenerateNginx(siteId);
+      return;
+    }
+
+    const ordered = [...sourceDomains].sort((a, b) => a.position - b.position);
+    const primarySource = ordered.find((d) => d.isPrimary) || ordered[0];
+
+    for (const sourceDomain of ordered) {
+      let targetDomain = await this.findTargetDomain(siteId, sourceDomain, primarySource);
+
+      if (!targetDomain) {
+        await this.siteDomains.createDomain(
+          siteId,
+          { domain: sourceDomain.domain },
+          userId,
+          UserRole.ADMIN,
+        );
+        targetDomain = await this.prisma.siteDomain.findFirst({
+          where: { siteId, domain: sourceDomain.domain },
+          select: { id: true, domain: true, isPrimary: true },
+        });
+      }
+      if (!targetDomain) {
+        throw new Error(`Не удалось создать домен "${sourceDomain.domain}"`);
+      }
+
+      await this.siteDomains.updateDomain(
+        siteId,
+        targetDomain.id,
+        {
+          domain: sourceDomain.domain,
+          filesRelPath: sourceDomain.filesRelPath,
+          appPort: sourceDomain.appPort,
+          httpsRedirect: sourceDomain.httpsRedirect,
+        },
+        userId,
+        UserRole.ADMIN,
+      );
+
+      const refreshed = await this.prisma.siteDomain.findFirst({
+        where: { siteId, domain: sourceDomain.domain },
+        select: { id: true },
+      });
+      if (!refreshed) throw new Error(`Домен "${sourceDomain.domain}" не найден после update`);
+
+      await this.siteDomains.updateAliases(
+        siteId,
+        refreshed.id,
+        { aliases: parseSiteAliases(sourceDomain.aliases) },
+        userId,
+        UserRole.ADMIN,
+      );
+
+      await this.prisma.siteDomain.update({
+        where: { id: refreshed.id },
+        data: this.buildDomainConfigUpdate(sourceDomain),
+      });
+    }
+
+    await this.siteDomains.syncPrimaryMirror(siteId);
+    await this.siteDomains.regenerateGlobalZones();
+    await this.siteDomains.regenerateNginx(siteId);
+  }
+
+  private async findTargetDomain(
+    siteId: string,
+    sourceDomain: SiteDomainSnapshot,
+    primarySource: SiteDomainSnapshot,
+  ): Promise<{ id: string; domain: string; isPrimary: boolean } | null> {
+    if (sourceDomain.isPrimary || sourceDomain.domain === primarySource.domain) {
+      return this.prisma.siteDomain.findFirst({
+        where: { siteId, isPrimary: true },
+        select: { id: true, domain: true, isPrimary: true },
+      });
+    }
+    return this.prisma.siteDomain.findFirst({
+      where: { siteId, domain: sourceDomain.domain },
+      select: { id: true, domain: true, isPrimary: true },
+    });
+  }
+
+  private buildSiteConfigUpdate(site: Record<string, unknown>): Prisma.SiteUpdateInput {
+    const data: Prisma.SiteUpdateInput = {};
+
+    if ('phpPoolCustom' in site) data.phpPoolCustom = nullableString(site.phpPoolCustom);
+    if ('nginxClientMaxBodySize' in site) data.nginxClientMaxBodySize = nullableString(site.nginxClientMaxBodySize);
+    if ('nginxFastcgiReadTimeout' in site) data.nginxFastcgiReadTimeout = nullableNumber(site.nginxFastcgiReadTimeout);
+    if ('nginxFastcgiSendTimeout' in site) data.nginxFastcgiSendTimeout = nullableNumber(site.nginxFastcgiSendTimeout);
+    if ('nginxFastcgiConnectTimeout' in site) data.nginxFastcgiConnectTimeout = nullableNumber(site.nginxFastcgiConnectTimeout);
+    if ('nginxFastcgiBufferSizeKb' in site) data.nginxFastcgiBufferSizeKb = nullableNumber(site.nginxFastcgiBufferSizeKb);
+    if ('nginxFastcgiBufferCount' in site) data.nginxFastcgiBufferCount = nullableNumber(site.nginxFastcgiBufferCount);
+    if ('nginxHttp2' in site) data.nginxHttp2 = boolValue(site.nginxHttp2, true);
+    if ('nginxHsts' in site) data.nginxHsts = boolValue(site.nginxHsts, false);
+    if ('nginxGzip' in site) data.nginxGzip = boolValue(site.nginxGzip, true);
+    if ('nginxRateLimitEnabled' in site) data.nginxRateLimitEnabled = boolValue(site.nginxRateLimitEnabled, true);
+    if ('nginxRateLimitRps' in site) data.nginxRateLimitRps = nullableNumber(site.nginxRateLimitRps);
+    if ('nginxRateLimitBurst' in site) data.nginxRateLimitBurst = nullableNumber(site.nginxRateLimitBurst);
+    if ('nginxCustomConfig' in site) data.nginxCustomConfig = nullableString(site.nginxCustomConfig);
+    if ('backupExcludes' in site) data.backupExcludes = nullableString(site.backupExcludes);
+    if ('backupExcludeTables' in site) data.backupExcludeTables = nullableString(site.backupExcludeTables);
+
+    return data;
+  }
+
+  private buildDomainConfigUpdate(domain: SiteDomainSnapshot): Prisma.SiteDomainUpdateInput {
+    return {
+      position: domain.position,
+      nginxClientMaxBodySize: domain.nginxClientMaxBodySize,
+      nginxFastcgiReadTimeout: domain.nginxFastcgiReadTimeout,
+      nginxFastcgiSendTimeout: domain.nginxFastcgiSendTimeout,
+      nginxFastcgiConnectTimeout: domain.nginxFastcgiConnectTimeout,
+      nginxFastcgiBufferSizeKb: domain.nginxFastcgiBufferSizeKb,
+      nginxFastcgiBufferCount: domain.nginxFastcgiBufferCount,
+      nginxHttp2: domain.nginxHttp2,
+      nginxHsts: domain.nginxHsts,
+      nginxGzip: domain.nginxGzip,
+      nginxRateLimitEnabled: domain.nginxRateLimitEnabled,
+      nginxRateLimitRps: domain.nginxRateLimitRps,
+      nginxRateLimitBurst: domain.nginxRateLimitBurst,
+      nginxCustomConfig: domain.nginxCustomConfig,
+    };
   }
 
   // ═══════════════════════════════════════════════════════════════════════════
@@ -443,7 +971,7 @@ export class MigrationService {
   async startImportPull(
     siteId: string,
     sourceUrl: string,
-    databases: Array<{ name: string; type: string }>,
+    databases: DatabaseSnapshot[],
   ): Promise<{ pullId: string; backupId: string }> {
     const site = await this.prisma.site.findUnique({
       where: { id: siteId },
@@ -496,7 +1024,7 @@ export class MigrationService {
     pullState: PullState,
     site: { id: string; name: string; rootPath: string },
     sourceUrl: string,
-    databases: Array<{ name: string; type: string }>,
+    databases: DatabaseSnapshot[],
   ) {
     const localPath = path.join(BACKUP_DIR, `migration_${pullState.pullId}.tar.gz`);
 
@@ -571,7 +1099,9 @@ export class MigrationService {
     // ── Phase 2: Restore ──
     pullState.phase = 'restoring';
 
-    this.agentRelay.emitToAgentAsync('backup:restore', {
+    await this.ensureTargetDatabases(site.id, databases);
+
+    const restoreResult = await this.agentRelay.emitToAgent<{ success: boolean; error?: string }>('backup:restore', {
       backupId: pullState.backupId,
       siteId: site.id,
       siteName: site.name,
@@ -580,33 +1110,10 @@ export class MigrationService {
       storageType: 'LOCAL',
       storageConfig: {},
       databases,
-    });
+    }, RESTORE_TIMEOUT_MS);
 
-    // Poll restore status — 30 минут при шаге 5с.
-    const maxAttempts = Math.ceil((30 * 60 * 1000) / AGENT_POLL_INTERVAL_MS);
-    for (let i = 0; i < maxAttempts; i++) {
-      await this.sleep(AGENT_POLL_INTERVAL_MS);
-
-      const backup = await this.prisma.backup.findUnique({
-        where: { id: pullState.backupId },
-        select: { progress: true, status: true, errorMessage: true },
-      });
-      if (!backup) continue;
-
-      pullState.restoreProgress = backup.progress;
-
-      // Check for restore complete event (status changes happen via gateway)
-      // The agent sends backup:restore:complete which doesn't change backup status in DB.
-      // We rely on the agent:backup:restore:complete handler. However, the backup record
-      // status was set to COMPLETED when we created it after download. We'll check for
-      // the restore via a different mechanism — poll until the restore progress hits 100 or errors.
-
-      // Actually, the restore doesn't update the backup record directly.
-      // Let's check if the site is back in RUNNING status as a signal.
-      // For now, we just wait for the restore progress event.
-      if (pullState.restoreProgress >= 100) {
-        break;
-      }
+    if (!restoreResult.success || restoreResult.data?.success === false) {
+      throw new Error(restoreResult.error || restoreResult.data?.error || 'Restore failed');
     }
 
     // Cleanup downloaded file
@@ -616,9 +1123,93 @@ export class MigrationService {
     pullState.restoreProgress = 100;
   }
 
+  private async ensureTargetDatabases(siteId: string, databases: DatabaseSnapshot[]): Promise<void> {
+    for (const db of databases) {
+      if (!db.name || !db.type || !db.dbUser || !db.dbPassword) {
+        throw new Error(`Неполный snapshot БД "${db.name || 'unknown'}"`);
+      }
+
+      const existing = await this.prisma.database.findFirst({
+        where: { name: db.name, type: db.type },
+        select: { id: true, siteId: true },
+      });
+
+      if (existing) {
+        if (existing.siteId !== siteId) {
+          throw new Error(`БД "${db.name}" (${db.type}) уже привязана к другому сайту`);
+        }
+        continue;
+      }
+
+      const passwordHash = await hashPassword(db.dbPassword);
+      const passwordEnc = encryptJson({ password: db.dbPassword });
+      const record = await this.prisma.database.create({
+        data: {
+          name: db.name,
+          type: db.type as DatabaseType,
+          dbUser: db.dbUser,
+          dbPasswordHash: passwordHash,
+          dbPasswordEnc: passwordEnc,
+          siteId,
+        },
+      });
+
+      const result = await this.agentRelay.emitToAgent('db:create', {
+        name: db.name,
+        type: db.type,
+        dbUser: db.dbUser,
+        password: db.dbPassword,
+      });
+      if (!result.success) {
+        await this.prisma.database.delete({ where: { id: record.id } }).catch(() => {});
+        throw new Error(`Создание БД "${db.name}" не удалось: ${result.error || 'unknown error'}`);
+      }
+    }
+  }
+
   // ═══════════════════════════════════════════════════════════════════════════
   // Helpers
   // ═══════════════════════════════════════════════════════════════════════════
+
+  private async assertServerVersions(params: MigrateParams): Promise<void> {
+    const checks = await Promise.all([
+      this.getPanelVersion(params.sourceServerId),
+      this.getPanelVersion(params.targetServerId),
+    ]);
+
+    for (const check of checks) {
+      if (!check.online) {
+        throw new BadRequestException(`Сервер "${check.label}" офлайн: ${check.error || 'нет ответа'}`);
+      }
+      if (!check.version || compareSemver(check.version, MIN_MIGRATION_VERSION) < 0) {
+        throw new BadRequestException(
+          `Сервер "${check.label}" должен быть не ниже ${MIN_MIGRATION_VERSION}, сейчас ${check.version || 'unknown'}`,
+        );
+      }
+    }
+  }
+
+  private async getPanelVersion(serverId: string): Promise<{
+    label: string;
+    online: boolean;
+    version?: string;
+    error?: string;
+  }> {
+    if (serverId === 'main') {
+      return { label: 'Этот сервер', online: true, version: readLocalVersion() };
+    }
+    const server = this.proxy.getServer(serverId);
+    if (!server) {
+      return { label: serverId, online: false, error: 'сервер не найден' };
+    }
+    const ping = await this.proxy.pingServer(server);
+    return {
+      label: server.name,
+      online: ping.online,
+      version: ping.version,
+      error: ping.lastError,
+    };
+  }
 
   private async localPost(path: string, body: unknown, userId: string): Promise<Record<string, unknown>> {
     const port = process.env.API_PORT || process.env.PANEL_PORT || '11860';
@@ -729,4 +1320,49 @@ export class MigrationService {
   private sleep(ms: number): Promise<void> {
     return new Promise(resolve => setTimeout(resolve, ms));
   }
+}
+
+function readLocalVersion(): string {
+  try {
+    return fs.readFileSync(path.join(process.cwd(), '..', 'VERSION'), 'utf8').trim();
+  } catch {
+    return MIN_MIGRATION_VERSION;
+  }
+}
+
+function compareSemver(a: string, b: string): number {
+  const aa = a.replace(/^v/i, '').split(/[.-]/);
+  const bb = b.replace(/^v/i, '').split(/[.-]/);
+  for (let i = 0; i < Math.max(aa.length, bb.length); i++) {
+    const av = aa[i] ?? '0';
+    const bv = bb[i] ?? '0';
+    const an = Number(av);
+    const bn = Number(bv);
+    if (!Number.isNaN(an) && !Number.isNaN(bn)) {
+      if (an !== bn) return an < bn ? -1 : 1;
+    } else if (av !== bv) {
+      return av < bv ? -1 : 1;
+    }
+  }
+  return 0;
+}
+
+function isObjectRecord(value: unknown): value is Record<string, unknown> {
+  return !!value && typeof value === 'object' && !Array.isArray(value);
+}
+
+function nullableString(value: unknown): string | null {
+  return typeof value === 'string' ? value : null;
+}
+
+function nullableNumber(value: unknown): number | null {
+  return typeof value === 'number' && Number.isFinite(value) ? value : null;
+}
+
+function numberValue(value: unknown, fallback: number): number {
+  return typeof value === 'number' && Number.isFinite(value) ? value : fallback;
+}
+
+function boolValue(value: unknown, fallback: boolean): boolean {
+  return typeof value === 'boolean' ? value : fallback;
 }
