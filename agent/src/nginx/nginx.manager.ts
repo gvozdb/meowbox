@@ -276,6 +276,24 @@ export class NginxManager {
     const backupPath = `${ZONES_PATH}.bak`;
     const lines: string[] = [ZONES_HEADER.trimEnd(), ''];
     const seen = new Set<string>();
+
+    // Сначала добавляем legacy-зоны, реально упоминаемые в существующих
+    // чанках сайтов (`limit_req zone=NAME ...`). Иначе при дроп-перегенерации
+    // (например, после hostpanel-миграции) старые чанки указывают на исчезнувшую
+    // зону → `nginx -t` падает, фоллбэк-restore оставляет ВСЁ старое и
+    // нормальная регенерация сайта (которая удалила бы устаревшие чанки) тоже
+    // не пройдёт. Catch-22. Слияние ломает цепочку без рисков (лишняя зона
+    // ничего не ломает, только держит чуть-чуть памяти).
+    try {
+      const legacy = await this.collectLegacyZoneRefs();
+      for (const name of legacy) {
+        const safe = name.replace(/[^a-zA-Z0-9_-]/g, '_');
+        if (!safe || safe === 'site_limit' || seen.has(safe)) continue;
+        seen.add(safe);
+        lines.push(`limit_req_zone $binary_remote_addr zone=${safe}:1m rate=30r/s;`);
+      }
+    } catch { /* best-effort: если не смогли пройтись по диску — игнорируем */ }
+
     for (const z of zones) {
       const safe = String(z.zoneName || '').replace(/[^a-zA-Z0-9_-]/g, '_');
       if (!safe || safe === 'site_limit' || seen.has(safe)) continue;
@@ -306,6 +324,48 @@ export class NginxManager {
     } catch (err) {
       return { success: false, error: (err as Error).message };
     }
+  }
+
+  /**
+   * Собирает имена rate-limit zones, реально упоминаемых в `limit_req zone=...`
+   * во ВСЕХ существующих чанках meowbox-сайтов. Используется как страховка от
+   * catch-22, когда регенерация global-zones и регенерация сайт-чанков ссылаются
+   * друг на друга.
+   */
+  private async collectLegacyZoneRefs(): Promise<Set<string>> {
+    const result = new Set<string>();
+    const re = /limit_req\s+zone=([A-Za-z0-9_-]+)/g;
+    let siteDirs: string[];
+    try {
+      siteDirs = await fs.readdir(MEOWBOX_INCLUDE_DIR);
+    } catch {
+      return result;
+    }
+    for (const siteName of siteDirs) {
+      const siteDir = path.join(MEOWBOX_INCLUDE_DIR, siteName);
+      let domDirs: string[];
+      try {
+        const entries = await fs.readdir(siteDir, { withFileTypes: true });
+        domDirs = entries.filter((e) => e.isDirectory()).map((e) => e.name);
+      } catch { continue; }
+      for (const domId of domDirs) {
+        const domDir = path.join(siteDir, domId);
+        let files: string[];
+        try { files = await fs.readdir(domDir); } catch { continue; }
+        for (const f of files) {
+          if (!f.endsWith('.conf')) continue;
+          let content: string;
+          try { content = await fs.readFile(path.join(domDir, f), 'utf8'); }
+          catch { continue; }
+          let m: RegExpExecArray | null;
+          re.lastIndex = 0;
+          while ((m = re.exec(content)) !== null) {
+            result.add(m[1]);
+          }
+        }
+      }
+    }
+    return result;
   }
 
   /**

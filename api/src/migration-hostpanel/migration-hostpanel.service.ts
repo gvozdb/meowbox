@@ -966,7 +966,10 @@ export class MigrationHostpanelService implements OnModuleInit {
       where: { name },
       select: { id: true },
     });
-    const conflictDb = await this.prisma.database.findUnique({
+    // name больше не уникален глобально (composite [name,type]); для проверки
+    // конфликта при migration-планировании достаточно first-match независимо
+    // от движка — оператору важно увидеть, что имя где-то занято.
+    const conflictDb = await this.prisma.database.findFirst({
       where: { name },
       select: { id: true },
     });
@@ -1022,7 +1025,10 @@ export class MigrationHostpanelService implements OnModuleInit {
       if (free.length >= 3) break;
       const [s, d] = await Promise.all([
         this.prisma.site.findUnique({ where: { name: c }, select: { id: true } }),
-        this.prisma.database.findUnique({ where: { name: c }, select: { id: true } }),
+        // name больше не глобально-уникален (composite [name,type]); ищем
+        // любую запись с этим именем — для подбора свободного кандидата
+        // достаточно first-match независимо от движка.
+        this.prisma.database.findFirst({ where: { name: c }, select: { id: true } }),
       ]);
       if (!s && !d) free.push(c);
     }

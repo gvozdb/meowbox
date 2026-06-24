@@ -9,7 +9,9 @@ import { ConfigService } from '@nestjs/config';
 import { randomUUID } from 'crypto';
 import { readFile, writeFile, rename, mkdir, chmod } from 'fs/promises';
 import { existsSync } from 'fs';
+import { isIP } from 'net';
 import { join } from 'path';
+import { Agent as UndiciAgent, type Dispatcher } from 'undici';
 import { assertPublicHttpUrl } from '../common/validators/safe-url';
 
 export interface ServerConfig {
@@ -40,6 +42,9 @@ const SERVERS_FILE = join(DATA_DIR, 'servers.json');
 export class ProxyService implements OnModuleInit {
   private readonly logger = new Logger('ProxyService');
   private servers: ServerConfig[] = [];
+  private readonly insecureIpTlsDispatcher = new UndiciAgent({
+    connect: { rejectUnauthorized: false },
+  });
 
   constructor(private readonly config: ConfigService) {}
 
@@ -104,6 +109,19 @@ export class ProxyService implements OnModuleInit {
 
   getServer(id: string): ServerConfig | undefined {
     return this.servers.find((s) => s.id === id);
+  }
+
+  allowsInsecureTlsForIp(server: ServerConfig): boolean {
+    try {
+      const url = new URL(server.url);
+      return url.protocol === 'https:' && isIP(url.hostname.replace(/^\[|\]$/g, '')) !== 0;
+    } catch {
+      return false;
+    }
+  }
+
+  private getFetchDispatcher(server: ServerConfig): Dispatcher | undefined {
+    return this.allowsInsecureTlsForIp(server) ? this.insecureIpTlsDispatcher : undefined;
   }
 
   async addServer(
@@ -237,6 +255,10 @@ export class ProxyService implements OnModuleInit {
       headers: reqHeaders,
       signal: AbortSignal.timeout(timeoutMs),
     };
+    const dispatcher = this.getFetchDispatcher(server);
+    if (dispatcher) {
+      (fetchOptions as RequestInit & { dispatcher: Dispatcher }).dispatcher = dispatcher;
+    }
 
     if (body && method !== 'GET' && method !== 'HEAD') {
       fetchOptions.body = JSON.stringify(body);
@@ -314,6 +336,10 @@ export class ProxyService implements OnModuleInit {
       // duplex: 'half' нужен для streaming body, но мы передаём целиком Buffer
       // (контроллер уже собрал raw body), так что это не критично.
     };
+    const dispatcher = this.getFetchDispatcher(server);
+    if (dispatcher) {
+      (fetchOptions as RequestInit & { dispatcher: Dispatcher }).dispatcher = dispatcher;
+    }
 
     if (body && body.length > 0 && method !== 'GET' && method !== 'HEAD') {
       // node-fetch принимает Buffer — но lib.dom типы fetch BodyInit не

@@ -1,4 +1,4 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import { Cron, CronExpression } from '@nestjs/schedule';
 import { PrismaService } from '../common/prisma.service';
 import { BackupsService } from '../backups/backups.service';
@@ -43,14 +43,22 @@ const WATCHDOG_DEPLOY_TIMEOUT_MS = envInt('WATCHDOG_DEPLOY_TIMEOUT_MS', 60 * 60 
 const HEALTH_PING_RETENTION_MS = envInt('HEALTH_PING_RETENTION_DAYS', 7) * 24 * 60 * 60 * 1000;
 const DISK_SNAPSHOT_RETENTION_MS = envInt('DISK_SNAPSHOT_RETENTION_DAYS', 90) * 24 * 60 * 60 * 1000;
 
+// Ключ в panel_settings для персиста состояния disk-алёрта между рестартами API.
+// Без него каждый pm2 restart сбрасывает edge-state → следующий cron-тик стреляет
+// заново → юзер получает «Disk Usage High» каждые 2 минуты после деплоя.
+const DISK_ALERT_STATE_KEY = 'disk-alert-state';
+
 @Injectable()
-export class SchedulerService {
+export class SchedulerService implements OnModuleInit {
   private readonly logger = new Logger('Scheduler');
   private lastHighLoadAlert = 0;
   // Disk-алёрт хранит уровень + время последнего уведомления, чтобы
   // не спамить раз в 30 минут пока диск стабильно держится выше порога.
+  // Persist в БД (см. loadDiskAlertState / persistDiskAlertState), иначе
+  // рестарт API сбрасывает edge-trigger и алёрт срабатывает повторно.
   private lastDiskLevel: 'ok' | 'high' | 'critical' = 'ok';
   private lastDiskAlertAt = 0;
+  private diskAlertStateLoaded = false;
 
   constructor(
     private readonly prisma: PrismaService,
@@ -69,6 +77,54 @@ export class SchedulerService {
     private readonly dnsService: DnsService,
     private readonly countryBlockService: CountryBlockService,
   ) {}
+
+  async onModuleInit() {
+    await this.loadDiskAlertState();
+  }
+
+  // Подтягиваем последний уровень/время disk-алёрта из БД на старте.
+  // Если запись пустая или невалидная — остаёмся в дефолтах (ok / 0).
+  private async loadDiskAlertState() {
+    try {
+      const row = await this.prisma.panelSetting.findUnique({
+        where: { key: DISK_ALERT_STATE_KEY },
+      });
+      if (!row) {
+        this.diskAlertStateLoaded = true;
+        return;
+      }
+      const parsed = JSON.parse(row.value) as {
+        level?: 'ok' | 'high' | 'critical';
+        at?: number;
+      };
+      if (parsed.level === 'ok' || parsed.level === 'high' || parsed.level === 'critical') {
+        this.lastDiskLevel = parsed.level;
+      }
+      if (typeof parsed.at === 'number' && parsed.at > 0) {
+        this.lastDiskAlertAt = parsed.at;
+      }
+      this.diskAlertStateLoaded = true;
+    } catch (err) {
+      this.logger.warn(`Failed to load disk alert state: ${(err as Error).message}`);
+      this.diskAlertStateLoaded = true;
+    }
+  }
+
+  private async persistDiskAlertState() {
+    const value = JSON.stringify({
+      level: this.lastDiskLevel,
+      at: this.lastDiskAlertAt,
+    });
+    try {
+      await this.prisma.panelSetting.upsert({
+        where: { key: DISK_ALERT_STATE_KEY },
+        create: { key: DISK_ALERT_STATE_KEY, value },
+        update: { value },
+      });
+    } catch (err) {
+      this.logger.warn(`Failed to persist disk alert state: ${(err as Error).message}`);
+    }
+  }
 
   // =========================================================================
   // Country block — refresh CIDR-баз по cron из настроек (`updateSchedule`).
@@ -606,11 +662,18 @@ export class SchedulerService {
       : metrics.diskPercent >= DISK_ALERT_HIGH_THRESHOLD ? 'high'
       : 'ok';
 
+    // Если в БД не подтянулось состояние (init ещё не отработал) — пропускаем
+    // тик, иначе после рестарта первый же cron посчитает уровень edge-событием
+    // и стрельнёт повторно.
+    if (!this.diskAlertStateLoaded) return;
+
     if (level === 'ok') {
       // Перешли в норму — сбрасываем состояние, следующий заход выше порога
       // снова считается edge-событием.
+      const changed = this.lastDiskLevel !== 'ok' || this.lastDiskAlertAt !== 0;
       this.lastDiskLevel = 'ok';
       this.lastDiskAlertAt = 0;
+      if (changed) await this.persistDiskAlertState();
     } else {
       const escalated =
         this.lastDiskLevel === 'ok' ||
@@ -621,6 +684,7 @@ export class SchedulerService {
       if (escalated || reminderDue) {
         this.lastDiskLevel = level;
         this.lastDiskAlertAt = now;
+        await this.persistDiskAlertState();
 
         this.notifier.dispatch({
           event: 'DISK_FULL',
@@ -630,10 +694,11 @@ export class SchedulerService {
         }).catch((err) => this.logger.error(`Notification failed: ${(err as Error).message}`));
 
         this.logger.warn(`Disk usage ${level}: ${Math.round(metrics.diskPercent)}%`);
-      } else {
-        // Уровень держится, reminder ещё не подошёл — молчим. Уровень не апдейтим
-        // (он и так совпадает с прошлым).
+      } else if (this.lastDiskLevel !== level) {
+        // Уровень держится в alarm-зоне, но это не эскалация (например, перешли
+        // critical→high — уже уведомляли). Запоминаем без отправки.
         this.lastDiskLevel = level;
+        await this.persistDiskAlertState();
       }
     }
   }

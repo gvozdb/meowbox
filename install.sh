@@ -1092,7 +1092,36 @@ done
 
 pm2 start ecosystem.config.js >> "$LOG_FILE" 2>&1 || pm2 restart ecosystem.config.js >> "$LOG_FILE" 2>&1
 pm2 save >> "$LOG_FILE" 2>&1
-pm2 startup systemd -u root --hp /root >> "$LOG_FILE" 2>&1 || true
+
+PM2_BIN="$(command -v pm2 || echo /usr/local/bin/pm2)"
+cat > /etc/systemd/system/meowbox-panel-pm2.service <<SERVICE
+# Managed by Meowbox — autostart панели.
+[Unit]
+Description=PM2 process manager for Meowbox panel
+Documentation=https://pm2.keymetrics.io/
+After=network.target
+
+[Service]
+Type=forking
+User=root
+LimitNOFILE=infinity
+LimitNPROC=infinity
+LimitCORE=infinity
+Environment=PM2_HOME=/root/.pm2
+PIDFile=/root/.pm2/pm2.pid
+Restart=on-failure
+RestartSec=10
+
+ExecStart=${PM2_BIN} resurrect
+ExecReload=${PM2_BIN} reload all
+ExecStop=${PM2_BIN} kill
+
+[Install]
+WantedBy=multi-user.target
+SERVICE
+systemctl daemon-reload >> "$LOG_FILE" 2>&1 || true
+systemctl enable meowbox-panel-pm2.service >> "$LOG_FILE" 2>&1 || true
+systemctl disable pm2@root.service >> "$LOG_FILE" 2>&1 || true
 
 # =============================================================================
 # Create backup directory

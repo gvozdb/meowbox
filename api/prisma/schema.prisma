@@ -289,7 +289,10 @@ model SiteService {
 
 model Database {
   id             String   @id @default(uuid())
-  name           String   @unique
+  // Имя БД уникально в рамках одного движка (type), но может повторяться между
+  // движками: на сервере MariaDB и PostgreSQL — это разные namespace, и нельзя
+  // блокировать создание pg-БД только потому, что MariaDB уже занял такое имя.
+  name           String
   type           String // DatabaseType
   dbUser         String   @map("db_user")
   dbPasswordHash String   @map("db_password_hash")
@@ -307,6 +310,7 @@ model Database {
 
   site Site? @relation(fields: [siteId], references: [id], onDelete: SetNull)
 
+  @@unique([name, type])
   @@index([siteId])
   @@map("databases")
 }

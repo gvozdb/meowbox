@@ -260,6 +260,7 @@ export class AgentGateway implements OnGatewayConnection, OnGatewayDisconnect {
       transports: ['websocket'],
       reconnection: false, // upstream одноразовый — если падает, клиент пересоединится
       timeout: 10_000,
+      rejectUnauthorized: !this.proxyService.allowsInsecureTlsForIp(server),
     });
 
     // Дожидаемся коннекта. Если не получилось — закрываем клиента.

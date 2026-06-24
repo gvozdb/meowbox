@@ -165,12 +165,14 @@ export class DatabasesService implements OnModuleInit, OnModuleDestroy {
   }
 
   async create(dto: CreateDatabaseDto, userId: string) {
-    // Check uniqueness
-    const existing = await this.prisma.database.findUnique({
-      where: { name: dto.name },
+    // Имя уникально в рамках движка (см. @@unique([name, type]) в schema).
+    // MariaDB и PostgreSQL — разные namespace на сервере, имя БД может совпадать.
+    const existing = await this.prisma.database.findFirst({
+      where: { name: dto.name, type: dto.type },
+      select: { id: true },
     });
     if (existing) {
-      throw new ConflictException(`Database "${dto.name}" already exists`);
+      throw new ConflictException(`Database "${dto.name}" (${dto.type}) already exists`);
     }
 
     // Движок должен быть установлен на сервере. ServerService — синхронизированный
@@ -328,6 +330,35 @@ export class DatabasesService implements OnModuleInit, OnModuleDestroy {
     });
 
     return { plainPassword };
+  }
+
+  /**
+   * Возвращает плейн-пароль БД для UI-просмотра.
+   *
+   * Использование: оператору регулярно нужно подсмотреть/скопировать пароль БД
+   * (в config сайта, в SSH-туннеле и т.п.). Reset каждый раз — лишнее
+   * (ломает существующие connection-строки). Поэтому даём прочитать
+   * сохранённый зашифрованный пароль.
+   *
+   * Безопасность:
+   *   - Только admin (enforced на контроллере @Roles('ADMIN')).
+   *   - Дополнительно — ownership-чек через findById (admin и так проходит).
+   *   - Throttle на контроллере, чтобы перебор по id-ам был дорогим.
+   *   - Если в БД хранится только legacy-хэш без enc — кидаем BadRequest
+   *     с подсказкой сделать reset (тот же путь, что и Adminer SSO).
+   */
+  async revealPassword(id: string, userId: string, role: string): Promise<{
+    name: string;
+    dbUser: string;
+    password: string;
+  }> {
+    const db = await this.findById(id, userId, role);
+    const password = this.getPlainPassword(db);
+    return {
+      name: db.name,
+      dbUser: db.dbUser,
+      password,
+    };
   }
 
   // ===========================================================================

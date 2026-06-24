@@ -1714,7 +1714,9 @@ export class SitesService implements OnModuleInit {
               DatabaseType.POSTGRESQL;
 
             const dbRecord = await this.prisma.database.upsert({
-              where: { name: dbName },
+              // Уникальность теперь composite [name, type]: одна и та же name
+              // может существовать в разных движках. Upsert ищет точную пару.
+              where: { name_type: { name: dbName, type: prismaDbType } },
               update: {
                 type: prismaDbType,
                 dbUser,

@@ -112,8 +112,12 @@ export class SiteDomainsService {
     });
 
     await this.syncPrimaryMirror(site.id);
-    await this.regenerateNginx(site.id);
+    // ВАЖНО: global-zones ДО site-regen. Иначе чанки нового домена ссылаются на
+    // `mb_<newId>` зону, которой ещё нет в meowbox-zones.conf → `nginx -t`
+    // падает → агент откатывает backup → старая конфигурация остаётся, новый
+    // домен в nginx не появляется. См. nginx.manager.ts::writeGlobalZones.
     await this.regenerateGlobalZones();
+    await this.regenerateNginx(site.id);
 
     this.logger.log(`Domain "${domain}" added to site "${site.name}"`);
     return this.listDomains(site.id, userId, role);
@@ -192,6 +196,10 @@ export class SiteDomainsService {
     }
 
     await this.syncPrimaryMirror(site.id);
+    // На случай, если global-zones файл не содержит зону этого домена (например,
+    // createDomain в прошлом упал, до ввода правильного порядка) — гарантируем
+    // её наличие ДО регенерации сайт-чанков. Дешёвая идемпотентная операция.
+    await this.regenerateGlobalZones();
     await this.regenerateNginx(site.id);
 
     return this.listDomains(site.id, userId, role);
@@ -243,8 +251,9 @@ export class SiteDomainsService {
     // Перенумеровываем позиции оставшихся доменов.
     await this.renumberPositions(site.id);
     await this.syncPrimaryMirror(site.id);
-    await this.regenerateNginx(site.id);
+    // global-zones ДО site-regen — см. createDomain.
     await this.regenerateGlobalZones();
+    await this.regenerateNginx(site.id);
 
     this.logger.log(`Domain "${target.domain}" removed from site "${site.name}"`);
     return this.listDomains(site.id, userId, role);
@@ -288,6 +297,9 @@ export class SiteDomainsService {
     ]);
 
     await this.syncPrimaryMirror(site.id);
+    // global-zones ДО site-regen — идемпотентная страховка от старого
+    // catch-22 (см. createDomain).
+    await this.regenerateGlobalZones();
     await this.regenerateNginx(site.id);
 
     this.logger.log(`Primary domain of site "${site.name}" → "${target.domain}"`);
@@ -331,6 +343,9 @@ export class SiteDomainsService {
     });
 
     await this.syncPrimaryMirror(site.id);
+    // global-zones ДО site-regen — идемпотентная страховка от старого
+    // catch-22 (см. createDomain).
+    await this.regenerateGlobalZones();
     await this.regenerateNginx(site.id);
 
     return this.listDomains(site.id, userId, role);
@@ -393,10 +408,19 @@ export class SiteDomainsService {
     });
     if (!site) return;
     try {
-      await this.agentRelay.emitToAgent(
+      const res = await this.agentRelay.emitToAgent<{ success?: boolean; error?: string }>(
         'nginx:create-config',
         buildMultiDomainNginxPayload(site as unknown as RawSiteForNginx),
       );
+      // Раньше success:false тихо игнорировался → агент откатывал backup, домен
+      // не появлялся в nginx, а оператор узнавал об этом только когда «всё не
+      // работает». Логируем ошибку явно.
+      const ack = res as unknown as { success?: boolean; error?: string };
+      if (ack && ack.success === false) {
+        this.logger.error(
+          `nginx:create-config rejected by agent for site ${siteId}: ${ack.error || 'unknown'}`,
+        );
+      }
     } catch (err) {
       this.logger.warn(
         `nginx:create-config failed for site ${siteId}: ${(err as Error).message}`,
@@ -423,7 +447,16 @@ export class SiteDomainsService {
         rps: d.nginxRateLimitRps && d.nginxRateLimitRps > 0 ? d.nginxRateLimitRps : 30,
         enabled: d.nginxRateLimitEnabled !== false,
       }));
-      await this.agentRelay.emitToAgent('nginx:write-global-zones', { zones });
+      const res = await this.agentRelay.emitToAgent<{ success?: boolean; error?: string }>(
+        'nginx:write-global-zones',
+        { zones },
+      );
+      const ack = res as unknown as { success?: boolean; error?: string };
+      if (ack && ack.success === false) {
+        this.logger.error(
+          `nginx:write-global-zones rejected by agent: ${ack.error || 'unknown'}`,
+        );
+      }
     } catch (err) {
       this.logger.warn(`regenerateGlobalZones: ${(err as Error).message}`);
     }

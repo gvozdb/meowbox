@@ -79,6 +79,10 @@
                   <svg v-if="openingAdminer !== db.id" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M3 5v14a9 3 0 0 0 18 0V5"/><path d="M3 12a9 3 0 0 0 18 0"/></svg>
                   <div v-else class="spinner-sm" />
                 </button>
+                <button class="row-action row-action--green" title="Показать пароль" :disabled="revealing === db.id" @click="revealPassword(db)">
+                  <svg v-if="revealing !== db.id" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+                  <div v-else class="spinner-sm" />
+                </button>
                 <button class="row-action row-action--amber" title="Сброс пароля" @click="resetPassword(db)">
                   <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4" /></svg>
                 </button>
@@ -160,13 +164,35 @@
 
     <!-- Password Result Modal -->
     <Teleport to="body">
-      <div v-if="newPassword" class="modal-overlay" @mousedown.self="newPassword = ''">
+      <div v-if="newPassword" class="modal-overlay" @mousedown.self="closePasswordModal">
         <div class="modal">
-          <h3 class="modal__title">New Password</h3>
-          <p class="modal__desc">Password has been reset for <strong>{{ passwordDbName }}</strong>. Copy it now — it won't be shown again.</p>
-          <div class="password-display">{{ newPassword }}</div>
+          <h3 class="modal__title">
+            {{ passwordKind === 'reset' ? 'Новый пароль' : 'Текущий пароль' }}
+          </h3>
+          <p class="modal__desc">
+            <template v-if="passwordKind === 'reset'">
+              Пароль БД <strong>{{ passwordDbName }}</strong> сброшен. Скопируй сейчас —
+              больше не покажем.
+            </template>
+            <template v-else>
+              Сохранённый пароль БД <strong>{{ passwordDbName }}</strong>
+              <template v-if="passwordDbUser"> (юзер <code>{{ passwordDbUser }}</code>)</template>.
+              Виден только админу.
+            </template>
+          </p>
+          <div class="password-display">
+            <span v-if="showPlainPassword">{{ newPassword }}</span>
+            <span v-else>{{ '•'.repeat(Math.max(8, newPassword.length)) }}</span>
+            <button
+              type="button"
+              class="password-display__toggle"
+              :title="showPlainPassword ? 'Скрыть' : 'Показать'"
+              @click="showPlainPassword = !showPlainPassword"
+            >{{ showPlainPassword ? '🙈' : '👁' }}</button>
+          </div>
           <div class="modal__actions">
-            <button class="btn btn--primary" @click="copyPassword">Copy & Close</button>
+            <button class="btn btn--ghost" @click="closePasswordModal">Закрыть</button>
+            <button class="btn btn--primary" @click="copyPassword">Скопировать</button>
           </div>
         </div>
       </div>
@@ -252,6 +278,10 @@ const deleteTarget = ref<DbItem | null>(null);
 const deleting = ref(false);
 const newPassword = ref('');
 const passwordDbName = ref('');
+const passwordDbUser = ref('');
+const passwordKind = ref<'reset' | 'reveal'>('reset');
+const showPlainPassword = ref(true);
+const revealing = ref<string | null>(null);
 
 const toast = useMbToast();
 let debounceTimeout: ReturnType<typeof setTimeout> | undefined;
@@ -353,9 +383,43 @@ async function resetPassword(db: DbItem) {
     const data = await api.post<{ plainPassword: string }>(`/databases/${db.id}/reset-password`);
     newPassword.value = data.plainPassword;
     passwordDbName.value = db.name;
+    passwordDbUser.value = db.dbUser || '';
+    passwordKind.value = 'reset';
+    showPlainPassword.value = true;
   } catch {
     showToast('Ошибка сброса пароля', true);
   }
+}
+
+async function revealPassword(db: DbItem) {
+  revealing.value = db.id;
+  try {
+    const data = await api.post<{ password: string; dbUser: string; name: string }>(
+      `/databases/${db.id}/reveal-password`,
+    );
+    if (!data?.password) {
+      showToast('Пароль пуст или не сохранён', true);
+      return;
+    }
+    newPassword.value = data.password;
+    passwordDbName.value = data.name || db.name;
+    passwordDbUser.value = data.dbUser || db.dbUser || '';
+    passwordKind.value = 'reveal';
+    // Открываем замаскированным — оператор сам жмёт глаз, чтобы лишний раз
+    // плейн не висел поверх скриншоров/демонстраций экрана.
+    showPlainPassword.value = false;
+  } catch (err) {
+    showToast((err as Error).message || 'Не удалось получить пароль', true);
+  } finally {
+    revealing.value = null;
+  }
+}
+
+function closePasswordModal() {
+  newPassword.value = '';
+  passwordDbName.value = '';
+  passwordDbUser.value = '';
+  showPlainPassword.value = false;
 }
 
 const openingAdminer = ref<string | null>(null);
@@ -429,9 +493,11 @@ async function importFile(event: Event, db: DbItem) {
 
 async function copyPassword() {
   const ok = await copyToClipboard(newPassword.value);
-  newPassword.value = '';
-  if (ok) showToast('Password copied to clipboard');
+  if (ok) showToast('Пароль скопирован');
   else showToast('Не удалось скопировать в буфер', true);
+  // Reset — одноразовый показ, закрываем сразу. Reveal — оставляем модалку,
+  // чтобы можно было повторно скопировать или скрыть/показать.
+  if (passwordKind.value === 'reset') closePasswordModal();
 }
 
 function formatDate(iso: string) {
@@ -638,6 +704,8 @@ onMounted(() => {
 .row-action--red:hover { color: #f87171; border-color: rgba(239, 68, 68, 0.2); background: rgba(239, 68, 68, 0.05); }
 .row-action--blue { color: rgba(59, 130, 246, 0.55); }
 .row-action--blue:hover:not(:disabled) { color: #60a5fa; border-color: rgba(59, 130, 246, 0.3); background: rgba(59, 130, 246, 0.08); }
+.row-action--green { color: rgba(34, 197, 94, 0.55); }
+.row-action--green:hover:not(:disabled) { color: #4ade80; border-color: rgba(34, 197, 94, 0.3); background: rgba(34, 197, 94, 0.08); }
 .row-action:disabled { opacity: 0.5; cursor: wait; }
 
 .table-empty {
@@ -834,10 +902,23 @@ select.form-input {
   padding: 0.75rem;
   margin-bottom: 1.25rem;
   word-break: break-all;
-  user-select: all;
-  text-align: center;
   letter-spacing: 0.05em;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
 }
+.password-display > span { flex: 1; user-select: all; text-align: center; }
+.password-display__toggle {
+  margin-left: auto;
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  font-size: 1rem;
+  padding: 0.1rem 0.35rem;
+  border-radius: 4px;
+  color: var(--text-tertiary);
+}
+.password-display__toggle:hover { color: var(--text-heading); }
 
 /* Spinner */
 .spinner {

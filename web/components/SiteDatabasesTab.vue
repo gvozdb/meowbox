@@ -59,6 +59,9 @@
             <span>{{ busy[db.id] === 'import' ? 'Импорт…' : 'Импорт' }}</span>
             <input type="file" accept=".sql,.gz" hidden @change="importFile($event, db)" />
           </label>
+          <button class="btn btn--ghost btn--sm" :disabled="busy[db.id] === 'reveal'" @click="revealPassword(db)">
+            {{ busy[db.id] === 'reveal' ? 'Загружаю…' : 'Показать пароль' }}
+          </button>
           <button class="btn btn--ghost btn--sm" @click="resetPassword(db)">
             Сбросить пароль
           </button>
@@ -132,14 +135,33 @@
     <Teleport to="body">
       <div v-if="newPassword" class="modal-overlay" @mousedown.self="newPassword = ''">
         <div class="modal">
-          <h3 class="modal__title">Новый пароль</h3>
+          <h3 class="modal__title">
+            {{ passwordKind === 'reset' ? 'Новый пароль' : 'Текущий пароль' }}
+          </h3>
           <p class="modal__desc">
-            Пароль БД <strong>{{ passwordDbName }}</strong> сброшен. Скопируй сейчас —
-            больше не покажем.
+            <template v-if="passwordKind === 'reset'">
+              Пароль БД <strong>{{ passwordDbName }}</strong> сброшен. Скопируй сейчас —
+              больше не покажем.
+            </template>
+            <template v-else>
+              Сохранённый пароль БД <strong>{{ passwordDbName }}</strong>
+              <template v-if="passwordDbUser"> (юзер <code>{{ passwordDbUser }}</code>)</template>.
+              Виден только админу.
+            </template>
           </p>
-          <div class="password-display">{{ newPassword }}</div>
+          <div class="password-display">
+            <span v-if="showPlainPassword">{{ newPassword }}</span>
+            <span v-else>{{ '•'.repeat(Math.max(8, newPassword.length)) }}</span>
+            <button
+              type="button"
+              class="password-display__toggle"
+              :title="showPlainPassword ? 'Скрыть' : 'Показать'"
+              @click="showPlainPassword = !showPlainPassword"
+            >{{ showPlainPassword ? '🙈' : '👁' }}</button>
+          </div>
           <div class="modal__actions">
-            <button class="btn btn--primary" @click="copyPassword">Скопировать и закрыть</button>
+            <button class="btn btn--ghost" @click="closePasswordModal">Закрыть</button>
+            <button class="btn btn--primary" @click="copyPassword">Скопировать</button>
           </div>
         </div>
       </div>
@@ -184,7 +206,7 @@ const ALL_ENGINES: DbEngineOption[] = [
 const databases = ref<DbItem[]>([]);
 const installedEngines = ref<Set<string>>(new Set());
 const loading = ref(true);
-const busy = reactive<Record<string, 'adminer' | 'export' | 'import' | undefined>>({});
+const busy = reactive<Record<string, 'adminer' | 'export' | 'import' | 'reveal' | undefined>>({});
 
 const showCreate = ref(false);
 const creating = ref(false);
@@ -195,6 +217,9 @@ const deleteTarget = ref<DbItem | null>(null);
 const deleting = ref(false);
 const newPassword = ref('');
 const passwordDbName = ref('');
+const passwordDbUser = ref('');
+const passwordKind = ref<'reset' | 'reveal'>('reset');
+const showPlainPassword = ref(true);
 
 const availableEngines = computed<DbEngineOption[]>(() =>
   ALL_ENGINES.filter((opt) => installedEngines.value.has(opt.engineKey)),
@@ -352,16 +377,51 @@ async function resetPassword(db: DbItem) {
     const data = await api.post<{ plainPassword: string }>(`/databases/${db.id}/reset-password`);
     newPassword.value = data.plainPassword;
     passwordDbName.value = db.name;
+    passwordDbUser.value = db.dbUser || '';
+    passwordKind.value = 'reset';
+    showPlainPassword.value = true;
   } catch (err) {
     toast.error((err as Error).message || 'Ошибка сброса пароля');
   }
 }
 
+async function revealPassword(db: DbItem) {
+  busy[db.id] = 'reveal';
+  try {
+    const data = await api.post<{ password: string; dbUser: string; name: string }>(
+      `/databases/${db.id}/reveal-password`,
+    );
+    if (!data?.password) {
+      toast.error('Пароль пуст или не сохранён');
+      return;
+    }
+    newPassword.value = data.password;
+    passwordDbName.value = data.name || db.name;
+    passwordDbUser.value = data.dbUser || db.dbUser || '';
+    passwordKind.value = 'reveal';
+    // По умолчанию маскируем — модалка появляется с точками, юзер сам нажмёт глаз.
+    showPlainPassword.value = false;
+  } catch (err) {
+    toast.error((err as Error).message || 'Не удалось получить пароль');
+  } finally {
+    delete busy[db.id];
+  }
+}
+
+function closePasswordModal() {
+  newPassword.value = '';
+  passwordDbName.value = '';
+  passwordDbUser.value = '';
+  showPlainPassword.value = false;
+}
+
 async function copyPassword() {
   const ok = await copyToClipboard(newPassword.value);
-  newPassword.value = '';
   if (ok) toast.success('Пароль скопирован');
   else toast.error('Не удалось скопировать');
+  // Для reset закрываем (так и было раньше — одноразовый показ).
+  // Для reveal оставляем модалку — юзер может ещё переключить глаз/скопировать повторно.
+  if (passwordKind.value === 'reset') closePasswordModal();
 }
 
 // Перезагружаем при первом открытии вкладки. Если уже грузили — не дёргаем.
@@ -687,7 +747,22 @@ watch(() => props.active, (active) => {
   font-size: 0.9rem;
   color: var(--text-heading);
   word-break: break-all;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
 }
+
+.password-display__toggle {
+  margin-left: auto;
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  font-size: 1rem;
+  padding: 0.1rem 0.3rem;
+  border-radius: 4px;
+  color: var(--text-tertiary);
+}
+.password-display__toggle:hover { color: var(--text-heading); }
 
 .link {
   color: var(--primary, var(--primary-light));

@@ -115,6 +115,19 @@ export class DatabasesController {
     return { success: true, data: result };
   }
 
+  // Возвращает plaintext пароль БД (расшифровка dbPasswordEnc). ADMIN-only,
+  // throttle жёсткий — фактически операция чтения секрета.
+  @Post(':id/reveal-password')
+  @Roles('ADMIN')
+  @Throttle({ default: { limit: 10, ttl: 60_000 } })
+  async revealPassword(
+    @Param('id', ParseUUIDPipe) id: string,
+    @CurrentUser() user?: JwtUser,
+  ) {
+    const result = await this.databasesService.revealPassword(id, user!.id, user!.role);
+    return { success: true, data: result };
+  }
+
   @Post(':id/adminer-ticket')
   @Throttle({ default: { limit: 10, ttl: 60_000 } })
   async createAdminerTicket(
