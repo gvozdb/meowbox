@@ -12,7 +12,7 @@ import * as path from 'path';
 import { Readable } from 'stream';
 import { pipeline } from 'stream/promises';
 import { Prisma } from '@prisma/client';
-import { BackupStatus, BackupStorageType, CronJobStatus, DatabaseType, SslStatus, UserRole } from '../common/enums';
+import { BackupEngine, BackupStatus, BackupStorageType, CronJobStatus, DatabaseType, SslStatus, UserRole } from '../common/enums';
 import { PrismaService } from '../common/prisma.service';
 import { ProxyService } from '../proxy/proxy.service';
 import { AgentRelayService } from '../gateway/agent-relay.service';
@@ -432,17 +432,22 @@ export class MigrationService {
       if (sourceServerId === 'main') {
         const result = await this.localPost('/backups/trigger', {
           siteId,
+          engine: BackupEngine.TAR,
           type: 'FULL',
-          storageType: 'LOCAL',
+          storageType: BackupStorageType.LOCAL,
         }, userId);
         backupId = this.extractBackupId(result);
       } else {
         const server = this.proxy.getServer(sourceServerId)!;
-        const { data } = await this.proxy.proxyRequest(server, 'POST', '/backups/trigger', {
+        const { status, data } = await this.proxy.proxyRequest(server, 'POST', '/backups/trigger', {
           siteId,
+          engine: BackupEngine.TAR,
           type: 'FULL',
-          storageType: 'LOCAL',
+          storageType: BackupStorageType.LOCAL,
         });
+        if (status >= 400) {
+          throw new Error(this.extractResponseError(data, `Ошибка запуска бэкапа на source: HTTP ${status}`));
+        }
         backupId = this.extractBackupId(data);
       }
 
@@ -2138,6 +2143,30 @@ export class MigrationService {
     }
 
     return this.extractBackupId(data.data);
+  }
+
+  private extractResponseError(payload: unknown, fallback: string): string {
+    if (!payload || typeof payload !== 'object') return fallback;
+
+    const data = payload as {
+      message?: unknown;
+      error?: unknown;
+      data?: unknown;
+    };
+
+    if (typeof data.message === 'string' && data.message) {
+      return data.message;
+    }
+
+    if (data.error && typeof data.error === 'object') {
+      const errorMessage = (data.error as { message?: unknown }).message;
+      if (typeof errorMessage === 'string' && errorMessage) {
+        return errorMessage;
+      }
+    }
+
+    const nested = this.extractResponseError(data.data, '');
+    return nested || fallback;
   }
 
   private async localRequest(

@@ -324,6 +324,8 @@ export class BackupsService {
     // что реально надо дампить. site.databases используется тут только для проверок.
     const dbsForAgent = selectedDatabases.map((d) => ({ name: d.name, type: d.type }));
 
+    await this.failImpossibleLegacyResticBackups(dto.siteId);
+
     // Active-check
     const active = await this.prisma.backup.findFirst({
       where: {
@@ -338,6 +340,10 @@ export class BackupsService {
     // =========================================================================
     // Режим: либо через StorageLocation-id (новая схема), либо legacy
     // =========================================================================
+
+    if (engine === BackupEngine.RESTIC && locationIds.length === 0) {
+      throw new BadRequestException('Restic требует явно выбранного StorageLocation');
+    }
 
     const createdBackups: Array<{ id: string; locationName?: string }> = [];
 
@@ -425,10 +431,6 @@ export class BackupsService {
         },
       });
 
-      if (engine === BackupEngine.RESTIC) {
-        throw new BadRequestException('Restic требует явно выбранного StorageLocation');
-      }
-
       try {
         this.agentRelay.emitToAgentAsync('backup:execute', {
           backupId: backup.id,
@@ -469,6 +471,22 @@ export class BackupsService {
       backups: createdBackups,
       site: { id: site.id, name: site.name },
     };
+  }
+
+  private async failImpossibleLegacyResticBackups(siteId: string): Promise<void> {
+    await this.prisma.backup.updateMany({
+      where: {
+        siteId,
+        status: { in: [BackupStatus.PENDING, BackupStatus.IN_PROGRESS] },
+        engine: BackupEngine.RESTIC,
+        storageLocationId: null,
+      },
+      data: {
+        status: BackupStatus.FAILED,
+        errorMessage: 'Некорректный legacy Restic backup без StorageLocation',
+        completedAt: new Date(),
+      },
+    });
   }
 
   // ===========================================================================
