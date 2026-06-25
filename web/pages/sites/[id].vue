@@ -2304,6 +2304,26 @@ php_value[max_execution_time] = 300"
                 </option>
               </select>
 
+              <label class="migrate-form__label">Имя сайта на целевом сервере</label>
+              <input
+                v-model.trim="migrateTargetName"
+                class="form-input"
+                placeholder="site_name"
+                autocomplete="off"
+              />
+
+              <label class="migrate-form__label">Основной домен на целевом сервере</label>
+              <input
+                v-model.trim="migrateTargetDomain"
+                class="form-input"
+                placeholder="example.com"
+                autocomplete="off"
+              />
+
+              <div v-if="migrateTargetName && migrateTargetName !== site?.name" class="migrate-warning">
+                При смене имени сайта Meowbox переименует БД и DB user под новое имя. Дефисы в имени БД заменяются на подчёркивания, дополнительные БД получают суффикс. После миграции проверь конфиги приложения и замени старые DB name/DB user на новые.
+              </div>
+
               <div class="migrate-form__checkboxes">
                 <label class="migrate-form__checkbox">
                   <input v-model="migrateReissueSsl" type="checkbox" />
@@ -2322,7 +2342,7 @@ php_value[max_execution_time] = 300"
               <button class="modal__btn modal__btn--cancel" @click="showMigrateModal = false">Отмена</button>
               <button
                 class="modal__btn modal__btn--primary"
-                :disabled="!migrateTarget || migrateStarting"
+                :disabled="!migrateTarget || !migrateTargetName || !migrateTargetDomain || migrateStarting"
                 @click="startMigration"
               >
                 {{ migrateStarting ? 'Запуск...' : 'Начать миграцию' }}
@@ -5519,6 +5539,8 @@ watch(activeTab, (tab) => {
 
 const showMigrateModal = ref(false);
 const migrateTarget = ref('');
+const migrateTargetName = ref('');
+const migrateTargetDomain = ref('');
 const migrateReissueSsl = ref(false);
 const migrateStopSource = ref(false);
 const migrateStarting = ref(false);
@@ -5552,12 +5574,14 @@ const migrateTargetServers = computed(() => {
 
 watch(showMigrateModal, (open) => {
   if (!open) return;
+  migrateTargetName.value = site.value?.name || '';
+  migrateTargetDomain.value = site.value?.domain || '';
   migrateReissueSsl.value = false;
   migrateError.value = '';
 });
 
 async function startMigration() {
-  if (!migrateTarget.value) return;
+  if (!migrateTarget.value || !migrateTargetName.value || !migrateTargetDomain.value) return;
   migrateStarting.value = true;
   migrateError.value = '';
   try {
@@ -5568,6 +5592,8 @@ async function startMigration() {
       reissueSsl: migrateReissueSsl.value,
       stopSource: false,
       panelUrl: window.location.origin,
+      targetName: migrateTargetName.value,
+      targetDomain: migrateTargetDomain.value,
     }, { noProxy: true });
     migrationId.value = res?.migrationId || '';
     migrationRunning.value = true;
@@ -9195,6 +9221,16 @@ html.theme-light .domain-modal__cmd {
   color: #f87171;
   font-size: 0.8rem;
   white-space: pre-wrap;
+}
+
+.migrate-warning {
+  margin-top: 0.5rem;
+  padding: 0.6rem 0.75rem;
+  border-radius: 8px;
+  background: rgba(245, 158, 11, 0.1);
+  color: #fbbf24;
+  font-size: 0.8rem;
+  line-height: 1.45;
 }
 
 .migrate-success {

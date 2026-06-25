@@ -27,6 +27,8 @@ import {
   IsBoolean,
   IsArray,
   IsObject,
+  Matches,
+  MaxLength,
 } from 'class-validator';
 
 // ─── DTOs ───
@@ -55,6 +57,17 @@ class StartMigrationDto {
   @IsOptional()
   @IsString()
   panelUrl?: string;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(32)
+  @Matches(/^[a-z][a-z0-9_-]{0,31}$/)
+  targetName?: string;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(253)
+  targetDomain?: string;
 }
 
 class CreateDownloadTokenDto {
@@ -73,8 +86,12 @@ class ImportPullDto {
   sourceUrl!: string;
 
   @IsOptional()
+  @IsString()
+  sourceRootPath?: string;
+
+  @IsOptional()
   @IsArray()
-  databases?: Array<{ name: string; type: string; dbUser: string; dbPassword: string }>;
+  databases?: Array<{ name: string; sourceName?: string; type: string; dbUser: string; dbPassword: string }>;
 }
 
 class ApplySiteExtrasDto {
@@ -116,6 +133,8 @@ export class MigrationController {
       reissueSsl: dto.reissueSsl ?? false,
       stopSource: dto.stopSource ?? false,
       panelUrl: dto.panelUrl,
+      targetName: dto.targetName,
+      targetDomain: dto.targetDomain,
     };
 
     const migrationId = await this.migrationService.startMigration(params, userId);
@@ -192,6 +211,7 @@ export class MigrationController {
       dto.siteId,
       dto.sourceUrl,
       dto.databases || [],
+      dto.sourceRootPath,
     );
     return { success: true, data: result };
   }

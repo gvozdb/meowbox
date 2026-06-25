@@ -793,7 +793,7 @@ export class AgentService {
       storageType: 'LOCAL' | 'S3' | 'YANDEX_DISK' | 'CLOUD_MAIL_RU';
       excludePaths: string[];
       storageConfig: Record<string, string>;
-      databases?: Array<{ name: string; type: string }>;
+      databases?: Array<{ name: string; sourceName?: string; type: string }>;
       baseTimestamp?: string;
       excludeTableData?: string[];
       keepLocalCopy?: boolean;
@@ -820,10 +820,11 @@ export class AgentService {
       siteId: string;
       siteName: string;
       rootPath: string;
+      sourceRootPath?: string;
       filePath: string;
       storageType: string;
       storageConfig: Record<string, string>;
-      databases?: Array<{ name: string; type: string }>;
+      databases?: Array<{ name: string; sourceName?: string; type: string }>;
       baseFilePath?: string;
       baseStorageType?: string;
       baseStorageConfig?: Record<string, string>;

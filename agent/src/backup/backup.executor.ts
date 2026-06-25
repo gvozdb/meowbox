@@ -14,7 +14,7 @@ interface BackupParams {
   storageType: 'LOCAL' | 'S3' | 'YANDEX_DISK' | 'CLOUD_MAIL_RU';
   excludePaths: string[];
   storageConfig: Record<string, string>;
-  databases?: Array<{ name: string; type: string }>;
+  databases?: Array<{ name: string; sourceName?: string; type: string }>;
   baseTimestamp?: string;
   excludeTableData?: string[];
   keepLocalCopy?: boolean;
@@ -214,11 +214,12 @@ export class BackupExecutor {
       siteId: string;
       siteName: string;
       rootPath: string;
+      sourceRootPath?: string;
       filePath: string;
       storageType: string;
       storageConfig: Record<string, string>;
       cleanup?: boolean;
-      databases?: Array<{ name: string; type: string }>;
+      databases?: Array<{ name: string; sourceName?: string; type: string }>;
       baseFilePath?: string;
       baseStorageType?: string;
       baseStorageConfig?: Record<string, string>;
@@ -328,8 +329,10 @@ export class BackupExecutor {
           // Имя БД идёт в argv `mysql ... <name>` и `psql -d <name>` —
           // arg-flag smuggling (`name="-e SELECT..."`) недопустим.
           assertDbName(db.name);
-          const dumpFile = path.join(tempDir, `${db.name}.sql`);
-          const altDumpFile = path.join(tempDir, 'var', 'meowbox', 'backups', `${db.name}.sql`);
+          const sourceName = db.sourceName || db.name;
+          assertDbName(sourceName);
+          const dumpFile = path.join(tempDir, `${sourceName}.sql`);
+          const altDumpFile = path.join(tempDir, 'var', 'meowbox', 'backups', `${sourceName}.sql`);
           const actualDump = fs.existsSync(dumpFile) ? dumpFile : fs.existsSync(altDumpFile) ? altDumpFile : null;
 
           if (actualDump) {
@@ -354,42 +357,57 @@ export class BackupExecutor {
 
       // Restore files to rootPath
       if (restoreFiles) {
-        const extractedRoot = path.join(tempDir, params.rootPath.replace(/^\//, ''));
-        if (fs.existsSync(extractedRoot)) {
-          if (includePaths.length === 0) {
-            // Без selective: весь корень
-            if (params.cleanup) {
-              await this.executor.execute('rsync', [
-                '-a', '--delete',
-                `${extractedRoot}/`,
-                `${params.rootPath}/`,
-              ], { timeout: 300_000 });
-            } else {
-              await this.executor.execute('cp', ['-a', `${extractedRoot}/.`, params.rootPath], { timeout: 300_000 });
-            }
+        const sourceRootPath = params.sourceRootPath || params.rootPath;
+        const sourceRootRel = sourceRootPath.replace(/^\/+/, '');
+        if (
+          sourceRootRel.length === 0 ||
+          sourceRootRel.includes('..') ||
+          sourceRootRel.includes('\0') ||
+          sourceRootRel.includes('\\')
+        ) {
+          return { success: false, error: `Invalid source root path: ${sourceRootPath}` };
+        }
+        const extractedRoot = path.resolve(tempDir, sourceRootRel);
+        if (!extractedRoot.startsWith(path.resolve(tempDir) + path.sep)) {
+          return { success: false, error: `Invalid source root path: ${sourceRootPath}` };
+        }
+        if (!fs.existsSync(extractedRoot)) {
+          return { success: false, error: `Backup root not found in archive: ${sourceRootPath}` };
+        }
+
+        if (includePaths.length === 0) {
+          // Без selective: весь корень
+          if (params.cleanup) {
+            await this.executor.execute('rsync', [
+              '-a', '--delete',
+              `${extractedRoot}/`,
+              `${params.rootPath}/`,
+            ], { timeout: 300_000 });
           } else {
-            // Selective: только указанные пути первого уровня
-            for (const rel of includePaths) {
-              const src = path.resolve(extractedRoot, rel);
-              const dst = path.resolve(params.rootPath, rel);
-              const extRootResolved = path.resolve(extractedRoot);
-              const rootResolved = path.resolve(params.rootPath);
-              // Strict containment: НЕ равны корню — иначе обход selective.
-              if (src === extRootResolved || dst === rootResolved) continue;
-              if (!src.startsWith(extRootResolved + path.sep)) continue;
-              if (!dst.startsWith(rootResolved + path.sep)) continue;
-              if (!fs.existsSync(src)) continue;
-              const isDir = fs.statSync(src).isDirectory();
-              await this.executor.execute('mkdir', ['-p', path.dirname(dst)], { timeout: 30_000 });
-              if (isDir) {
-                if (params.cleanup) {
-                  await this.executor.execute('rsync', ['-a', '--delete', `${src}/`, `${dst}/`], { timeout: 300_000 });
-                } else {
-                  await this.executor.execute('rsync', ['-a', `${src}/`, `${dst}/`], { timeout: 300_000 });
-                }
+            await this.executor.execute('cp', ['-a', `${extractedRoot}/.`, params.rootPath], { timeout: 300_000 });
+          }
+        } else {
+          // Selective: только указанные пути первого уровня
+          for (const rel of includePaths) {
+            const src = path.resolve(extractedRoot, rel);
+            const dst = path.resolve(params.rootPath, rel);
+            const extRootResolved = path.resolve(extractedRoot);
+            const rootResolved = path.resolve(params.rootPath);
+            // Strict containment: НЕ равны корню — иначе обход selective.
+            if (src === extRootResolved || dst === rootResolved) continue;
+            if (!src.startsWith(extRootResolved + path.sep)) continue;
+            if (!dst.startsWith(rootResolved + path.sep)) continue;
+            if (!fs.existsSync(src)) continue;
+            const isDir = fs.statSync(src).isDirectory();
+            await this.executor.execute('mkdir', ['-p', path.dirname(dst)], { timeout: 30_000 });
+            if (isDir) {
+              if (params.cleanup) {
+                await this.executor.execute('rsync', ['-a', '--delete', `${src}/`, `${dst}/`], { timeout: 300_000 });
               } else {
-                await this.executor.execute('cp', ['-a', src, dst], { timeout: 60_000 });
+                await this.executor.execute('rsync', ['-a', `${src}/`, `${dst}/`], { timeout: 300_000 });
               }
+            } else {
+              await this.executor.execute('cp', ['-a', src, dst], { timeout: 60_000 });
             }
           }
         }

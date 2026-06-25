@@ -34,6 +34,8 @@ export interface MigrateParams {
   reissueSsl: boolean;
   stopSource: boolean;
   panelUrl?: string; // Required when source='main' — frontend sends window.location.origin
+  targetName?: string;
+  targetDomain?: string;
 }
 
 export interface MigrationState {
@@ -70,6 +72,7 @@ export interface PullState {
 
 export interface DatabaseSnapshot {
   name: string;
+  sourceName?: string;
   type: string;
   dbUser: string;
   dbPassword: string;
@@ -176,6 +179,9 @@ interface TargetDomainForSslReissue {
   domain: string;
 }
 
+const RE_SITE_NAME = /^[a-z][a-z0-9_-]{0,31}$/;
+const RE_DOMAIN = /^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])$/;
+
 // ─── Steps ───
 
 const STEPS = [
@@ -232,7 +238,7 @@ const RESTORE_TIMEOUT_MS = Number(
   process.env.MIGRATION_RESTORE_TIMEOUT_MS,
 ) || 6 * 60 * 60 * 1000;
 
-const MIN_MIGRATION_VERSION = 'v0.6.56';
+const MIN_MIGRATION_VERSION = 'v0.6.57';
 
 const MIGRATION_DOWNLOAD_PATH_RE =
   /^\/api\/migration\/download\/[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -348,6 +354,7 @@ export class MigrationService {
     if (params.sourceServerId === 'main' && !params.panelUrl) {
       throw new BadRequestException('panelUrl обязателен при миграции с основного сервера');
     }
+    this.validateTargetOverrides(params);
 
     if (params.targetServerId !== 'main') {
       const target = this.proxy.getServer(params.targetServerId);
@@ -403,219 +410,235 @@ export class MigrationService {
 
   private async runMigration(migrationId: string, params: MigrateParams, userId: string) {
     const { siteId, sourceServerId, targetServerId, reissueSsl, stopSource, panelUrl } = params;
+    let createdTargetSiteId: string | undefined;
+    let migrationCompleted = false;
 
-    this.updateState(migrationId, 'preflight');
-    const siteSnapshot = this.normalizeSnapshot(
-      await this.getSiteSnapshotFromServer(sourceServerId, siteId),
-    );
-    await this.assertTargetConflicts(targetServerId, siteSnapshot);
+    try {
+      this.updateState(migrationId, 'preflight');
+      const sourceSnapshot = this.normalizeSnapshot(
+        await this.getSiteSnapshotFromServer(sourceServerId, siteId),
+      );
+      const sourceRootPath = typeof sourceSnapshot.site.rootPath === 'string'
+        ? sourceSnapshot.site.rootPath
+        : undefined;
+      const siteSnapshot = this.applyTargetOverrides(sourceSnapshot, params);
+      await this.assertTargetConflicts(targetServerId, siteSnapshot);
 
-    // ══════════ Step 1: Trigger LOCAL backup on source ══════════
-    this.updateState(migrationId, 'backup');
+      // ══════════ Step 1: Trigger LOCAL backup on source ══════════
+      this.updateState(migrationId, 'backup');
 
-    let backupId: string;
+      let backupId: string;
 
-    if (sourceServerId === 'main') {
-      const result = await this.localPost('/backups/trigger', {
-        siteId,
-        type: 'FULL',
-        storageType: 'LOCAL',
-      }, userId);
-      backupId = result?.backupId as string;
-    } else {
-      const server = this.proxy.getServer(sourceServerId)!;
-      const { data } = await this.proxy.proxyRequest(server, 'POST', '/backups/trigger', {
-        siteId,
-        type: 'FULL',
-        storageType: 'LOCAL',
-      });
-      backupId = (data as { data?: { backupId?: string } })?.data?.backupId || '';
-    }
-
-    if (!backupId) throw new Error('Не удалось запустить бэкап');
-
-    // ══════════ Step 2: Wait for backup ══════════
-    this.updateState(migrationId, 'waiting_backup');
-
-    const backupResult = await this.pollBackupStatus(sourceServerId, siteId, backupId);
-    if (!backupResult.success) {
-      throw new Error(`Бэкап не удался: ${backupResult.error || 'неизвестная ошибка'}`);
-    }
-
-    const backupFilePath = backupResult.filePath;
-    if (!backupFilePath) throw new Error('Бэкап завершён, но путь к файлу не получен');
-
-    // ══════════ Step 3: Create download token on source ══════════
-    this.updateState(migrationId, 'download_token');
-
-    let downloadToken: string;
-    let sourceBaseUrl: string;
-
-    if (sourceServerId === 'main') {
-      const tokenResult = this.createDownloadToken(backupFilePath);
-      downloadToken = tokenResult.token;
-      sourceBaseUrl = panelUrl!.replace(/\/+$/, '');
-    } else {
-      const server = this.proxy.getServer(sourceServerId)!;
-      const { status, data } = await this.proxy.proxyRequest(server, 'POST', '/migration/download-token', {
-        filePath: backupFilePath,
-      });
-      if (status >= 400) {
-        throw new Error((data as { error?: { message?: string } })?.error?.message || 'Ошибка создания токена');
+      if (sourceServerId === 'main') {
+        const result = await this.localPost('/backups/trigger', {
+          siteId,
+          type: 'FULL',
+          storageType: 'LOCAL',
+        }, userId);
+        backupId = result?.backupId as string;
+      } else {
+        const server = this.proxy.getServer(sourceServerId)!;
+        const { data } = await this.proxy.proxyRequest(server, 'POST', '/backups/trigger', {
+          siteId,
+          type: 'FULL',
+          storageType: 'LOCAL',
+        });
+        backupId = (data as { data?: { backupId?: string } })?.data?.backupId || '';
       }
-      downloadToken = (data as { data?: { token?: string } })?.data?.token || '';
-      sourceBaseUrl = server.url;
-    }
 
-    if (!downloadToken) throw new Error('Не удалось создать токен загрузки');
-    const sourceDownloadUrl = `${sourceBaseUrl}/api/migration/download/${downloadToken}`;
+      if (!backupId) throw new Error('Не удалось запустить бэкап');
 
-    // ══════════ Step 4: Get site metadata ══════════
-    this.updateState(migrationId, 'metadata');
+      // ══════════ Step 2: Wait for backup ══════════
+      this.updateState(migrationId, 'waiting_backup');
 
-    const siteMeta = siteSnapshot.site;
-
-    // ══════════ Step 5: Create site on target (skipInstall) ══════════
-    this.updateState(migrationId, 'create_site');
-
-    // siteMeta может прийти из локальной БД (SQLite строки) или через proxy API (уже parsed).
-    // Нормализуем чтобы sites.create получил нативные типы.
-    const rawAliases = siteMeta.aliases;
-    const aliases = Array.isArray(rawAliases)
-      ? rawAliases
-      : typeof rawAliases === 'string'
-      ? (() => { try { const v = JSON.parse(rawAliases); return Array.isArray(v) ? v : []; } catch { return []; } })()
-      : [];
-    const rawEnv = siteMeta.envVars;
-    const envVars =
-      rawEnv && typeof rawEnv === 'object'
-        ? rawEnv
-        : typeof rawEnv === 'string'
-        ? (() => { try { return JSON.parse(rawEnv); } catch { return {}; } })()
-        : {};
-
-    const createBody = {
-      name: siteMeta.name,
-      displayName: siteMeta.displayName || undefined,
-      domain: siteMeta.domain,
-      aliases,
-      type: siteMeta.type,
-      phpEnabled: !!siteMeta.phpVersion,
-      phpVersion: siteMeta.phpVersion || undefined,
-      dbEnabled: siteSnapshot.databases.length > 0 || siteMeta.dbEnabled === true,
-      dbType: siteSnapshot.databases[0]?.type,
-      dbName: siteSnapshot.databases[0]?.name,
-      dbUser: siteSnapshot.databases[0]?.dbUser,
-      dbPassword: siteSnapshot.databases[0]?.dbPassword,
-      httpsRedirect: siteMeta.httpsRedirect !== false,
-      gitRepository: siteMeta.gitRepository || undefined,
-      deployBranch: siteMeta.deployBranch || undefined,
-      appPort: siteMeta.appPort || undefined,
-      envVars,
-      filesRelPath: siteMeta.filesRelPath || undefined,
-      modxVersion: siteMeta.modxVersion || undefined,
-      cmsTablePrefix: siteMeta.cmsTablePrefix || undefined,
-      managerPath: siteMeta.managerPath || undefined,
-      connectorsPath: siteMeta.connectorsPath || undefined,
-      skipInstall: true,
-    };
-
-    let targetSiteId: string;
-
-    if (targetServerId === 'main') {
-      const result = await this.localPost('/sites', createBody, userId);
-      targetSiteId = result?.id as string;
-    } else {
-      const server = this.proxy.getServer(targetServerId)!;
-      const { status, data } = await this.proxy.proxyRequest(server, 'POST', '/sites', createBody);
-      if (status >= 400) {
-        const errMsg = (data as { error?: { message?: string } })?.error?.message || 'Ошибка создания сайта';
-        throw new Error(errMsg);
+      const backupResult = await this.pollBackupStatus(sourceServerId, siteId, backupId);
+      if (!backupResult.success) {
+        throw new Error(`Бэкап не удался: ${backupResult.error || 'неизвестная ошибка'}`);
       }
-      targetSiteId = ((data as { data?: { id?: string } })?.data?.id) || '';
-    }
 
-    if (!targetSiteId) throw new Error('Не удалось создать сайт на целевом сервере');
-    this.updateState(migrationId, 'create_site', undefined, { targetSiteId });
-    await this.waitTargetSiteProvisioned(targetServerId, targetSiteId);
+      const backupFilePath = backupResult.filePath;
+      if (!backupFilePath) throw new Error('Бэкап завершён, но путь к файлу не получен');
 
-    // ══════════ Step 6: Tell target to pull from source ══════════
-    this.updateState(migrationId, 'import_pull');
+      // ══════════ Step 3: Create download token on source ══════════
+      this.updateState(migrationId, 'download_token');
 
-    const databases = siteSnapshot.databases;
-    let pullId: string;
+      let downloadToken: string;
+      let sourceBaseUrl: string;
 
-    if (targetServerId === 'main') {
-      const result = await this.startImportPull(targetSiteId, sourceDownloadUrl, databases);
-      pullId = result.pullId;
-    } else {
-      const server = this.proxy.getServer(targetServerId)!;
-      const { status, data } = await this.proxy.proxyRequest(server, 'POST', '/migration/import-pull', {
-        siteId: targetSiteId,
-        sourceUrl: sourceDownloadUrl,
-        databases,
-      });
-      if (status >= 400) {
-        const errMsg = (data as { error?: { message?: string } })?.error?.message || 'Ошибка передачи';
-        throw new Error(errMsg);
-      }
-      pullId = (data as { data?: { pullId?: string } })?.data?.pullId || '';
-    }
-
-    if (!pullId) throw new Error('Не удалось запустить передачу');
-
-    // ══════════ Step 7: Wait for pull (download + restore) ══════════
-    this.updateState(migrationId, 'waiting_pull');
-
-    const pullResult = await this.pollPullStatus(targetServerId, pullId);
-    if (!pullResult.success) {
-      throw new Error(`Передача не удалась: ${pullResult.error || 'неизвестная ошибка'}`);
-    }
-
-    // ══════════ Step 8: Copy DB-only extras that are not inside archive ══════════
-    this.updateState(migrationId, 'apply_config');
-    if (targetServerId === 'main') {
-      await this.applySiteExtras(targetSiteId, siteSnapshot);
-    } else {
-      const server = this.proxy.getServer(targetServerId)!;
-      const { status, data } = await this.proxy.proxyRequest(server, 'POST', '/migration/apply-site-extras', {
-        siteId: targetSiteId,
-        snapshot: siteSnapshot,
-      });
-      if (status >= 400) {
-        const errMsg = (data as { error?: { message?: string } })?.error?.message || 'Ошибка переноса настроек сайта';
-        throw new Error(errMsg);
-      }
-    }
-
-    // ══════════ Step 8: Optional SSL ══════════
-    if (reissueSsl) {
-      this.updateState(migrationId, 'ssl');
-      try {
-        await this.reissueTargetSsl(targetServerId, targetSiteId, userId);
-      } catch (err) {
-        this.logger.warn(`SSL reissue failed during migration: ${(err as Error).message}`);
-      }
-    }
-
-    // ══════════ Step 9: Optional stop source ══════════
-    if (stopSource) {
-      this.updateState(migrationId, 'cleanup');
-      try {
-        if (sourceServerId === 'main') {
-          await this.localPost(`/sites/${siteId}/stop`, {}, userId);
-        } else {
-          const server = this.proxy.getServer(sourceServerId)!;
-          await this.proxy.proxyRequest(server, 'POST', `/sites/${siteId}/stop`, {});
+      if (sourceServerId === 'main') {
+        const tokenResult = this.createDownloadToken(backupFilePath);
+        downloadToken = tokenResult.token;
+        sourceBaseUrl = panelUrl!.replace(/\/+$/, '');
+      } else {
+        const server = this.proxy.getServer(sourceServerId)!;
+        const { status, data } = await this.proxy.proxyRequest(server, 'POST', '/migration/download-token', {
+          filePath: backupFilePath,
+        });
+        if (status >= 400) {
+          throw new Error((data as { error?: { message?: string } })?.error?.message || 'Ошибка создания токена');
         }
-      } catch (err) {
-        this.logger.warn(`Source site stop failed: ${(err as Error).message}`);
+        downloadToken = (data as { data?: { token?: string } })?.data?.token || '';
+        sourceBaseUrl = server.url;
       }
-    }
 
-    // ══════════ Done ══════════
-    this.updateState(migrationId, 'done', 'Миграция завершена успешно', { targetSiteId });
-    this.logger.log(`Migration ${migrationId} completed: site ${siteId} → ${targetSiteId}`);
+      if (!downloadToken) throw new Error('Не удалось создать токен загрузки');
+      const sourceDownloadUrl = `${sourceBaseUrl}/api/migration/download/${downloadToken}`;
+
+      // ══════════ Step 4: Get site metadata ══════════
+      this.updateState(migrationId, 'metadata');
+
+      const siteMeta = siteSnapshot.site;
+
+      // ══════════ Step 5: Create site on target (skipInstall) ══════════
+      this.updateState(migrationId, 'create_site');
+
+      // siteMeta может прийти из локальной БД (SQLite строки) или через proxy API (уже parsed).
+      // Нормализуем чтобы sites.create получил нативные типы.
+      const rawAliases = siteMeta.aliases;
+      const aliases = Array.isArray(rawAliases)
+        ? rawAliases
+        : typeof rawAliases === 'string'
+        ? (() => { try { const v = JSON.parse(rawAliases); return Array.isArray(v) ? v : []; } catch { return []; } })()
+        : [];
+      const rawEnv = siteMeta.envVars;
+      const envVars =
+        rawEnv && typeof rawEnv === 'object'
+          ? rawEnv
+          : typeof rawEnv === 'string'
+          ? (() => { try { return JSON.parse(rawEnv); } catch { return {}; } })()
+          : {};
+
+      const createBody = {
+        name: siteMeta.name,
+        displayName: siteMeta.displayName || undefined,
+        domain: siteMeta.domain,
+        aliases,
+        type: siteMeta.type,
+        phpEnabled: !!siteMeta.phpVersion,
+        phpVersion: siteMeta.phpVersion || undefined,
+        dbEnabled: siteSnapshot.databases.length > 0 || siteMeta.dbEnabled === true,
+        dbType: siteSnapshot.databases[0]?.type,
+        dbName: siteSnapshot.databases[0]?.name,
+        dbUser: siteSnapshot.databases[0]?.dbUser,
+        dbPassword: siteSnapshot.databases[0]?.dbPassword,
+        httpsRedirect: siteMeta.httpsRedirect !== false,
+        gitRepository: siteMeta.gitRepository || undefined,
+        deployBranch: siteMeta.deployBranch || undefined,
+        appPort: siteMeta.appPort || undefined,
+        envVars,
+        filesRelPath: siteMeta.filesRelPath || undefined,
+        modxVersion: siteMeta.modxVersion || undefined,
+        cmsTablePrefix: siteMeta.cmsTablePrefix || undefined,
+        managerPath: siteMeta.managerPath || undefined,
+        connectorsPath: siteMeta.connectorsPath || undefined,
+        skipInstall: true,
+      };
+
+      let targetSiteId: string;
+
+      if (targetServerId === 'main') {
+        const result = await this.localPost('/sites', createBody, userId);
+        targetSiteId = result?.id as string;
+      } else {
+        const server = this.proxy.getServer(targetServerId)!;
+        const { status, data } = await this.proxy.proxyRequest(server, 'POST', '/sites', createBody);
+        if (status >= 400) {
+          const errMsg = (data as { error?: { message?: string } })?.error?.message || 'Ошибка создания сайта';
+          throw new Error(errMsg);
+        }
+        targetSiteId = ((data as { data?: { id?: string } })?.data?.id) || '';
+      }
+
+      if (!targetSiteId) throw new Error('Не удалось создать сайт на целевом сервере');
+      createdTargetSiteId = targetSiteId;
+      this.updateState(migrationId, 'create_site', undefined, { targetSiteId });
+      await this.waitTargetSiteProvisioned(targetServerId, targetSiteId);
+
+      // ══════════ Step 6: Tell target to pull from source ══════════
+      this.updateState(migrationId, 'import_pull');
+
+      const databases = siteSnapshot.databases;
+      let pullId: string;
+
+      if (targetServerId === 'main') {
+        const result = await this.startImportPull(targetSiteId, sourceDownloadUrl, databases, sourceRootPath);
+        pullId = result.pullId;
+      } else {
+        const server = this.proxy.getServer(targetServerId)!;
+        const { status, data } = await this.proxy.proxyRequest(server, 'POST', '/migration/import-pull', {
+          siteId: targetSiteId,
+          sourceUrl: sourceDownloadUrl,
+          databases,
+          sourceRootPath,
+        });
+        if (status >= 400) {
+          const errMsg = (data as { error?: { message?: string } })?.error?.message || 'Ошибка передачи';
+          throw new Error(errMsg);
+        }
+        pullId = (data as { data?: { pullId?: string } })?.data?.pullId || '';
+      }
+
+      if (!pullId) throw new Error('Не удалось запустить передачу');
+
+      // ══════════ Step 7: Wait for pull (download + restore) ══════════
+      this.updateState(migrationId, 'waiting_pull');
+
+      const pullResult = await this.pollPullStatus(targetServerId, pullId);
+      if (!pullResult.success) {
+        throw new Error(`Передача не удалась: ${pullResult.error || 'неизвестная ошибка'}`);
+      }
+
+      // ══════════ Step 8: Copy DB-only extras that are not inside archive ══════════
+      this.updateState(migrationId, 'apply_config');
+      if (targetServerId === 'main') {
+        await this.applySiteExtras(targetSiteId, siteSnapshot);
+      } else {
+        const server = this.proxy.getServer(targetServerId)!;
+        const { status, data } = await this.proxy.proxyRequest(server, 'POST', '/migration/apply-site-extras', {
+          siteId: targetSiteId,
+          snapshot: siteSnapshot,
+        });
+        if (status >= 400) {
+          const errMsg = (data as { error?: { message?: string } })?.error?.message || 'Ошибка переноса настроек сайта';
+          throw new Error(errMsg);
+        }
+      }
+
+      // ══════════ Step 8: Optional SSL ══════════
+      if (reissueSsl) {
+        this.updateState(migrationId, 'ssl');
+        try {
+          await this.reissueTargetSsl(targetServerId, targetSiteId, userId);
+        } catch (err) {
+          this.logger.warn(`SSL reissue failed during migration: ${(err as Error).message}`);
+        }
+      }
+
+      // ══════════ Step 9: Optional stop source ══════════
+      if (stopSource) {
+        this.updateState(migrationId, 'cleanup');
+        try {
+          if (sourceServerId === 'main') {
+            await this.localPost(`/sites/${siteId}/stop`, {}, userId);
+          } else {
+            const server = this.proxy.getServer(sourceServerId)!;
+            await this.proxy.proxyRequest(server, 'POST', `/sites/${siteId}/stop`, {});
+          }
+        } catch (err) {
+          this.logger.warn(`Source site stop failed: ${(err as Error).message}`);
+        }
+      }
+
+      // ══════════ Done ══════════
+      migrationCompleted = true;
+      this.updateState(migrationId, 'done', 'Миграция завершена успешно', { targetSiteId });
+      this.logger.log(`Migration ${migrationId} completed: site ${siteId} → ${targetSiteId}`);
+    } catch (err) {
+      if (createdTargetSiteId && !migrationCompleted) {
+        await this.cleanupCreatedTargetSite(targetServerId, createdTargetSiteId, userId, migrationId);
+      }
+      throw err;
+    }
   }
 
   async getSiteSnapshot(siteId: string): Promise<SiteSnapshot> {
@@ -925,6 +948,7 @@ export class MigrationService {
           .filter(isObjectRecord)
           .map((db) => ({
             name: String(db.name || ''),
+            sourceName: typeof db.sourceName === 'string' && db.sourceName ? db.sourceName : undefined,
             type: String(db.type || ''),
             dbUser: String(db.dbUser || ''),
             dbPassword: String(db.dbPassword || ''),
@@ -1634,6 +1658,7 @@ export class MigrationService {
     siteId: string,
     sourceUrl: string,
     databases: DatabaseSnapshot[],
+    sourceRootPath?: string,
   ): Promise<{ pullId: string; backupId: string }> {
     const site = await this.prisma.site.findUnique({
       where: { id: siteId },
@@ -1665,7 +1690,7 @@ export class MigrationService {
     this.pullStates.set(pullId, pullState);
 
     // Run async — download file, then trigger restore
-    this.downloadAndRestore(pullState, site, sourceUrl, databases).catch((err) => {
+    this.downloadAndRestore(pullState, site, sourceUrl, databases, sourceRootPath).catch((err) => {
       this.logger.error(`Import-pull ${pullId} failed: ${(err as Error).message}`);
       pullState.phase = 'failed';
       pullState.error = (err as Error).message;
@@ -1687,6 +1712,7 @@ export class MigrationService {
     site: { id: string; name: string; rootPath: string },
     sourceUrl: string,
     databases: DatabaseSnapshot[],
+    sourceRootPath?: string,
   ) {
     const localPath = path.join(BACKUP_DIR, `migration_${pullState.pullId}.tar.gz`);
 
@@ -1765,6 +1791,7 @@ export class MigrationService {
       siteId: site.id,
       siteName: site.name,
       rootPath: site.rootPath,
+      sourceRootPath,
       filePath: localPath,
       storageType: 'LOCAL',
       storageConfig: {},
@@ -1869,6 +1896,143 @@ export class MigrationService {
   // Helpers
   // ═══════════════════════════════════════════════════════════════════════════
 
+  private validateTargetOverrides(params: MigrateParams): void {
+    const targetName = params.targetName?.trim();
+    if (targetName && !RE_SITE_NAME.test(targetName)) {
+      throw new BadRequestException('targetName должен быть валидным именем сайта');
+    }
+
+    const targetDomain = params.targetDomain?.trim().toLowerCase();
+    if (targetDomain && !RE_DOMAIN.test(targetDomain)) {
+      throw new BadRequestException('targetDomain должен быть валидным доменом');
+    }
+  }
+
+  private applyTargetOverrides(snapshot: SiteSnapshot, params: MigrateParams): SiteSnapshot {
+    const targetName = params.targetName?.trim();
+    const targetDomain = params.targetDomain?.trim().toLowerCase();
+    if (!targetName && !targetDomain) return snapshot;
+
+    const oldPrimaryDomain = typeof snapshot.site.domain === 'string' ? snapshot.site.domain : '';
+    const next: SiteSnapshot = {
+      ...snapshot,
+      site: { ...snapshot.site },
+      domains: snapshot.domains.map((domain) => ({ ...domain })),
+      databases: snapshot.databases.map((db) => ({ ...db })),
+      backupConfigs: snapshot.backupConfigs.map((cfg) => ({ ...cfg })),
+      services: snapshot.services.map((service) => ({ ...service })),
+      dnsZones: snapshot.dnsZones.map((zone) => ({ ...zone })),
+      sslCertificates: snapshot.sslCertificates.map((cert) => ({ ...cert })),
+      cronJobs: snapshot.cronJobs.map((job) => ({ ...job })),
+      quickCommands: snapshot.quickCommands.map((cmd) => ({ ...cmd })),
+      node: {
+        ...snapshot.node,
+        ecosystems: snapshot.node.ecosystems.map((eco) => ({ ...eco })),
+        processesToStop: [...snapshot.node.processesToStop],
+        orphanProcesses: [...snapshot.node.orphanProcesses],
+      },
+    };
+
+    if (targetName) {
+      next.site.name = targetName;
+      next.site.rootPath = `/var/www/${targetName}`;
+      next.site.systemUser = targetName;
+      next.databases = next.databases.map((db, index) => {
+        const mappedName = this.targetDatabaseName(targetName, index);
+        const mappedUser = this.targetDatabaseUserName(targetName, index);
+        return {
+          ...db,
+          sourceName: db.sourceName || db.name,
+          name: mappedName,
+          dbUser: mappedUser,
+        };
+      });
+    }
+
+    if (targetDomain) {
+      next.site.domain = targetDomain;
+      next.domains = this.replacePrimaryDomain(next.domains, targetDomain);
+      next.site.aliases = this.filterAliases(next.site.aliases, [oldPrimaryDomain, targetDomain]);
+    }
+
+    return next;
+  }
+
+  private targetDatabaseName(targetName: string, index: number): string {
+    const base = this.targetDatabaseBaseName(targetName);
+    if (index === 0) return base.slice(0, 64);
+    const suffix = `_${index + 1}`;
+    return `${base.slice(0, 64 - suffix.length)}${suffix}`;
+  }
+
+  private targetDatabaseUserName(targetName: string, index: number): string {
+    const base = this.targetDatabaseBaseName(targetName);
+    if (index === 0) return base.slice(0, 32);
+    const suffix = `_${index + 1}`;
+    return `${base.slice(0, 32 - suffix.length)}${suffix}`;
+  }
+
+  private targetDatabaseBaseName(targetName: string): string {
+    return targetName.replace(/-/g, '_');
+  }
+
+  private replacePrimaryDomain(domains: SiteDomainSnapshot[], targetDomain: string): SiteDomainSnapshot[] {
+    if (domains.length === 0) {
+      return [{
+        domain: targetDomain,
+        isPrimary: true,
+        position: 0,
+        aliases: '[]',
+        filesRelPath: null,
+        appPort: null,
+        httpsRedirect: true,
+        nginxClientMaxBodySize: null,
+        nginxFastcgiReadTimeout: null,
+        nginxFastcgiSendTimeout: null,
+        nginxFastcgiConnectTimeout: null,
+        nginxFastcgiBufferSizeKb: null,
+        nginxFastcgiBufferCount: null,
+        nginxHttp2: false,
+        nginxHsts: false,
+        nginxGzip: true,
+        nginxRateLimitEnabled: false,
+        nginxRateLimitRps: null,
+        nginxRateLimitBurst: null,
+        nginxCustomConfig: null,
+      }];
+    }
+
+    const primaryIndex = domains.findIndex((domain) => domain.isPrimary);
+    const effectivePrimaryIndex = primaryIndex >= 0 ? primaryIndex : 0;
+    return domains
+      .map((domain, index) => index === effectivePrimaryIndex
+        ? { ...domain, domain: targetDomain, isPrimary: true, position: 0 }
+        : { ...domain, isPrimary: false },
+      )
+      .filter((domain, index) => index === effectivePrimaryIndex || domain.domain.toLowerCase() !== targetDomain)
+      .map((domain, index) => ({ ...domain, position: index }));
+  }
+
+  private filterAliases(rawAliases: unknown, domainsToDrop: string[]): unknown {
+    const drop = new Set(domainsToDrop.filter(Boolean).map((domain) => domain.toLowerCase()));
+    const aliases = Array.isArray(rawAliases)
+      ? rawAliases
+      : typeof rawAliases === 'string'
+      ? (() => {
+          try {
+            const parsed = JSON.parse(rawAliases);
+            return Array.isArray(parsed) ? parsed : [];
+          } catch {
+            return [];
+          }
+        })()
+      : [];
+    const filtered = aliases
+      .filter((alias): alias is string => typeof alias === 'string')
+      .filter((alias) => !drop.has(alias.toLowerCase()));
+    return typeof rawAliases === 'string' ? JSON.stringify(filtered) : filtered;
+  }
+
   private async assertServerVersions(params: MigrateParams): Promise<void> {
     const checks = await Promise.all([
       this.getPanelVersion(params.sourceServerId),
@@ -1909,7 +2073,53 @@ export class MigrationService {
     };
   }
 
+  private async cleanupCreatedTargetSite(
+    targetServerId: string,
+    targetSiteId: string,
+    userId: string,
+    migrationId: string,
+  ): Promise<void> {
+    try {
+      this.logger.warn(`Migration ${migrationId}: cleanup target site ${targetSiteId}`);
+      if (targetServerId === 'main') {
+        await this.localRequest('DELETE', `/sites/${targetSiteId}`, {}, userId, 300_000);
+        return;
+      }
+
+      const server = this.proxy.getServer(targetServerId);
+      if (!server) {
+        this.logger.warn(`Migration ${migrationId}: target cleanup skipped, server not found`);
+        return;
+      }
+
+      const { status, data } = await this.proxy.proxyRequest(
+        server,
+        'DELETE',
+        `/sites/${targetSiteId}`,
+        {},
+        { 'X-Migration-User': userId },
+        300_000,
+      );
+      if (status >= 400) {
+        const errMsg = (data as { error?: { message?: string } })?.error?.message || `HTTP ${status}`;
+        this.logger.warn(`Migration ${migrationId}: target cleanup failed: ${errMsg}`);
+      }
+    } catch (err) {
+      this.logger.warn(`Migration ${migrationId}: target cleanup failed: ${(err as Error).message}`);
+    }
+  }
+
   private async localPost(path: string, body: unknown, userId: string): Promise<Record<string, unknown>> {
+    return this.localRequest('POST', path, body, userId);
+  }
+
+  private async localRequest(
+    method: string,
+    path: string,
+    body: unknown,
+    userId: string,
+    timeoutMs = 300_000,
+  ): Promise<Record<string, unknown>> {
     const port = process.env.API_PORT || process.env.PANEL_PORT || '11860';
     const url = `http://127.0.0.1:${port}/api${path}`;
 
@@ -1924,12 +2134,16 @@ export class MigrationService {
     // парсит, но оставляем для трассировки запросов в nginx access-log.
     headers['X-Migration-User'] = userId;
 
-    const response = await fetch(url, {
-      method: 'POST',
+    const request: RequestInit = {
+      method,
       headers,
-      body: JSON.stringify(body),
-      signal: AbortSignal.timeout(300_000),
-    });
+      signal: AbortSignal.timeout(timeoutMs),
+    };
+    if (body !== undefined && method !== 'GET' && method !== 'HEAD') {
+      request.body = JSON.stringify(body);
+    }
+
+    const response = await fetch(url, request);
 
     const data = await response.json().catch(() => null);
     if (response.status >= 400) {
