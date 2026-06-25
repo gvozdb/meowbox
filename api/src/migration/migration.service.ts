@@ -238,7 +238,7 @@ const RESTORE_TIMEOUT_MS = Number(
   process.env.MIGRATION_RESTORE_TIMEOUT_MS,
 ) || 6 * 60 * 60 * 1000;
 
-const MIN_MIGRATION_VERSION = 'v0.6.57';
+const MIN_MIGRATION_VERSION = 'v0.6.59';
 
 const MIGRATION_DOWNLOAD_PATH_RE =
   /^\/api\/migration\/download\/[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
