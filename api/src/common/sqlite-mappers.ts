@@ -24,11 +24,18 @@ import {
 // полями. Учитывает, что findFirst/findUnique могут вернуть null.
 // ---------------------------------------------------------------------------
 
-export function mapSite<T extends { aliases?: string | unknown[]; envVars?: string | Record<string, unknown>; backupExcludes?: string | string[] | null; backupExcludeTables?: string | string[] | null } | null>(
+export function mapSite<T extends {
+  aliases?: string | unknown[];
+  envVars?: string | Record<string, unknown>;
+  metadata?: string | Record<string, unknown> | null;
+  backupExcludes?: string | string[] | null;
+  backupExcludeTables?: string | string[] | null;
+} | null>(
   site: T,
-): T extends null ? null : Omit<NonNullable<T>, 'aliases' | 'envVars' | 'backupExcludes' | 'backupExcludeTables'> & {
+): T extends null ? null : Omit<NonNullable<T>, 'aliases' | 'envVars' | 'metadata' | 'backupExcludes' | 'backupExcludeTables'> & {
   aliases: SiteAliasParsed[];
   envVars: Record<string, unknown>;
+  metadata: Record<string, unknown>;
   backupExcludes: string[];
   backupExcludeTables: string[];
 } {
@@ -54,6 +61,10 @@ export function mapSite<T extends { aliases?: string | unknown[]; envVars?: stri
       typeof s.envVars === 'object' && s.envVars !== null && !Array.isArray(s.envVars)
         ? (s.envVars as Record<string, unknown>)
         : parseJsonObject(s.envVars as string | undefined, {}),
+    metadata:
+      typeof s.metadata === 'object' && s.metadata !== null && !Array.isArray(s.metadata)
+        ? (s.metadata as Record<string, unknown>)
+        : parseJsonObject(s.metadata as string | undefined, {}),
     backupExcludes: Array.isArray(s.backupExcludes)
       ? (s.backupExcludes as string[])
       : parseStringArray(s.backupExcludes as string | undefined),

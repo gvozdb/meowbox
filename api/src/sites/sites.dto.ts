@@ -186,6 +186,10 @@ export class CreateSiteDto {
   envVars?: Record<string, string>;
 
   @IsOptional()
+  @IsObject()
+  metadata?: Record<string, unknown>;
+
+  @IsOptional()
   @IsBoolean()
   skipInstall?: boolean;
 

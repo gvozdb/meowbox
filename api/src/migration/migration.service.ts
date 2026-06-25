@@ -11,6 +11,7 @@ import * as net from 'net';
 import * as path from 'path';
 import { Readable } from 'stream';
 import { pipeline } from 'stream/promises';
+import { Agent as UndiciAgent, type Dispatcher } from 'undici';
 import { Prisma } from '@prisma/client';
 import { BackupEngine, BackupStatus, BackupStorageType, CronJobStatus, DatabaseType, SslStatus, UserRole } from '../common/enums';
 import { PrismaService } from '../common/prisma.service';
@@ -323,6 +324,9 @@ export class MigrationService {
   private readonly migrations = new Map<string, MigrationState>();
   private readonly downloadTokens = new Map<string, DownloadToken>();
   private readonly pullStates = new Map<string, PullState>();
+  private readonly insecureIpTlsDispatcher = new UndiciAgent({
+    connect: { rejectUnauthorized: false },
+  });
 
   constructor(
     private readonly prisma: PrismaService,
@@ -536,6 +540,13 @@ export class MigrationService {
         cmsTablePrefix: siteMeta.cmsTablePrefix || undefined,
         managerPath: siteMeta.managerPath || undefined,
         connectorsPath: siteMeta.connectorsPath || undefined,
+        metadata: {
+          migrationId,
+          importedFrom: 'meowbox',
+          sourceServerId,
+          sourceSiteId: siteId,
+          createdAt: new Date().toISOString(),
+        },
         skipInstall: true,
       };
 
@@ -1731,7 +1742,20 @@ export class MigrationService {
 
     const safeUrl = await assertMigrationDownloadUrl(sourceUrl);
 
-    const response = await fetch(safeUrl.toString());
+    const request: RequestInit = {};
+    const dispatcher = this.getMigrationDownloadDispatcher(safeUrl);
+    if (dispatcher) {
+      (request as RequestInit & { dispatcher: Dispatcher }).dispatcher = dispatcher;
+    }
+
+    let response: Response;
+    try {
+      response = await fetch(safeUrl.toString(), request);
+    } catch (err) {
+      throw new Error(
+        `Ошибка скачивания с source (${this.safeUrlHost(safeUrl)}): ${this.fetchErrorMessage(err)}`,
+      );
+    }
 
     if (!response.ok) {
       throw new Error(`Ошибка скачивания: HTTP ${response.status}`);
@@ -2085,6 +2109,14 @@ export class MigrationService {
     migrationId: string,
   ): Promise<void> {
     try {
+      const metadata = await this.getTargetSiteMetadata(targetServerId, targetSiteId);
+      if (metadata.migrationId !== migrationId || metadata.importedFrom !== 'meowbox') {
+        this.logger.warn(
+          `Migration ${migrationId}: target cleanup skipped, metadata mismatch for site ${targetSiteId}`,
+        );
+        return;
+      }
+
       this.logger.warn(`Migration ${migrationId}: cleanup target site ${targetSiteId}`);
       if (targetServerId === 'main') {
         await this.localRequest('DELETE', `/sites/${targetSiteId}`, {}, userId, 300_000);
@@ -2112,6 +2144,48 @@ export class MigrationService {
     } catch (err) {
       this.logger.warn(`Migration ${migrationId}: target cleanup failed: ${(err as Error).message}`);
     }
+  }
+
+  private async getTargetSiteMetadata(
+    targetServerId: string,
+    targetSiteId: string,
+  ): Promise<Record<string, unknown>> {
+    if (targetServerId === 'main') {
+      const site = await this.prisma.site.findUnique({
+        where: { id: targetSiteId },
+        select: { metadata: true },
+      });
+      return site?.metadata ? parseJsonObjectString(site.metadata) : {};
+    }
+
+    const server = this.proxy.getServer(targetServerId);
+    if (!server) return {};
+    const { status, data } = await this.proxy.proxyRequest(server, 'GET', `/sites/${targetSiteId}`);
+    if (status >= 400) return {};
+    const site = (data as { data?: { metadata?: unknown } })?.data;
+    return jsonObjectValue(site?.metadata);
+  }
+
+  private getMigrationDownloadDispatcher(url: URL): Dispatcher | undefined {
+    const hostname = url.hostname.replace(/^\[|\]$/g, '');
+    if (url.protocol === 'https:' && net.isIP(hostname) !== 0) {
+      return this.insecureIpTlsDispatcher;
+    }
+    return undefined;
+  }
+
+  private safeUrlHost(url: URL): string {
+    return url.host || 'unknown';
+  }
+
+  private fetchErrorMessage(err: unknown): string {
+    const error = err as { message?: unknown; cause?: unknown };
+    const message = typeof error.message === 'string' ? error.message : String(err);
+    const cause = error.cause as { message?: unknown } | undefined;
+    if (cause && typeof cause.message === 'string' && cause.message && cause.message !== message) {
+      return `${message}: ${cause.message}`;
+    }
+    return message;
   }
 
   private async localPost(path: string, body: unknown, userId: string): Promise<Record<string, unknown>> {
@@ -2456,6 +2530,16 @@ function jsonObjectStringValue(value: unknown): string {
     return JSON.stringify(value);
   }
   return '{}';
+}
+
+function jsonObjectValue(value: unknown): Record<string, unknown> {
+  if (typeof value === 'string') {
+    return parseJsonObjectString(value);
+  }
+  if (isObjectRecord(value)) {
+    return value;
+  }
+  return {};
 }
 
 function parseJsonObjectString(value: string): Record<string, unknown> {

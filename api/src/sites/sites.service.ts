@@ -1084,6 +1084,7 @@ export class SitesService implements OnModuleInit {
           deployBranch: dto.deployBranch || 'main',
           appPort: dto.appPort || null,
           envVars: JSON.stringify(dto.envVars || {}),
+          metadata: dto.metadata ? JSON.stringify(dto.metadata) : null,
           rootPath,
           filesRelPath,
           nginxConfigPath,
