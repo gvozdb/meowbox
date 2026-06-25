@@ -435,7 +435,7 @@ export class MigrationService {
           type: 'FULL',
           storageType: 'LOCAL',
         }, userId);
-        backupId = result?.backupId as string;
+        backupId = this.extractBackupId(result);
       } else {
         const server = this.proxy.getServer(sourceServerId)!;
         const { data } = await this.proxy.proxyRequest(server, 'POST', '/backups/trigger', {
@@ -443,7 +443,7 @@ export class MigrationService {
           type: 'FULL',
           storageType: 'LOCAL',
         });
-        backupId = (data as { data?: { backupId?: string } })?.data?.backupId || '';
+        backupId = this.extractBackupId(data);
       }
 
       if (!backupId) throw new Error('Не удалось запустить бэкап');
@@ -2111,6 +2111,33 @@ export class MigrationService {
 
   private async localPost(path: string, body: unknown, userId: string): Promise<Record<string, unknown>> {
     return this.localRequest('POST', path, body, userId);
+  }
+
+  private extractBackupId(payload: unknown): string {
+    if (!payload || typeof payload !== 'object') return '';
+
+    const data = payload as {
+      backupId?: unknown;
+      backups?: unknown;
+      data?: unknown;
+    };
+
+    if (typeof data.backupId === 'string' && data.backupId) {
+      return data.backupId;
+    }
+
+    if (Array.isArray(data.backups)) {
+      const backup = data.backups.find(
+        (item): item is { id: string } =>
+          !!item &&
+          typeof item === 'object' &&
+          typeof (item as { id?: unknown }).id === 'string' &&
+          !!(item as { id?: string }).id,
+      );
+      if (backup) return backup.id;
+    }
+
+    return this.extractBackupId(data.data);
   }
 
   private async localRequest(
