@@ -1223,7 +1223,13 @@ export class MigrationService {
       where: { id: siteId },
       data: siteUpdate,
     });
-    await this.applySiteDomains(siteId, site.userId, snapshot.domains);
+    await this.applySiteDomains(
+      siteId,
+      site.userId,
+      snapshot.domains,
+      safeRelativePath(nullableString(snapshot.site.filesRelPath)) || 'www',
+    );
+    await this.normalizeTargetSitePermissions(siteId);
     const sslCertificates = await this.applySslCertificates(siteId, snapshot.sslCertificates);
     const backupConfigs = await this.applyBackupConfigs(siteId, snapshot.backupConfigs);
     const services = await this.applySiteServices(siteId, snapshot.services);
@@ -1490,6 +1496,7 @@ export class MigrationService {
     siteId: string,
     userId: string,
     sourceDomains: SiteDomainSnapshot[],
+    siteFilesRelPath: string,
   ): Promise<void> {
     if (sourceDomains.length === 0) {
       await this.siteDomains.regenerateGlobalZones();
@@ -1524,7 +1531,7 @@ export class MigrationService {
         targetDomain.id,
         {
           domain: sourceDomain.domain,
-          filesRelPath: sourceDomain.filesRelPath,
+          filesRelPath: targetDomain.isPrimary ? siteFilesRelPath : sourceDomain.filesRelPath,
           appPort: sourceDomain.appPort,
           httpsRedirect: sourceDomain.httpsRedirect,
         },
@@ -1555,6 +1562,38 @@ export class MigrationService {
     await this.siteDomains.syncPrimaryMirror(siteId);
     await this.siteDomains.regenerateGlobalZones();
     await this.siteDomains.regenerateNginx(siteId);
+  }
+
+  private async normalizeTargetSitePermissions(siteId: string): Promise<void> {
+    const site = await this.prisma.site.findUnique({
+      where: { id: siteId },
+      select: {
+        name: true,
+        type: true,
+        rootPath: true,
+        filesRelPath: true,
+        systemUser: true,
+      },
+    });
+    if (!site) throw new Error('Целевой сайт не найден для нормализации прав');
+
+    const result = await this.agentRelay.emitToAgent<{
+      steps: Array<{ cmd: string; ok: boolean; error?: string }>;
+      modxCorePath?: string;
+    }>(
+      'site:normalize-permissions',
+      {
+        rootPath: site.rootPath,
+        filesRelPath: site.filesRelPath,
+        systemUser: site.systemUser || site.name,
+        siteType: site.type,
+      },
+      120_000,
+    );
+
+    if (!result.success) {
+      throw new Error(`Нормализация прав после миграции не удалась: ${result.error || 'unknown error'}`);
+    }
   }
 
   private async findTargetDomain(
@@ -1593,6 +1632,7 @@ export class MigrationService {
     if ('nginxCustomConfig' in site) data.nginxCustomConfig = nullableString(site.nginxCustomConfig);
     if ('backupExcludes' in site) data.backupExcludes = nullableString(site.backupExcludes);
     if ('backupExcludeTables' in site) data.backupExcludeTables = nullableString(site.backupExcludeTables);
+    if ('filesRelPath' in site) data.filesRelPath = safeRelativePath(nullableString(site.filesRelPath)) || 'www';
 
     return data;
   }
