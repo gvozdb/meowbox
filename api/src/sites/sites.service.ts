@@ -246,9 +246,9 @@ export class SitesService implements OnModuleInit {
       try {
         this.logger.log(`Migrating artifacts for site "${s.name}" (${s.domain}) → siteName schema`);
 
-        await this.agentRelay.emitToAgent(
-          'nginx:create-config',
-          buildMultiDomainNginxPayload(s as unknown as RawSiteForNginx),
+        await this.emitSiteNginxConfig(
+          s as unknown as RawSiteForNginx & { status?: string },
+          undefined,
           30_000,
         );
 
@@ -2275,7 +2275,7 @@ export class SitesService implements OnModuleInit {
   async controlSite(id: string, userId: string, role: string, action: 'start' | 'stop' | 'restart') {
     const site = await this.prisma.site.findUnique({
       where: { id },
-      select: { id: true, userId: true, name: true, domain: true, type: true, phpVersion: true, appPort: true, rootPath: true },
+      select: { id: true, userId: true, name: true },
     });
 
     if (!site) throw new NotFoundException('Site not found');
@@ -2283,21 +2283,16 @@ export class SitesService implements OnModuleInit {
       throw new ForbiddenException('Access denied');
     }
 
-    // С новой архитектурой site-control работает так:
-    //  - если есть PHP — рестартуем FPM (или просто reload при stop тоже, потому что
-    //    полностью остановить один сайт без остановки чужих нельзя через systemd);
-    //  - для CUSTOM без PHP — просто reload nginx.
-    if (site.phpVersion) {
-      const phpVersion = site.phpVersion || '8.2';
-      await this.agentRelay.emitToAgent('php:restart', { phpVersion });
-    } else {
-      await this.agentRelay.emitToAgent('nginx:reload', {});
+    if (!this.agentRelay.isAgentConnected()) {
+      throw new InternalServerErrorException('Агент не подключён');
     }
+
+    await this.applySiteNginxState(id, action === 'stop');
 
     const newStatus = action === 'stop' ? SiteStatus.STOPPED : SiteStatus.RUNNING;
     await this.prisma.site.update({
       where: { id },
-      data: { status: newStatus },
+      data: { status: newStatus, errorMessage: null },
     });
 
     this.logger.log(`Site "${site.name}" ${action} completed`);
@@ -2534,10 +2529,39 @@ export class SitesService implements OnModuleInit {
     }
   }
 
+  private async applySiteNginxState(siteId: string, stopped: boolean): Promise<void> {
+    const site = await this.prisma.site.findUnique({
+      where: { id: siteId },
+      include: DOMAINS_WITH_SSL,
+    });
+    if (!site) throw new NotFoundException('Site not found');
+    await this.emitSiteNginxConfig(site as unknown as RawSiteForNginx & { status?: string }, stopped);
+  }
+
+  private async emitSiteNginxConfig(
+    site: RawSiteForNginx & { status?: string },
+    stoppedOverride?: boolean,
+    timeoutMs?: number,
+  ): Promise<void> {
+    const stopped = stoppedOverride ?? site.status === SiteStatus.STOPPED;
+    const event = stopped ? 'nginx:create-stopped-config' : 'nginx:create-config';
+    const res = await this.agentRelay.emitToAgent<{ success?: boolean; error?: string }>(
+      event,
+      buildMultiDomainNginxPayload(site),
+      timeoutMs,
+    );
+    const ack = res as unknown as { success?: boolean; error?: string };
+    if (ack && ack.success === false) {
+      throw new InternalServerErrorException(
+        `${event} rejected by agent: ${ack.error || 'unknown'}`,
+      );
+    }
+  }
+
   /**
-   * Регенерирует весь nginx-конфиг сайта (главный файл + чанки всех основных
-   * доменов) через `nginx:create-config` с мульти-доменным payload. Загружает
-   * сайт со всеми доменами и их SSL. Best-effort: при ошибке только логирует.
+   * Регенерирует nginx-конфиг сайта с учётом статуса. RUNNING/ERROR получают
+   * обычный конфиг, STOPPED остаётся stopped-конфигом и не включается случайно
+   * после изменения доменов/настроек.
    */
   private async regenerateSiteNginx(siteId: string): Promise<void> {
     if (!this.agentRelay.isAgentConnected()) return;
@@ -2546,10 +2570,7 @@ export class SitesService implements OnModuleInit {
       include: DOMAINS_WITH_SSL,
     });
     if (!site) return;
-    await this.agentRelay.emitToAgent(
-      'nginx:create-config',
-      buildMultiDomainNginxPayload(site as unknown as RawSiteForNginx),
-    );
+    await this.emitSiteNginxConfig(site as unknown as RawSiteForNginx & { status?: string });
   }
 
   /**

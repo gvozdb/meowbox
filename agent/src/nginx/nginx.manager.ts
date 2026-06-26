@@ -32,6 +32,8 @@ import {
 } from '../config';
 import {
   MEOWBOX_INCLUDE_DIR,
+  NginxDomainAlias,
+  NginxDomainParams,
   NginxSiteParams,
   renderNginxSite,
 } from './templates';
@@ -47,6 +49,91 @@ const ZONES_HEADER =
 # Legacy fallback zone (для конфигов сайтов, которые ещё не пере-генерены под per-zone).
 limit_req_zone $binary_remote_addr zone=site_limit:10m rate=30r/s;
 `;
+
+function stoppedServerNames(domain: string, aliases: NginxDomainAlias[] | undefined): string {
+  const names = new Set<string>();
+  const add = (value: unknown) => {
+    if (typeof value !== 'string') return;
+    const name = value.trim();
+    if (name) names.add(name);
+  };
+
+  add(domain);
+  for (const alias of aliases || []) add(alias?.domain);
+  return [...names].join(' ') || '_';
+}
+
+function stoppedWebRoot(rootPath: string, filesRelPath: string): string {
+  const rel = (filesRelPath || 'www').replace(/^\/+/, '').replace(/\.\.+/g, '').replace(/\/+$/, '');
+  return `${rootPath}/${rel || 'www'}`;
+}
+
+function stoppedResponseBlock(): string {
+  return `    add_header Retry-After "3600" always;
+    default_type text/plain;
+    return 503 "Site stopped";`;
+}
+
+function stoppedHttpServer(d: NginxDomainParams, webRoot: string): string {
+  return `server {
+    listen 80;
+    listen [::]:80;
+    server_name ${stoppedServerNames(d.domain, d.aliases)};
+
+    location ^~ /.well-known/acme-challenge/ {
+        root ${webRoot};
+        default_type "text/plain";
+        allow all;
+        try_files $uri =404;
+    }
+
+    location / {
+${stoppedResponseBlock()}
+    }
+}
+`;
+}
+
+function stoppedHttpsServer(d: NginxDomainParams): string {
+  if (!d.sslEnabled || !d.certPath || !d.keyPath) return '';
+  return `server {
+    listen 443 ssl;
+    listen [::]:443 ssl;
+    server_name ${stoppedServerNames(d.domain, d.aliases)};
+
+    ssl_certificate ${d.certPath};
+    ssl_certificate_key ${d.keyPath};
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_ciphers ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384;
+    ssl_prefer_server_ciphers on;
+    ssl_session_cache shared:SSL:10m;
+    ssl_session_timeout 1d;
+    ssl_session_tickets off;
+
+    location / {
+${stoppedResponseBlock()}
+    }
+}
+`;
+}
+
+function renderStoppedNginxSite(site: NginxSiteParams): string {
+  const serverBlocks = site.domains.map((d) => {
+    const webRoot = stoppedWebRoot(site.rootPath, d.filesRelPath);
+    return [
+      `# --- Остановленный домен: ${d.domain} (${d.domainId}) ---`,
+      stoppedHttpServer(d, webRoot),
+      stoppedHttpsServer(d),
+    ].filter(Boolean).join('\n');
+  });
+
+  const domainList = site.domains.map((d) => d.domain).join(', ') || '(нет доменов)';
+  return `# Сгенерировано Meowbox для остановленного сайта ${site.siteName}.
+# Домены: ${domainList}
+# НЕ редактировать вручную: файл перезаписывается при start/stop сайта.
+
+${serverBlocks.join('\n')}`;
+}
 
 export class NginxManager {
   private readonly executor = new CommandExecutor();
@@ -151,6 +238,42 @@ export class NginxManager {
         await this.restoreFromBackup(site.siteName, backup);
         return { success: false, error: `nginx -t failed: ${test.error}` };
       }
+      await this.reload();
+      return { success: true };
+    } catch (err) {
+      await this.restoreFromBackup(site.siteName, backup).catch(() => {});
+      return { success: false, error: (err as Error).message };
+    }
+  }
+
+  /**
+   * Останавливает сайт на уровне nginx: все домены остаются закреплены за
+   * сайтом, но вместо backend/PHP отдают 503. Чанки доменов и custom-конфиги
+   * не трогаем, чтобы start мог вернуть обычный конфиг без потерь.
+   */
+  async createStoppedSiteConfig(site: NginxSiteParams): Promise<{ success: boolean; error?: string }> {
+    if (!site.siteName) return { success: false, error: 'siteName required' };
+
+    const mainPath = this.mainConfigPath(site.siteName);
+    const enabledLink = this.enabledLinkPath(site.siteName);
+    const backup = await this.backupSite(site.siteName);
+
+    try {
+      await fs.mkdir(SITES_AVAILABLE, { recursive: true });
+      await fs.mkdir(SITES_ENABLED, { recursive: true });
+
+      await fs.writeFile(mainPath, renderStoppedNginxSite(site), 'utf8');
+      await fs.chmod(mainPath, 0o644).catch(() => {});
+
+      await fs.unlink(enabledLink).catch(() => {});
+      await fs.symlink(mainPath, enabledLink);
+
+      const test = await this.testConfig();
+      if (!test.success) {
+        await this.restoreFromBackup(site.siteName, backup);
+        return { success: false, error: `nginx -t failed: ${test.error}` };
+      }
+
       await this.reload();
       return { success: true };
     } catch (err) {

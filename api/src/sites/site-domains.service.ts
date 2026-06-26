@@ -28,7 +28,7 @@ import {
   parseSiteAliases,
   aliasDomains,
 } from '../common/json-array';
-import { SslStatus } from '../common/enums';
+import { SiteStatus, SslStatus } from '../common/enums';
 import {
   buildMultiDomainNginxPayload,
   serializeSiteDomain,
@@ -408,8 +408,11 @@ export class SiteDomainsService {
     });
     if (!site) return;
     try {
+      const event = site.status === SiteStatus.STOPPED
+        ? 'nginx:create-stopped-config'
+        : 'nginx:create-config';
       const res = await this.agentRelay.emitToAgent<{ success?: boolean; error?: string }>(
-        'nginx:create-config',
+        event,
         buildMultiDomainNginxPayload(site as unknown as RawSiteForNginx),
       );
       // Раньше success:false тихо игнорировался → агент откатывал backup, домен
@@ -418,12 +421,12 @@ export class SiteDomainsService {
       const ack = res as unknown as { success?: boolean; error?: string };
       if (ack && ack.success === false) {
         this.logger.error(
-          `nginx:create-config rejected by agent for site ${siteId}: ${ack.error || 'unknown'}`,
+          `${event} rejected by agent for site ${siteId}: ${ack.error || 'unknown'}`,
         );
       }
     } catch (err) {
       this.logger.warn(
-        `nginx:create-config failed for site ${siteId}: ${(err as Error).message}`,
+        `nginx config regeneration failed for site ${siteId}: ${(err as Error).message}`,
       );
     }
   }
@@ -561,8 +564,11 @@ export class SiteDomainsService {
     let failed = 0;
     for (const site of sites) {
       try {
+        const event = site.status === SiteStatus.STOPPED
+          ? 'nginx:create-stopped-config'
+          : 'nginx:create-config';
         const r = await this.agentRelay.emitToAgent(
-          'nginx:create-config',
+          event,
           buildMultiDomainNginxPayload(site as unknown as RawSiteForNginx, {
             forceWriteCustom: site.domains.some((d) => !!d.nginxCustomConfig),
           }),

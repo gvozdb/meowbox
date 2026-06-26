@@ -301,6 +301,42 @@ export class AgentService {
     });
 
     /**
+     * Регенерирует главный nginx-файл сайта в stopped-режиме: все домены сайта
+     * отвечают 503, при этом layered-чанки и 95-custom.conf не трогаются.
+     */
+    this.safeOn(s, 'nginx:create-stopped-config', async (
+      params: {
+        siteName: string;
+        rootPath: string;
+        phpEnabled: boolean;
+        phpVersion?: string;
+        systemUser?: string;
+        domains: Array<{
+          domainId: string;
+          domain: string;
+          aliases: Array<{ domain: string; redirect: boolean }>;
+          filesRelPath: string;
+          appPort?: number | null;
+          sslEnabled: boolean;
+          certPath?: string | null;
+          keyPath?: string | null;
+          httpsRedirect: boolean;
+          zoneName: string;
+          settings: import('@meowbox/shared').SiteNginxOverrides;
+          customConfig?: string | null;
+          forceWriteCustom?: boolean;
+        }>;
+      },
+      cb: Callback,
+    ) => {
+      const owner = params.systemUser ? `${params.systemUser}:${params.systemUser}` : 'www-data:www-data';
+      await this.cmdExec.execute('mkdir', ['-p', params.rootPath]);
+      await this.cmdExec.execute('chown', [owner, params.rootPath]);
+      await this.cmdExec.execute('chmod', ['750', params.rootPath]);
+      cb(await this.nginx.createStoppedSiteConfig(params));
+    });
+
+    /**
      * Записать ТОЛЬКО `95-custom.conf` конкретного домена. Используется
      * UI-вкладкой Nginx при сохранении кастом-блока. nginx -t + reload +
      * автооткат при ошибке — внутри `setCustomConfig()`.
