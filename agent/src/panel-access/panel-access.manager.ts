@@ -16,12 +16,11 @@ import * as path from 'path';
 import * as os from 'os';
 import { createConnection } from 'net';
 import { CommandExecutor } from '../command-executor';
-import { LETSENCRYPT_LIVE_DIR } from '../config';
+import { ACME_WEBROOT, LETSENCRYPT_LIVE_DIR } from '../config';
 
 const PANEL_NGINX_PATH = '/etc/nginx/sites-available/meowbox-panel';
 const PANEL_NGINX_ENABLED = '/etc/nginx/sites-enabled/meowbox-panel';
 const PANEL_NGINX_BAK = '/etc/nginx/sites-available/meowbox-panel.bak';
-const ACME_WEBROOT = '/var/www/meowbox-acme';
 const SELFSIGNED_DIR = '/etc/ssl/meowbox/panel';
 
 interface RenderSettings {

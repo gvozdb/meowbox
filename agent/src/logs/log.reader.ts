@@ -1,7 +1,7 @@
 import * as fs from 'fs/promises';
 import * as path from 'path';
 import { CommandExecutor } from '../command-executor';
-import { artifactAnchor } from '@meowbox/shared';
+import { artifactAnchor, siteDomainLogBase } from '@meowbox/shared';
 
 // Совместимо с log.tail.ts — обе подсистемы должны смотреть в одну директорию,
 // иначе на нестандартных дистрибутивах (например, /var/log/nginx-extra) часть
@@ -46,7 +46,8 @@ export class LogReader {
     lines?: number;
   }): Promise<{ success: boolean; data?: LogReadResult; error?: string }> {
     const maxLines = Math.min(params.lines || 200, 1000);
-    const logPath = this.resolveLogPath(params);
+    const logPaths = this.resolveLogPathCandidates(params);
+    const logPath = await this.firstExistingPath(logPaths) || logPaths[0] || null;
 
     if (!logPath) {
       return { success: false, error: `Unknown log type: ${params.type}` };
@@ -93,7 +94,7 @@ export class LogReader {
     const available: Array<{ type: string; path: string; sizeBytes: number }> = [];
 
     for (const type of types) {
-      const logPath = this.resolveLogPath({ ...params, type });
+      const logPath = await this.firstExistingPath(this.resolveLogPathCandidates({ ...params, type }));
       if (!logPath) continue;
 
       try {
@@ -184,22 +185,54 @@ export class LogReader {
     siteName?: string;
     systemUser?: string;
   }): string | null {
-    const anchor = artifactAnchor({ siteName: params.siteName, domain: params.domain });
+    return this.resolveLogPathCandidates(params)[0] || null;
+  }
+
+  private resolveLogPathCandidates(params: {
+    domain: string;
+    type: string;
+    siteName?: string;
+    systemUser?: string;
+  }): string[] {
     switch (params.type) {
       case 'access':
-        return `/var/log/nginx/${anchor}-access.log`;
+        return this.nginxLogCandidates(params, 'access');
       case 'error':
-        return `/var/log/nginx/${anchor}-error.log`;
+        return this.nginxLogCandidates(params, 'error');
       case 'php':
-        return `/var/log/php/${anchor}-error.log`;
+        return [`/var/log/php/${artifactAnchor({ siteName: params.siteName, domain: params.domain })}-error.log`];
       case 'app':
         if (params.siteName) {
-          return `${process.env.HOME || '/root'}/.pm2/logs/${params.siteName}-out.log`;
+          return [`${process.env.HOME || '/root'}/.pm2/logs/${params.siteName}-out.log`];
         }
-        return null;
+        return [];
       default:
-        return null;
+        return [];
     }
+  }
+
+  private nginxLogCandidates(
+    params: { domain: string; siteName?: string },
+    type: 'access' | 'error',
+  ): string[] {
+    const bases = [
+      siteDomainLogBase({ siteName: params.siteName, domain: params.domain }),
+      (params.siteName || '').trim(),
+      (params.domain || '').trim(),
+    ].filter(Boolean);
+    return Array.from(new Set(bases)).map((base) => path.join(NGINX_LOG_DIR, `${base}-${type}.log`));
+  }
+
+  private async firstExistingPath(paths: string[]): Promise<string | null> {
+    for (const file of paths) {
+      try {
+        await fs.access(file);
+        return file;
+      } catch {
+        // Try next legacy candidate.
+      }
+    }
+    return null;
   }
 
   private async readLogFile(

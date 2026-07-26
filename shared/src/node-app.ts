@@ -44,6 +44,17 @@ export interface NodeProcessRuntime {
   restarts: number;
   execMode: string | null;
   instances: number | null;
+  /** Рабочая директория PM2-процесса, если PM2 её отдал. */
+  cwd: string | null;
+}
+
+/** Основной домен сайта, из web-root которого найден Node/PM2 ecosystem. */
+export interface NodeDomainRef {
+  domainId: string | null;
+  domain: string;
+  filesRelPath: string;
+  isPrimary: boolean;
+  position: number;
 }
 
 /** Объединённое представление процесса для UI: definition ∪ runtime. */
@@ -55,6 +66,8 @@ export interface NodeProcessView {
   loaded: boolean;
   /** Абсолютный путь к ecosystem-файлу, если defined. */
   ecosystemFile: string | null;
+  /** Основные домены, чей web-root содержит это определение. */
+  domains: NodeDomainRef[];
   definition: NodeAppDefinition | null;
   runtime: NodeProcessRuntime | null;
 }
@@ -63,6 +76,10 @@ export interface NodeProcessView {
 export interface NodeEcosystemGroup {
   /** Абс. путь ecosystem-файла; null — группа «сироты». */
   ecosystemFile: string | null;
+  /** Web-root относительно Site.rootPath, где найден файл; null для сирот. */
+  filesRelPath: string | null;
+  /** Основные домены, чей web-root содержит этот ecosystem-файл. */
+  domains: NodeDomainRef[];
   /** Путь директории файла относительно web-root сайта (для UI); null для сирот. */
   dir: string | null;
   processes: NodeProcessView[];

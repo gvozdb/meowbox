@@ -12,7 +12,7 @@ import { MonitoringService } from '../monitoring/monitoring.service';
 import { NotificationDispatcherService } from '../notifications/notification-dispatcher.service';
 import { NotificationDigestService } from '../notifications/notification-digest.service';
 import { SessionService } from '../auth/session.service';
-import { SslStatus, SiteStatus, BackupStatus, DeployStatus } from '../common/enums';
+import { SiteStatus, BackupStatus, DeployStatus } from '../common/enums';
 import { PanelSettingsService } from '../panel-settings/panel-settings.service';
 import { DnsService } from '../dns/dns.service';
 import { CountryBlockService } from '../country-block/country-block.service';
@@ -448,56 +448,14 @@ export class SchedulerService implements OnModuleInit {
   }
 
   // =========================================================================
-  // SSL Expiration Check — run twice daily at 6:00 and 18:00
+  // SSL Expiration Check — run twice daily at 6:00 and 18:00.
+  // Продлением владеет системный certbot.timer; здесь только синхронизируем
+  // статусы/сроки в БД, чтобы не запускать второй конкурирующий certbot renew.
   // =========================================================================
   @Cron('0 6,18 * * *')
   async handleSslCheck() {
     try {
-      // Update expiration status for all certs
       await this.sslService.checkExpirations();
-
-      // Auto-renew expiring certs
-      if (!this.agentRelay.isAgentConnected()) return;
-
-      const expiring = await this.prisma.sslCertificate.findMany({
-        where: {
-          status: { in: [SslStatus.EXPIRING_SOON, SslStatus.EXPIRED] },
-        },
-        include: {
-          site: { select: { id: true, domain: true, userId: true } },
-        },
-      });
-
-      for (const cert of expiring) {
-        if (!cert.site) continue;
-
-        try {
-          // Try to renew via certbot renew-all
-          const result = await this.agentRelay.emitToAgent(
-            'ssl:renew-all',
-            {},
-            180_000,
-          );
-
-          if (result.success) {
-            this.logger.log(`SSL renewed for ${cert.site.domain}`);
-            // Re-check expirations after renewal
-            await this.sslService.checkExpirations();
-          } else {
-            this.logger.warn(
-              `SSL renewal failed for ${cert.site.domain}: ${result.error}`,
-            );
-          }
-
-          // Only run renew-all once (it renews all certs)
-          break;
-        } catch (err) {
-          this.logger.error(
-            `SSL renewal error: ${(err as Error).message}`,
-          );
-          break;
-        }
-      }
     } catch (err) {
       this.logger.error(`SSL check failed: ${(err as Error).message}`);
     }

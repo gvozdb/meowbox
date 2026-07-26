@@ -1,19 +1,11 @@
 import { CommandExecutor } from '../command-executor';
-import { LETSENCRYPT_LIVE_DIR, CUSTOM_SSL_DIR } from '../config';
+import { ACME_WEBROOT, LETSENCRYPT_LIVE_DIR, CUSTOM_SSL_DIR } from '../config';
 import * as fsp from 'fs/promises';
 import * as path from 'path';
 
 interface IssueSslParams {
   domain: string;
   domains: string[];
-  rootPath: string;
-  /**
-   * Относительный путь к веб-файлам внутри `rootPath` (по умолчанию `www`).
-   * ВАЖНО: должен точно совпадать с тем, что прописано в nginx-конфиге сайта,
-   * иначе certbot положит challenge в одну директорию, а nginx будет искать
-   * его в другой → 404. См. `agent/src/nginx/templates.ts::resolveWebRoot`.
-   */
-  filesRelPath?: string;
   email?: string;
 }
 
@@ -32,6 +24,28 @@ interface SslResult {
   error?: string;
 }
 
+export interface ExistingSslInspection {
+  success: boolean;
+  found: boolean;
+  certPath?: string;
+  keyPath?: string;
+  expiresAt?: string;
+  domains?: string[];
+  error?: string;
+}
+
+const PEM_CERT_RE = /-----BEGIN CERTIFICATE-----[\s\S]*?-----END CERTIFICATE-----/g;
+
+function pemCertificateBlocks(pem: string | undefined): string[] {
+  return (pem?.match(PEM_CERT_RE) || [])
+    .map((block) => block.trim())
+    .filter(Boolean);
+}
+
+function pemJoin(blocks: string[]): string {
+  return `${blocks.map((block) => block.trim()).filter(Boolean).join('\n')}\n`;
+}
+
 /**
  * Manages SSL certificates via certbot (Let's Encrypt).
  * Uses webroot authentication for zero-downtime issuance.
@@ -47,12 +61,9 @@ export class SslManager {
    * Issue/renew SSL certificate using certbot webroot mode.
    */
   async issueCertificate(params: IssueSslParams): Promise<SslResult> {
-    const { domain, domains, rootPath, filesRelPath, email } = params;
-    // Webroot ДОЛЖЕН совпадать с nginx `root` для `.well-known/acme-challenge/`.
-    // Сан-логика дублирует resolveWebRoot() из nginx/templates.ts: убираем
-    // ведущие/трейлинг слэши и `..`, fallback — `www`.
-    const rel = (filesRelPath || 'www').replace(/^\/+/, '').replace(/\.\.+/g, '').replace(/\/+$/, '') || 'www';
-    const webroot = `${rootPath}/${rel}`;
+    const { domain, domains, email } = params;
+    await fsp.mkdir(ACME_WEBROOT, { recursive: true, mode: 0o755 });
+    await fsp.chmod(ACME_WEBROOT, 0o755);
 
     // Build certbot args.
     // --expand ВАЖЕН: если серт с --cert-name уже существует и список -d
@@ -62,7 +73,7 @@ export class SslManager {
     const args = [
       'certonly',
       '--webroot',
-      '--webroot-path', webroot,
+      '--webroot-path', ACME_WEBROOT,
       '--agree-tos',
       '--non-interactive',
       '--expand',
@@ -91,7 +102,7 @@ export class SslManager {
     // при следующей попытке). Если выпустили — тем более не нужны.
     // Саму директорию .well-known удаляем только если она пустая после чистки,
     // чтобы не удалить чужие файлы (security.txt и т.п., которые юзер мог положить).
-    await this.cleanupAcmeChallenge(webroot);
+    await this.cleanupAcmeChallenge(ACME_WEBROOT);
 
     if (result.exitCode !== 0) {
       // Certbot 2.x пишет понятные ошибки в STDOUT, а не STDERR — парсим оба.
@@ -125,28 +136,13 @@ export class SslManager {
   }
 
   /**
-   * Renew all certificates that are close to expiration.
-   */
-  async renewAll(): Promise<{ success: boolean; output: string }> {
-    const result = await this.executor.execute('certbot', ['renew', '--quiet'], {
-      timeout: 300_000,
-      allowFailure: true,
-    });
-
-    return {
-      success: result.exitCode === 0,
-      output: result.stdout + result.stderr,
-    };
-  }
-
-  /**
    * Проверить и подхватить уже лежащий на диске сертификат.
    * Читает /etc/letsencrypt/live/DOMAIN/fullchain.pem, достаёт notAfter
    * через openssl. Нужен для UI-кнопки «Импортировать существующий серт».
    */
   async inspectExisting(
     domain: string,
-  ): Promise<{ success: boolean; found: boolean; certPath?: string; keyPath?: string; expiresAt?: string; domains?: string[]; error?: string }> {
+  ): Promise<ExistingSslInspection> {
     if (!/^[A-Za-z0-9.-]+$/.test(domain) || domain.includes('..')) {
       return { success: false, found: false, error: 'Invalid domain name' };
     }
@@ -173,6 +169,19 @@ export class SslManager {
     const sanDomains = await this.readCertSan(certPath);
     return { success: true, found: true, certPath, keyPath, expiresAt, domains: sanDomains } as
       { success: true; found: true; certPath: string; keyPath: string; expiresAt?: string; domains?: string[] };
+  }
+
+  async inspectExistingMany(
+    domains: string[],
+  ): Promise<Array<ExistingSslInspection & { domain: string }>> {
+    const uniqueDomains = Array.from(
+      new Set(domains.map((domain) => domain.trim().toLowerCase()).filter(Boolean)),
+    );
+    const inspections: Array<ExistingSslInspection & { domain: string }> = [];
+    for (const domain of uniqueDomains) {
+      inspections.push({ domain, ...await this.inspectExisting(domain) });
+    }
+    return inspections;
   }
 
   /**
@@ -250,13 +259,28 @@ export class SslManager {
 
       // Write cert files
       const certPath = `${certDir}/fullchain.pem`;
+      const chainPath = `${certDir}/chain.pem`;
       const keyPath = `${certDir}/privkey.pem`;
 
-      // Combine cert + chain if provided
-      const fullChain = chainPem ? `${certPem}\n${chainPem}` : certPem;
+      const certBlocks = pemCertificateBlocks(certPem);
+      if (!certBlocks.length) {
+        return { success: false, error: 'certPem must contain a valid certificate block' };
+      }
+      const explicitChainBlocks = chainPem ? pemCertificateBlocks(chainPem) : [];
+      if (chainPem && !explicitChainBlocks.length) {
+        return { success: false, error: 'chainPem must contain a valid certificate block' };
+      }
+      const leafCert = certBlocks[0];
+      const chainBlocks = explicitChainBlocks.length > 0 ? explicitChainBlocks : certBlocks.slice(1);
+      const fullChain = pemJoin(chainBlocks.length > 0 ? [leafCert, ...chainBlocks] : certBlocks);
 
       const { writeFile } = await import('fs/promises');
       await writeFile(certPath, fullChain, 'utf-8');
+      if (chainBlocks.length > 0) {
+        await writeFile(chainPath, pemJoin(chainBlocks), 'utf-8');
+      } else {
+        await fsp.rm(chainPath, { force: true }).catch(() => {});
+      }
       await writeFile(keyPath, keyPem, { encoding: 'utf-8', mode: 0o600 });
 
       // Restrict key permissions

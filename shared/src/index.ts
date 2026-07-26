@@ -26,6 +26,8 @@ export type { SupportedPhpVersion } from './constants';
 export {
   artifactAnchor,
   artifactAnchorOrEmpty,
+  sanitizeDomainForFilename,
+  siteDomainLogBase,
 } from './site-artifacts';
 export type { AnchorParams } from './site-artifacts';
 
@@ -178,6 +180,7 @@ export type {
   NodeCommandSource,
   NodeAppDefinition,
   NodeProcessRuntime,
+  NodeDomainRef,
   NodeProcessView,
   NodeEcosystemGroup,
   NodeProcessesResult,

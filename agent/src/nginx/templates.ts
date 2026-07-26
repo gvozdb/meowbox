@@ -11,6 +11,7 @@
  *   /etc/nginx/sites-available/{siteName}.conf   ← главный файл (генерится панелью)
  *       содержит для КАЖДОГО домена:
  *         server { listen 80; ... return 301 https; }            (если SSL+redirect)
+ *         server { listen 80; ... include non-SSL chunks; }      (если SSL без redirect)
  *         server { listen 443 ssl http2; ...
  *             include /etc/nginx/meowbox/{siteName}/{domainId}/*.conf;
  *         }
@@ -30,8 +31,8 @@
  *   после первоначальной установки (кроме явного forceWriteCustom).
  */
 
-import { resolveNginxSettings, type SiteNginxOverrides } from '@meowbox/shared';
-import { DEFAULT_PHP_VERSION } from '../config';
+import { resolveNginxSettings, siteDomainLogBase, type SiteNginxOverrides } from '@meowbox/shared';
+import { ACME_WEBROOT, DEFAULT_PHP_VERSION } from '../config';
 import { sanitizeCustomNginxConfig } from './sanitize-custom';
 
 // =============================================================================
@@ -57,6 +58,8 @@ export interface NginxDomainParams {
   sslEnabled: boolean;
   certPath?: string | null;
   keyPath?: string | null;
+  trustedCertPath?: string | null;
+  ocspStapling?: boolean | null;
   httpsRedirect: boolean;
   /** Имя rate-limit зоны для этого домена — приходит из API, НЕ вычисляем. */
   zoneName: string;
@@ -135,11 +138,6 @@ function phpSocketPath(phpVersion: string, anchor: string): string {
   return `/var/run/php/php${phpVersion}-fpm-${anchor}.sock`;
 }
 
-/** Санитайзит домен под имя файла лога (no slashes/dots-as-path). */
-function sanitizeForFilename(domain: string): string {
-  return String(domain).toLowerCase().replace(/[^a-z0-9._-]/g, '_') || 'domain';
-}
-
 const MEOWBOX_INCLUDE_DIR = '/etc/nginx/meowbox';
 
 /** Директория чанков домена: meowbox/{siteName}/{domainId}/ */
@@ -161,7 +159,7 @@ function chunk00Server(
   const phpEnabled = !!site.phpEnabled;
   const indexDirective = phpEnabled ? 'index.php index.html' : 'index.html index.htm';
   // Лог-файл включает домен → у каждого домена сайта свои логи.
-  const logBase = `${site.siteName}__${sanitizeForFilename(d.domain)}`;
+  const logBase = siteDomainLogBase({ siteName: site.siteName, domain: d.domain });
   return `# === 00-server.conf — базовые директивы (управляется Meowbox) ===
 root ${webRoot};
 index ${indexDirective};
@@ -174,6 +172,7 @@ error_log /var/log/nginx/${logBase}-error.log;
 # ACME HTTP-01 (Let's Encrypt). Должно быть ВЫШЕ deny /\\. (regex, который
 # в 50-security.conf), чтобы валидация LE не упёрлась в deny.
 location ^~ /.well-known/acme-challenge/ {
+    root ${ACME_WEBROOT};
     default_type "text/plain";
     allow all;
     try_files $uri =404;
@@ -181,8 +180,17 @@ location ^~ /.well-known/acme-challenge/ {
 `;
 }
 
-/** 10-ssl.conf — SSL ciphers, stapling, HSTS (если включено). Listen в main файле. */
-function chunk10Ssl(settings: ReturnType<typeof resolveNginxSettings>): string {
+/** 10-ssl.conf — SSL ciphers, OCSP stapling, HSTS. Listen в main файле. */
+function chunk10Ssl(
+  d: NginxDomainParams,
+  settings: ReturnType<typeof resolveNginxSettings>,
+): string {
+  const stapling = d.ocspStapling === true
+    ? `ssl_stapling on;
+ssl_stapling_verify on;
+resolver 1.1.1.1 8.8.8.8 valid=300s;
+resolver_timeout 5s;`
+    : `# OCSP stapling отключён: у сертификата нет OCSP URI или нет trusted chain.`;
   return `# === 10-ssl.conf — SSL параметры (управляется Meowbox) ===
 ssl_protocols TLSv1.2 TLSv1.3;
 ssl_ciphers ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384;
@@ -190,8 +198,7 @@ ssl_prefer_server_ciphers on;
 ssl_session_cache shared:SSL:10m;
 ssl_session_timeout 1d;
 ssl_session_tickets off;
-ssl_stapling on;
-ssl_stapling_verify on;
+${stapling}
 ${settings.hsts ? 'add_header Strict-Transport-Security "max-age=63072000; includeSubDomains; preload" always;\n' : ''}`;
 }
 
@@ -285,7 +292,7 @@ function listenDirective(sslEnabled: boolean, http2: boolean): string {
     listen [::]:80;`;
 }
 
-function httpRedirectServer(d: NginxDomainParams, webRoot: string, serverAliases: string[]): string {
+function httpRedirectServer(d: NginxDomainParams, serverAliases: string[]): string {
   return `# Auto-generated HTTP→HTTPS redirect (Meowbox).
 server {
     listen 80;
@@ -293,7 +300,7 @@ server {
     server_name ${serverNames(d.domain, serverAliases)};
 
     location ^~ /.well-known/acme-challenge/ {
-        root ${webRoot};
+        root ${ACME_WEBROOT};
         default_type "text/plain";
         allow all;
         try_files $uri =404;
@@ -310,21 +317,25 @@ function aliasRedirectServer(
   redirectAliases: string[],
   mainDomain: string,
   sslEnabled: boolean,
+  http2: boolean,
   certPath?: string | null,
   keyPath?: string | null,
+  trustedCertPath?: string | null,
 ): string {
   if (!redirectAliases.length) return '';
   const names = redirectAliases.join(' ');
   const scheme = sslEnabled ? 'https' : 'http';
+  const h2 = http2 ? ' http2' : '';
   const ssl443 =
     sslEnabled && certPath && keyPath
       ? `
 server {
-    listen 443 ssl;
-    listen [::]:443 ssl;
+    listen 443 ssl${h2};
+    listen [::]:443 ssl${h2};
     server_name ${names};
     ssl_certificate ${certPath};
     ssl_certificate_key ${keyPath};
+${trustedCertPath ? `    ssl_trusted_certificate ${trustedCertPath};\n` : ''}
     ssl_protocols TLSv1.2 TLSv1.3;
     return 301 ${scheme}://${mainDomain}$request_uri;
 }
@@ -336,22 +347,48 @@ server {
     listen 80;
     listen [::]:80;
     server_name ${names};
-    return 301 ${scheme}://${mainDomain}$request_uri;
+
+    location ^~ /.well-known/acme-challenge/ {
+        root ${ACME_WEBROOT};
+        default_type "text/plain";
+        allow all;
+        try_files $uri =404;
+    }
+
+    location / {
+        return 301 ${scheme}://${mainDomain}$request_uri;
+    }
 }
 ${ssl443}`;
 }
 
-/** Главный server-блок одного домена. */
-function mainServerBlock(
+function domainChunkIncludes(
+  site: NginxSiteParams,
+  d: NginxDomainParams,
+  includeSslChunk: boolean,
+): string {
+  const dir = domainChunkDir(site.siteName, d.domainId);
+  if (includeSslChunk) {
+    return `    include ${dir}/*.conf;`;
+  }
+  // HTTP и HTTPS делят все server-level настройки, кроме 10-ssl.conf.
+  // Маски не падают, если optional chunk (например 20-php.conf) отсутствует.
+  return `    include ${dir}/0[0-9]-*.conf;
+    include ${dir}/[2-9][0-9]-*.conf;`;
+}
+
+/** Контентный server-блок одного домена для HTTP либо HTTPS. */
+function contentServerBlock(
   site: NginxSiteParams,
   d: NginxDomainParams,
   serverAliases: string[],
   settings: ReturnType<typeof resolveNginxSettings>,
+  useSsl: boolean,
 ): string {
-  const sslEnabled = !!d.sslEnabled && !!d.certPath && !!d.keyPath;
-  const sslLines = sslEnabled
+  const sslLines = useSsl
     ? `    ssl_certificate ${d.certPath};
     ssl_certificate_key ${d.keyPath};
+${d.trustedCertPath ? `    ssl_trusted_certificate ${d.trustedCertPath};\n` : ''}
 `
     : '';
   // appPort proxy_pass — если задан, добавляем как кастомный location перед include.
@@ -372,11 +409,11 @@ function mainServerBlock(
 `
     : '';
   return `server {
-${listenDirective(sslEnabled, settings.http2)}
+${listenDirective(useSsl, settings.http2)}
     server_name ${serverNames(d.domain, serverAliases)};
 ${sslLines}${proxyBlock}
-    # Подключаем все управляемые чанки + 95-custom.conf — сортировка по имени файла.
-    include ${domainChunkDir(site.siteName, d.domainId)}/*.conf;
+    # Подключаем управляемые чанки + 95-custom.conf.
+${domainChunkIncludes(site, d, useSsl)}
 }
 `;
 }
@@ -397,7 +434,7 @@ function renderDomainChunks(
   const chunks: Record<string, string> = {
     '00-server.conf': chunk00Server(site, d, webRoot, settings),
   };
-  if (sslEnabled) chunks['10-ssl.conf'] = chunk10Ssl(settings);
+  if (sslEnabled) chunks['10-ssl.conf'] = chunk10Ssl(d, settings);
   // appPort proxy_pass и php могут сосуществовать — php матчится регекспом раньше.
   if (site.phpEnabled) chunks['20-php.conf'] = chunk20Php(site, settings);
   chunks['40-static.conf'] = chunk40Static(settings);
@@ -435,9 +472,25 @@ export function renderNginxSite(site: NginxSiteParams): RenderedNginxSite {
     domains.push(renderDomainChunks(site, d, settings));
 
     const blocks: string[] = [`# --- Домен: ${d.domain} (${d.domainId}) ---`];
-    if (doHttpRedirect) blocks.push(httpRedirectServer(d, webRoot, serverAliases));
-    blocks.push(mainServerBlock(site, d, serverAliases, settings));
-    const aliasBlock = aliasRedirectServer(redirectAliases, d.domain, sslEnabled, d.certPath, d.keyPath);
+    if (sslEnabled) {
+      if (doHttpRedirect) {
+        blocks.push(httpRedirectServer(d, serverAliases));
+      } else {
+        blocks.push(contentServerBlock(site, d, serverAliases, settings, false));
+      }
+      blocks.push(contentServerBlock(site, d, serverAliases, settings, true));
+    } else {
+      blocks.push(contentServerBlock(site, d, serverAliases, settings, false));
+    }
+    const aliasBlock = aliasRedirectServer(
+      redirectAliases,
+      d.domain,
+      sslEnabled,
+      settings.http2,
+      d.certPath,
+      d.keyPath,
+      d.trustedCertPath,
+    );
     if (aliasBlock) blocks.push(aliasBlock);
     serverBlocks.push(blocks.join('\n'));
   }

@@ -70,7 +70,11 @@ export class NginxService {
       select: { id: true, name: true, domain: true },
     });
 
-    const siteMap = new Map(sites.map((s) => [s.domain, s]));
+    const siteMap = new Map<string, (typeof sites)[number]>();
+    for (const site of sites) {
+      siteMap.set(site.domain, site);
+      siteMap.set(site.name, site);
+    }
 
     if (result.success && result.data) {
       return result.data.map((domain) => {

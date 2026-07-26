@@ -7,6 +7,7 @@ import { SITES_BASE_PATH, isUnderAllowedSiteRoot, TIMEOUTS } from '../config';
 import { PM2_ECOSYSTEM_FILENAMES } from '@meowbox/shared';
 import type {
   NodeAppDefinition,
+  NodeDomainRef,
   NodeProcessRuntime,
   NodeProcessView,
   NodeEcosystemGroup,
@@ -111,12 +112,16 @@ try {
   /** Web-root сайта (директория, где лежит код) — `home/{filesRelPath}`. */
   private webRoot(user: string, filesRelPath: string): string {
     const home = this.siteHome(user);
-    const rel = (filesRelPath || 'www').replace(/^\/+|\/+$/g, '');
+    const rel = this.normalizeRelPath(filesRelPath);
     const root = path.resolve(home, rel);
     if (root !== home && !root.startsWith(home + path.sep)) {
       throw new Error(`Web root escapes site home: ${root}`);
     }
     return root;
+  }
+
+  private normalizeRelPath(filesRelPath: string | null | undefined): string {
+    return (filesRelPath || 'www').replace(/^\/+|\/+$/g, '') || 'www';
   }
 
   /** Проверяет, что путь лежит строго внутри домашней директории сайта. */
@@ -208,6 +213,7 @@ try {
             restart_time?: number;
             exec_mode?: string;
             instances?: number;
+            pm_cwd?: string;
           };
         };
         if (typeof proc.name !== 'string') return null;
@@ -225,9 +231,26 @@ try {
             typeof proc.pm2_env?.instances === 'number'
               ? proc.pm2_env.instances
               : null,
+          cwd: typeof proc.pm2_env?.pm_cwd === 'string' ? proc.pm2_env.pm_cwd : null,
         };
       })
       .filter((p): p is NodeProcessRuntime => p !== null);
+  }
+
+  private domainsForRuntime(
+    runtime: NodeProcessRuntime,
+    roots: Array<{ webRoot: string; domains: NodeDomainRef[] }>,
+  ): NodeDomainRef[] {
+    if (!runtime.cwd) return [];
+    const cwd = path.resolve(runtime.cwd);
+    const matches = roots
+      .filter((root) => cwd === root.webRoot || cwd.startsWith(root.webRoot + path.sep))
+      .sort((a, b) => b.webRoot.length - a.webRoot.length);
+    const bestLength = matches[0]?.webRoot.length;
+    if (!bestLength) return [];
+    return matches
+      .filter((root) => root.webRoot.length === bestLength)
+      .flatMap((root) => root.domains);
   }
 
   // ------------------------------------------------------------------
@@ -239,6 +262,7 @@ try {
     root: string,
     accept: (name: string) => boolean,
     limit: number,
+    skipRoots: ReadonlySet<string> = new Set(),
   ): Promise<string[]> {
     const found: string[] = [];
     const visit = async (dir: string, depth: number): Promise<void> => {
@@ -252,10 +276,14 @@ try {
       for (const e of entries) {
         if (found.length >= limit) return;
         if (e.isDirectory()) {
+          const childDir = path.resolve(dir, e.name);
+          if (skipRoots.has(childDir)) {
+            continue;
+          }
           if (e.name.startsWith('.') || NodeAppManager.SKIP_DIRS.has(e.name)) {
             continue;
           }
-          await visit(path.join(dir, e.name), depth + 1);
+          await visit(childDir, depth + 1);
         } else if (e.isFile() && accept(e.name)) {
           found.push(path.join(dir, e.name));
         }
@@ -312,46 +340,93 @@ try {
    */
   async getProcesses(
     user: string,
-    filesRelPath: string,
+    domainRootsOrFilesRelPath: NodeDomainRef[] | string,
   ): Promise<NodeProcessesResult> {
-    const home = this.siteHome(user);
-    const webRoot = this.webRoot(user, filesRelPath);
+    const rootInputs: NodeDomainRef[] = Array.isArray(domainRootsOrFilesRelPath) && domainRootsOrFilesRelPath.length
+      ? domainRootsOrFilesRelPath
+      : [{
+          domainId: null,
+          domain: user,
+          filesRelPath: typeof domainRootsOrFilesRelPath === 'string' ? domainRootsOrFilesRelPath : 'www',
+          isPrimary: true,
+          position: 0,
+        }];
 
-    const ecoFiles = fs.existsSync(webRoot)
-      ? await this.walk(
-          webRoot,
-          (n) => NodeAppManager.ECOSYSTEM_NAMES.has(n),
-          NodeAppManager.MAX_ECOSYSTEM_FILES,
-        )
-      : [];
-    ecoFiles.sort();
+    const rootByPath = new Map<string, { filesRelPath: string; domains: NodeDomainRef[] }>();
+    for (const input of rootInputs) {
+      const filesRelPath = this.normalizeRelPath(input.filesRelPath);
+      const webRoot = this.webRoot(user, filesRelPath);
+      const domain: NodeDomainRef = {
+        domainId: input.domainId ?? null,
+        domain: input.domain || filesRelPath,
+        filesRelPath,
+        isPrimary: input.isPrimary === true,
+        position: Number.isFinite(input.position) ? input.position : 0,
+      };
+      const bucket = rootByPath.get(webRoot);
+      if (bucket) {
+        bucket.domains.push(domain);
+      } else {
+        rootByPath.set(webRoot, { filesRelPath, domains: [domain] });
+      }
+    }
+
+    const roots = Array.from(rootByPath.entries())
+      .map(([webRoot, value]) => ({
+        webRoot,
+        filesRelPath: value.filesRelPath,
+        domains: value.domains.sort((a, b) => a.position - b.position),
+      }))
+      .sort((a, b) => (a.domains[0]?.position ?? 0) - (b.domains[0]?.position ?? 0));
 
     const runtime = await this.listRuntime(user);
     const runtimeByName = new Map(runtime.map((r) => [r.name, r]));
     const consumed = new Set<string>();
 
     const groups: NodeEcosystemGroup[] = [];
-    for (const file of ecoFiles) {
-      const defs = await this.readEcosystem(user, file);
-      const processes: NodeProcessView[] = [];
-      for (const def of defs) {
-        if (!def.name) continue; // без имени процессом не поуправляешь
-        const rt = runtimeByName.get(def.name) || null;
-        if (rt) consumed.add(def.name);
-        processes.push({
-          name: def.name,
-          defined: true,
-          loaded: rt !== null,
+    let ecosystemCount = 0;
+    const allRootPaths = new Set(roots.map((r) => r.webRoot));
+
+    for (const root of roots) {
+      const skipRoots = new Set(
+        Array.from(allRootPaths).filter((p) => p !== root.webRoot),
+      );
+      const ecoFiles = fs.existsSync(root.webRoot)
+        ? await this.walk(
+            root.webRoot,
+            (n) => NodeAppManager.ECOSYSTEM_NAMES.has(n),
+            NodeAppManager.MAX_ECOSYSTEM_FILES,
+            skipRoots,
+          )
+        : [];
+      ecoFiles.sort();
+      ecosystemCount += ecoFiles.length;
+
+      for (const file of ecoFiles) {
+        const defs = await this.readEcosystem(user, file);
+        const processes: NodeProcessView[] = [];
+        for (const def of defs) {
+          if (!def.name) continue; // без имени процессом не поуправляешь
+          const rt = runtimeByName.get(def.name) || null;
+          if (rt) consumed.add(def.name);
+          processes.push({
+            name: def.name,
+            defined: true,
+            loaded: rt !== null,
+            ecosystemFile: file,
+            domains: root.domains,
+            definition: def,
+            runtime: rt,
+          });
+        }
+        groups.push({
           ecosystemFile: file,
-          definition: def,
-          runtime: rt,
+          filesRelPath: root.filesRelPath,
+          domains: root.domains,
+          dir: path.relative(root.webRoot, path.dirname(file)) || '.',
+          processes,
         });
       }
-      groups.push({
-        ecosystemFile: file,
-        dir: path.relative(webRoot, path.dirname(file)) || '.',
-        processes,
-      });
     }
 
     // Сироты — процессы в PM2-демоне, не описанные ни одним ecosystem-файлом.
@@ -362,16 +437,23 @@ try {
         defined: false,
         loaded: true,
         ecosystemFile: null,
+        domains: this.domainsForRuntime(r, roots),
         definition: null,
         runtime: r,
       }));
     if (orphans.length > 0) {
-      groups.push({ ecosystemFile: null, dir: null, processes: orphans });
+      groups.push({
+        ecosystemFile: null,
+        filesRelPath: null,
+        domains: [],
+        dir: null,
+        processes: orphans,
+      });
     }
 
     return {
       groups,
-      ecosystemCount: ecoFiles.length,
+      ecosystemCount,
       daemonRunning: this.daemonRunning(user),
       autostartEnabled: await this.getAutostart(user),
     };

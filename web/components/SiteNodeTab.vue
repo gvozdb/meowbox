@@ -48,7 +48,7 @@
         </div>
         <p class="site-node__empty-title">Нет PM2-процессов</p>
         <p class="site-node__empty-text">
-          PM2-процессы берутся из ecosystem-файла в репозитории сайта
+          PM2-процессы берутся из ecosystem-файлов в web-root каждого основного домена
           (<code>ecosystem.config.js</code>, <code>.cjs</code> или <code>.json</code>).
           Чтобы здесь появились процессы — добавьте такой файл в код сайта.
         </p>
@@ -92,12 +92,31 @@
             class="nproc"
           >
             <div class="nproc__head">
-              <div class="nproc__title-block">
-                <span class="nproc__name">{{ proc.name }}</span>
-                <span class="nproc__badge" :class="`nproc__badge--${badgeKind(proc)}`">
-                  <span class="status-dot" :class="`status-dot--${badgeKind(proc)}`" />
-                  {{ statusLabel(proc) }}
-                </span>
+              <div class="nproc__identity">
+                <div class="nproc__title-line">
+                  <span class="nproc__name">{{ proc.name }}</span>
+                  <span class="nproc__badge" :class="`nproc__badge--${badgeKind(proc)}`">
+                    <span class="status-dot" :class="`status-dot--${badgeKind(proc)}`" />
+                    {{ statusLabel(proc) }}
+                  </span>
+                </div>
+                <div class="nproc__domains">
+                  <span
+                    v-for="domain in processDomains(proc, group)"
+                    :key="domain.domainId ?? domain.domain"
+                    class="nproc__domain-chip"
+                    :title="`web-root: ${domain.filesRelPath}`"
+                  >
+                    <span class="nproc__domain-name">{{ domain.domain }}</span>
+                    <code>{{ domain.filesRelPath }}</code>
+                  </span>
+                  <span
+                    v-if="processDomains(proc, group).length === 0"
+                    class="nproc__domain-chip nproc__domain-chip--muted"
+                  >
+                    без ecosystem-файла
+                  </span>
+                </div>
               </div>
               <div class="nproc__actions">
                 <template v-if="proc.loaded">
@@ -196,6 +215,7 @@ import type {
   NodeProcessesResult,
   NodeProcessView,
   NodeEcosystemGroup,
+  NodeDomainRef,
 } from '@meowbox/shared';
 
 const props = defineProps<{ siteId: string; active: boolean }>();
@@ -335,7 +355,7 @@ async function removeProcess(proc: NodeProcessView) {
 
 async function openLogs(proc: NodeProcessView) {
   logsModal.name = proc.name;
-  logsModal.title = proc.name;
+  logsModal.title = processTitle(proc);
   logsModal.open = true;
   await reloadLogs();
 }
@@ -382,6 +402,16 @@ function statusLabel(proc: NodeProcessView): string {
     case 'stopping': return 'Остановка…';
     default: return proc.runtime.status;
   }
+}
+
+function processDomains(proc: NodeProcessView, group: NodeEcosystemGroup): NodeDomainRef[] {
+  return proc.domains?.length ? proc.domains : (group.domains || []);
+}
+
+function processTitle(proc: NodeProcessView): string {
+  const domains = proc.domains || [];
+  if (!domains.length) return proc.name;
+  return `${proc.name} · ${domains.map((d) => d.domain).join(', ')}`;
 }
 
 function execModeLabel(mode: string | null): string {
@@ -556,12 +586,55 @@ function formatUptime(startedAtMs: number, status: string): string {
   gap: 0.85rem;
   flex-wrap: wrap;
 }
-.nproc__title-block { display: flex; align-items: center; gap: 0.6rem; }
+.nproc__identity {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  min-width: 0;
+}
+.nproc__title-line {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  flex-wrap: wrap;
+}
 .nproc__name {
   font-weight: 600;
   font-size: 0.92rem;
   color: var(--text-primary);
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+.nproc__domains {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  flex-wrap: wrap;
+}
+.nproc__domain-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  min-width: 0;
+  max-width: 100%;
+  border: 1px solid var(--border-subtle);
+  border-radius: 7px;
+  background: var(--bg-input);
+  color: var(--text-secondary);
+  padding: 0.2rem 0.45rem;
+  font-size: 0.72rem;
+}
+.nproc__domain-chip--muted {
+  color: var(--text-tertiary);
+}
+.nproc__domain-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: min(240px, 42vw);
+}
+.nproc__domain-chip code {
+  font-size: 0.92em;
+  padding: 0.02rem 0.25rem;
 }
 
 .nproc__badge {

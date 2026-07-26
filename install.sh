@@ -1040,10 +1040,13 @@ chmod 0755 /var/www/meowbox-acme
 mkdir -p /etc/letsencrypt/renewal-hooks/deploy
 cat > /etc/letsencrypt/renewal-hooks/deploy/meowbox-reload-nginx <<'HOOK'
 #!/usr/bin/env bash
-set -e
-nginx -t >/dev/null 2>&1 && systemctl reload nginx || true
+set -euo pipefail
+export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+nginx -t
+systemctl reload nginx
 HOOK
 chmod 0755 /etc/letsencrypt/renewal-hooks/deploy/meowbox-reload-nginx
+systemctl enable --now certbot.timer
 
 # Директория self-signed cert'ов панели (для UI-кнопки «Self-signed для IP»).
 mkdir -p /etc/ssl/meowbox/panel

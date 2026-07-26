@@ -1,4 +1,5 @@
 import {
+  BadRequestException,
   Controller,
   Get,
   Post,
@@ -8,7 +9,7 @@ import {
 } from '@nestjs/common';
 import { Throttle } from '@nestjs/throttler';
 import { NginxService } from './nginx.service';
-import { UpdateNginxConfigDto, WriteNginxGlobalConfigDto } from './nginx.dto';
+import { WriteNginxGlobalConfigDto } from './nginx.dto';
 import { Roles } from '../common/decorators/roles.decorator';
 
 @Controller('nginx')
@@ -63,11 +64,9 @@ export class NginxController {
 
   @Put('configs/:domain')
   @Throttle({ default: { limit: 10, ttl: 60000 } })
-  async updateConfig(
-    @Param('domain') domain: string,
-    @Body() dto: UpdateNginxConfigDto,
-  ) {
-    await this.nginxService.updateConfig(domain, dto.config);
-    return { success: true };
+  async updateConfig() {
+    throw new BadRequestException(
+      'Site nginx configs are managed by Meowbox. Edit only the custom block on the site Nginx tab.',
+    );
   }
 }

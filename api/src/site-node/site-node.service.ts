@@ -9,11 +9,13 @@ import { AgentRelayService } from '../gateway/agent-relay.service';
 import { PrismaService } from '../common/prisma.service';
 import type {
   NodeProcessesResult,
+  NodeDomainRef,
   DiscoveredCommandGroup,
   QuickCommand,
   QuickCommandRunResult,
 } from '@meowbox/shared';
 import { QuickCommandInputDto } from './site-node.dto';
+import { resolveDomainFilesRelPath } from '../sites/site-domains.helper';
 
 const PROC_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,99}$/;
 type ProcessAction = 'stop' | 'restart' | 'reload' | 'delete';
@@ -37,13 +39,47 @@ export class SiteNodeService {
   /** Системный юзер + web-root сайта. Бросает 404, если сайта нет. */
   private async siteCtx(
     siteId: string,
-  ): Promise<{ systemUser: string; filesRelPath: string }> {
+  ): Promise<{ systemUser: string; filesRelPath: string; domainRoots: NodeDomainRef[] }> {
     const site = await this.prisma.site.findUnique({
       where: { id: siteId },
-      select: { name: true, filesRelPath: true },
+      select: {
+        name: true,
+        domain: true,
+        filesRelPath: true,
+        domains: {
+          select: {
+            id: true,
+            domain: true,
+            isPrimary: true,
+            position: true,
+            filesRelPath: true,
+          },
+          orderBy: [{ isPrimary: 'desc' }, { position: 'asc' }],
+        },
+      },
     });
     if (!site) throw new NotFoundException('Сайт не найден');
-    return { systemUser: site.name, filesRelPath: site.filesRelPath };
+
+    const siteFilesRelPath = site.filesRelPath || 'www';
+    const domainRoots: NodeDomainRef[] = site.domains.map((d) => ({
+      domainId: d.id,
+      domain: d.domain,
+      filesRelPath: resolveDomainFilesRelPath(d.filesRelPath, siteFilesRelPath),
+      isPrimary: d.isPrimary,
+      position: d.position,
+    }));
+
+    if (domainRoots.length === 0 && site.domain) {
+      domainRoots.push({
+        domainId: null,
+        domain: site.domain,
+        filesRelPath: siteFilesRelPath,
+        isPrimary: true,
+        position: 0,
+      });
+    }
+
+    return { systemUser: site.name, filesRelPath: siteFilesRelPath, domainRoots };
   }
 
   private unwrap<T>(

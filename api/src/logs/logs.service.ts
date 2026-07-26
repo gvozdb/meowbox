@@ -7,6 +7,7 @@ import {
 } from '@nestjs/common';
 import { PrismaService } from '../common/prisma.service';
 import { AgentRelayService } from '../gateway/agent-relay.service';
+import { artifactAnchor, siteDomainLogBase } from '@meowbox/shared';
 
 export interface LogSource {
   id: string;
@@ -116,15 +117,13 @@ export class LogsService {
       const site = await this.getSiteOrFail(siteId, userId, role);
 
       // Map type to file path (must match agent LogReader.resolveLogPath).
-      // Логи теперь якорятся на Site.name (неизменяемый юзер-юзер), не на домене.
-      const anchor = site.name || site.domain;
       switch (type) {
         case 'access':
-          return `/var/log/nginx/${anchor}-access.log`;
+          return `/var/log/nginx/${siteDomainLogBase({ siteName: site.name, domain: site.domain })}-access.log`;
         case 'error':
-          return `/var/log/nginx/${anchor}-error.log`;
+          return `/var/log/nginx/${siteDomainLogBase({ siteName: site.name, domain: site.domain })}-error.log`;
         case 'php':
-          return `/var/log/php/${anchor}-error.log`;
+          return `/var/log/php/${artifactAnchor({ siteName: site.name, domain: site.domain })}-error.log`;
         case 'app':
           if (site.name) {
             return `/root/.pm2/logs/${site.name}-out.log`;

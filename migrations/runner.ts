@@ -10,7 +10,7 @@
  * Применяется автоматически в make update после prisma migrate deploy.
  */
 import { execFile } from 'node:child_process';
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { promises as fs } from 'node:fs';
 import * as path from 'node:path';
 import { promisify } from 'node:util';
@@ -81,7 +81,7 @@ class MigrationsRunner {
   async up(): Promise<void> {
     const all = await this.discoverMigrations();
     const applied = await this.getApplied();
-    const appliedIds = new Set(applied.map((m) => m.id));
+    const appliedIds = new Set(applied.filter((m) => m.ok).map((m) => m.id));
 
     // Проверяем чексумы уже применённых — warning если кто-то задним числом отредактировал.
     for (const m of all) {
@@ -226,9 +226,17 @@ class MigrationsRunner {
     }
 
     const durationMs = Date.now() - start;
-    await this.prisma.systemMigration.create({
-      data: {
+    await this.prisma.systemMigration.upsert({
+      where: { id: m.id },
+      create: {
         id: m.id,
+        durationMs,
+        checksum: m.checksum,
+        ok,
+        errorLog: ok ? null : logBuffer.slice(-32 * 1024),
+      },
+      update: {
+        appliedAt: new Date(),
         durationMs,
         checksum: m.checksum,
         ok,
@@ -267,8 +275,40 @@ class MigrationsRunner {
         return fs.readFile(p, 'utf8');
       },
       async writeFile(p: string, content: string, mode?: number) {
-        await fs.mkdir(path.dirname(p), { recursive: true });
-        await fs.writeFile(p, content, { mode });
+        const writePath = await fs.lstat(p)
+          .then((stat) => stat.isSymbolicLink() ? fs.realpath(p) : p)
+          .catch(() => p);
+        const dir = path.dirname(writePath);
+        await fs.mkdir(dir, { recursive: true });
+        const existing = await fs.stat(writePath).catch(() => null);
+        const finalMode = mode ?? (existing ? existing.mode & 0o7777 : undefined);
+        const tmp = path.join(
+          dir,
+          `.${path.basename(writePath)}.meowbox-migration-${process.pid}-${randomUUID()}`,
+        );
+        try {
+          const handle = await fs.open(tmp, 'wx', finalMode);
+          try {
+            await handle.writeFile(content, 'utf8');
+            await handle.sync();
+          } finally {
+            await handle.close();
+          }
+          if (existing) await fs.chown(tmp, existing.uid, existing.gid);
+          if (finalMode !== undefined) await fs.chmod(tmp, finalMode);
+          await fs.rename(tmp, writePath);
+          const dirHandle = await fs.open(dir, 'r').catch(() => null);
+          if (dirHandle) {
+            try {
+              await dirHandle.sync().catch(() => {});
+            } finally {
+              await dirHandle.close();
+            }
+          }
+        } catch (err) {
+          await fs.unlink(tmp).catch(() => {});
+          throw err;
+        }
       },
       log: (msg: string) => console.log(`[migrate]     ${msg}`),
       config: {

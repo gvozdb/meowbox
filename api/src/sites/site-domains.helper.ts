@@ -45,6 +45,17 @@ export interface RawSslCertificate {
   keyPath: string | null;
 }
 
+export function isNginxUsableSsl(ssl: RawSslCertificate | null | undefined): boolean {
+  return !!(
+    ssl &&
+    (ssl.status === SslStatus.ACTIVE ||
+      ssl.status === SslStatus.EXPIRING_SOON ||
+      ssl.status === SslStatus.EXPIRED) &&
+    ssl.certPath &&
+    ssl.keyPath
+  );
+}
+
 export interface RawSiteDomain {
   id: string;
   domain: string;
@@ -116,12 +127,7 @@ export function buildMultiDomainNginxPayload(
     .sort((a, b) => a.position - b.position)
     .map((d) => {
       const ssl = d.sslCertificate;
-      const sslActive = !!(
-        ssl &&
-        ssl.status === SslStatus.ACTIVE &&
-        ssl.certPath &&
-        ssl.keyPath
-      );
+      const sslActive = isNginxUsableSsl(ssl);
       return {
         domainId: d.id,
         domain: d.domain,

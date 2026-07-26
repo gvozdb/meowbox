@@ -36,3 +36,21 @@ export function artifactAnchor(params: AnchorParams): string {
 export function artifactAnchorOrEmpty(params: AnchorParams): string {
   return (params.siteName || '').trim() || (params.domain || '').trim();
 }
+
+/** Санитайзит домен под имя файла лога (no slashes/dots-as-path). */
+export function sanitizeDomainForFilename(domain: string): string {
+  return String(domain).toLowerCase().replace(/[^a-z0-9._-]/g, '_') || 'domain';
+}
+
+/**
+ * База имени nginx-логов домена.
+ *
+ * В multi-domain схеме у каждого основного домена свой access/error log:
+ * `{Site.name}__{domain}-access.log`. Legacy fallback — обычный artifactAnchor.
+ */
+export function siteDomainLogBase(params: AnchorParams): string {
+  const siteName = (params.siteName || '').trim();
+  const domain = (params.domain || '').trim();
+  if (siteName && domain) return `${siteName}__${sanitizeDomainForFilename(domain)}`;
+  return artifactAnchor(params);
+}

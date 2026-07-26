@@ -12,8 +12,8 @@ import { NotificationDispatcherService } from '../notifications/notification-dis
 import { parseStringArray, parseSiteAliases } from '../common/json-array';
 import { SiteDomainsService } from '../sites/site-domains.service';
 import {
-  serializeSslCertificate,
   resolveDomainFilesRelPath,
+  serializeSslCertificate,
 } from '../sites/site-domains.helper';
 
 /**
@@ -22,6 +22,18 @@ import {
  */
 const CERTBOT_ISSUE_TIMEOUT_MS = Number(process.env.CERTBOT_ISSUE_TIMEOUT_MS) || 180_000;
 const CERTBOT_REVOKE_TIMEOUT_MS = Number(process.env.CERTBOT_REVOKE_TIMEOUT_MS) || 90_000;
+const CERTBOT_INSPECT_TIMEOUT_MS = 300_000;
+
+interface ExistingSslInspection {
+  domain: string;
+  success: boolean;
+  found: boolean;
+  certPath?: string;
+  keyPath?: string;
+  expiresAt?: string;
+  domains?: string[];
+  error?: string;
+}
 
 /**
  * SSL-операции domain-scoped: каждый основной домен (`SiteDomain`) имеет
@@ -161,8 +173,7 @@ export class SslService {
       where: { id: cert.id },
       data: { status: SslStatus.PENDING },
     });
-
-    const filesRelPath = resolveDomainFilesRelPath(
+    const legacyFilesRelPath = resolveDomainFilesRelPath(
       domain.filesRelPath,
       domain.site.filesRelPath,
     );
@@ -180,8 +191,10 @@ export class SslService {
         {
           domain: domain.domain,
           domains,
+          // Backward compatibility for a previous agent during rolling restart.
+          // Current agents intentionally ignore these site-specific paths.
           rootPath: domain.site.rootPath,
-          filesRelPath,
+          filesRelPath: legacyFilesRelPath,
         },
         CERTBOT_ISSUE_TIMEOUT_MS,
       );
@@ -452,16 +465,75 @@ export class SslService {
   async checkExpirations() {
     const certs = await this.prisma.sslCertificate.findMany({
       where: {
-        status: { in: [SslStatus.ACTIVE, SslStatus.EXPIRING_SOON] },
-        expiresAt: { not: null },
+        status: { in: [SslStatus.ACTIVE, SslStatus.EXPIRING_SOON, SslStatus.EXPIRED] },
       },
       include: { domain: { select: { domain: true } } },
     });
 
+    const letsEncryptDomains = certs
+      .filter((cert) => cert.certPath?.startsWith('/etc/letsencrypt/live/'))
+      .map((cert) => cert.domain?.domain)
+      .filter((domain): domain is string => !!domain);
+    const inspections = new Map<string, ExistingSslInspection>();
+
+    if (letsEncryptDomains.length > 0 && this.agentRelay.isAgentConnected()) {
+      try {
+        const result = await this.agentRelay.emitToAgent<{
+          certificates: ExistingSslInspection[];
+        }>(
+          'ssl:inspect-existing-many',
+          { domains: letsEncryptDomains },
+          CERTBOT_INSPECT_TIMEOUT_MS,
+        );
+        if (!result.success) {
+          this.logger.warn(`SSL metadata sync failed: ${result.error || 'unknown agent error'}`);
+        } else {
+          const certificates = Array.isArray(result.data?.certificates)
+            ? result.data.certificates
+            : [];
+          for (const inspection of certificates) {
+            if (typeof inspection?.domain === 'string') {
+              inspections.set(inspection.domain.toLowerCase(), inspection);
+            }
+          }
+        }
+      } catch (err) {
+        this.logger.warn(`SSL metadata sync skipped: ${(err as Error).message}`);
+      }
+    }
+
     for (const cert of certs) {
-      if (!cert.expiresAt) continue;
+      const domain = cert.domain?.domain.toLowerCase();
+      const inspection = domain ? inspections.get(domain) : undefined;
+      let expiresAt = cert.expiresAt;
+      const metadataUpdate: Record<string, unknown> = {};
+
+      if (inspection?.success && inspection.found && inspection.expiresAt) {
+        const inspectedExpiry = new Date(inspection.expiresAt);
+        if (!Number.isNaN(inspectedExpiry.getTime())) {
+          expiresAt = inspectedExpiry;
+          if (!cert.expiresAt || cert.expiresAt.getTime() !== inspectedExpiry.getTime()) {
+            metadataUpdate.expiresAt = inspectedExpiry;
+          }
+          if (inspection.certPath && inspection.certPath !== cert.certPath) {
+            metadataUpdate.certPath = inspection.certPath;
+          }
+          if (inspection.keyPath && inspection.keyPath !== cert.keyPath) {
+            metadataUpdate.keyPath = inspection.keyPath;
+          }
+          if (inspection.domains?.length) {
+            const inspectedDomains = JSON.stringify(
+              Array.from(new Set(inspection.domains.map((item) => item.trim().toLowerCase())))
+                .filter(Boolean),
+            );
+            if (inspectedDomains !== cert.domains) metadataUpdate.domains = inspectedDomains;
+          }
+        }
+      }
+
+      if (!expiresAt) continue;
       const daysRemaining = Math.floor(
-        (cert.expiresAt.getTime() - Date.now()) / (1000 * 60 * 60 * 24),
+        (expiresAt.getTime() - Date.now()) / (1000 * 60 * 60 * 24),
       );
 
       let newStatus = cert.status;
@@ -473,10 +545,14 @@ export class SslService {
         newStatus = SslStatus.ACTIVE;
       }
 
-      if (newStatus !== cert.status || cert.daysRemaining !== daysRemaining) {
+      if (
+        newStatus !== cert.status ||
+        cert.daysRemaining !== daysRemaining ||
+        Object.keys(metadataUpdate).length > 0
+      ) {
         await this.prisma.sslCertificate.update({
           where: { id: cert.id },
-          data: { status: newStatus, daysRemaining },
+          data: { ...metadataUpdate, status: newStatus, daysRemaining },
         });
 
         const statusChanged =

@@ -141,6 +141,7 @@ export interface SslCertificateSnapshot {
   expiresAt: string | null;
   daysRemaining: number | null;
   certPem: string | null;
+  chainPem: string | null;
   keyPem: string | null;
 }
 
@@ -758,6 +759,7 @@ export class MigrationService {
         expiresAt: cert.expiresAt?.toISOString() || null,
         daysRemaining: cert.daysRemaining,
         certPem: pem.certPem,
+        chainPem: pem.chainPem,
         keyPem: pem.keyPem,
       };
     }));
@@ -838,9 +840,9 @@ export class MigrationService {
     status: string,
     certPath: string | null,
     keyPath: string | null,
-  ): Promise<{ certPem: string | null; keyPem: string | null }> {
+  ): Promise<{ certPem: string | null; chainPem: string | null; keyPem: string | null }> {
     if (!isMigratableSslStatus(status) || !certPath || !keyPath) {
-      return { certPem: null, keyPem: null };
+      return { certPem: null, chainPem: null, keyPem: null };
     }
 
     try {
@@ -848,10 +850,18 @@ export class MigrationService {
         readAllowedSslFile(certPath),
         readAllowedSslFile(keyPath),
       ]);
-      return { certPem, keyPem };
+      let chainPem: string | null = null;
+      const chainPath = chainPathForFullchain(certPath);
+      if (chainPath) {
+        chainPem = await readAllowedSslFile(chainPath).catch((err) => {
+          this.logger.warn(`SSL chain read skipped during migration snapshot: ${(err as Error).message}`);
+          return null;
+        });
+      }
+      return { certPem, chainPem, keyPem };
     } catch (err) {
       this.logger.warn(`SSL certificate read skipped during migration snapshot: ${(err as Error).message}`);
-      return { certPem: null, keyPem: null };
+      return { certPem: null, chainPem: null, keyPem: null };
     }
   }
 
@@ -887,7 +897,7 @@ export class MigrationService {
         continue;
       }
 
-      const file = buildTargetEcosystemPath(filesRelPath, group.dir, group.ecosystemFile);
+      const file = buildTargetEcosystemPath(group.filesRelPath || filesRelPath, group.dir, group.ecosystemFile);
       if (!file) continue;
 
       const defined = (group.processes || []).filter((proc) => proc.defined && proc.name);
@@ -1029,6 +1039,7 @@ export class MigrationService {
             expiresAt: nullableDateIso(cert.expiresAt),
             daysRemaining: nullableNumber(cert.daysRemaining),
             certPem: nullableString(cert.certPem),
+            chainPem: nullableString(cert.chainPem),
             keyPem: nullableString(cert.keyPem),
           }))
           .filter((cert) => cert.status !== SslStatus.NONE)
@@ -1323,6 +1334,7 @@ export class MigrationService {
         const raw = await this.agentRelay.emitToAgent<unknown>('ssl:install-custom', {
           domain: targetDomain.domain,
           certPem: cert.certPem,
+          chainPem: cert.chainPem || undefined,
           keyPem: cert.keyPem,
         });
         const ack = raw as unknown as {
@@ -2619,6 +2631,13 @@ function sslStatusFromDaysRemaining(daysRemaining: number | null, fallback: stri
   if (daysRemaining <= 0) return SslStatus.EXPIRED;
   if (daysRemaining <= 30) return SslStatus.EXPIRING_SOON;
   return SslStatus.ACTIVE;
+}
+
+function chainPathForFullchain(certPath: string | null): string | null {
+  if (!certPath || certPath.includes('\0')) return null;
+  const resolved = path.resolve(certPath);
+  if (path.basename(resolved) !== 'fullchain.pem') return null;
+  return path.join(path.dirname(resolved), 'chain.pem');
 }
 
 const SSL_FILE_ALLOWED_PREFIXES = [

@@ -26,6 +26,7 @@ import * as path from 'path';
 
 import { CommandExecutor } from '../command-executor';
 import {
+  ACME_WEBROOT,
   NGINX_GLOBAL_CONF,
   NGINX_SITES_AVAILABLE as SITES_AVAILABLE,
   NGINX_SITES_ENABLED as SITES_ENABLED,
@@ -40,6 +41,7 @@ import {
 import { sanitizeCustomNginxConfig } from './sanitize-custom';
 
 const ZONES_PATH = '/etc/nginx/conf.d/meowbox-zones.conf';
+const SYSTEM_CA_BUNDLE = '/etc/ssl/certs/ca-certificates.crt';
 
 const ZONES_HEADER =
 `# === Meowbox global rate-limit zones (управляется агентом) ===
@@ -63,25 +65,20 @@ function stoppedServerNames(domain: string, aliases: NginxDomainAlias[] | undefi
   return [...names].join(' ') || '_';
 }
 
-function stoppedWebRoot(rootPath: string, filesRelPath: string): string {
-  const rel = (filesRelPath || 'www').replace(/^\/+/, '').replace(/\.\.+/g, '').replace(/\/+$/, '');
-  return `${rootPath}/${rel || 'www'}`;
-}
-
 function stoppedResponseBlock(): string {
   return `    add_header Retry-After "3600" always;
     default_type text/plain;
     return 503 "Site stopped";`;
 }
 
-function stoppedHttpServer(d: NginxDomainParams, webRoot: string): string {
+function stoppedHttpServer(d: NginxDomainParams): string {
   return `server {
     listen 80;
     listen [::]:80;
     server_name ${stoppedServerNames(d.domain, d.aliases)};
 
     location ^~ /.well-known/acme-challenge/ {
-        root ${webRoot};
+        root ${ACME_WEBROOT};
         default_type "text/plain";
         allow all;
         try_files $uri =404;
@@ -117,12 +114,11 @@ ${stoppedResponseBlock()}
 `;
 }
 
-function renderStoppedNginxSite(site: NginxSiteParams): string {
+export function renderStoppedNginxSite(site: NginxSiteParams): string {
   const serverBlocks = site.domains.map((d) => {
-    const webRoot = stoppedWebRoot(site.rootPath, d.filesRelPath);
     return [
       `# --- Остановленный домен: ${d.domain} (${d.domainId}) ---`,
-      stoppedHttpServer(d, webRoot),
+      stoppedHttpServer(d),
       stoppedHttpsServer(d),
     ].filter(Boolean).join('\n');
   });
@@ -152,6 +148,7 @@ export class NginxManager {
   async createSiteConfig(site: NginxSiteParams): Promise<{ success: boolean; error?: string }> {
     if (!site.siteName) return { success: false, error: 'siteName required' };
 
+    site = await this.withTrustedSslChains(site);
     const rendered = renderNginxSite(site);
     const mainPath = this.mainConfigPath(site.siteName);
     const enabledLink = this.enabledLinkPath(site.siteName);
@@ -667,6 +664,41 @@ export class NginxManager {
   /** Директория чанков домена: meowbox/{siteName}/{domainId}/ */
   private domainDir(siteName: string, domainId: string): string {
     return path.join(MEOWBOX_INCLUDE_DIR, siteName, domainId);
+  }
+
+  private chainPathForFullchain(certPath?: string | null): string | null {
+    if (!certPath || certPath.includes('\0')) return null;
+    const normalized = path.posix.normalize(certPath);
+    if (!path.posix.isAbsolute(normalized)) return null;
+    if (path.posix.basename(normalized) !== 'fullchain.pem') return null;
+    return path.posix.join(path.posix.dirname(normalized), 'chain.pem');
+  }
+
+  private async certHasOcspResponder(certPath?: string | null): Promise<boolean> {
+    if (!certPath || certPath.includes('\0')) return false;
+    const normalized = path.posix.normalize(certPath);
+    if (!path.posix.isAbsolute(normalized)) return false;
+    const result = await this.executor.execute('openssl', [
+      'x509', '-in', normalized, '-noout', '-ocsp_uri',
+    ], { allowFailure: true });
+    return result.exitCode === 0 && result.stdout.trim().length > 0;
+  }
+
+  private async withTrustedSslChains(site: NginxSiteParams): Promise<NginxSiteParams> {
+    const domains = await Promise.all(site.domains.map(async (domain) => {
+      if (!domain.sslEnabled || !domain.certPath || !domain.keyPath) {
+        return domain;
+      }
+      const chainPath = domain.trustedCertPath || this.chainPathForFullchain(domain.certPath);
+      const trustedCertPath = chainPath && await this.exists(chainPath)
+        ? chainPath
+        : await this.exists(SYSTEM_CA_BUNDLE)
+          ? SYSTEM_CA_BUNDLE
+          : null;
+      const ocspStapling = trustedCertPath ? await this.certHasOcspResponder(domain.certPath) : false;
+      return { ...domain, trustedCertPath, ocspStapling };
+    }));
+    return { ...site, domains };
   }
 
   private async exists(p: string): Promise<boolean> {

@@ -90,6 +90,8 @@ export const DEFAULT_PHP_VERSION = env('DEFAULT_PHP_VERSION', '8.2');
 /** SSL пути (Let's Encrypt + кастомные сертификаты). */
 export const LETSENCRYPT_LIVE_DIR = env('LETSENCRYPT_LIVE_DIR', '/etc/letsencrypt/live');
 export const CUSTOM_SSL_DIR = env('CUSTOM_SSL_DIR', '/etc/ssl/meowbox');
+/** Стабильный webroot для всех HTTP-01 challenge, не зависящий от файлов сайтов. */
+export const ACME_WEBROOT = '/var/www/meowbox-acme';
 
 /** Директория экспортов БД (dump'ы через UI). */
 export const DB_EXPORTS_DIR = path.resolve(env('DB_EXPORTS_DIR', '/var/meowbox/exports'));

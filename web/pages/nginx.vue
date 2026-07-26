@@ -107,21 +107,26 @@
       <div class="editor-panel">
         <div v-if="!selectedDomain" class="editor-panel__empty">
           <CatMascot :size="64" mood="sleepy" />
-          <p>Select a config to edit</p>
+          <p>Select a config to view</p>
         </div>
         <template v-else>
           <div class="editor-panel__header">
             <span class="editor-panel__filename mono">{{ selectedDomain }}.conf</span>
-            <div class="editor-panel__btns">
-              <button class="btn btn--ghost btn--sm" :disabled="!configModified" @click="resetConfig">Discard</button>
-              <button class="btn btn--primary btn--sm" :disabled="!configModified || saving" @click="saveConfig">
-                {{ saving ? 'Saving...' : 'Save & Reload' }}
-              </button>
+            <div class="editor-panel__note">
+              <span>Full site config is read-only.</span>
+              <NuxtLink
+                v-if="selectedSiteNginxPath"
+                class="editor-panel__link"
+                :to="selectedSiteNginxPath"
+              >
+                Edit custom block on site page
+              </NuxtLink>
             </div>
           </div>
           <div class="editor-panel__body">
             <textarea
               v-model="configContent"
+              readonly
               class="editor-textarea mono"
               spellcheck="false"
               autocomplete="off"
@@ -147,10 +152,8 @@ const configs = ref<NginxConfig[]>([]);
 const loadingConfigs = ref(true);
 const selectedDomain = ref('');
 const configContent = ref('');
-const originalContent = ref('');
 const testing = ref(false);
 const reloading = ref(false);
-const saving = ref(false);
 const showGlobal = ref(false);
 const globalContent = ref('');
 const globalOriginal = ref('');
@@ -159,7 +162,10 @@ const savingGlobal = ref(false);
 const globalModified = computed(() => globalContent.value !== globalOriginal.value);
 
 const toast = useMbToast();
-const configModified = computed(() => configContent.value !== originalContent.value);
+const selectedConfig = computed(() => configs.value.find((cfg) => cfg.domain === selectedDomain.value) || null);
+const selectedSiteNginxPath = computed(() => (
+  selectedConfig.value?.siteId ? `/sites/${selectedConfig.value.siteId}?tab=nginx` : ''
+));
 
 function showToast(msg: string, isError = false) {
   if (isError) toast.error(msg);
@@ -189,26 +195,8 @@ async function selectConfig(domain: string) {
   try {
     const content = await api.get<string>(`/nginx/configs/${domain}`);
     configContent.value = content || '';
-    originalContent.value = configContent.value;
   } catch {
     showToast('Failed to load config', true);
-  }
-}
-
-function resetConfig() {
-  configContent.value = originalContent.value;
-}
-
-async function saveConfig() {
-  saving.value = true;
-  try {
-    await api.put(`/nginx/configs/${selectedDomain.value}`, { config: configContent.value });
-    originalContent.value = configContent.value;
-    showToast('Config saved and nginx reloaded');
-  } catch (err) {
-    showToast((err as Error).message || 'Failed to save config (nginx -t failed)', true);
-  } finally {
-    saving.value = false;
   }
 }
 
@@ -356,6 +344,15 @@ onMounted(async () => {
 }
 .editor-panel__filename { font-size: 0.78rem; color: var(--text-tertiary); }
 .editor-panel__btns { display: flex; gap: 0.35rem; }
+.editor-panel__note {
+  display: flex; align-items: center; gap: 0.6rem; flex-wrap: wrap;
+  justify-content: flex-end; font-size: 0.74rem; color: var(--text-muted);
+}
+.editor-panel__link {
+  color: var(--primary-text, var(--primary-light)); text-decoration: none;
+  font-weight: 600;
+}
+.editor-panel__link:hover { text-decoration: underline; }
 .editor-panel__body { flex: 1; position: relative; }
 
 .editor-textarea {
@@ -364,6 +361,7 @@ onMounted(async () => {
   background: var(--bg-code); color: var(--text-primary);
   font-size: 0.78rem; line-height: 1.55; tab-size: 4;
 }
+.editor-textarea[readonly] { cursor: default; }
 
 /* Shared */
 .mono { font-family: 'JetBrains Mono', monospace; }

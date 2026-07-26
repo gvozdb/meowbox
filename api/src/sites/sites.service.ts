@@ -37,6 +37,7 @@ import { isReservedSiteName } from '../common/validators/site-names';
 import { initialCustomConfigFor } from '@meowbox/shared';
 import {
   buildMultiDomainNginxPayload,
+  isNginxUsableSsl,
   serializeSiteDomain,
   nginxZoneName,
   type RawSiteForNginx,
@@ -255,12 +256,7 @@ export class SitesService implements OnModuleInit {
         if (s.phpVersion) {
           // sslEnabled пула — по активному SSL главного домена (cookie_secure).
           const primarySsl = s.domains.find((d) => d.isPrimary)?.sslCertificate;
-          const sslActive = !!(
-            primarySsl &&
-            primarySsl.status === SslStatus.ACTIVE &&
-            primarySsl.certPath &&
-            primarySsl.keyPath
-          );
+          const sslActive = isNginxUsableSsl(primarySsl);
           await this.agentRelay.emitToAgent('php:create-pool', {
             siteName: s.name,
             domain: s.domain,
@@ -2150,7 +2146,7 @@ export class SitesService implements OnModuleInit {
           select: { status: true, certPath: true, keyPath: true },
         })
       : null;
-    const sslActive = !!(sslCert && sslCert.status === 'ACTIVE' && sslCert.certPath && sslCert.keyPath);
+    const sslActive = isNginxUsableSsl(sslCert);
 
     // Список алиасов изменился? (сравниваем стабильный JSON)
     const aliasesChanged =
@@ -2695,7 +2691,12 @@ export class SitesService implements OnModuleInit {
     if (this.agentRelay.isAgentConnected()) {
       // Найдём активный SSL для правильного cookie_secure.
       const ssl = await this.prisma.sslCertificate.findFirst({
-        where: { siteId: id, status: 'ACTIVE' },
+        where: {
+          siteId: id,
+          status: { in: [SslStatus.ACTIVE, SslStatus.EXPIRING_SOON, SslStatus.EXPIRED] },
+          certPath: { not: null },
+          keyPath: { not: null },
+        },
       });
       const sslActive = !!ssl;
 

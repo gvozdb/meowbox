@@ -578,8 +578,21 @@ export class AgentService {
     // -- Node.js apps (per-site PM2) --
     // Управление Node-приложениями сайта: ecosystem-файлы как источник правды,
     // PM2-демон сайта (от имени системного юзера), быстрые команды.
-    this.safeOn(s, 'node:processes', async (params: { systemUser: string; filesRelPath: string }, cb: Callback) => {
-      cb({ success: true, data: await this.nodeApp.getProcesses(params.systemUser, params.filesRelPath) });
+    this.safeOn(s, 'node:processes', async (
+      params: {
+        systemUser: string;
+        filesRelPath?: string;
+        domainRoots?: import('@meowbox/shared').NodeDomainRef[];
+      },
+      cb: Callback,
+    ) => {
+      cb({
+        success: true,
+        data: await this.nodeApp.getProcesses(
+          params.systemUser,
+          params.domainRoots?.length ? params.domainRoots : (params.filesRelPath || 'www'),
+        ),
+      });
     });
 
     this.safeOn(s, 'node:ecosystem-start', async (params: { systemUser: string; file: string; only?: string }, cb: Callback) => {
@@ -735,13 +748,22 @@ export class AgentService {
     });
 
     // -- SSL --
-    this.safeOn(s, 'ssl:issue', async (params: { domain: string; domains: string[]; rootPath: string; filesRelPath?: string; email?: string }, cb: Callback) => {
+    this.safeOn(s, 'ssl:issue', async (params: {
+      domain: string;
+      domains: string[];
+      email?: string;
+      rootPath?: string;
+      filesRelPath?: string;
+    }, cb: Callback) => {
       const result = await this.ssl.issueCertificate(params);
       cb(result);
     });
 
     this.safeOn(s, 'ssl:renew-all', async (_params: unknown, cb: Callback) => {
-      cb(await this.ssl.renewAll());
+      cb({
+        success: false,
+        error: 'Automatic renewal is managed by certbot.timer',
+      });
     });
 
     this.safeOn(s, 'ssl:revoke', async (params: { domain: string }, cb: Callback) => {
@@ -753,9 +775,33 @@ export class AgentService {
       cb({
         success: r.success,
         error: r.error,
-        data: { found: r.found, certPath: r.certPath, keyPath: r.keyPath, expiresAt: r.expiresAt },
+        data: {
+          found: r.found,
+          certPath: r.certPath,
+          keyPath: r.keyPath,
+          expiresAt: r.expiresAt,
+          domains: r.domains,
+        },
       });
     });
+
+    this.safeOn(s, 'ssl:inspect-existing-many', async (
+      params: { domains?: unknown },
+      cb: Callback,
+    ) => {
+      if (
+        !Array.isArray(params?.domains) ||
+        params.domains.length > 5000 ||
+        params.domains.some((domain) => typeof domain !== 'string')
+      ) {
+        cb({ success: false, error: 'domains must contain at most 5000 strings' });
+        return;
+      }
+      cb({
+        success: true,
+        data: { certificates: await this.ssl.inspectExistingMany(params.domains as string[]) },
+      });
+    }, 300_000);
 
     this.safeOn(s, 'ssl:install-custom', async (params: { domain: string; certPem: string; keyPem: string; chainPem?: string }, cb: Callback) => {
       cb(await this.ssl.installCustomCertificate(params));
