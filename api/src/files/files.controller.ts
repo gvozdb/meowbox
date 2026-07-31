@@ -10,7 +10,6 @@ import {
   Res,
   Header,
   ParseUUIDPipe,
-  NotFoundException,
   StreamableFile,
   UseInterceptors,
   UploadedFile,
@@ -19,7 +18,6 @@ import {
 import { FileInterceptor } from '@nestjs/platform-express';
 import { Throttle } from '@nestjs/throttler';
 import { Response } from 'express';
-import * as fs from 'fs';
 import * as path from 'path';
 import { Roles } from '../common/decorators/roles.decorator';
 import { CurrentUser } from '../common/decorators/current-user.decorator';
@@ -28,7 +26,7 @@ import { attachmentDisposition } from '../common/http/content-disposition';
 import { WriteFileDto, CreateItemDto, RenameItemDto } from './files.dto';
 import { UPLOAD_BLOCKED_EXTENSIONS } from '@meowbox/shared';
 
-@Controller('sites/:siteId/files')
+@Controller('sites/:siteId/domains/:domainId/files')
 @Roles('ADMIN', 'MANAGER')
 export class FilesController {
   constructor(private readonly filesService: FilesService) {}
@@ -36,22 +34,36 @@ export class FilesController {
   @Get()
   async list(
     @Param('siteId', ParseUUIDPipe) siteId: string,
+    @Param('domainId', ParseUUIDPipe) domainId: string,
     @Query('path') dirPath: string,
     @CurrentUser('sub') userId: string,
     @CurrentUser('role') role: string,
   ) {
-    const data = await this.filesService.listFiles(siteId, userId, role, dirPath || '/');
+    const data = await this.filesService.listFiles(
+      siteId,
+      domainId,
+      userId,
+      role,
+      dirPath || '/',
+    );
     return { success: true, data };
   }
 
   @Get('read')
   async read(
     @Param('siteId', ParseUUIDPipe) siteId: string,
+    @Param('domainId', ParseUUIDPipe) domainId: string,
     @Query('path') filePath: string,
     @CurrentUser('sub') userId: string,
     @CurrentUser('role') role: string,
   ) {
-    const content = await this.filesService.readFile(siteId, userId, role, filePath);
+    const content = await this.filesService.readFile(
+      siteId,
+      domainId,
+      userId,
+      role,
+      filePath,
+    );
     return { success: true, data: content };
   }
 
@@ -59,31 +71,27 @@ export class FilesController {
   @Header('Cache-Control', 'no-store')
   async download(
     @Param('siteId', ParseUUIDPipe) siteId: string,
+    @Param('domainId', ParseUUIDPipe) domainId: string,
     @Query('path') filePath: string,
     @Res({ passthrough: true }) res: Response,
     @CurrentUser('sub') userId: string,
     @CurrentUser('role') role: string,
   ) {
-    const resolved = await this.filesService.resolveFilePath(siteId, userId, role, filePath);
-
-    if (!fs.existsSync(resolved)) {
-      throw new NotFoundException('Файл не найден');
-    }
-
-    const stat = fs.statSync(resolved);
-    if (stat.isDirectory()) {
-      throw new BadRequestException('Невозможно скачать директорию');
-    }
-
-    const filename = path.basename(resolved);
+    const file = await this.filesService.openDownloadFile(
+      siteId,
+      domainId,
+      userId,
+      role,
+      filePath,
+    );
 
     res.set({
       'Content-Type': 'application/octet-stream',
-      'Content-Length': stat.size.toString(),
-      'Content-Disposition': attachmentDisposition(filename),
+      'Content-Length': file.size.toString(),
+      'Content-Disposition': attachmentDisposition(file.filename),
     });
 
-    return new StreamableFile(fs.createReadStream(resolved));
+    return new StreamableFile(file.stream);
   }
 
   @Post('upload')
@@ -91,6 +99,7 @@ export class FilesController {
   @UseInterceptors(FileInterceptor('file', { limits: { fileSize: 100 * 1024 * 1024 } }))
   async upload(
     @Param('siteId', ParseUUIDPipe) siteId: string,
+    @Param('domainId', ParseUUIDPipe) domainId: string,
     @Query('path') targetDir: string,
     @UploadedFile() file: Express.Multer.File,
     @CurrentUser('sub') userId: string,
@@ -121,7 +130,14 @@ export class FilesController {
     // в сервисе. ext уже проверили выше через segments.
     void ext;
 
-    await this.filesService.uploadFile(siteId, userId, role, targetDir || '/', file);
+    await this.filesService.uploadFile(
+      siteId,
+      domainId,
+      userId,
+      role,
+      targetDir || '/',
+      file,
+    );
     return { success: true };
   }
 
@@ -129,11 +145,19 @@ export class FilesController {
   @Throttle({ default: { limit: 30, ttl: 60_000 } })
   async write(
     @Param('siteId', ParseUUIDPipe) siteId: string,
+    @Param('domainId', ParseUUIDPipe) domainId: string,
     @Body() body: WriteFileDto,
     @CurrentUser('sub') userId: string,
     @CurrentUser('role') role: string,
   ) {
-    await this.filesService.writeFile(siteId, userId, role, body.path, body.content);
+    await this.filesService.writeFile(
+      siteId,
+      domainId,
+      userId,
+      role,
+      body.path,
+      body.content,
+    );
     return { success: true };
   }
 
@@ -141,11 +165,19 @@ export class FilesController {
   @Throttle({ default: { limit: 30, ttl: 60_000 } })
   async create(
     @Param('siteId', ParseUUIDPipe) siteId: string,
+    @Param('domainId', ParseUUIDPipe) domainId: string,
     @Body() body: CreateItemDto,
     @CurrentUser('sub') userId: string,
     @CurrentUser('role') role: string,
   ) {
-    await this.filesService.createItem(siteId, userId, role, body.path, body.type);
+    await this.filesService.createItem(
+      siteId,
+      domainId,
+      userId,
+      role,
+      body.path,
+      body.type,
+    );
     return { success: true };
   }
 
@@ -153,11 +185,12 @@ export class FilesController {
   @Throttle({ default: { limit: 30, ttl: 60_000 } })
   async remove(
     @Param('siteId', ParseUUIDPipe) siteId: string,
+    @Param('domainId', ParseUUIDPipe) domainId: string,
     @Query('path') itemPath: string,
     @CurrentUser('sub') userId: string,
     @CurrentUser('role') role: string,
   ) {
-    await this.filesService.deleteItem(siteId, userId, role, itemPath);
+    await this.filesService.deleteItem(siteId, domainId, userId, role, itemPath);
     return { success: true };
   }
 
@@ -165,11 +198,19 @@ export class FilesController {
   @Throttle({ default: { limit: 30, ttl: 60_000 } })
   async rename(
     @Param('siteId', ParseUUIDPipe) siteId: string,
+    @Param('domainId', ParseUUIDPipe) domainId: string,
     @Body() body: RenameItemDto,
     @CurrentUser('sub') userId: string,
     @CurrentUser('role') role: string,
   ) {
-    await this.filesService.renameItem(siteId, userId, role, body.oldPath, body.newPath);
+    await this.filesService.renameItem(
+      siteId,
+      domainId,
+      userId,
+      role,
+      body.oldPath,
+      body.newPath,
+    );
     return { success: true };
   }
 }

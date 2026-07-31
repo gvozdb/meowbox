@@ -305,7 +305,7 @@ function validateContent(): string {
     const tokens = c.split(/\s+/);
     if (tokens.length !== 3 && tokens.length !== 4) return 'SRV: ожидается "weight port target" (priority в отдельном поле)';
     for (let i = 0; i < tokens.length - 1; i++) {
-      if (!/^\d+$/.test(tokens[i])) return 'SRV: первые 2-3 токена должны быть числами';
+      if (!/^\d+$/.test(tokens[i] ?? '')) return 'SRV: первые 2-3 токена должны быть числами';
     }
   }
   if (form.value.type === 'CAA') {

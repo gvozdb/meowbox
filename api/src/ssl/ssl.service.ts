@@ -11,10 +11,7 @@ import { AgentRelayService } from '../gateway/agent-relay.service';
 import { NotificationDispatcherService } from '../notifications/notification-dispatcher.service';
 import { parseStringArray, parseSiteAliases } from '../common/json-array';
 import { SiteDomainsService } from '../sites/site-domains.service';
-import {
-  resolveDomainFilesRelPath,
-  serializeSslCertificate,
-} from '../sites/site-domains.helper';
+import { serializeSslCertificate } from '../sites/site-domains.helper';
 
 /**
  * Timeout'ы certbot'а. Переопределяются env. В норме первый выпуск 1-3 мин,
@@ -121,7 +118,7 @@ export class SslService {
     const domain = await this.prisma.siteDomain.findUnique({
       where: { id: domainId },
       include: {
-        site: { select: { id: true, name: true, userId: true, rootPath: true, filesRelPath: true } },
+        site: { select: { id: true, name: true, userId: true, rootPath: true } },
         sslCertificate: true,
       },
     });
@@ -173,11 +170,6 @@ export class SslService {
       where: { id: cert.id },
       data: { status: SslStatus.PENDING },
     });
-    const legacyFilesRelPath = resolveDomainFilesRelPath(
-      domain.filesRelPath,
-      domain.site.filesRelPath,
-    );
-
     try {
       const raw = await this.agentRelay.emitToAgent<{
         success: boolean;
@@ -194,7 +186,7 @@ export class SslService {
           // Backward compatibility for a previous agent during rolling restart.
           // Current agents intentionally ignore these site-specific paths.
           rootPath: domain.site.rootPath,
-          filesRelPath: legacyFilesRelPath,
+          filesRelPath: domain.filesRelPath,
         },
         CERTBOT_ISSUE_TIMEOUT_MS,
       );

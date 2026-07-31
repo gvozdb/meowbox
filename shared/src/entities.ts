@@ -1,9 +1,10 @@
 import {
   SiteType,
   SiteStatus,
+  DomainApplicationStatus,
   UserRole,
   DatabaseType,
-  PhpVersion,
+  DatabasePurpose,
   BackupStorageType,
   BackupType,
   BackupStatus,
@@ -15,6 +16,7 @@ import {
   FirewallProtocol,
   CronJobStatus,
 } from './enums';
+import type { PhpVersion } from './enums';
 
 // =============================================================================
 // User
@@ -52,27 +54,19 @@ export interface SiteAlias {
 export interface Site {
   id: string;
   name: string;
-  /**
-   * Главный домен сайта. Зеркало `domains[].domain` того элемента, у которого
-   * `isPrimary=true`. Поддерживается синхронно с SiteDomain ради обратной
-   * совместимости (шапка, списки, ссылки). Источник правды — `domains`.
-   */
-  domain: string;
-  /** Алиасы ГЛАВНОГО домена (зеркало primary `SiteDomain.aliases`). */
-  aliases: SiteAlias[];
-  /** Все основные домены сайта (главный — первым, `isPrimary=true`). */
+  displayName: string | null;
+  /** Все main domains; the application source of truth is each SiteDomain. */
   domains: SiteDomain[];
-  type: SiteType;
+  /** Global Linux/container lifecycle; not a selected application's state. */
   status: SiteStatus;
-  phpVersion: PhpVersion | null;
-  gitRepository: string | null;
-  deployBranch: string | null;
-  /** Зеркало `appPort` главного домена. */
-  appPort: number | null;
-  envVars: Record<string, string>;
+  errorMessage: string | null;
   /** Хомдира linux-юзера — ОБЩАЯ на весь сайт (одна на все основные домены). */
   rootPath: string;
   nginxConfigPath: string;
+  systemUser: string | null;
+  /** Persistence/internal field; ordinary REST projections must not reveal it. */
+  sshPasswordEnc: string | null;
+  metadata: Record<string, unknown> | null;
   userId: string;
   createdAt: string;
   updatedAt: string;
@@ -98,15 +92,42 @@ export interface SiteDomain {
   /** Порядок в списке доменов сайта (главный — 0). */
   position: number;
   aliases: SiteAlias[];
-  /**
-   * web-root этого домена ОТНОСИТЕЛЬНО Site.rootPath.
-   * null → наследует `Site` (общий дефолт filesRelPath сайта).
-   */
-  filesRelPath: string | null;
-  /** Порт приложения для reverse-proxy (Node и т.п.). null — нет proxy. */
-  appPort: number | null;
+  /** Explicit web-root relative to Site.rootPath. */
+  filesRelPath: string;
+  /** MODX_REVO | MODX_3 | CUSTOM. */
+  preset: SiteType;
+  appStatus: DomainApplicationStatus;
+  appErrorMessage: string | null;
+  /** PHP is derived: `phpVersion !== null`; it is never separately persisted. */
+  phpVersion: PhpVersion | null;
+  phpPoolCustom: string | null;
+  /** Immutable, globally unique PHP pool/socket/log operation key. */
+  runtimeKey: string;
+  gitRepository: string | null;
+  deployBranch: string | null;
+  envVars: Record<string, string>;
+  cmsAdminUser: string | null;
+  /** Persistence/internal field; do not include in unprivileged responses. */
+  cmsAdminPasswordEnc: string | null;
+  managerPath: string | null;
+  connectorsPath: string | null;
+  cmsTablePrefix: string | null;
+  modxVersion: string | null;
   /** 301 HTTP→HTTPS для этого домена (действует при активном SSL). */
   httpsRedirect: boolean;
+  nginxClientMaxBodySize: string | null;
+  nginxFastcgiReadTimeout: number | null;
+  nginxFastcgiSendTimeout: number | null;
+  nginxFastcgiConnectTimeout: number | null;
+  nginxFastcgiBufferSizeKb: number | null;
+  nginxFastcgiBufferCount: number | null;
+  nginxHttp2: boolean;
+  nginxHsts: boolean;
+  nginxGzip: boolean;
+  nginxRateLimitEnabled: boolean;
+  nginxRateLimitRps: number | null;
+  nginxRateLimitBurst: number | null;
+  nginxCustomConfig: string | null;
   /** SSL-сертификат этого домена (null — не выпущен). */
   sslCertificate: SslCertificate | null;
   createdAt: string;
@@ -123,7 +144,9 @@ export interface Database {
   type: DatabaseType;
   dbUser: string;
   dbPasswordHash: string;
-  siteId: string | null;
+  siteId: string;
+  siteDomainId: string;
+  purpose: DatabasePurpose;
   sizeBytes: number;
   createdAt: string;
   updatedAt: string;
@@ -223,6 +246,7 @@ export interface SslCertificate {
 export interface DeployLog {
   id: string;
   siteId: string;
+  siteDomainId: string;
   status: DeployStatus;
   commitSha: string | null;
   commitMessage: string | null;
@@ -232,6 +256,36 @@ export interface DeployLog {
   durationMs: number | null;
   startedAt: string;
   completedAt: string | null;
+  createdAt: string;
+}
+
+// =============================================================================
+// Domain-scoped observability
+// =============================================================================
+
+export interface HealthCheckPing {
+  id: string;
+  siteId: string;
+  /** Null only for legacy/global Site probes with no trustworthy app target. */
+  siteDomainId: string | null;
+  reachable: boolean;
+  statusCode: number | null;
+  responseTimeMs: number;
+  createdAt: string;
+}
+
+export interface AuditLog {
+  id: string;
+  userId: string;
+  /** Null for non-domain or pre-domain audit records. */
+  siteDomainId: string | null;
+  operationId: string | null;
+  action: string;
+  entity: string;
+  entityId: string | null;
+  details: Record<string, unknown> | null;
+  ipAddress: string;
+  userAgent: string | null;
   createdAt: string;
 }
 

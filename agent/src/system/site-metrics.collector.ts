@@ -1,23 +1,19 @@
 import { CommandExecutor } from '../command-executor';
 import * as fs from 'fs/promises';
-import { TIMEOUTS, SITES_BASE_PATH } from '../config';
-
-/**
- * Нормализация filesRelPath в безопасный относительный путь без
- * leading slash, без `..` и shell-метасимволов. Невалидное → дефолт `www`.
- */
-function sanitizeFilesRelPath(rel: string | undefined | null): string {
-  const v = (rel || '').trim();
-  if (!v) return 'www';
-  if (!/^[A-Za-z0-9._-]+(?:\/[A-Za-z0-9._-]+)*$/.test(v)) return 'www';
-  return v;
-}
+import { TIMEOUTS } from '../config';
+import { siteDomainLogBase } from '@meowbox/shared';
+import {
+  resolveSiteDomainRoot,
+  validateRuntimeKey,
+} from '../runtime/site-domain-runtime';
 
 export interface SiteMetrics {
   cpuPercent: number;
   memoryBytes: number;
   diskBytes: number;
   requestCount: number;
+  scope: 'domain';
+  runtimeKey: string;
 }
 
 export interface StorageBreakdown {
@@ -46,18 +42,27 @@ export class SiteMetricsCollector {
    * disk usage, and request count from nginx access log.
    */
   async collect(params: {
+    siteDomainId: string;
     systemUser: string;
     rootPath: string;
-    siteType: string;
-    phpVersion?: string;
-    appPort?: number;
+    preset: string;
+    phpVersion?: string | null;
+    appPort?: number | null;
     domain: string;
+    siteName: string;
+    filesRelPath: string;
+    runtimeKey: string;
   }): Promise<{ success: boolean; data?: SiteMetrics; error?: string }> {
     try {
+      const runtimeKey = validateRuntimeKey(params.runtimeKey);
+      const domainRoot = resolveSiteDomainRoot(
+        params.rootPath,
+        params.filesRelPath,
+      );
       const [process, disk, requests] = await Promise.all([
-        this.getProcessMetrics(params),
-        this.getDiskUsage(params.rootPath),
-        this.getRequestCount(params.systemUser),
+        this.getProcessMetrics({ ...params, runtimeKey }),
+        this.getDiskUsage(domainRoot),
+        this.getRequestCount(params),
       ]);
 
       return {
@@ -67,6 +72,8 @@ export class SiteMetricsCollector {
           memoryBytes: process.mem,
           diskBytes: disk,
           requestCount: requests,
+          scope: 'domain',
+          runtimeKey,
         },
       };
     } catch (err) {
@@ -81,15 +88,16 @@ export class SiteMetricsCollector {
    */
   private async getProcessMetrics(params: {
     systemUser: string;
-    siteType: string;
-    phpVersion?: string;
-    appPort?: number;
+    preset?: string;
+    phpVersion?: string | null;
+    appPort?: number | null;
+    runtimeKey: string;
   }): Promise<{ cpu: number; mem: number }> {
     try {
       // Find processes belonging to the site user
       const result = await this.cmd.execute('ps', [
         '-u', params.systemUser,
-        '-o', 'pcpu=,rss=',
+        '-o', 'pcpu=,rss=,args=',
         '--no-headers',
       ], { timeout: 5000 });
 
@@ -99,6 +107,12 @@ export class SiteMetricsCollector {
       for (const line of result.stdout.trim().split('\n')) {
         const parts = line.trim().split(/\s+/);
         if (parts.length >= 2) {
+          const command = parts.slice(2).join(' ');
+          const poolName = params.runtimeKey.replace(/\./g, '_');
+          const nodeName = `site-${params.runtimeKey}`;
+          if (!command.includes(params.runtimeKey) && !command.includes(poolName) && !command.includes(nodeName)) {
+            continue;
+          }
           totalCpu += parseFloat(parts[0]) || 0;
           totalMemKb += parseInt(parts[1], 10) || 0;
         }
@@ -132,11 +146,11 @@ export class SiteMetricsCollector {
     filesRelPath?: string;
   }): Promise<{ success: boolean; data?: StorageBreakdown; error?: string }> {
     try {
-      const webRel = sanitizeFilesRelPath(params.filesRelPath);
+      const webRoot = resolveSiteDomainRoot(params.rootPath, params.filesRelPath || 'www');
       // wwwBytes — занятое место под web-файлами (поле имени историческое:
       // metric называется "www", но сейчас может ссылаться на любой webRel).
       const sizes = await Promise.all([
-        this.getDiskUsage(`${params.rootPath}/${webRel}`),
+        this.getDiskUsage(webRoot),
         this.getDiskUsage(`${params.rootPath}/logs`),
         this.getDiskUsage(`${params.rootPath}/tmp`),
       ]);
@@ -157,12 +171,12 @@ export class SiteMetricsCollector {
     filesRelPath?: string;
   }): Promise<{ success: boolean; data?: TopFile[]; error?: string }> {
     const limit = params.limit || 20;
-    const webRel = sanitizeFilesRelPath(params.filesRelPath);
     try {
+      const webRoot = resolveSiteDomainRoot(params.rootPath, params.filesRelPath || 'www');
       // du -S gives size of each directory excluding subdirs, but we want files only
       // Use du -ab and then filter out directories via fs.lstat on top candidates
       const result = await this.cmd.execute('du', [
-        '-ab', '--max-depth=5', `${params.rootPath}/${webRel}`,
+        '-ab', '--max-depth=5', webRoot,
       ], { timeout: TIMEOUTS.SHORT });
 
       const entries: { size: number; absPath: string; relPath: string }[] = [];
@@ -218,17 +232,25 @@ export class SiteMetricsCollector {
    * Get request count from nginx access log for the site.
    * Reads the site-specific access log.
    */
-  private async getRequestCount(systemUser: string): Promise<number> {
-    // Access log: {SITES_BASE_PATH}/{systemUser}/logs/access.log
-    const logPath = `${SITES_BASE_PATH}/${systemUser}/logs/access.log`;
+  private async getRequestCount(params: {
+    siteName: string;
+    domain: string;
+  }): Promise<number> {
+    const nginxLogDir = process.env.NGINX_LOG_DIR || '/var/log/nginx';
+    const logPath =
+      `${nginxLogDir}/${siteDomainLogBase(params)}-access.log`;
     try {
       await fs.access(logPath);
-      // Count lines in the access log (each line = 1 request)
-      const result = await this.cmd.execute('wc', ['-l', logPath], { timeout: TIMEOUTS.METRICS_FAST });
+      const result = await this.cmd.execute(
+        'wc',
+        ['-l', logPath],
+        { timeout: TIMEOUTS.METRICS_FAST },
+      );
       const match = result.stdout.match(/^(\d+)/);
-      return match ? parseInt(match[1], 10) : 0;
+      if (match) return parseInt(match[1], 10);
     } catch {
       return 0;
     }
+    return 0;
   }
 }

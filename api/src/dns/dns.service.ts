@@ -22,6 +22,7 @@ import {
 import {
   getMailTemplate, MailTemplate, MailTemplateExtras,
 } from './templates/mail-templates';
+import { parseSiteAliases } from '../common/json-array';
 
 export interface MaskedProviderView {
   id: string;
@@ -56,7 +57,12 @@ export interface ZoneView {
    * example.com, и зону blog.example.com если обе есть). Матчинг динамический —
    * вычисляется при каждом запросе, чтобы не зависеть от ручного "linkedSite".
    */
-  matchedSites: Array<{ id: string; name: string; domain: string }>;
+  matchedSites: Array<{
+    id: string;
+    siteDomainId: string;
+    name: string;
+    domain: string;
+  }>;
   nameservers: string[] | null;
   updatedAt: Date;
 }
@@ -352,8 +358,13 @@ export class DnsService {
    *   4. На каждой группе (host) — список { provider, zone, record }, чтобы юзер
    *      видел дубли в разных провайдерах (конфликт делегирования).
    */
-  async getSiteDnsView(siteId: string): Promise<{
-    site: { id: string; domain: string; aliases: string[] };
+  async getSiteDnsView(siteId: string, domainId: string): Promise<{
+    site: {
+      id: string;
+      siteDomainId: string;
+      domain: string;
+      aliases: string[];
+    };
     groups: Array<{
       host: string;
       isAlias: boolean;
@@ -373,21 +384,21 @@ export class DnsService {
       isLinked: boolean;
     }>;
   }> {
-    const site = await this.prisma.site.findUnique({
-      where: { id: siteId },
-      select: { id: true, domain: true, aliases: true },
+    const selectedDomain = await this.prisma.siteDomain.findFirst({
+      where: { id: domainId, siteId },
+      select: {
+        id: true,
+        domain: true,
+        aliases: true,
+        site: { select: { id: true } },
+      },
     });
-    if (!site) throw new NotFoundException('Site not found');
+    if (!selectedDomain) throw new NotFoundException('Site domain not found');
 
-    let aliasArr: string[] = [];
-    try {
-      const parsed = JSON.parse(site.aliases || '[]');
-      if (Array.isArray(parsed)) aliasArr = parsed.filter((s) => typeof s === 'string');
-    } catch {
-      aliasArr = [];
-    }
-
-    const apex = site.domain.trim().toLowerCase();
+    const aliasArr = parseSiteAliases(selectedDomain.aliases).map(
+      (alias) => alias.domain,
+    );
+    const apex = selectedDomain.domain.trim().toLowerCase();
     const aliasSet = new Set(aliasArr.map((a) => a.trim().toLowerCase()).filter(Boolean));
     const allHosts = new Set<string>([apex, ...aliasSet]);
 
@@ -512,7 +523,12 @@ export class DnsService {
     });
 
     return {
-      site: { id: site.id, domain: site.domain, aliases: aliasArr },
+      site: {
+        id: selectedDomain.site.id,
+        siteDomainId: selectedDomain.id,
+        domain: selectedDomain.domain,
+        aliases: aliasArr,
+      },
       groups: ordered,
       zones: siteZones,
     };
@@ -533,7 +549,14 @@ export class DnsService {
         orderBy: { domain: 'asc' },
       }),
       this.prisma.site.findMany({
-        select: { id: true, name: true, domain: true, aliases: true },
+        select: {
+          id: true,
+          name: true,
+          domains: {
+            orderBy: { position: 'asc' },
+            select: { id: true, domain: true, aliases: true },
+          },
+        },
       }),
     ]);
     return rows.map((z) => ({
@@ -559,25 +582,49 @@ export class DnsService {
    */
   private findMatchedSites(
     zoneDomain: string,
-    sites: Array<{ id: string; name: string; domain: string; aliases: string }>,
-  ): Array<{ id: string; name: string; domain: string }> {
+    sites: Array<{
+      id: string;
+      name: string;
+      domains: Array<{
+        id: string;
+        domain: string;
+        aliases: string;
+      }>;
+    }>,
+  ): Array<{
+    id: string;
+    siteDomainId: string;
+    name: string;
+    domain: string;
+  }> {
     const apex = zoneDomain.trim().toLowerCase();
     if (!apex) return [];
-    const out: Array<{ id: string; name: string; domain: string }> = [];
-    for (const s of sites) {
-      const hosts = new Set<string>();
-      const main = s.domain.trim().toLowerCase();
-      if (main) hosts.add(main);
-      try {
-        const arr = JSON.parse(s.aliases || '[]');
-        if (Array.isArray(arr)) {
-          for (const a of arr) {
-            if (typeof a === 'string' && a.trim()) hosts.add(a.trim().toLowerCase());
-          }
+    const out: Array<{
+      id: string;
+      siteDomainId: string;
+      name: string;
+      domain: string;
+    }> = [];
+    for (const site of sites) {
+      for (const domain of site.domains) {
+        const hosts = new Set<string>([
+          domain.domain.trim().toLowerCase(),
+          ...parseSiteAliases(domain.aliases).map((alias) =>
+            alias.domain.trim().toLowerCase(),
+          ),
+        ]);
+        const matched = [...hosts].some(
+          (host) => host === apex || host.endsWith(`.${apex}`),
+        );
+        if (matched) {
+          out.push({
+            id: site.id,
+            siteDomainId: domain.id,
+            name: site.name,
+            domain: domain.domain,
+          });
         }
-      } catch { /* ignore broken aliases JSON */ }
-      const matched = [...hosts].some((h) => h === apex || h.endsWith(`.${apex}`));
-      if (matched) out.push({ id: s.id, name: s.name, domain: s.domain });
+      }
     }
     return out;
   }
@@ -595,7 +642,16 @@ export class DnsService {
           records: { orderBy: [{ type: 'asc' }, { name: 'asc' }] },
         },
       }),
-      this.prisma.site.findMany({ select: { id: true, name: true, domain: true, aliases: true } }),
+      this.prisma.site.findMany({
+        select: {
+          id: true,
+          name: true,
+          domains: {
+            orderBy: { position: 'asc' },
+            select: { id: true, domain: true, aliases: true },
+          },
+        },
+      }),
     ]);
     if (!z) throw new NotFoundException('DNS zone not found');
     return {

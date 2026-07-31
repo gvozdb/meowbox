@@ -1,10 +1,6 @@
 import { IsString, IsNotEmpty, IsOptional, MaxLength, Matches } from 'class-validator';
 
 export class TriggerDeployDto {
-  @IsString()
-  @IsNotEmpty()
-  siteId!: string;
-
   @IsOptional()
   @IsString()
   @MaxLength(128)

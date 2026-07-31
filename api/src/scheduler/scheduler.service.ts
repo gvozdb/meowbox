@@ -505,13 +505,23 @@ export class SchedulerService implements OnModuleInit {
     if (!this.agentRelay.isAgentConnected()) return;
 
     try {
-      // Check both RUNNING and ERROR sites (ERROR sites can recover)
-      const sites = await this.prisma.site.findMany({
-        where: { status: { in: [SiteStatus.RUNNING, SiteStatus.ERROR] } },
-        select: { id: true, name: true, domain: true, type: true, appPort: true, status: true },
+      const domains = await this.prisma.siteDomain.findMany({
+        where: {
+          site: { status: SiteStatus.RUNNING },
+          appStatus: { in: ['RUNNING', 'ERROR'] },
+        },
+        select: {
+          id: true,
+          siteId: true,
+          domain: true,
+          appPort: true,
+          appStatus: true,
+          appErrorMessage: true,
+          site: { select: { name: true } },
+        },
       });
 
-      for (const site of sites) {
+      for (const domain of domains) {
         try {
           const result = await this.agentRelay.emitToAgent<{
             reachable: boolean;
@@ -519,15 +529,15 @@ export class SchedulerService implements OnModuleInit {
             responseTimeMs: number;
           }>(
             'site:health-check',
-            { domain: site.domain, port: site.appPort },
+            { domain: domain.domain, port: domain.appPort },
             10_000,
           );
 
           if (result.success && result.data) {
-            // Save ping result
             await this.prisma.healthCheckPing.create({
               data: {
-                siteId: site.id,
+                siteId: domain.siteId,
+                siteDomainId: domain.id,
                 reachable: result.data.reachable,
                 statusCode: result.data.statusCode,
                 responseTimeMs: result.data.responseTimeMs,
@@ -541,35 +551,57 @@ export class SchedulerService implements OnModuleInit {
             // т.к. на их домен прилетал 502 от дефолтного/wildcard-сервера.
             const code = result.data.statusCode ?? 0;
             const healthy = result.data.reachable && code > 0 && code < 500;
+            const healthError = `[health] ${domain.domain} is not responding${
+              code > 0 ? ` (HTTP ${code})` : ''
+            }`;
 
-            if (!healthy && site.status === SiteStatus.RUNNING) {
-              // Site went down — update status and notify
-              await this.prisma.site.update({
-                where: { id: site.id },
-                data: { status: SiteStatus.ERROR },
+            if (!healthy && domain.appStatus === 'RUNNING') {
+              await this.prisma.siteDomain.update({
+                where: { id: domain.id },
+                data: {
+                  appStatus: 'ERROR',
+                  appErrorMessage: healthError,
+                },
               });
 
-              this.notifier.dispatch({
-                event: 'SITE_DOWN',
-                title: 'Site Down',
-                message: `${site.domain} is not responding`,
-                siteName: site.name,
-                timestamp: new Date(),
-              }).catch((err) => this.logger.error(`Notification failed: ${(err as Error).message}`));
+              this.notifier
+                .dispatch({
+                  event: 'SITE_DOWN',
+                  title: 'Application Down',
+                  message: `${domain.domain} is not responding`,
+                  siteName: domain.site.name,
+                  timestamp: new Date(),
+                })
+                .catch((err) =>
+                  this.logger.error(
+                    `Notification failed: ${(err as Error).message}`,
+                  ),
+                );
 
-              this.logger.warn(`Site "${site.name}" (${site.domain}) is down`);
-            } else if (healthy && site.status === SiteStatus.ERROR) {
-              // Site recovered — set back to RUNNING
-              await this.prisma.site.update({
-                where: { id: site.id },
-                data: { status: SiteStatus.RUNNING, errorMessage: null },
+              this.logger.warn(
+                `Application "${domain.domain}" (${domain.site.name}) is down`,
+              );
+            } else if (
+              healthy &&
+              domain.appStatus === 'ERROR' &&
+              domain.appErrorMessage?.startsWith('[health] ')
+            ) {
+              await this.prisma.siteDomain.update({
+                where: { id: domain.id },
+                data: { appStatus: 'RUNNING', appErrorMessage: null },
               });
 
-              this.logger.log(`Site "${site.name}" (${site.domain}) recovered`);
+              this.logger.log(
+                `Application "${domain.domain}" (${domain.site.name}) recovered`,
+              );
             }
           }
-        } catch {
-          // Agent failed to check — skip silently
+        } catch (error) {
+          this.logger.warn(
+            `Health check failed for "${domain.domain}": ${
+              (error as Error).message
+            }`,
+          );
         }
       }
     } catch (err) {
@@ -739,7 +771,7 @@ export class SchedulerService implements OnModuleInit {
           id: true,
           name: true,
           rootPath: true,
-          filesRelPath: true,
+          domains: { select: { filesRelPath: true } },
           databases: { select: { sizeBytes: true } },
         },
       });
@@ -748,7 +780,16 @@ export class SchedulerService implements OnModuleInit {
         try {
           const res = await this.agentRelay.emitToAgent<{
             wwwBytes: number; logsBytes: number; tmpBytes: number; totalBytes: number;
-          }>('site:storage', { rootPath: site.rootPath, filesRelPath: site.filesRelPath || undefined }, 30_000);
+          }>(
+            'site:storage',
+            {
+              rootPath: site.rootPath,
+              filesRelPaths: [
+                ...new Set(site.domains.map((domain) => domain.filesRelPath)),
+              ],
+            },
+            30_000,
+          );
 
           if (res.success && res.data) {
             const dbBytes = site.databases.reduce(

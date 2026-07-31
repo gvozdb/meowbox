@@ -880,9 +880,19 @@ export class AgentGateway implements OnGatewayConnection, OnGatewayDisconnect {
     // --- Backup restore progress ---
     agent.on(
       'backup:restore:progress',
-      async (data: { backupId: string; progress: number }) => {
+      async (data: {
+        backupId: string;
+        restoreId: string;
+        progress: number;
+      }) => {
+        await this.backupsService.updateRestoreProgress(
+          data.backupId,
+          data.restoreId,
+          data.progress,
+        );
         agent.broadcast.emit('backup:restore:progress', {
           backupId: data.backupId,
+          restoreId: data.restoreId,
           progress: data.progress,
           timestamp: new Date().toISOString(),
         });
@@ -920,14 +930,17 @@ export class AgentGateway implements OnGatewayConnection, OnGatewayDisconnect {
       'backup:restore:complete',
       async (data: {
         backupId: string;
+        restoreId: string;
         success: boolean;
         error?: string;
       }) => {
+        const result = await this.backupsService.completeRestore(data);
         agent.broadcast.emit('backup:restore:progress', {
           backupId: data.backupId,
-          progress: data.success ? 100 : 0,
-          status: data.success ? 'RESTORED' : 'FAILED',
-          error: data.error,
+          restoreId: data.restoreId,
+          progress: result.success ? 100 : 0,
+          status: result.success ? 'RESTORED' : 'FAILED',
+          error: result.error,
           timestamp: new Date().toISOString(),
         });
       },

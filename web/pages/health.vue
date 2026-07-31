@@ -66,9 +66,9 @@
                 />
               </div>
               <div class="ping-chart__labels">
-                <span>{{ pings.length > 0 ? formatPingTime(pings[0].createdAt) : '' }}</span>
+                <span>{{ pings[0] ? formatPingTime(pings[0].createdAt) : '' }}</span>
                 <span>Время отклика (мс)</span>
-                <span>{{ pings.length > 0 ? formatPingTime(pings[pings.length - 1].createdAt) : '' }}</span>
+                <span>{{ pings.at(-1) ? formatPingTime(pings.at(-1)!.createdAt) : '' }}</span>
               </div>
             </div>
           </template>

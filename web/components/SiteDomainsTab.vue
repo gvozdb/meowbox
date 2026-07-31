@@ -1,371 +1,336 @@
 <template>
-  <div class="domains-section">
-    <!-- Алерт: у сайта есть сертификат(ы), но часть доменов им не покрыта -->
-    <div v-if="anyCoverageProblem" class="domains-cert-alert">
-      <div class="domains-cert-alert__icon">
-        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
-          <path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z" /><line x1="12" y1="9" x2="12" y2="13" /><line x1="12" y1="17" x2="12.01" y2="17" />
-        </svg>
-      </div>
-      <div class="domains-cert-alert__body">
-        <strong>Часть доменов не покрыта SSL-сертификатом</strong>
-        <span>
-          Открой вкладку «SSL» соответствующего домена и перевыпусти сертификат —
-          в SAN должны быть и сам домен, и все его алиасы (в т. ч. redirect).
-        </span>
-      </div>
+  <div class="domains-tab">
+    <div v-if="anyCoverageProblem" class="domains-tab__alert">
+      <strong>SSL покрывает не все hostname.</strong>
+      <span>Перевыпусти сертификат нужного приложения после изменения домена или алиасов.</span>
     </div>
 
-    <div class="info-card">
-      <div class="domains-header">
-        <h3 class="info-card__title">Домены</h3>
-        <span class="domains-hint">У каждого основного домена свои алиасы, SSL и nginx-конфиг. Корона — главный домен.</span>
-      </div>
+    <DomainOperationProgress
+      v-if="activeOperationId"
+      :operation-id="activeOperationId"
+      @finished="onOperationFinished"
+    />
 
-      <div v-if="domains.length" class="domains-list">
-        <div
-          v-for="d in domains"
-          :key="d.id"
-          class="domain-row"
-          :class="{ 'domain-row--primary': d.isPrimary }"
-        >
-          <!-- Корона: главный домен (read-only иконка) / тогл для остальных -->
-          <button
-            class="domain-row__crown"
-            :class="{ 'domain-row__crown--active': d.isPrimary }"
-            :disabled="busy || d.isPrimary"
-            :title="d.isPrimary ? 'Главный домен сайта' : 'Сделать главным доменом'"
-            @click="onMakePrimary(d)"
-          >
-            <svg width="14" height="14" viewBox="0 0 24 24" :fill="d.isPrimary ? 'currentColor' : 'none'" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-              <path d="M2 7l5 5 5-8 5 8 5-5v11a1 1 0 0 1-1 1H3a1 1 0 0 1-1-1z" />
-            </svg>
-          </button>
-
-          <!-- SSL-coverage индикатор -->
-          <span
-            v-if="coverageState(d) !== 'no-cert'"
-            class="cert-badge"
-            :class="`cert-badge--${coverageState(d)}`"
-            :title="coverageTitle(d)"
-          >
-            <svg v-if="coverageState(d) === 'covered'" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round"><polyline points="20 6 9 17 4 12" /></svg>
-            <svg v-else width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" /></svg>
-          </span>
-
-          <!-- Домен (ссылка) + кнопка редактирования -->
-          <a :href="domainUrl(d)" target="_blank" rel="noopener noreferrer" class="domain-row__name domain-link">{{ d.domain }}</a>
-          <button class="domain-row__edit" :disabled="busy" title="Изменить домен" @click="openEditDomain(d)">
-            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7" /><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z" /></svg>
-          </button>
-
-          <!-- Алиасы (comma-separated) + web-root badge -->
-          <span class="domain-row__aliases">
-            <span
-              class="domain-row__webroot"
-              :class="{ 'domain-row__webroot--inherited': !d.filesRelPath }"
-              :title="d.filesRelPath
-                ? 'Собственная папка домена (отдельный web-root)'
-                : (d.isPrimary
-                  ? 'Общий дефолт сайта (web-root этого домена = общий дефолт)'
-                  : 'Наследует общий дефолт сайта')"
-            >
-              <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" /></svg>
-              {{ resolvedRelPath(d) }}
-            </span>
-            <template v-if="d.aliases?.length">
-              <span class="domain-row__aliases-sep">·</span>
-              <template v-for="(a, i) in d.aliases" :key="a.domain + i">
-                <span class="domain-row__alias">{{ a.domain }}<span v-if="a.redirect" class="domain-row__alias-arrow"> →</span></span><span v-if="i < d.aliases.length - 1">, </span>
-              </template>
-            </template>
-            <template v-else>
-              <span class="domain-row__aliases-sep">·</span>
-              <span class="domain-row__aliases-empty">без алиасов</span>
-            </template>
-          </span>
-
-          <!-- Действия -->
-          <div class="domain-row__actions">
-            <button class="btn btn--ghost btn--xs" :disabled="busy" @click="openAliasesModal(d)">
-              Алиасы
-              <span v-if="d.aliases?.length" class="domain-row__count">{{ d.aliases.length }}</span>
-            </button>
-            <button class="btn btn--ghost btn--xs" :disabled="busy" @click="emit('navigate-ssl', d.id)">SSL</button>
-            <button class="btn btn--ghost btn--xs" :disabled="busy" @click="emit('navigate-nginx', d.id)">Nginx</button>
-            <button
-              class="domain-row__remove"
-              :disabled="busy || d.isPrimary || domains.length <= 1"
-              :title="d.isPrimary ? 'Сначала назначь главным другой домен' : 'Удалить домен'"
-              @click="onRemoveDomain(d)"
-            >
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" /></svg>
-            </button>
-          </div>
+    <section class="domains-tab__card">
+      <header class="domains-tab__header">
+        <div>
+          <h3>Домены / приложения</h3>
+          <p>Каждая строка — отдельное приложение. Алиасы используют приложение своего домена.</p>
         </div>
-      </div>
-      <div v-else class="domains-empty">Основные домены не настроены</div>
-
-      <div class="domains-add">
-        <input
-          v-model="newDomain"
-          type="text"
-          class="domains-add__input"
-          placeholder="new.example.com"
-          spellcheck="false"
-          autocomplete="off"
-          :disabled="busy"
-          @keyup.enter="onAddDomain"
-        />
-        <button class="btn btn--primary domains-add__btn" :disabled="!newDomain.trim() || busy" @click="onAddDomain">
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="12" y1="5" x2="12" y2="19" /><line x1="5" y1="12" x2="19" y2="12" /></svg>
-          Добавить домен
+        <button class="btn btn--primary btn--sm" :disabled="busy" @click="openAddModal">
+          + Добавить приложение
         </button>
-      </div>
-      <span v-if="addError" class="domains-add__error">{{ addError }}</span>
-    </div>
+      </header>
 
-    <!-- Modal: edit a domain (тот же предупреждающий формат, что и старая смена главного домена) -->
-    <Teleport to="body">
-      <div v-if="editTarget" class="modal-overlay" @mousedown.self="closeEditDomain">
-        <div class="domain-modal">
-          <div class="domain-modal__header">
-            <div class="domain-modal__title-group">
-              <div class="domain-modal__icon">
-                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
-                  <circle cx="12" cy="12" r="10" /><line x1="2" y1="12" x2="22" y2="12" /><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z" />
-                </svg>
-              </div>
-              <div>
-                <h3 class="domain-modal__title">Редактирование домена</h3>
-                <p class="domain-modal__subtitle">Имя домена и его собственный web-root</p>
-              </div>
+      <div v-if="domains.length" class="domains-tab__list">
+        <article
+          v-for="domain in domains"
+          :key="domain.id"
+          class="domain-row"
+          :class="{ 'domain-row--primary': domain.isPrimary }"
+        >
+          <button
+            class="domain-row__primary"
+            :class="{ 'domain-row__primary--active': domain.isPrimary }"
+            :disabled="busy || domain.isPrimary"
+            :title="domain.isPrimary ? 'Главное приложение сайта' : 'Сделать главным'"
+            @click="onMakePrimary(domain)"
+          >
+            ★
+          </button>
+
+          <div class="domain-row__main">
+            <div class="domain-row__title">
+              <a :href="domainUrl(domain)" target="_blank" rel="noopener noreferrer">
+                {{ domain.domain }}
+              </a>
+              <span class="domain-row__preset">{{ presetLabel(domain.preset) }}</span>
+              <span class="domain-row__status" :class="`domain-row__status--${domain.appStatus.toLowerCase()}`">
+                {{ appStatusLabel(domain.appStatus) }}
+              </span>
+              <span
+                v-if="coverageState(domain) !== 'no-cert'"
+                class="domain-row__ssl"
+                :class="`domain-row__ssl--${coverageState(domain)}`"
+                :title="coverageTitle(domain)"
+              >
+                {{ coverageState(domain) === 'covered' ? 'SSL ✓' : 'SSL !' }}
+              </span>
             </div>
-            <button class="domain-modal__close" :disabled="busy" @click="closeEditDomain">
-              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" /></svg>
+
+            <div class="domain-row__meta">
+              <code>{{ domain.filesRelPath }}</code>
+              <span>{{ domain.phpVersion ? `PHP ${domain.phpVersion}` : 'без PHP' }}</span>
+              <span v-if="domain.aliases.length">
+                aliases: {{ domain.aliases.map((alias) => alias.domain).join(', ') }}
+              </span>
+              <span v-else>без алиасов</span>
+            </div>
+            <p v-if="domain.appErrorMessage" class="domain-row__error">
+              {{ domain.appErrorMessage }}
+            </p>
+          </div>
+
+          <div class="domain-row__actions">
+            <button class="btn btn--ghost btn--xs" :disabled="busy" @click="openEditModal(domain)">
+              Изменить
+            </button>
+            <button class="btn btn--ghost btn--xs" :disabled="busy" @click="openAliasesModal(domain)">
+              Алиасы
+            </button>
+            <button class="btn btn--ghost btn--xs" :disabled="busy" @click="emit('navigate-ssl', domain.id)">
+              SSL
+            </button>
+            <button class="btn btn--ghost btn--xs" :disabled="busy" @click="emit('navigate-nginx', domain.id)">
+              Nginx
+            </button>
+            <button
+              class="domain-row__delete"
+              :disabled="busy || domain.isPrimary || domains.length <= 1"
+              :title="domain.isPrimary ? 'Сначала назначь главным другое приложение' : 'Удалить приложение'"
+              @click="openDeleteModal(domain)"
+            >
+              ×
             </button>
           </div>
+        </article>
+      </div>
+      <div v-else class="domains-tab__empty">Приложения не найдены.</div>
+    </section>
+
+    <Teleport to="body">
+      <div v-if="addOpen && addDraft" class="domain-modal-overlay" @mousedown.self="closeAddModal">
+        <section class="domain-modal domain-modal--wide">
+          <header class="domain-modal__header">
+            <div>
+              <h3>Новое приложение</h3>
+              <p>Будет создан отдельный runtime для нового основного домена.</p>
+            </div>
+            <button :disabled="busy" @click="closeAddModal">×</button>
+          </header>
 
           <div class="domain-modal__body">
-            <div class="domain-modal__swap">
-              <div class="domain-modal__swap-col">
-                <label class="domain-modal__label">Сейчас</label>
-                <div class="domain-modal__chip domain-modal__chip--current">
-                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="10" /></svg>
-                  <code>{{ editTarget.domain }}</code>
-                </div>
-              </div>
-              <div class="domain-modal__arrow">
-                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="5" y1="12" x2="19" y2="12" /><polyline points="12 5 19 12 12 19" /></svg>
-              </div>
-              <div class="domain-modal__swap-col">
-                <label class="domain-modal__label">Новый домен</label>
-                <div class="domain-modal__input-wrap" :class="{ 'domain-modal__input-wrap--error': !!editDomainError }">
-                  <svg class="domain-modal__input-icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7" /><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z" /></svg>
-                  <input
-                    v-model="editDomainValue"
-                    type="text"
-                    class="domain-modal__input"
-                    placeholder="new.example.com"
-                    :disabled="busy"
-                    autocomplete="off"
-                    spellcheck="false"
-                    @keyup.enter="saveEditDomain"
-                  />
-                </div>
-                <span v-if="editDomainError" class="domain-modal__error">{{ editDomainError }}</span>
-              </div>
-            </div>
-
-            <!-- Web-root домена -->
-            <div class="domain-modal__field">
-              <label class="domain-modal__label">
-                Папка с файлами (web-root относительно <code>{{ ' ' }}{{ siteRootHint }}</code>)
-              </label>
-              <div class="domain-modal__input-wrap" :class="{ 'domain-modal__input-wrap--error': !!editFilesRelPathError }">
-                <svg class="domain-modal__input-icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" /></svg>
-                <input
-                  v-model="editFilesRelPathValue"
-                  type="text"
-                  class="domain-modal__input"
-                  :placeholder="editTarget.isPrimary ? 'www' : `наследует «${siteDefaultRelPath || 'www'}»`"
-                  :disabled="busy"
-                  autocomplete="off"
-                  spellcheck="false"
-                  @keyup.enter="saveEditDomain"
-                />
-              </div>
-              <span class="domain-modal__hint">
-                <template v-if="editTarget.isPrimary">
-                  Главный домен — это поле задаёт <b>общий дефолт сайта</b>
-                  (используется неглавными доменами без своего web-root).
-                  Пустое значение трактуется как <code>www</code>.
-                </template>
-                <template v-else>
-                  Пустое поле — наследует общий дефолт сайта
-                  (<code>{{ siteDefaultRelPath || 'www' }}</code>).
-                  Своё значение — отдельный web-root внутри той же домашней директории сайта.
-                </template>
-              </span>
-              <span v-if="editFilesRelPathError" class="domain-modal__error">{{ editFilesRelPathError }}</span>
-            </div>
-
-            <div class="domain-modal__impact">
-              <div class="domain-modal__impact-title">
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="10" /><line x1="12" y1="8" x2="12" y2="12" /><line x1="12" y1="16" x2="12.01" y2="16" /></svg>
-                Что произойдёт
-              </div>
-              <ul class="domain-modal__impact-list">
-                <li v-if="domainChanged">
-                  В nginx-конфиге обновится <code>server_name</code> на <code>{{ editDomainValue.trim() || 'new.example.com' }}</code>.
-                  Конфиг будет проверен <code>nginx -t</code> и перезагружен.
-                </li>
-                <li v-if="domainChanged && editTarget.sslCertificate && editTarget.sslCertificate.status !== 'NONE'" class="domain-modal__impact-danger">
-                  <b>SSL домена сбросится в статус «Нет»</b> — старый серт выпущен на <code>{{ editTarget.domain }}</code>,
-                  для нового домена невалиден. После смены — выпусти новый серт на вкладке «SSL».
-                </li>
-                <li v-if="domainChanged">
-                  <b>DNS</b> нового домена должен уже указывать на этот сервер, иначе сайт станет недоступен
-                  (и выпуск SSL потом обломается).
-                </li>
-                <li v-if="filesRelPathChanged" class="domain-modal__impact-danger">
-                  В nginx-конфиге обновится <code>root</code> на <code>{{ siteRootHint }}/{{ filesRelPathPreview }}</code>.
-                  <b>Файлы панель не перекладывает</b> — если новая папка пустая, сайт ляжет в 404.
-                  Перенеси содержимое вручную:
-                  <pre class="domain-modal__cmd">sudo mv {{ siteRootHint }}/{{ currentResolvedRelPath }}/* {{ siteRootHint }}/{{ filesRelPathPreview }}/</pre>
-                </li>
-                <li v-if="filesRelPathChanged && editTarget.isPrimary" class="domain-modal__impact-danger">
-                  Это <b>общий дефолт сайта</b> — изменится web-root и у всех неглавных доменов, которые его наследуют.
-                </li>
-                <li v-if="domainChanged">
-                  Ссылки в админке/БД сайта (<code>site_url</code>, MODX <code>system_settings</code>, хардкод в контенте)
-                  панель <b>не трогает</b> — правь руками.
-                </li>
-                <li v-if="!domainChanged && !filesRelPathChanged" class="domain-modal__impact-quiet">
-                  Изменений нет — измени домен или папку, чтобы сохранить.
-                </li>
-              </ul>
-            </div>
+            <DomainApplicationForm
+              v-model="addDraft"
+              :php-versions="phpVersions"
+              :modx-revo-versions="modxRevoVersions"
+              :modx3-versions="modx3Versions"
+              :installed-db-engines="installedDbEngines"
+              :default-db-name="siteName || 'site'"
+              :default-db-user="siteName || 'site'"
+              :default-files-rel-path="defaultFilesRelPath || 'www'"
+              :disabled="busy"
+            />
+            <p v-if="addError" class="domain-modal__error">{{ addError }}</p>
           </div>
 
-          <div class="domain-modal__footer">
-            <button class="btn btn--ghost" :disabled="busy" @click="closeEditDomain">Отмена</button>
-            <button
-              class="btn btn--danger"
-              :disabled="busy || !editDirty || !editDomainValue.trim()"
-              @click="saveEditDomain"
-            >
-              <svg v-if="!busy" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><polyline points="20 6 9 17 4 12" /></svg>
-              {{ busy ? 'Применяю...' : 'Сохранить' }}
+          <footer class="domain-modal__footer">
+            <button class="btn btn--ghost" :disabled="busy" @click="closeAddModal">Отмена</button>
+            <button class="btn btn--primary" :disabled="busy" @click="onAddDomain">
+              {{ busy ? 'Создаю…' : 'Создать приложение' }}
             </button>
-          </div>
-        </div>
+          </footer>
+        </section>
       </div>
     </Teleport>
 
-    <!-- Modal: per-domain aliases -->
     <Teleport to="body">
-      <div v-if="aliasTarget" class="modal-overlay" @mousedown.self="closeAliasesModal">
-        <div class="domain-modal">
-          <div class="domain-modal__header">
-            <div class="domain-modal__title-group">
-              <div class="domain-modal__icon">
-                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
-                  <path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71" /><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71" />
-                </svg>
-              </div>
-              <div>
-                <h3 class="domain-modal__title">Алиасы домена</h3>
-                <p class="domain-modal__subtitle">Дополнительные домены для <code>{{ aliasTarget.domain }}</code></p>
-              </div>
+      <div v-if="editTarget && editDraft" class="domain-modal-overlay" @mousedown.self="closeEditModal">
+        <section class="domain-modal">
+          <header class="domain-modal__header">
+            <div>
+              <h3>Настройки приложения</h3>
+              <p>{{ presetLabel(editTarget.preset) }} · {{ editTarget.domain }}</p>
             </div>
-            <button class="domain-modal__close" :disabled="aliasSaving" @click="closeAliasesModal">
-              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" /></svg>
-            </button>
-          </div>
+            <button :disabled="busy" @click="closeEditModal">×</button>
+          </header>
 
-          <div class="domain-modal__body">
-            <!-- SSL-not-covered предупреждение -->
-            <div v-if="aliasModalMissing.length" class="domains-cert-alert ssl-le__mismatch">
-              <div class="domains-cert-alert__icon">
-                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
-                  <path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z" /><line x1="12" y1="9" x2="12" y2="13" /><line x1="12" y1="17" x2="12.01" y2="17" />
-                </svg>
-              </div>
-              <div class="domains-cert-alert__body">
-                <strong>Не покрыто SSL-сертификатом</strong>
-                <span>
-                  <template v-for="(d, i) in aliasModalMissing" :key="d"><code>{{ d }}</code><span v-if="i < aliasModalMissing.length - 1">, </span></template>
-                  — перевыпусти SSL домена, чтобы добавить в SAN (redirect-алиасы тоже должны быть в SAN).
-                </span>
-              </div>
-            </div>
-
-            <div v-if="aliasDraft.length" class="domains-list">
-              <div v-for="(alias, idx) in aliasDraft" :key="alias.domain + idx" class="domain-item">
-                <span
-                  v-if="aliasCoverage(alias.domain) !== 'no-cert'"
-                  class="cert-badge"
-                  :class="`cert-badge--${aliasCoverage(alias.domain)}`"
-                  :title="aliasCoverage(alias.domain) === 'covered' ? 'Алиас покрыт SSL-сертификатом' : 'Алиас не в сертификате — перевыпусти SSL'"
-                >
-                  <svg v-if="aliasCoverage(alias.domain) === 'covered'" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round"><polyline points="20 6 9 17 4 12" /></svg>
-                  <svg v-else width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" /></svg>
-                </span>
-                <a :href="aliasUrl(alias.domain)" target="_blank" rel="noopener noreferrer" class="domain-item__name domain-item__name--inline domain-link">{{ alias.domain }}</a>
-                <div class="domain-item__redirect">
-                  <label class="domain-item__toggle" :title="alias.redirect ? 'Редирект 301 на основной домен' : 'Алиас отдаёт сайт (200)'">
-                    <input
-                      type="checkbox"
-                      :checked="alias.redirect"
-                      :disabled="aliasSaving"
-                      @change="toggleRedirect(idx)"
-                    />
-                    <span class="domain-item__toggle-slider" />
-                    <span class="domain-item__toggle-label">{{ alias.redirect ? '301' : '200' }}</span>
-                  </label>
-                </div>
-                <button class="domain-item__remove" title="Удалить алиас" :disabled="aliasSaving" @click="removeAliasDraft(idx)">
-                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" /></svg>
-                </button>
-              </div>
-            </div>
-            <div v-else class="domains-empty">Алиасы не настроены</div>
-
-            <div class="domains-add">
+          <div class="domain-modal__body domain-modal__fields">
+            <label>
+              <span>Домен</span>
+              <input v-model="editDraft.domain" maxlength="253" autocomplete="off" spellcheck="false" />
+            </label>
+            <label>
+              <span>filesRelPath</span>
+              <input v-model="editDraft.filesRelPath" maxlength="255" autocomplete="off" spellcheck="false" />
+              <small>
+                Файлы автоматически не переносятся. Новый каталог должен содержать готовое приложение.
+              </small>
+            </label>
+            <label class="domain-modal__check">
               <input
-                v-model="newAlias"
-                type="text"
-                class="domains-add__input"
-                placeholder="alias.example.com"
-                spellcheck="false"
-                autocomplete="off"
-                :disabled="aliasSaving"
-                @keyup.enter="addAliasDraft"
+                v-model="editDraft.phpEnabled"
+                type="checkbox"
+                :disabled="isModxPreset(editTarget.preset)"
               />
-              <button class="btn btn--ghost domains-add__btn" :disabled="!newAlias.trim() || aliasSaving" @click="addAliasDraft">
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="12" y1="5" x2="12" y2="19" /><line x1="5" y1="12" x2="19" y2="12" /></svg>
-                Добавить алиас
+              <span>PHP</span>
+            </label>
+            <label v-if="editDraft.phpEnabled">
+              <span>Версия PHP</span>
+              <select v-model="editDraft.phpVersion">
+                <option v-for="version in phpVersions" :key="version.value" :value="version.value">
+                  {{ version.label }}
+                </option>
+              </select>
+            </label>
+            <label class="domain-modal__check">
+              <input v-model="editDraft.httpsRedirect" type="checkbox" />
+              <span>Редирект HTTP → HTTPS</span>
+            </label>
+
+            <template v-if="editTarget.preset === 'CUSTOM'">
+              <label>
+                <span>Git-репозиторий</span>
+                <input v-model="editDraft.gitRepository" maxlength="512" />
+              </label>
+              <label>
+                <span>Ветка</span>
+                <input v-model="editDraft.deployBranch" maxlength="128" />
+              </label>
+            </template>
+
+            <div class="domain-modal__env">
+              <span>Переменные окружения</span>
+              <div v-for="(_pair, index) in editDraft.envVars" :key="index" class="domain-modal__env-row">
+                <input v-model="editDraft.envVars[index]!.key" placeholder="KEY" maxlength="128" />
+                <input v-model="editDraft.envVars[index]!.value" placeholder="VALUE" maxlength="8192" />
+                <button type="button" @click="editDraft.envVars.splice(index, 1)">×</button>
+              </div>
+              <button
+                type="button"
+                class="domain-modal__add-row"
+                @click="editDraft.envVars.push({ key: '', value: '' })"
+              >
+                + Добавить переменную
               </button>
             </div>
-            <span v-if="aliasError" class="domains-add__error">{{ aliasError }}</span>
+
+            <p v-if="editError" class="domain-modal__error">{{ editError }}</p>
           </div>
 
-          <div class="domain-modal__footer">
+          <footer class="domain-modal__footer">
+            <button class="btn btn--ghost" :disabled="busy" @click="closeEditModal">Отмена</button>
+            <button class="btn btn--primary" :disabled="busy" @click="saveEditDomain">
+              {{ busy ? 'Сохраняю…' : 'Сохранить' }}
+            </button>
+          </footer>
+        </section>
+      </div>
+    </Teleport>
+
+    <Teleport to="body">
+      <div v-if="aliasTarget" class="domain-modal-overlay" @mousedown.self="closeAliasesModal">
+        <section class="domain-modal">
+          <header class="domain-modal__header">
+            <div>
+              <h3>Алиасы</h3>
+              <p>{{ aliasTarget.domain }}</p>
+            </div>
+            <button :disabled="aliasSaving" @click="closeAliasesModal">×</button>
+          </header>
+
+          <div class="domain-modal__body">
+            <div v-if="aliasDraft.length" class="alias-list">
+              <div v-for="(alias, index) in aliasDraft" :key="`${alias.domain}:${index}`" class="alias-list__row">
+                <input v-model="alias.domain" autocomplete="off" spellcheck="false" />
+                <label>
+                  <input v-model="alias.redirect" type="checkbox" />
+                  301
+                </label>
+                <button type="button" @click="aliasDraft.splice(index, 1)">×</button>
+              </div>
+            </div>
+            <div class="alias-list__add">
+              <input
+                v-model="newAlias"
+                placeholder="alias.example.com"
+                autocomplete="off"
+                spellcheck="false"
+                @keyup.enter="addAliasDraft"
+              />
+              <button class="btn btn--ghost btn--sm" @click="addAliasDraft">Добавить</button>
+            </div>
+            <p v-if="aliasError" class="domain-modal__error">{{ aliasError }}</p>
+          </div>
+
+          <footer class="domain-modal__footer">
             <button class="btn btn--ghost" :disabled="aliasSaving" @click="closeAliasesModal">Отмена</button>
             <button class="btn btn--primary" :disabled="aliasSaving || !aliasesDirty" @click="saveAliases">
-              <svg v-if="!aliasSaving" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><polyline points="20 6 9 17 4 12" /></svg>
-              {{ aliasSaving ? 'Сохранение...' : 'Сохранить алиасы' }}
+              {{ aliasSaving ? 'Сохраняю…' : 'Сохранить' }}
             </button>
+          </footer>
+        </section>
+      </div>
+    </Teleport>
+
+    <Teleport to="body">
+      <div v-if="deleteTarget" class="domain-modal-overlay" @mousedown.self="closeDeleteModal">
+        <section class="domain-modal">
+          <header class="domain-modal__header domain-modal__header--danger">
+            <div>
+              <h3>Удалить приложение</h3>
+              <p>{{ deleteTarget.domain }}</p>
+            </div>
+            <button :disabled="busy" @click="closeDeleteModal">×</button>
+          </header>
+
+          <div class="domain-modal__body domain-modal__fields">
+            <p class="domain-modal__warning">
+              Маршрутизация и метаданные приложения будут удалены. Файлы и БД сохраняются,
+              пока ты явно не включишь их удаление.
+            </p>
+            <label class="domain-modal__check">
+              <input v-model="deleteApplicationFiles" type="checkbox" />
+              <span>Удалить файлы приложения после snapshot</span>
+            </label>
+            <label class="domain-modal__check">
+              <input v-model="deleteOwnedDatabases" type="checkbox" />
+              <span>Удалить принадлежащие приложению БД после snapshot</span>
+            </label>
+            <label>
+              <span>Введи <code>{{ deleteTarget.domain }}</code></span>
+              <input
+                v-model="deleteConfirmation"
+                autocomplete="off"
+                spellcheck="false"
+                :placeholder="deleteTarget.domain"
+              />
+            </label>
+            <p v-if="deleteError" class="domain-modal__error">{{ deleteError }}</p>
           </div>
-        </div>
+
+          <footer class="domain-modal__footer">
+            <button class="btn btn--ghost" :disabled="busy" @click="closeDeleteModal">Отмена</button>
+            <button
+              class="btn btn--danger"
+              :disabled="busy || deleteConfirmation !== deleteTarget.domain"
+              @click="onRemoveDomain"
+            >
+              {{ busy ? 'Удаляю…' : 'Удалить приложение' }}
+            </button>
+          </footer>
+        </section>
       </div>
     </Teleport>
   </div>
 </template>
 
 <script setup lang="ts">
-import { computed, ref } from 'vue';
+import {
+  DEFAULT_MODX_3_VERSIONS,
+  DEFAULT_MODX_REVO_VERSIONS,
+  DEFAULT_PHP_VERSIONS,
+  buildDomainApplicationPayload,
+  createDomainApplicationDraft,
+  isDomainValid,
+  isFilesRelPathValid,
+  isModxApplication,
+  presetLabel,
+  validateDomainApplication,
+  type DomainApplicationDraft,
+  type SelectOption,
+  type SiteTypePreset,
+} from '~/utils/domain-application';
 
 interface SiteAlias {
   domain: string;
@@ -385,935 +350,705 @@ interface SiteDomain {
   isPrimary: boolean;
   position: number;
   aliases: SiteAlias[];
-  filesRelPath: string | null;
-  appPort: number | null;
+  preset: SiteTypePreset;
+  appStatus: 'PROVISIONING' | 'RUNNING' | 'DEPLOYING' | 'UPDATING' | 'ERROR';
+  appErrorMessage: string | null;
+  filesRelPath: string;
+  phpVersion: string | null;
+  gitRepository: string | null;
+  deployBranch: string | null;
+  envVars: Record<string, string>;
   httpsRedirect: boolean;
   sslCertificate: SslCert | null;
   createdAt: string;
   updatedAt: string;
 }
 
-const props = defineProps<{
-  siteId: string;
-  domains: SiteDomain[];
-  /** Общий дефолт web-root сайта (Site.filesRelPath). Нужен для отображения
-   *  «наследует» в строке и плейсхолдеров в модалке. Может быть пустым/null. */
-  siteDefaultRelPath?: string | null;
-  /** Site.rootPath — нужен только для подсказки команды mv в модалке. */
-  siteRootPath?: string | null;
-}>();
+interface OperationResponse {
+  operationId: string;
+  operationStatus: string;
+}
+
+interface OperationState {
+  id: string;
+  status: 'PENDING' | 'RUNNING' | 'SUCCEEDED' | 'FAILED';
+  currentStep: string | null;
+  progress: number;
+  errorMessage: string | null;
+}
+
+interface EditDraft {
+  domain: string;
+  filesRelPath: string;
+  phpEnabled: boolean;
+  phpVersion: string;
+  gitRepository: string;
+  deployBranch: string;
+  envVars: Array<{ key: string; value: string }>;
+  httpsRedirect: boolean;
+}
+
+const props = withDefaults(
+  defineProps<{
+    siteId: string;
+    siteName?: string;
+    domains: SiteDomain[];
+    defaultFilesRelPath?: string;
+    siteRootPath?: string | null;
+  }>(),
+  {
+    siteName: '',
+    defaultFilesRelPath: 'www',
+    siteRootPath: null,
+  },
+);
 
 const emit = defineEmits<{
-  (e: 'changed'): void;
-  (e: 'navigate-ssl', domainId: string): void;
-  (e: 'navigate-nginx', domainId: string): void;
+  (event: 'changed'): void;
+  (event: 'navigate-ssl', domainId: string): void;
+  (event: 'navigate-nginx', domainId: string): void;
 }>();
 
 const api = useApi();
 const toast = useMbToast();
 const confirm = useMbConfirm();
-
 const busy = ref(false);
-const newDomain = ref('');
+const activeOperationId = ref('');
+
+const phpVersions = ref<SelectOption[]>(DEFAULT_PHP_VERSIONS.map((version) => ({ ...version })));
+const modxRevoVersions = ref<SelectOption[]>(
+  DEFAULT_MODX_REVO_VERSIONS.map((version) => ({ ...version })),
+);
+const modx3Versions = ref<SelectOption[]>(
+  DEFAULT_MODX_3_VERSIONS.map((version) => ({ ...version })),
+);
+const installedDbEngines = ref<string[]>([]);
+
+type Coverage = 'covered' | 'missing' | 'no-cert';
+
+function hasActiveCert(domain: SiteDomain): boolean {
+  return ['ACTIVE', 'EXPIRING_SOON', 'EXPIRED'].includes(
+    domain.sslCertificate?.status || '',
+  );
+}
+
+function certSet(domain: SiteDomain): Set<string> {
+  return new Set((domain.sslCertificate?.domains || []).map((value) => value.toLowerCase()));
+}
+
+function coverageState(domain: SiteDomain): Coverage {
+  if (!hasActiveCert(domain)) return 'no-cert';
+  const covered = certSet(domain);
+  return [domain.domain, ...domain.aliases.map((alias) => alias.domain)].every((hostname) =>
+    covered.has(hostname.toLowerCase()),
+  )
+    ? 'covered'
+    : 'missing';
+}
+
+function coverageTitle(domain: SiteDomain): string {
+  return coverageState(domain) === 'covered'
+    ? 'Домен и алиасы покрыты сертификатом'
+    : 'Домен или алиас отсутствует в SAN сертификата';
+}
+
+function domainUrl(domain: SiteDomain): string {
+  const validCertificate = ['ACTIVE', 'EXPIRING_SOON'].includes(
+    domain.sslCertificate?.status || '',
+  );
+  const covered = certSet(domain).has(domain.domain.toLowerCase());
+  return `${validCertificate && covered ? 'https' : 'http'}://${domain.domain}`;
+}
+
+const anyCoverageProblem = computed(() =>
+  props.domains.some((domain) => coverageState(domain) === 'missing'),
+);
+
+function appStatusLabel(status: SiteDomain['appStatus']): string {
+  return {
+    PROVISIONING: 'Создаётся',
+    RUNNING: 'Работает',
+    DEPLOYING: 'Деплой',
+    UPDATING: 'Обновляется',
+    ERROR: 'Ошибка',
+  }[status];
+}
+
+function isModxPreset(preset: SiteTypePreset): boolean {
+  return preset === 'MODX_REVO' || preset === 'MODX_3';
+}
+
+function idempotencyKey(prefix: string): string {
+  const suffix =
+    globalThis.crypto?.randomUUID?.() ||
+    `${Date.now()}-${Math.random().toString(36).slice(2, 12)}`;
+  return `${prefix}:${suffix}`;
+}
+
+async function loadFormOptions(): Promise<void> {
+  const [phpResult, modxResult, servicesResult] = await Promise.allSettled([
+    api.get<string[]>('/php/versions'),
+    api.get<{
+      revo: Array<{ value: string; label: string }>;
+      modx3: Array<{ value: string; label: string }>;
+    }>('/sites/modx-versions'),
+    api.get<Array<{ key: string; installed: boolean }>>('/services'),
+  ]);
+
+  if (phpResult.status === 'fulfilled' && phpResult.value.length) {
+    phpVersions.value = [...phpResult.value]
+      .sort((left, right) => right.localeCompare(left, undefined, { numeric: true }))
+      .map((version) => ({
+        value: version,
+        label: /^7\./.test(version) ? `PHP ${version} (EOL)` : `PHP ${version}`,
+      }));
+  }
+  if (modxResult.status === 'fulfilled') {
+    if (modxResult.value.revo.length) modxRevoVersions.value = modxResult.value.revo;
+    if (modxResult.value.modx3.length) modx3Versions.value = modxResult.value.modx3;
+  }
+  if (servicesResult.status === 'fulfilled') {
+    installedDbEngines.value = servicesResult.value
+      .filter((service) => service.installed)
+      .map((service) => service.key);
+  }
+}
+
+const addOpen = ref(false);
+const addDraft = ref<DomainApplicationDraft | null>(null);
 const addError = ref('');
 
-// --- coverage helpers ---
-type Coverage = 'covered' | 'missing' | 'no-cert';
-function hasActiveCert(d: SiteDomain): boolean {
-  const s = d.sslCertificate?.status;
-  return s === 'ACTIVE' || s === 'EXPIRING_SOON' || s === 'EXPIRED';
-}
-function certSet(d: SiteDomain): Set<string> {
-  return new Set((d.sslCertificate?.domains || []).map((x) => x.toLowerCase()));
-}
-/** Покрытие домена + всех его алиасов одним взглядом — для индикатора в строке. */
-function coverageState(d: SiteDomain): Coverage {
-  if (!hasActiveCert(d)) return 'no-cert';
-  const set = certSet(d);
-  const all = [d.domain, ...d.aliases.map((a) => a.domain)];
-  return all.every((x) => set.has(x.toLowerCase())) ? 'covered' : 'missing';
-}
-function coverageTitle(d: SiteDomain): string {
-  return coverageState(d) === 'covered'
-    ? 'Домен и все его алиасы покрыты SSL-сертификатом'
-    : 'Домен или часть алиасов не в SAN сертификата — перевыпусти SSL';
-}
-function domainUrl(d: SiteDomain): string {
-  const s = d.sslCertificate?.status;
-  const valid = s === 'ACTIVE' || s === 'EXPIRING_SOON';
-  const covered = certSet(d).has(d.domain.toLowerCase());
-  return `${valid && covered ? 'https' : 'http'}://${d.domain}`;
-}
-const anyCoverageProblem = computed(() => props.domains.some((d) => coverageState(d) === 'missing'));
-
-/** Резолв web-root домена → собственный, либо общий дефолт сайта, либо 'www'. */
-function resolvedRelPath(d: SiteDomain): string {
-  const own = (d.filesRelPath || '').trim();
-  if (own) return own;
-  const siteDefault = (props.siteDefaultRelPath || '').trim();
-  return siteDefault || 'www';
-}
-const siteRootHint = computed(() => props.siteRootPath || '/var/www/&lt;site&gt;');
-
-// --- domain CRUD ---
-async function onAddDomain() {
-  const domain = newDomain.value.trim().toLowerCase();
-  addError.value = '';
-  if (!domain) return;
-  if (!/^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$/.test(domain)) {
-    addError.value = 'Невалидный домен';
-    return;
-  }
-  busy.value = true;
-  try {
-    await api.post(`/sites/${props.siteId}/domains`, { domain });
-    newDomain.value = '';
-    toast.success(`Домен ${domain} добавлен`);
-    emit('changed');
-  } catch (e) {
-    addError.value = (e as Error).message || 'Не удалось добавить домен';
-    toast.error(addError.value);
-  } finally {
-    busy.value = false;
-  }
-}
-
-async function onRemoveDomain(d: SiteDomain) {
-  if (d.isPrimary) return;
-  const ok = await confirm.ask({
-    title: 'Удаление домена',
-    message: `Удалить домен ${d.domain}? Его nginx-конфиг, SSL-сертификат и алиасы будут удалены.`,
-    confirmText: 'Удалить',
-    danger: true,
+function openAddModal(): void {
+  addDraft.value = createDomainApplicationDraft({
+    id: idempotencyKey('draft'),
+    filesRelPath: props.defaultFilesRelPath || 'www',
+    phpVersion: phpVersions.value[0]?.value || '8.2',
+    modxRevoVersion: modxRevoVersions.value[0]?.value,
+    modx3Version: modx3Versions.value[0]?.value,
   });
-  if (!ok) return;
+  addError.value = '';
+  addOpen.value = true;
+}
+
+function closeAddModal(): void {
+  if (busy.value) return;
+  addOpen.value = false;
+  addDraft.value = null;
+}
+
+function validateHostnames(application: DomainApplicationDraft): string | null {
+  const known = new Set<string>();
+  for (const domain of props.domains) {
+    known.add(domain.domain.toLowerCase());
+    for (const alias of domain.aliases) known.add(alias.domain.toLowerCase());
+  }
+  const requested = [
+    application.domain.trim().toLowerCase(),
+    ...application.aliases.map((alias) => alias.trim().toLowerCase()).filter(Boolean),
+  ];
+  const local = new Set<string>();
+  for (const hostname of requested) {
+    if (known.has(hostname)) return `${hostname} уже используется этим сайтом.`;
+    if (local.has(hostname)) return `${hostname} указан повторно.`;
+    local.add(hostname);
+  }
+  return null;
+}
+
+async function onAddDomain(): Promise<void> {
+  if (!addDraft.value || busy.value) return;
+  addError.value =
+    validateDomainApplication(addDraft.value, new Set(installedDbEngines.value)) ||
+    validateHostnames(addDraft.value) ||
+    '';
+  if (addError.value) return;
+
   busy.value = true;
   try {
-    await api.delete(`/sites/${props.siteId}/domains/${d.id}`);
-    toast.success(`Домен ${d.domain} удалён`);
+    const response = await api.post<OperationResponse>(
+      `/sites/${props.siteId}/domains`,
+      buildDomainApplicationPayload(
+        addDraft.value,
+        phpVersions.value[0]?.value || '8.2',
+      ),
+      { headers: { 'Idempotency-Key': idempotencyKey('domain-create') } },
+    );
+    activeOperationId.value = response.operationId;
+    addOpen.value = false;
+    addDraft.value = null;
+    toast.success('Приложение зарезервировано. Идёт установка.');
     emit('changed');
-  } catch (e) {
-    toast.error((e as Error).message || 'Не удалось удалить домен');
+  } catch (error) {
+    addError.value = (error as Error).message || 'Не удалось создать приложение';
   } finally {
     busy.value = false;
   }
 }
 
-async function onMakePrimary(d: SiteDomain) {
-  if (d.isPrimary) return;
-  const ok = await confirm.ask({
-    title: 'Смена главного домена',
-    message: `Сделать ${d.domain} главным доменом сайта? Главный домен используется в шапке, ссылках и как зеркало legacy-полей.`,
+function onOperationFinished(operation: OperationState): void {
+  emit('changed');
+  if (operation.status === 'SUCCEEDED') toast.success('Операция завершена');
+  else toast.error(operation.errorMessage || 'Операция завершилась с ошибкой');
+}
+
+async function onMakePrimary(domain: SiteDomain): Promise<void> {
+  if (domain.isPrimary || busy.value) return;
+  const approved = await confirm.ask({
+    title: 'Смена главного приложения',
+    message: `Сделать ${domain.domain} главным доменом контейнера? Приложения и их runtime не перемещаются.`,
     confirmText: 'Сделать главным',
   });
-  if (!ok) return;
+  if (!approved) return;
+
   busy.value = true;
   try {
-    await api.post(`/sites/${props.siteId}/domains/${d.id}/make-primary`, {});
-    toast.success(`${d.domain} — теперь главный домен`);
+    await api.post(
+      `/sites/${props.siteId}/domains/${domain.id}/make-primary`,
+      {},
+      { headers: { 'Idempotency-Key': idempotencyKey('domain-primary') } },
+    );
+    toast.success(`${domain.domain} — главный домен`);
     emit('changed');
-  } catch (e) {
-    toast.error((e as Error).message || 'Не удалось сменить главный домен');
+  } catch (error) {
+    toast.error((error as Error).message || 'Не удалось сменить главный домен');
   } finally {
     busy.value = false;
   }
 }
 
-// --- edit domain modal ---
 const editTarget = ref<SiteDomain | null>(null);
-const editDomainValue = ref('');
-const editDomainError = ref('');
-const editFilesRelPathValue = ref('');
-const editFilesRelPathError = ref('');
+const editDraft = ref<EditDraft | null>(null);
+const editError = ref('');
 
-/** Изначальное значение поля web-root: для primary — общий дефолт сайта;
- *  для не-primary — собственный filesRelPath (или пусто, если наследует). */
-function initialRelPathFor(d: SiteDomain): string {
-  if (d.isPrimary) return (props.siteDefaultRelPath || '').trim() || 'www';
-  return (d.filesRelPath || '').trim();
+function openEditModal(domain: SiteDomain): void {
+  editTarget.value = domain;
+  editDraft.value = {
+    domain: domain.domain,
+    filesRelPath: domain.filesRelPath,
+    phpEnabled: domain.phpVersion !== null,
+    phpVersion: domain.phpVersion || phpVersions.value[0]?.value || '8.2',
+    gitRepository: domain.gitRepository || '',
+    deployBranch: domain.deployBranch || 'main',
+    envVars: Object.entries(domain.envVars || {}).map(([key, value]) => ({ key, value })),
+    httpsRedirect: domain.httpsRedirect,
+  };
+  editError.value = '';
 }
 
-function openEditDomain(d: SiteDomain) {
-  editTarget.value = d;
-  editDomainValue.value = d.domain;
-  editFilesRelPathValue.value = initialRelPathFor(d);
-  editDomainError.value = '';
-  editFilesRelPathError.value = '';
-}
-function closeEditDomain() {
+function closeEditModal(): void {
   if (busy.value) return;
   editTarget.value = null;
+  editDraft.value = null;
 }
 
-/** Текущий web-root домена (резолвленный) для подсказки команды mv. */
-const currentResolvedRelPath = computed(() => {
-  const d = editTarget.value;
-  return d ? resolvedRelPath(d) : 'www';
-});
-/** Предпросмотр будущего web-root: что введено || общий дефолт сайта (для не-primary). */
-const filesRelPathPreview = computed(() => {
-  const v = editFilesRelPathValue.value.trim();
-  if (v) return v;
-  if (editTarget.value?.isPrimary) return 'www';
-  return (props.siteDefaultRelPath || '').trim() || 'www';
-});
-const domainChanged = computed(() => {
-  const d = editTarget.value;
-  if (!d) return false;
-  const next = editDomainValue.value.trim().toLowerCase();
-  return !!next && next !== d.domain;
-});
-const filesRelPathChanged = computed(() => {
-  const d = editTarget.value;
-  if (!d) return false;
-  return editFilesRelPathValue.value.trim() !== initialRelPathFor(d);
-});
-const editDirty = computed(() => domainChanged.value || filesRelPathChanged.value);
-
-const REL_PATH_RE = /^[A-Za-z0-9_][A-Za-z0-9_.\-/]*$/;
-
-async function saveEditDomain() {
-  if (!editTarget.value) return;
-  editDomainError.value = '';
-  editFilesRelPathError.value = '';
-
-  const payload: { domain?: string; filesRelPath?: string | null } = {};
-
-  if (domainChanged.value) {
-    const next = editDomainValue.value.trim().toLowerCase();
-    if (!/^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$/.test(next)) {
-      editDomainError.value = 'Невалидный домен';
-      return;
+function envRecord(items: EditDraft['envVars']): Record<string, string> | null {
+  const result: Record<string, string> = {};
+  for (const item of items) {
+    const key = item.key.trim();
+    if (!key) continue;
+    if (!/^[A-Za-z_][A-Za-z0-9_]{0,127}$/.test(key)) {
+      editError.value = `Невалидное имя env: ${key}`;
+      return null;
     }
-    payload.domain = next;
-  }
-
-  if (filesRelPathChanged.value) {
-    const raw = editFilesRelPathValue.value.trim();
-    if (raw) {
-      if (raw.startsWith('/') || raw.includes('..') || !REL_PATH_RE.test(raw) || raw.length > 255) {
-        editFilesRelPathError.value =
-          'Относительный путь: только латиница/цифры/_/-/./слэш, без ".." и ведущего "/"';
-        return;
-      }
-      payload.filesRelPath = raw;
-    } else {
-      // Пусто для не-primary → наследовать (null). Для primary бэк сам подставит 'www'.
-      payload.filesRelPath = editTarget.value.isPrimary ? 'www' : null;
+    if (Object.hasOwn(result, key)) {
+      editError.value = `Переменная ${key} указана повторно`;
+      return null;
     }
+    result[key] = item.value;
   }
+  return result;
+}
 
-  if (!payload.domain && payload.filesRelPath === undefined) return;
+async function saveEditDomain(): Promise<void> {
+  if (!editTarget.value || !editDraft.value || busy.value) return;
+  editError.value = '';
+  if (!isDomainValid(editDraft.value.domain)) {
+    editError.value = 'Невалидный домен';
+    return;
+  }
+  if (!isFilesRelPathValid(editDraft.value.filesRelPath)) {
+    editError.value = 'Невалидный filesRelPath';
+    return;
+  }
+  const envVars = envRecord(editDraft.value.envVars);
+  if (!envVars) return;
+
+  const payload = {
+    domain: editDraft.value.domain.trim().toLowerCase(),
+    filesRelPath: editDraft.value.filesRelPath.trim(),
+    phpVersion:
+      editDraft.value.phpEnabled || isModxPreset(editTarget.value.preset)
+        ? editDraft.value.phpVersion
+        : null,
+    gitRepository:
+      editTarget.value.preset === 'CUSTOM'
+        ? editDraft.value.gitRepository.trim() || null
+        : editTarget.value.gitRepository,
+    deployBranch:
+      editTarget.value.preset === 'CUSTOM'
+        ? editDraft.value.deployBranch.trim() || null
+        : editTarget.value.deployBranch,
+    envVars,
+    httpsRedirect: editDraft.value.httpsRedirect,
+  };
 
   busy.value = true;
   try {
-    await api.put(`/sites/${props.siteId}/domains/${editTarget.value.id}`, payload);
-    if (payload.domain && payload.filesRelPath !== undefined) {
-      toast.success('Домен и web-root обновлены');
-    } else if (payload.domain) {
-      toast.success(`Домен изменён на ${payload.domain}`);
-    } else {
-      toast.success('Web-root обновлён');
-    }
+    await api.put(
+      `/sites/${props.siteId}/domains/${editTarget.value.id}`,
+      payload,
+      { headers: { 'Idempotency-Key': idempotencyKey('domain-update') } },
+    );
+    toast.success('Настройки приложения сохранены');
     editTarget.value = null;
+    editDraft.value = null;
     emit('changed');
-  } catch (e) {
-    const msg = (e as Error).message || 'Не удалось сохранить';
-    // Эвристика: ошибка по домену или по пути — кладём в соответствующее поле.
-    if (payload.domain && /домен|domain/i.test(msg)) {
-      editDomainError.value = msg;
-    } else {
-      editFilesRelPathError.value = msg;
-    }
-    toast.error(msg);
+  } catch (error) {
+    editError.value = (error as Error).message || 'Не удалось сохранить настройки';
   } finally {
     busy.value = false;
   }
 }
 
-// --- aliases modal ---
 const aliasTarget = ref<SiteDomain | null>(null);
 const aliasDraft = ref<SiteAlias[]>([]);
 const newAlias = ref('');
 const aliasError = ref('');
 const aliasSaving = ref(false);
 
-function openAliasesModal(d: SiteDomain) {
-  aliasTarget.value = d;
-  aliasDraft.value = d.aliases.map((a) => ({ domain: a.domain, redirect: a.redirect }));
+function openAliasesModal(domain: SiteDomain): void {
+  aliasTarget.value = domain;
+  aliasDraft.value = domain.aliases.map((alias) => ({ ...alias }));
   newAlias.value = '';
   aliasError.value = '';
 }
-function closeAliasesModal() {
+
+function closeAliasesModal(): void {
   if (aliasSaving.value) return;
   aliasTarget.value = null;
 }
 
-const aliasesDirty = computed(() => {
-  if (!aliasTarget.value) return false;
-  return JSON.stringify(aliasDraft.value) !== JSON.stringify(aliasTarget.value.aliases);
-});
+const aliasesDirty = computed(() =>
+  aliasTarget.value
+    ? JSON.stringify(aliasDraft.value) !== JSON.stringify(aliasTarget.value.aliases)
+    : false,
+);
 
-function aliasCoverage(aliasDomain: string): Coverage {
-  const d = aliasTarget.value;
-  if (!d || !hasActiveCert(d)) return 'no-cert';
-  return certSet(d).has(aliasDomain.toLowerCase()) ? 'covered' : 'missing';
-}
-function aliasUrl(aliasDomain: string): string {
-  const d = aliasTarget.value;
-  const s = d?.sslCertificate?.status;
-  const valid = s === 'ACTIVE' || s === 'EXPIRING_SOON';
-  const covered = d ? certSet(d).has(aliasDomain.toLowerCase()) : false;
-  return `${valid && covered ? 'https' : 'http'}://${aliasDomain}`;
-}
-const aliasModalMissing = computed(() => {
-  const d = aliasTarget.value;
-  if (!d || !hasActiveCert(d)) return [] as string[];
-  const set = certSet(d);
-  return aliasDraft.value.filter((a) => !set.has(a.domain.toLowerCase())).map((a) => a.domain);
-});
-
-function addAliasDraft() {
+function addAliasDraft(): void {
   const alias = newAlias.value.trim().toLowerCase();
   aliasError.value = '';
-  if (!alias) return;
-  if (!/^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$/.test(alias)) {
-    aliasError.value = 'Невалидный домен';
+  if (!isDomainValid(alias)) {
+    aliasError.value = 'Невалидный алиас';
     return;
   }
-  if (aliasDraft.value.some((a) => a.domain === alias)) {
-    aliasError.value = 'Такой алиас уже есть';
+  if (
+    alias === aliasTarget.value?.domain.toLowerCase() ||
+    aliasDraft.value.some((entry) => entry.domain.toLowerCase() === alias)
+  ) {
+    aliasError.value = 'Такой hostname уже указан';
     return;
   }
   aliasDraft.value.push({ domain: alias, redirect: false });
   newAlias.value = '';
 }
-function removeAliasDraft(idx: number) {
-  aliasDraft.value.splice(idx, 1);
-}
-/** Тогл редиректа алиаса: 200 (отдаёт сайт) ↔ 301 (редирект на основной домен). */
-function toggleRedirect(idx: number) {
-  const a = aliasDraft.value[idx];
-  if (a) aliasDraft.value[idx] = { ...a, redirect: !a.redirect };
-}
 
-async function saveAliases() {
-  if (!aliasTarget.value || !aliasesDirty.value) return;
-  aliasSaving.value = true;
+async function saveAliases(): Promise<void> {
+  if (!aliasTarget.value || !aliasesDirty.value || aliasSaving.value) return;
   aliasError.value = '';
+  const seen = new Set<string>();
+  for (const alias of aliasDraft.value) {
+    const canonical = alias.domain.trim().toLowerCase();
+    if (!isDomainValid(canonical)) {
+      aliasError.value = `Невалидный алиас: ${alias.domain}`;
+      return;
+    }
+    if (canonical === aliasTarget.value.domain.toLowerCase() || seen.has(canonical)) {
+      aliasError.value = `Hostname ${canonical} указан повторно`;
+      return;
+    }
+    seen.add(canonical);
+    alias.domain = canonical;
+  }
+
+  aliasSaving.value = true;
   try {
-    await api.put(`/sites/${props.siteId}/domains/${aliasTarget.value.id}/aliases`, {
-      aliases: aliasDraft.value,
-    });
+    await api.put(
+      `/sites/${props.siteId}/domains/${aliasTarget.value.id}/aliases`,
+      { aliases: aliasDraft.value },
+      { headers: { 'Idempotency-Key': idempotencyKey('domain-aliases') } },
+    );
     toast.success('Алиасы сохранены');
     aliasTarget.value = null;
     emit('changed');
-  } catch (e) {
-    aliasError.value = (e as Error).message || 'Не удалось сохранить алиасы';
-    toast.error(aliasError.value);
+  } catch (error) {
+    aliasError.value = (error as Error).message || 'Не удалось сохранить алиасы';
   } finally {
     aliasSaving.value = false;
   }
 }
+
+const deleteTarget = ref<SiteDomain | null>(null);
+const deleteConfirmation = ref('');
+const deleteApplicationFiles = ref(false);
+const deleteOwnedDatabases = ref(false);
+const deleteError = ref('');
+
+function openDeleteModal(domain: SiteDomain): void {
+  if (domain.isPrimary) return;
+  deleteTarget.value = domain;
+  deleteConfirmation.value = '';
+  deleteApplicationFiles.value = false;
+  deleteOwnedDatabases.value = false;
+  deleteError.value = '';
+}
+
+function closeDeleteModal(): void {
+  if (busy.value) return;
+  deleteTarget.value = null;
+}
+
+async function onRemoveDomain(): Promise<void> {
+  if (
+    !deleteTarget.value ||
+    deleteConfirmation.value !== deleteTarget.value.domain ||
+    busy.value
+  ) {
+    return;
+  }
+
+  busy.value = true;
+  try {
+    const response = await api.delete<OperationResponse>(
+      `/sites/${props.siteId}/domains/${deleteTarget.value.id}`,
+      {
+        confirmDomain: deleteConfirmation.value,
+        deleteApplicationFiles: deleteApplicationFiles.value,
+        deleteOwnedDatabases: deleteOwnedDatabases.value,
+      },
+      { headers: { 'Idempotency-Key': idempotencyKey('domain-delete') } },
+    );
+    activeOperationId.value = response.operationId;
+    deleteTarget.value = null;
+    toast.success('Удаление приложения запущено');
+  } catch (error) {
+    deleteError.value = (error as Error).message || 'Не удалось удалить приложение';
+  } finally {
+    busy.value = false;
+  }
+}
+
+onMounted(() => {
+  void loadFormOptions();
+});
 </script>
 
 <style scoped>
-.domains-section { display: flex; flex-direction: column; gap: 1rem; }
-
-.info-card {
-  background: var(--bg-surface);
+.domains-tab { display: flex; flex-direction: column; gap: 1rem; }
+.domains-tab__alert {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  padding: 0.75rem 0.9rem;
+  border: 1px solid var(--danger-border);
+  border-radius: 11px;
+  background: var(--danger-bg);
+  color: var(--danger-light);
+  font-size: 0.76rem;
+}
+.domains-tab__card {
+  overflow: hidden;
   border: 1px solid var(--border-secondary);
   border-radius: 14px;
-  padding: 1.15rem;
+  background: var(--bg-surface);
 }
-.info-card__title {
-  font-size: 0.78rem;
-  font-weight: 600;
-  color: var(--text-tertiary);
-  margin: 0;
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
-}
-
-.domains-header {
+.domains-tab__header {
   display: flex;
-  align-items: baseline;
+  align-items: flex-start;
   justify-content: space-between;
   gap: 1rem;
-  flex-wrap: wrap;
-  margin-bottom: 0.85rem;
+  padding: 1rem;
+  border-bottom: 1px solid var(--bar-bg);
 }
-.domains-hint { font-size: 0.7rem; color: var(--text-muted); }
-
-.domains-list { display: flex; flex-direction: column; gap: 0.4rem; }
-.domains-empty { font-size: 0.82rem; color: var(--text-muted); padding: 0.75rem 0; }
-
-/* Domain row */
+.domains-tab__header h3 { margin: 0; color: var(--text-primary); font-size: 0.95rem; }
+.domains-tab__header p { margin: 0.25rem 0 0; color: var(--text-muted); font-size: 0.72rem; }
+.domains-tab__list { display: flex; flex-direction: column; }
 .domain-row {
   display: grid;
-  grid-template-columns: auto auto auto auto 1fr auto;
+  grid-template-columns: 30px minmax(0, 1fr) auto;
   align-items: center;
-  gap: 0.55rem;
-  padding: 0.6rem 0.8rem;
-  background: var(--bg-elevated);
-  border: 1px solid var(--border-secondary);
-  border-radius: 9px;
-}
-.domain-row--primary {
-  border-color: var(--primary-border, var(--border));
-}
-
-.domain-row__crown {
-  width: 26px;
-  height: 26px;
-  border-radius: 6px;
-  border: 1px solid var(--border-secondary);
-  background: transparent;
-  color: var(--text-faint);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  cursor: pointer;
-  transition: all 0.15s;
-  flex-shrink: 0;
-}
-.domain-row__crown:hover:not(:disabled) { color: var(--primary-text); border-color: var(--primary-text); }
-.domain-row__crown--active {
-  color: #fbbf24;
-  border-color: rgba(251, 191, 36, 0.35);
-  background: rgba(251, 191, 36, 0.1);
-  cursor: default;
-}
-.domain-row__crown:disabled:not(.domain-row__crown--active) { opacity: 0.5; cursor: not-allowed; }
-
-.domain-row__name {
-  font-family: 'JetBrains Mono', monospace;
-  font-size: 0.82rem;
-  color: var(--text-secondary);
-  overflow-wrap: anywhere;
-}
-
-.domain-row__edit {
-  width: 24px;
-  height: 24px;
-  border-radius: 6px;
-  border: 1px solid var(--border-secondary);
-  background: transparent;
-  color: #a78bfa;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  cursor: pointer;
-  transition: all 0.15s;
-  flex-shrink: 0;
-}
-.domain-row__edit:hover:not(:disabled) { background: var(--bg-surface-hover); border-color: #a78bfa; }
-.domain-row__edit:disabled { opacity: 0.5; cursor: not-allowed; }
-
-.domain-row__aliases {
-  font-size: 0.74rem;
-  color: var(--text-muted);
-  font-family: 'JetBrains Mono', monospace;
-  overflow-wrap: anywhere;
-  min-width: 0;
-}
-.domain-row__alias-arrow { color: var(--text-faint); }
-.domain-row__aliases-empty { font-style: italic; opacity: 0.7; font-family: inherit; }
-.domain-row__aliases-sep { color: var(--text-faint); margin: 0 0.4rem; font-family: inherit; }
-.domain-row__webroot {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.25rem;
-  padding: 0.05rem 0.4rem;
-  border-radius: 5px;
-  background: rgba(99, 102, 241, 0.1);
-  color: var(--primary-text);
-  font-family: 'JetBrains Mono', monospace;
-  font-size: 0.7rem;
-  border: 1px solid rgba(99, 102, 241, 0.18);
-  cursor: help;
-}
-.domain-row__webroot--inherited {
-  background: var(--bg-elevated);
-  color: var(--text-muted);
-  border-color: var(--border-secondary);
-  font-style: italic;
-}
-html.theme-light .domain-row__webroot { color: #4338ca; }
-html.theme-light .domain-row__webroot--inherited { color: var(--text-muted); }
-
-.domain-row__actions {
-  display: flex;
-  align-items: center;
-  gap: 0.35rem;
-  flex-shrink: 0;
-}
-.domain-row__count {
-  font-size: 0.62rem;
-  font-weight: 700;
-  padding: 0.05rem 0.3rem;
-  border-radius: 5px;
-  background: var(--border);
-  color: var(--text-muted);
-}
-.domain-row__remove {
-  width: 26px; height: 26px; border-radius: 6px; border: none; background: transparent;
-  color: var(--text-faint); display: flex; align-items: center; justify-content: center;
-  cursor: pointer; transition: all 0.15s; flex-shrink: 0;
-}
-.domain-row__remove:hover:not(:disabled) { background: rgba(239, 68, 68, 0.1); color: #f87171; }
-.domain-row__remove:disabled { opacity: 0.35; cursor: not-allowed; }
-
-@media (max-width: 720px) {
-  .domain-row {
-    grid-template-columns: auto auto 1fr;
-    grid-template-areas:
-      'crown badge name'
-      'aliases aliases aliases'
-      'actions actions actions';
-  }
-  .domain-row__crown { grid-area: crown; }
-  .domain-row__name { grid-area: name; }
-  .domain-row__aliases { grid-area: aliases; }
-  .domain-row__actions { grid-area: actions; justify-content: flex-start; }
-}
-
-/* add */
-.domains-add {
-  display: flex;
-  gap: 0.5rem;
-  margin-top: 0.85rem;
-  align-items: stretch;
-}
-.domains-add__input {
-  flex: 1;
-  min-width: 0;
-  padding: 0.55rem 0.85rem;
-  font-family: 'JetBrains Mono', monospace;
-  font-size: 0.82rem;
-  background: var(--bg-input, var(--bg-elevated));
-  border: 1px solid var(--border-secondary);
-  border-radius: 9px;
-  color: var(--text-primary);
-  outline: none;
-  transition: border-color 0.15s, box-shadow 0.15s, background 0.15s;
-}
-.domains-add__input::placeholder { color: var(--text-faint); }
-.domains-add__input:hover { border-color: var(--border); }
-.domains-add__input:focus {
-  border-color: var(--primary-text);
-  box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.15);
-  background: var(--bg-surface);
-}
-.domains-add__btn {
-  flex-shrink: 0;
-  padding: 0 1rem;
-  display: inline-flex;
-  align-items: center;
-  gap: 0.4rem;
-  white-space: nowrap;
-}
-.domains-add__error {
-  display: block;
-  font-size: 0.74rem;
-  color: #f87171;
-  margin-top: 0.4rem;
-}
-
-/* cert badge */
-.cert-badge {
-  flex-shrink: 0;
-  width: 18px;
-  height: 18px;
-  border-radius: 50%;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  cursor: help;
-  transition: transform 0.15s;
-}
-.cert-badge:hover { transform: scale(1.15); }
-.cert-badge--covered { background: rgba(34, 197, 94, 0.15); color: #4ade80; border: 1px solid rgba(34, 197, 94, 0.3); }
-.cert-badge--missing { background: rgba(239, 68, 68, 0.15); color: #f87171; border: 1px solid rgba(239, 68, 68, 0.3); }
-html.theme-light .cert-badge--covered { background: rgba(34, 197, 94, 0.15); color: #15803d; border-color: rgba(34, 197, 94, 0.35); }
-html.theme-light .cert-badge--missing { background: rgba(239, 68, 68, 0.15); color: #b91c1c; border-color: rgba(239, 68, 68, 0.35); }
-
-/* domain → SAN mismatch alert */
-.domains-cert-alert {
-  display: flex;
   gap: 0.75rem;
-  padding: 0.8rem 1rem;
-  background: linear-gradient(135deg, rgba(239, 68, 68, 0.08), rgba(251, 146, 60, 0.08));
-  border: 1px solid rgba(239, 68, 68, 0.25);
-  border-radius: 12px;
-  align-items: flex-start;
+  padding: 0.85rem 1rem;
+  border-bottom: 1px solid var(--bar-bg);
 }
-.domains-cert-alert__icon {
-  flex-shrink: 0;
-  width: 30px;
-  height: 30px;
+.domain-row:last-child { border-bottom: 0; }
+.domain-row--primary { background: var(--primary-bg); }
+.domain-row__primary {
+  width: 28px;
+  height: 28px;
+  border: 1px solid var(--border-secondary);
   border-radius: 8px;
-  background: rgba(239, 68, 68, 0.15);
-  color: #f87171;
-  display: flex;
-  align-items: center;
-  justify-content: center;
+  background: var(--bg-surface);
+  color: var(--text-faint);
+  cursor: pointer;
 }
-.domains-cert-alert__body {
-  display: flex;
-  flex-direction: column;
-  gap: 0.25rem;
-  font-size: 0.78rem;
-  color: var(--text-secondary);
-  line-height: 1.5;
-}
-.domains-cert-alert__body strong { color: #fca5a5; font-size: 0.82rem; font-weight: 600; }
-.domains-cert-alert__body code {
-  background: rgba(239, 68, 68, 0.12);
-  color: #fca5a5;
-  padding: 0.05em 0.35em;
-  border-radius: 4px;
-  font-size: 0.9em;
-}
-html.theme-light .domains-cert-alert {
-  background: linear-gradient(135deg, rgba(239, 68, 68, 0.07), rgba(251, 146, 60, 0.07));
-  border-color: rgba(239, 68, 68, 0.25);
-}
-html.theme-light .domains-cert-alert__icon { background: rgba(239, 68, 68, 0.12); color: #dc2626; }
-html.theme-light .domains-cert-alert__body strong { color: #b91c1c; }
-html.theme-light .domains-cert-alert__body code { background: rgba(239, 68, 68, 0.1); color: #b91c1c; }
-.ssl-le__mismatch {
-  margin: 0;
-  padding: 0.7rem 0.85rem;
-  gap: 0.6rem;
-  font-size: 0.77rem;
-}
-.ssl-le__mismatch .domains-cert-alert__body { gap: 0.3rem; }
-
-/* aliases modal items */
-.domain-item {
-  display: flex; align-items: center; gap: 0.6rem;
-  padding: 0.5rem 0.75rem; background: var(--bg-elevated); border-radius: 8px;
-}
-.domain-item__name {
-  font-family: 'JetBrains Mono', monospace; font-size: 0.82rem;
-  color: var(--text-secondary); overflow-wrap: anywhere;
-}
-/* BUG FIX: ссылка не должна растягиваться на всю ширину колонки */
-.domain-item__name--inline {
-  flex: 1;
-  min-width: 0;
-  align-self: center;
-}
-.domain-item__name--inline.domain-link {
-  width: max-content;
-  max-width: 100%;
-  display: inline-block;
-}
-.domain-item__redirect { display: flex; align-items: center; }
-.domain-item__toggle {
-  display: inline-flex; align-items: center; gap: 0.4rem; cursor: pointer;
-  font-size: 0.72rem; color: var(--text-muted); user-select: none;
-}
-.domain-item__toggle input { position: absolute; opacity: 0; pointer-events: none; }
-.domain-item__toggle-slider {
-  position: relative; width: 30px; height: 16px; background: var(--bg-input);
-  border: 1px solid var(--border-secondary); border-radius: 16px; transition: all 0.15s;
-  flex-shrink: 0;
-}
-.domain-item__toggle-slider::before {
-  content: ''; position: absolute; left: 2px; top: 50%; transform: translateY(-50%);
-  width: 10px; height: 10px; border-radius: 50%; background: var(--text-muted); transition: all 0.15s;
-}
-.domain-item__toggle input:checked + .domain-item__toggle-slider {
-  background: rgba(99, 102, 241, 0.25); border-color: var(--primary-text);
-}
-.domain-item__toggle input:checked + .domain-item__toggle-slider::before {
-  left: 16px; background: var(--primary-text);
-}
-.domain-item__toggle input:disabled ~ * { opacity: 0.6; cursor: not-allowed; }
-.domain-item__toggle-label { font-family: 'JetBrains Mono', monospace; font-size: 0.7rem; min-width: 28px; }
-.domain-item__remove {
-  width: 26px; height: 26px; border-radius: 6px; border: none; background: transparent;
-  color: var(--text-faint); display: flex; align-items: center; justify-content: center;
-  cursor: pointer; transition: all 0.15s; flex-shrink: 0;
-}
-.domain-item__remove:hover:not(:disabled) { background: rgba(239, 68, 68, 0.1); color: #f87171; }
-.domain-item__remove:disabled { opacity: 0.5; cursor: not-allowed; }
-
-.domain-link {
-  color: inherit;
+.domain-row__primary--active { border-color: var(--primary-border); color: var(--primary); }
+.domain-row__main { min-width: 0; }
+.domain-row__title,
+.domain-row__meta,
+.domain-row__actions { display: flex; align-items: center; gap: 0.45rem; }
+.domain-row__title { flex-wrap: wrap; }
+.domain-row__title a {
+  color: var(--text-primary);
+  font-weight: 600;
+  font-size: 0.84rem;
   text-decoration: none;
-  border-bottom: 1px dashed var(--border-secondary);
-  transition: color 0.15s, border-color 0.15s;
 }
-.domain-link:hover,
-.domain-link:focus-visible {
-  color: var(--primary-text);
-  border-bottom-color: currentColor;
-  outline: none;
+.domain-row__preset,
+.domain-row__status,
+.domain-row__ssl {
+  padding: 0.12rem 0.38rem;
+  border-radius: 5px;
+  background: var(--bg-input);
+  color: var(--text-muted);
+  font-size: 0.62rem;
 }
+.domain-row__status--running,
+.domain-row__ssl--covered { color: #4ade80; }
+.domain-row__status--error,
+.domain-row__ssl--missing { color: var(--danger-light); }
+.domain-row__meta { flex-wrap: wrap; margin-top: 0.28rem; color: var(--text-muted); font-size: 0.68rem; }
+.domain-row__meta code { color: var(--text-secondary); }
+.domain-row__error { margin: 0.35rem 0 0; color: var(--danger-light); font-size: 0.7rem; }
+.domain-row__actions { justify-content: flex-end; flex-wrap: wrap; }
+.domain-row__delete {
+  width: 28px;
+  height: 28px;
+  border: 1px solid var(--danger-border);
+  border-radius: 8px;
+  background: transparent;
+  color: var(--danger-light);
+  cursor: pointer;
+}
+.domain-row__delete:disabled { opacity: 0.35; cursor: not-allowed; }
+.domains-tab__empty { padding: 2rem; color: var(--text-muted); text-align: center; }
 
-/* Modal — копирует .domain-modal из [id].vue (scoped CSS изолирован) */
-.modal-overlay {
+.domain-modal-overlay {
   position: fixed;
+  z-index: 1000;
   inset: 0;
-  z-index: 100;
-  background: var(--bg-overlay);
-  backdrop-filter: blur(4px);
   display: flex;
   align-items: center;
   justify-content: center;
+  padding: 1rem;
+  background: rgba(0, 0, 0, 0.68);
+  backdrop-filter: blur(3px);
 }
 .domain-modal {
-  width: min(560px, calc(100vw - 2rem));
+  display: flex;
+  flex-direction: column;
+  width: min(560px, 100%);
   max-height: calc(100vh - 2rem);
-  display: flex;
-  flex-direction: column;
-  background: var(--bg-surface);
-  border: 1px solid var(--border);
-  border-radius: 16px;
   overflow: hidden;
-  box-shadow: 0 24px 60px rgba(0, 0, 0, 0.5);
-}
-.domain-modal__header {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 1rem;
-  padding: 1.1rem 1.25rem 0.9rem;
-  border-bottom: 1px solid var(--border);
-}
-.domain-modal__title-group { display: flex; align-items: center; gap: 0.75rem; min-width: 0; }
-.domain-modal__icon {
-  flex-shrink: 0;
-  width: 38px;
-  height: 38px;
-  border-radius: 11px;
-  background: linear-gradient(135deg, rgba(var(--primary-rgb), 0.18), rgba(239, 68, 68, 0.15));
-  color: var(--primary-light);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-}
-.domain-modal__title {
-  margin: 0;
-  font-size: 1.05rem;
-  font-weight: 700;
-  color: var(--text-heading);
-  line-height: 1.2;
-}
-.domain-modal__subtitle { margin: 0.15rem 0 0; font-size: 0.72rem; color: var(--text-muted); }
-.domain-modal__subtitle code {
-  font-family: 'JetBrains Mono', monospace;
-  font-size: 0.9em;
-  background: var(--bg-elevated);
-  padding: 0.05em 0.3em;
-  border-radius: 4px;
-}
-.domain-modal__close {
-  flex-shrink: 0;
-  width: 30px;
-  height: 30px;
-  border-radius: 8px;
   border: 1px solid var(--border-secondary);
-  background: transparent;
-  color: var(--text-muted);
-  cursor: pointer;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  transition: all 0.15s;
+  border-radius: 15px;
+  background: var(--bg-card);
+  box-shadow: var(--shadow-card);
 }
-.domain-modal__close:hover:not(:disabled) { background: var(--bg-elevated); color: var(--text-primary); border-color: var(--border); }
-.domain-modal__close:disabled { opacity: 0.4; cursor: not-allowed; }
-.domain-modal__body {
-  padding: 1.1rem 1.25rem;
-  overflow-y: auto;
-  display: flex;
-  flex-direction: column;
-  gap: 1.1rem;
-}
-.domain-modal__swap {
-  display: grid;
-  grid-template-columns: 1fr auto 1.3fr;
-  align-items: end;
-  gap: 0.75rem;
-}
-.domain-modal__swap-col { display: flex; flex-direction: column; gap: 0.4rem; min-width: 0; }
-.domain-modal__label {
-  font-size: 0.68rem;
-  font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
-  color: var(--text-faint);
-}
-.domain-modal__chip {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.45rem;
-  padding: 0.55rem 0.75rem;
-  border-radius: 9px;
-  background: var(--bg-elevated);
-  border: 1px solid var(--border-secondary);
-  color: var(--text-muted);
-  font-family: 'JetBrains Mono', monospace;
-  font-size: 0.8rem;
-  min-height: 38px;
-  overflow-wrap: anywhere;
-}
-.domain-modal__chip code { background: none; color: inherit; font-size: 1em; }
-.domain-modal__chip--current { color: var(--text-secondary); }
-.domain-modal__arrow {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  padding-bottom: 0.55rem;
-  color: var(--text-faint);
-}
-.domain-modal__input-wrap {
-  position: relative;
-  display: flex;
-  align-items: center;
-  background: var(--bg-input, var(--bg-elevated));
-  border: 1px solid var(--border-secondary);
-  border-radius: 9px;
-  transition: border-color 0.15s, box-shadow 0.15s, background 0.15s;
-  min-height: 38px;
-}
-.domain-modal__input-wrap:hover { border-color: var(--border); }
-.domain-modal__input-wrap:focus-within {
-  border-color: var(--primary-text);
-  box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.15);
-  background: var(--bg-surface);
-}
-.domain-modal__input-wrap--error {
-  border-color: #f87171;
-  box-shadow: 0 0 0 3px rgba(239, 68, 68, 0.15);
-}
-.domain-modal__input-icon { flex-shrink: 0; margin-left: 0.7rem; color: var(--text-faint); }
-.domain-modal__input {
-  flex: 1;
-  min-width: 0;
-  padding: 0.55rem 0.75rem 0.55rem 0.5rem;
-  background: none;
-  border: none;
-  outline: none;
-  color: var(--text-primary);
-  font-family: 'JetBrains Mono', monospace;
-  font-size: 0.82rem;
-}
-.domain-modal__input::placeholder { color: var(--text-faint); }
-.domain-modal__input:disabled { opacity: 0.6; cursor: not-allowed; }
-.domain-modal__error { font-size: 0.72rem; color: #f87171; margin-top: 0.15rem; }
-.domain-modal__impact {
-  padding: 0.85rem 1rem;
-  background: var(--bg-elevated);
-  border: 1px solid var(--border-subtle, var(--border-secondary));
-  border-radius: 11px;
-}
-.domain-modal__impact-title {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.4rem;
-  font-size: 0.72rem;
-  font-weight: 700;
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
-  color: var(--text-muted);
-  margin-bottom: 0.55rem;
-}
-.domain-modal__impact-list {
-  margin: 0;
-  padding-left: 1.1rem;
-  display: flex;
-  flex-direction: column;
-  gap: 0.45rem;
-  font-size: 0.78rem;
-  color: var(--text-secondary);
-  line-height: 1.5;
-}
-.domain-modal__impact-list code {
-  font-family: 'JetBrains Mono', monospace;
-  font-size: 0.9em;
-  background: rgba(99, 102, 241, 0.1);
-  color: #a78bfa;
-  padding: 0.05em 0.35em;
-  border-radius: 4px;
-}
-.domain-modal__impact-danger { color: #fca5a5; }
-.domain-modal__impact-danger code { background: rgba(239, 68, 68, 0.12); color: #fca5a5; }
-.domain-modal__impact-quiet { color: var(--text-muted); font-style: italic; }
-html.theme-light .domain-modal__impact-danger { color: #b91c1c; }
-html.theme-light .domain-modal__impact-danger code { background: rgba(239, 68, 68, 0.08); color: #b91c1c; }
-.domain-modal__field { display: flex; flex-direction: column; gap: 0.4rem; }
-.domain-modal__hint {
-  font-size: 0.72rem;
-  color: var(--text-muted);
-  line-height: 1.5;
-}
-.domain-modal__hint code {
-  font-family: 'JetBrains Mono', monospace;
-  font-size: 0.9em;
-  background: var(--bg-elevated);
-  padding: 0.05em 0.3em;
-  border-radius: 4px;
-}
-.domain-modal__cmd {
-  margin: 0.4rem 0 0;
-  padding: 0.55rem 0.7rem;
-  background: rgba(0, 0, 0, 0.25);
-  border: 1px solid var(--border-secondary);
-  border-radius: 8px;
-  font-family: 'JetBrains Mono', monospace;
-  font-size: 0.72rem;
-  color: var(--text-secondary);
-  white-space: pre-wrap;
-  word-break: break-all;
-}
-html.theme-light .domain-modal__cmd { background: rgba(0, 0, 0, 0.04); }
+.domain-modal--wide { width: min(760px, 100%); }
+.domain-modal__header,
 .domain-modal__footer {
   display: flex;
-  justify-content: flex-end;
-  gap: 0.55rem;
-  padding: 0.9rem 1.25rem;
-  border-top: 1px solid var(--border);
-  background: var(--bg-secondary, var(--bg-surface));
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 0.9rem 1rem;
 }
-@media (max-width: 560px) {
-  .domain-modal__swap { grid-template-columns: 1fr; gap: 0.5rem; }
-  .domain-modal__arrow { transform: rotate(90deg); padding: 0; justify-self: start; }
+.domain-modal__header { border-bottom: 1px solid var(--bar-bg); }
+.domain-modal__header--danger { border-color: var(--danger-border); }
+.domain-modal__header h3 { margin: 0; color: var(--text-primary); font-size: 0.95rem; }
+.domain-modal__header p { margin: 0.2rem 0 0; color: var(--text-muted); font-size: 0.72rem; }
+.domain-modal__header > button {
+  border: 0;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 1.25rem;
+  cursor: pointer;
 }
-
-/* buttons */
-.btn {
-  display: inline-flex;
+.domain-modal__body { padding: 1rem; overflow: auto; }
+.domain-modal__footer { border-top: 1px solid var(--bar-bg); justify-content: flex-end; }
+.domain-modal__fields { display: flex; flex-direction: column; gap: 0.85rem; }
+.domain-modal__fields > label,
+.domain-modal__env { display: flex; flex-direction: column; gap: 0.35rem; }
+.domain-modal__fields label > span,
+.domain-modal__env > span { color: var(--text-tertiary); font-size: 0.76rem; }
+.domain-modal input,
+.domain-modal select {
+  box-sizing: border-box;
+  width: 100%;
+  min-width: 0;
+  padding: 0.58rem 0.75rem;
+  border: 1px solid var(--border-secondary);
+  border-radius: 9px;
+  background: var(--bg-input);
+  color: var(--text-primary);
+  font: inherit;
+  font-size: 0.8rem;
+}
+.domain-modal small { color: var(--text-faint); font-size: 0.68rem; }
+.domain-modal__check { flex-direction: row !important; align-items: center; }
+.domain-modal__check input { width: auto; }
+.domain-modal__error { margin: 0; color: var(--danger-light); font-size: 0.74rem; }
+.domain-modal__warning {
+  margin: 0;
+  padding: 0.7rem 0.8rem;
+  border: 1px solid var(--danger-border);
+  border-radius: 9px;
+  background: var(--danger-bg);
+  color: var(--danger-light);
+  font-size: 0.72rem;
+  line-height: 1.5;
+}
+.domain-modal__env { gap: 0.5rem; }
+.domain-modal__env-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) 34px;
+  gap: 0.4rem;
+}
+.domain-modal__env-row button,
+.alias-list__row > button {
+  border: 1px solid var(--danger-border);
+  border-radius: 8px;
+  background: transparent;
+  color: var(--danger-light);
+  cursor: pointer;
+}
+.domain-modal__add-row {
+  align-self: flex-start;
+  border: 1px dashed var(--border-strong);
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text-muted);
+  padding: 0.4rem 0.65rem;
+  cursor: pointer;
+}
+.alias-list { display: flex; flex-direction: column; gap: 0.5rem; }
+.alias-list__row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto 34px;
   align-items: center;
   gap: 0.45rem;
-  padding: 0.55rem 1.1rem;
-  border-radius: 10px;
-  border: none;
-  font-size: 0.82rem;
-  font-weight: 600;
-  font-family: inherit;
-  cursor: pointer;
-  transition: all 0.2s;
-  white-space: nowrap;
 }
-.btn--xs { padding: 0.28rem 0.6rem; font-size: 0.72rem; border-radius: 7px; }
-.btn--primary {
-  background: linear-gradient(135deg, var(--primary-light), var(--primary-dark));
-  color: var(--primary-text-on);
+.alias-list__row label { display: flex; align-items: center; gap: 0.3rem; color: var(--text-muted); font-size: 0.72rem; }
+.alias-list__row label input { width: auto; }
+.alias-list__add { display: flex; gap: 0.45rem; margin-top: 0.75rem; }
+.alias-list__add input { flex: 1; }
+
+@media (max-width: 780px) {
+  .domains-tab__header { flex-direction: column; }
+  .domain-row { grid-template-columns: 28px minmax(0, 1fr); }
+  .domain-row__actions { grid-column: 1 / -1; justify-content: flex-start; }
+  .domain-modal__env-row { grid-template-columns: 1fr 34px; }
+  .domain-modal__env-row input:nth-child(2) { grid-column: 1; }
+  .domain-modal__env-row button { grid-column: 2; grid-row: 1 / span 2; }
 }
-.btn--primary:not(:disabled):hover {
-  transform: translateY(-1px);
-  box-shadow: 0 4px 16px rgba(var(--primary-rgb), 0.2);
-}
-.btn--primary:disabled { opacity: 0.4; cursor: not-allowed; }
-.btn--ghost { background: var(--bg-input); border: 1px solid var(--border-strong); color: var(--text-tertiary); }
-.btn--ghost:not(:disabled):hover { color: var(--text-secondary); border-color: var(--border-strong); }
-.btn--ghost:disabled { opacity: 0.45; cursor: not-allowed; }
-.btn--danger { background: rgba(239, 68, 68, 0.12); border: 1px solid rgba(239, 68, 68, 0.2); color: #f87171; }
-.btn--danger:not(:disabled):hover { background: rgba(239, 68, 68, 0.18); }
-.btn--danger:disabled { opacity: 0.4; cursor: not-allowed; }
 </style>

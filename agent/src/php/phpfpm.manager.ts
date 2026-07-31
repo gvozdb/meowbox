@@ -1,25 +1,24 @@
 import * as fs from 'fs/promises';
 import * as path from 'path';
+import { randomUUID } from 'crypto';
 import { CommandExecutor } from '../command-executor';
 import {
   PHP_FPM_CONFIG_DIR as PHP_FPM_POOL_DIR,
-  PHP_FPM_SOCKET_DIR,
   PHP_LOG_DIR,
-  SITES_BASE_PATH,
-  isUnderAllowedSiteRoot,
 } from '../config';
 import {
-  DEFAULT_PHP_MEMORY_LIMIT_MB,
-  DEFAULT_PHP_UPLOAD_MAX_FILESIZE_MB,
-  DEFAULT_PHP_POST_MAX_SIZE_MB,
-  artifactAnchor,
-} from '@meowbox/shared';
+  validatePhpVersion,
+  validateRuntimeKey,
+} from '../runtime/site-domain-runtime';
+import {
+  renderPhpFpmPool,
+  type PhpPoolRenderParams,
+} from './pool-template';
+import { buildPhpPoolPreflightPlan } from './pool-preflight';
 
 // ────── Strict allowlist regex для всех значений, которые падают в pool-INI.
 // Любой chars вне allowlist'а = отказ. Это второй рубеж поверх API-валидации
 // (DTO), защищает от багов в вызывающем коде и от прямых socket.io вызовов.
-const RE_ANCHOR = /^[a-z][a-z0-9._-]{0,63}$/;
-const RE_LINUX_USER = /^[a-z_][a-z0-9_-]{0,31}$/;
 const RE_PHP_VERSION = /^\d+\.\d+$/;
 // PHP-extension package name (mbstring, mysql, xdebug, …).
 // Имя идёт в `apt-get install php{ver}-{name}` и `phpenmod -v {ver} {name}`.
@@ -34,17 +33,6 @@ function assertRegex(name: string, value: string, re: RegExp): void {
   }
 }
 
-/** Запрещаем символы, которые могут ломать INI или инжектить новые директивы. */
-function assertSafePathValue(name: string, p: string): void {
-  if (p.includes('\n') || p.includes('\r') || p.includes('\0')) {
-    throw new Error(`PhpFpmManager: ${name} contains control chars`);
-  }
-  // php-fpm INI: `=` и `;` — разделители. Path не должен их содержать.
-  if (/[=;\n\r\0$`]/.test(p)) {
-    throw new Error(`PhpFpmManager: ${name} contains forbidden chars`);
-  }
-}
-
 export class PhpFpmManager {
   private executor: CommandExecutor;
 
@@ -53,224 +41,192 @@ export class PhpFpmManager {
   }
 
   /**
-   * Create a PHP-FPM pool for a site.
-   * Each site gets its own pool with its own socket for isolation.
-   *
-   * `sslEnabled` управляет флагом `session.cookie_secure`:
-   *   - true → `On`   (браузер отдаёт cookie только по HTTPS — корректно для HTTPS-сайтов)
-   *   - false → `Off` (без этого флага на HTTP-сайте cookie с Secure не
-   *     сохраняется и админка/логин-форма зациклится, потому что сессия
-   *     теряется между запросами)
+   * Read-only target validation used before a transfer creates any Site state.
+   * It renders the exact future pools, verifies PHP packages/services, and
+   * rejects orphan pool/socket collisions on disk.
    */
-  async createPool(params: {
-    /**
-     * Системное имя сайта (Site.name = Linux-юзер) — неизменно. К нему
-     * якорятся pool-файл, сокет, error_log. При смене главного домена
-     * сайта ничего из этого НЕ меняется, поэтому pool не пересоздаётся.
-     * Fallback на `domain` — для legacy-вызовов до миграции.
-     */
-    siteName?: string;
-    domain: string;
-    phpVersion: string;
-    user?: string;
-    rootPath?: string;
-    sslEnabled?: boolean;
-    /**
-     * Кастомный INI-фрагмент пула, заданный пользователем в UI. Дописывается
-     * В КОНЕЦ базового шаблона → в php-fpm директивы last-wins внутри одной
-     * секции пула, так что юзер может переопределить, например, `memory_limit`
-     * или `upload_max_filesize`. Секции пула (`[name]`) и системные директивы
-     * (user/group/listen/pm/open_basedir/...) валидируются на стороне API и
-     * сюда в чистом виде попасть не должны.
-     */
-    customConfig?: string | null;
-  }): Promise<{ success: boolean; error?: string }> {
-    const { domain, phpVersion, user = 'www-data', rootPath } = params;
-    const cookieSecure = params.sslEnabled ? 'On' : 'Off';
-
-    // Валидация всех входных значений (defense in depth: API уже валидирует,
-    // но agent — последняя линия защиты от template injection).
-    const anchor = artifactAnchor({ siteName: params.siteName, domain });
-    assertRegex('anchor', anchor, RE_ANCHOR);
-    assertRegex('phpVersion', phpVersion, RE_PHP_VERSION);
-    assertRegex('user', user, RE_LINUX_USER);
-
-    // Home-dir по-умолчанию: SITES_BASE_PATH/<anchor>. rootPath явный приоритет.
-    const homeDirRaw = rootPath || path.join(SITES_BASE_PATH, anchor);
-    const homeDir = path.resolve(homeDirRaw);
-    assertSafePathValue('homeDir', homeDir);
-    // homeDir должен быть внутри allowlist — иначе pool получит `open_basedir`
-    // куда-то в /etc или /root, что недопустимо.
-    if (!isUnderAllowedSiteRoot(homeDir)) {
-      throw new Error(`PhpFpmManager: homeDir "${homeDir}" is outside allowed site roots`);
-    }
-
-    // poolName и пути — от siteName (неизменяемый якорь). Если siteName не
-    // передан (legacy) — fallback на старое поведение (по домену).
-    const poolName = anchor.replace(/\./g, '_');
-    const socketPath = `${PHP_FPM_SOCKET_DIR}/php${phpVersion}-fpm-${anchor}.sock`;
-    const poolDir = `${PHP_FPM_POOL_DIR}/${phpVersion}/fpm/pool.d`;
-    const poolFile = `${poolDir}/${poolName}.conf`;
-
-    // Low resource consumption pool config.
-    // ВАЖНО: php-fpm в режиме PHP_INI_SYSTEM игнорирует повторное определение
-    // одного и того же `php_admin_value[X]` / `php_value[X]` — побеждает ПЕРВОЕ.
-    // Поэтому если юзер переопределяет директиву в customConfig, базовую строку
-    // надо ВЫРЕЗАТЬ, иначе кастом будет тихо игнорироваться.
-    const overriddenKeys = this.extractDirectiveKeys(params.customConfig);
-    const baseLines: string[] = [
-      `[${poolName}]`,
-      `user = ${user}`,
-      `group = ${user}`,
-      `listen = ${socketPath}`,
-      `listen.owner = www-data`,
-      `listen.group = www-data`,
-      `listen.mode = 0660`,
-      ``,
-      `; Process manager — ondemand uses minimal resources when idle`,
-      `pm = ondemand`,
-      `pm.max_children = 8`,
-      `pm.process_idle_timeout = 10s`,
-      `pm.max_requests = 500`,
-      ``,
-      `; Limits`,
-      `request_terminate_timeout = 300`,
-      `rlimit_files = 4096`,
-      ``,
-      `; Security — per-site isolation`,
-      `php_admin_value[open_basedir] = ${homeDir}:${homeDir}/tmp:${homeDir}/.npm-global:/usr/share/php:/usr/bin:/usr/local/bin:/usr/local/lib/node_modules:/usr/lib/node_modules:/usr/share/npm:/usr/share/nodejs:/usr/share/node_modules`,
-      `php_admin_value[sys_temp_dir] = ${homeDir}/tmp`,
-      `php_admin_value[upload_tmp_dir] = ${homeDir}/tmp`,
-      `php_admin_value[session.save_path] = ${homeDir}/tmp`,
-      `php_admin_value[disable_functions] = exec,passthru,shell_exec,system,popen`,
-      `php_admin_value[expose_php] = Off`,
-      `php_admin_value[allow_url_fopen] = Off`,
-      `php_admin_value[session.cookie_httponly] = On`,
-      `php_admin_value[session.cookie_secure] = ${cookieSecure}`,
-      `php_admin_value[session.use_strict_mode] = On`,
-      ``,
-      `; Logging`,
-      `php_admin_value[error_log] = ${PHP_LOG_DIR}/${anchor}-error.log`,
-      `php_admin_flag[log_errors] = On`,
-      ``,
-      `; Performance`,
-      `php_value[memory_limit] = ${DEFAULT_PHP_MEMORY_LIMIT_MB}M`,
-      `php_value[upload_max_filesize] = ${DEFAULT_PHP_UPLOAD_MAX_FILESIZE_MB}M`,
-      `php_value[post_max_size] = ${DEFAULT_PHP_POST_MAX_SIZE_MB}M`,
-      `php_value[max_execution_time] = 120`,
-      `php_value[opcache.enable] = 1`,
-      `php_value[opcache.memory_consumption] = 64`,
-    ];
-
-    const filteredBase = baseLines.map((line) => {
-      const key = this.extractKeyFromLine(line);
-      if (key && overriddenKeys.has(key)) {
-        return `; [overridden by UI] ${line}`;
-      }
-      return line;
-    });
-
-    const poolConfig = `${filteredBase.join('\n')}\n${this.renderCustomBlock(params.customConfig)}`;
-
+  async preflightPools(
+    params: readonly PhpPoolRenderParams[],
+  ): Promise<{
+    success: boolean;
+    data?: { phpVersions: string[]; poolCount: number };
+    error?: string;
+  }> {
     try {
-      // Ensure pool directory exists
-      await fs.mkdir(poolDir, { recursive: true });
+      const plan = buildPhpPoolPreflightPlan(params);
+      const installedVersions = new Set(await this.listVersions());
+      const errors: string[] = [];
 
-      await fs.writeFile(poolFile, poolConfig, 'utf-8');
+      for (const version of plan.phpVersions) {
+        if (!installedVersions.has(version)) {
+          errors.push(`PHP ${version} configuration is not installed`);
+          continue;
+        }
 
-      // Legacy cleanup: если сайт раньше жил под старой схемой (pool по
-      // имени домена), удаляем осиротевший файл — иначе php-fpm загрузит
-      // ДВА пула с одинаковым listen-сокетом → конфликт на рестарте.
-      if (params.siteName && params.domain && params.domain !== anchor) {
-        const legacyPoolName = params.domain.replace(/\./g, '_');
-        if (legacyPoolName !== poolName) {
-          const legacyPoolFile = `${poolDir}/${legacyPoolName}.conf`;
-          await fs.unlink(legacyPoolFile).catch(() => {});
+        const cliPath = `/usr/bin/php${version}`;
+        try {
+          await fs.access(cliPath);
+        } catch {
+          errors.push(`PHP ${version} CLI is not installed (${cliPath})`);
+        }
+
+        const service = await this.executor.execute(
+          'systemctl',
+          ['show', '-p', 'LoadState', '--value', `php${version}-fpm`],
+          { allowFailure: true, timeout: 10_000 },
+        );
+        if (service.exitCode !== 0 || service.stdout.trim() !== 'loaded') {
+          errors.push(`php${version}-fpm service is not installed`);
         }
       }
 
-      // Ensure log directory exists
-      await this.executor.execute('mkdir', ['-p', PHP_LOG_DIR]);
-
-      // Restart PHP-FPM for this version. Может фейлиться при «нет такого юнита»
-      // (PHP-версия не установлена) — обрабатываем явно.
-      const result = await this.executor.execute('systemctl', [
-        'restart',
-        `php${phpVersion}-fpm`,
-      ], { allowFailure: true });
-
-      if (result.exitCode !== 0) {
-        const errMsg = result.stderr || '';
-        // Rollback poolFile — нельзя оставлять дохлый конфиг.
-        await fs.unlink(poolFile).catch(() => {});
-        // Особый случай: сервис php{V}-fpm не установлен на системе. Раньше
-        // здесь silently возвращался success — это приводило к "успешному"
-        // созданию сайта с несуществующим upstream (запросы 502 forever).
-        // Теперь явная ошибка с подсказкой.
-        if (
-          errMsg.includes('not found') ||
-          errMsg.includes('No such file') ||
-          errMsg.includes('could not be found')
-        ) {
-          return {
-            success: false,
-            error: `php${phpVersion}-fpm не установлен на сервере. Установи: apt install php${phpVersion}-fpm php${phpVersion}-cli (на Ubuntu/Debian подключи ondrej/php PPA или sury.org), либо выбери другую версию PHP при создании сайта.`,
-          };
+      for (const pool of plan.pools) {
+        if (await this.pathExists(pool.poolFile)) {
+          errors.push(
+            `runtimeKey "${pool.runtime.runtimeKey}" collides with existing pool ${pool.poolFile}`,
+          );
         }
-        return { success: false, error: errMsg };
+        const socketPath = pool.runtime.socketPath!;
+        if (await this.pathExists(socketPath)) {
+          errors.push(
+            `runtimeKey "${pool.runtime.runtimeKey}" collides with existing socket ${socketPath}`,
+          );
+        }
       }
 
-      return { success: true };
+      if (errors.length > 0) {
+        return { success: false, error: errors.join('; ') };
+      }
+      return {
+        success: true,
+        data: {
+          phpVersions: plan.phpVersions,
+          poolCount: plan.pools.length,
+        },
+      };
     } catch (err) {
       return { success: false, error: (err as Error).message };
     }
   }
 
   /**
-   * Обёртка: превращает пользовательский INI-фрагмент в суффикс pool-файла.
-   * Пусто/whitespace → пустая строка (ничего не дописываем).
-   * Иначе — комментарий-разделитель + сам фрагмент с нормализованным EOL.
+   * Create/update one PHP-FPM pool for one SiteDomain. Pools sharing a PHP
+   * version intentionally share only the `phpX.Y-fpm` service; their pool,
+   * socket, temp/session paths and error log are runtimeKey-owned.
    */
-  private renderCustomBlock(custom: string | null | undefined): string {
-    const s = (custom || '').trim();
-    if (!s) return '';
-    return `
-; --- Custom overrides (meowbox UI) ---
-${s}
-`;
-  }
+  async createPool(params: PhpPoolRenderParams): Promise<{ success: boolean; error?: string }> {
+    const rendered = renderPhpFpmPool(params);
+    const {
+      content: poolConfig,
+      homeDir,
+      tempDir,
+      sessionDir,
+      poolFile,
+      phpVersion: version,
+      runtime,
+      user,
+    } = rendered;
+    const socketPath = runtime.socketPath!;
+    const poolDir = path.dirname(poolFile);
 
-  /**
-   * Достаёт левую часть `key = value` (или `key[sub] = value`) из одной строки
-   * INI-конфига. Возвращает null для пустых/комментариев/секций/мусора.
-   * Ключи нормализуем по регистру (php-fpm case-sensitive только по `[brackets]`).
-   */
-  private extractKeyFromLine(line: string): string | null {
-    const trimmed = line.trim();
-    if (!trimmed) return null;
-    if (trimmed.startsWith(';') || trimmed.startsWith('#')) return null;
-    if (trimmed.startsWith('[') && trimmed.endsWith(']')) return null; // section
-    const eq = trimmed.indexOf('=');
-    if (eq <= 0) return null;
-    const key = trimmed.substring(0, eq).trim();
-    if (!key) return null;
-    return key;
-  }
-
-  /**
-   * Парсит кастомный INI-фрагмент юзера и возвращает Set ключей, которые он
-   * переопределяет. Используется чтобы вырезать соответствующие строки из
-   * базового шаблона (см. `createPool`).
-   */
-  private extractDirectiveKeys(custom: string | null | undefined): Set<string> {
-    const keys = new Set<string>();
-    const s = (custom || '').trim();
-    if (!s) return keys;
-    for (const line of s.split(/\r?\n/)) {
-      const k = this.extractKeyFromLine(line);
-      if (k) keys.add(k);
+    let previous: string | null = null;
+    try { previous = await fs.readFile(poolFile, 'utf-8'); } catch { /* new pool */ }
+    if (params.domainId && previous) {
+      const previousDomainId = previous.match(/^;\s*meowbox-domain-id\s*=\s*(\S+)$/m)?.[1];
+      if (previousDomainId && previousDomainId !== params.domainId) {
+        return {
+          success: false,
+          error: `runtimeKey collision: pool ${runtime.runtimeKey} already belongs to SiteDomain ${previousDomainId}`,
+        };
+      }
     }
-    return keys;
+
+    try {
+      await fs.mkdir(poolDir, { recursive: true });
+      await this.writeAtomic(poolFile, poolConfig, 0o644);
+      await fs.mkdir(tempDir, { recursive: true, mode: 0o750 });
+      await fs.mkdir(sessionDir, { recursive: true, mode: 0o750 });
+      await fs.chmod(tempDir, 0o750).catch(() => {});
+      await fs.chmod(sessionDir, 0o750).catch(() => {});
+      if (user !== 'www-data') {
+        await this.executor.execute('chown', ['-R', `${user}:${user}`, tempDir]);
+        if (sessionDir !== tempDir) await this.executor.execute('chown', ['-R', `${user}:${user}`, sessionDir]);
+      }
+      await this.executor.execute('mkdir', ['-p', PHP_LOG_DIR]);
+
+      // One shared service per version; the pool identity is never a service.
+      const result = await this.executor.execute('systemctl', ['restart', `php${version}-fpm`], { allowFailure: true });
+      if (result.exitCode !== 0) {
+        const detail = result.stderr || result.stdout || `exit ${result.exitCode}`;
+        await this.restorePool(poolFile, previous, version);
+        if (/not found|No such file|could not be found/i.test(detail)) {
+          return {
+            success: false,
+            error: `php${version}-fpm не установлен на сервере. Установи php${version}-fpm и php${version}-cli, либо выбери другую версию PHP.`,
+          };
+        }
+        return { success: false, error: detail };
+      }
+
+      if (!(await this.waitForSocket(socketPath))) {
+        const detail = `PHP-FPM service php${version}-fpm restarted but socket was not created: ${socketPath}`;
+        await this.restorePool(poolFile, previous, version);
+        return { success: false, error: detail };
+      }
+      return { success: true };
+    } catch (err) {
+      await this.restorePool(poolFile, previous, version).catch(() => {});
+      return { success: false, error: (err as Error).message };
+    }
+  }
+
+  private async writeAtomic(filePath: string, content: string, mode: number): Promise<void> {
+    const tempPath = `${filePath}.tmp-${process.pid}-${randomUUID()}`;
+    try {
+      await fs.writeFile(tempPath, content, { encoding: 'utf-8', mode });
+      await fs.chmod(tempPath, mode).catch(() => {});
+      await fs.rename(tempPath, filePath);
+    } finally {
+      await fs.unlink(tempPath).catch(() => {});
+    }
+  }
+
+  private async pathExists(filePath: string): Promise<boolean> {
+    try {
+      await fs.access(filePath);
+      return true;
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException).code;
+      if (code === 'ENOENT') return false;
+      throw err;
+    }
+  }
+
+  private async restorePool(
+    poolFile: string,
+    previous: string | null,
+    phpVersion: string,
+  ): Promise<void> {
+    if (previous === null) {
+      await fs.unlink(poolFile).catch(() => {});
+    } else {
+      await this.writeAtomic(poolFile, previous, 0o644).catch(() => {});
+    }
+    await this.executor.execute('systemctl', ['restart', `php${phpVersion}-fpm`], { allowFailure: true }).catch(() => {});
+  }
+
+  private async waitForSocket(socketPath: string, timeoutMs = 3000): Promise<boolean> {
+    const deadline = Date.now() + timeoutMs;
+    do {
+      try {
+        await fs.access(socketPath);
+        return true;
+      } catch {
+        if (Date.now() >= deadline) return false;
+        await new Promise<void>((resolve) => setTimeout(resolve, 100));
+      }
+    } while (Date.now() < deadline);
+    return false;
   }
 
   /**
@@ -279,9 +235,9 @@ ${s}
    * Параметр `anchor` — либо siteName (новая схема), либо domain (legacy).
    */
   async readPool(anchor: string, phpVersion: string): Promise<string | null> {
-    assertRegex('anchor', anchor, RE_ANCHOR);
+    const runtimeKey = validateRuntimeKey(anchor);
     assertRegex('phpVersion', phpVersion, RE_PHP_VERSION);
-    const poolName = anchor.replace(/\./g, '_');
+    const poolName = runtimeKey.replace(/\./g, '_');
     const poolFile = `${PHP_FPM_POOL_DIR}/${phpVersion}/fpm/pool.d/${poolName}.conf`;
     try {
       return await fs.readFile(poolFile, 'utf-8');
@@ -291,12 +247,12 @@ ${s}
   }
 
   /**
-   * Remove a PHP-FPM pool (по siteName или legacy-domain).
+   * Remove a PHP-FPM pool by stable runtime key.
    */
   async removePool(anchor: string, phpVersion: string): Promise<void> {
-    assertRegex('anchor', anchor, RE_ANCHOR);
+    const runtimeKey = validateRuntimeKey(anchor);
     assertRegex('phpVersion', phpVersion, RE_PHP_VERSION);
-    const poolName = anchor.replace(/\./g, '_');
+    const poolName = runtimeKey.replace(/\./g, '_');
     const poolFile = `${PHP_FPM_POOL_DIR}/${phpVersion}/fpm/pool.d/${poolName}.conf`;
 
     await fs.unlink(poolFile).catch(() => {});

@@ -2,15 +2,15 @@
  * Хелперы для мульти-доменной модели (`SiteDomain`).
  *
  * Один Site = N основных доменов (`SiteDomain`). Ровно один помечен
- * `isPrimary=true` (главный, position=0). Site.domain / Site.aliases /
- * Site.appPort — зеркало главного домена (обратная совместимость).
+ * `isPrimary=true` (главный, position=0). Приложение и runtime принадлежат
+ * непосредственно SiteDomain.
  *
  * Здесь сосредоточены:
  *  - `nginxZoneName` — имя rate-limit zone (одно на SiteDomain);
  *  - `buildMultiDomainNginxPayload` — payload для socket-события
  *    `nginx:create-config` (регенерирует весь сайт со всеми доменами);
  *  - `serializeSiteDomain` — нормализация SiteDomain в shared-форму для REST;
- *  - `resolveDomainFilesRelPath` — резолв web-root (domain || site default).
+ *  - `resolveDomainFilesRelPath` — валидация обязательного web-root домена.
  */
 
 import {
@@ -18,21 +18,26 @@ import {
   nginxZoneName,
   type SiteNginxOverrides,
 } from '@meowbox/shared';
-import { parseSiteAliases, parseStringArray, type SiteAliasParsed } from '../common/json-array';
+import {
+  parseJsonObject,
+  parseSiteAliases,
+  parseStringArray,
+  type SiteAliasParsed,
+} from '../common/json-array';
 import { SslStatus } from '../common/enums';
 
 // Имя rate-limit зоны домена — единая реализация в @meowbox/shared
 // (используется агентом при рендере и миграцией nginx-multi-domain-rebuild).
 export { nginxZoneName };
 
-/** Резолвит web-root домена: собственный `filesRelPath` или дефолт сайта. */
+/** Возвращает обязательный явный web-root домена. */
 export function resolveDomainFilesRelPath(
   domainFilesRelPath: string | null | undefined,
-  siteFilesRelPath: string | null | undefined,
+  _siteFilesRelPath?: string | null,
 ): string {
   const own = domainFilesRelPath?.trim();
   if (own) return own;
-  return (siteFilesRelPath?.trim()) || 'www';
+  throw new Error('SiteDomain.filesRelPath is required');
 }
 
 // ---------------------------------------------------------------------------
@@ -62,7 +67,22 @@ export interface RawSiteDomain {
   isPrimary: boolean;
   position: number;
   aliases: string;
-  filesRelPath: string | null;
+  preset: string;
+  appStatus: string;
+  appErrorMessage?: string | null;
+  filesRelPath: string;
+  phpVersion: string | null;
+  phpPoolCustom?: string | null;
+  runtimeKey: string;
+  gitRepository?: string | null;
+  deployBranch?: string | null;
+  envVars?: string;
+  cmsAdminUser?: string | null;
+  cmsAdminPasswordEnc?: string | null;
+  managerPath?: string | null;
+  connectorsPath?: string | null;
+  cmsTablePrefix?: string | null;
+  modxVersion?: string | null;
   appPort: number | null;
   httpsRedirect: boolean;
   nginxClientMaxBodySize?: string | null;
@@ -83,10 +103,7 @@ export interface RawSiteDomain {
 
 export interface RawSiteForNginx {
   name: string;
-  type: string;
   rootPath: string;
-  filesRelPath: string | null;
-  phpVersion: string | null;
   systemUser: string | null;
   domains: RawSiteDomain[];
 }
@@ -97,8 +114,12 @@ export interface RawSiteForNginx {
 export interface NginxDomainEntry {
   domainId: string;
   domain: string;
+  isPrimary: boolean;
   aliases: SiteAliasParsed[];
   filesRelPath: string;
+  preset: string;
+  phpVersion: string | null;
+  runtimeKey: string;
   appPort: number | null;
   sslEnabled: boolean;
   certPath: string | null;
@@ -121,7 +142,6 @@ export function buildMultiDomainNginxPayload(
   site: RawSiteForNginx,
   opts: { forceWriteCustom?: boolean } = {},
 ): Record<string, unknown> {
-  const phpEnabled = !!site.phpVersion;
   const domains: NginxDomainEntry[] = site.domains
     .slice()
     .sort((a, b) => a.position - b.position)
@@ -131,8 +151,12 @@ export function buildMultiDomainNginxPayload(
       return {
         domainId: d.id,
         domain: d.domain,
+        isPrimary: d.isPrimary,
         aliases: parseSiteAliases(d.aliases),
-        filesRelPath: resolveDomainFilesRelPath(d.filesRelPath, site.filesRelPath),
+        filesRelPath: resolveDomainFilesRelPath(d.filesRelPath),
+        preset: d.preset,
+        phpVersion: d.phpVersion,
+        runtimeKey: d.runtimeKey,
         appPort: d.appPort ?? null,
         sslEnabled: sslActive,
         certPath: sslActive ? ssl!.certPath : null,
@@ -148,8 +172,6 @@ export function buildMultiDomainNginxPayload(
   return {
     siteName: site.name,
     rootPath: site.rootPath,
-    phpEnabled,
-    phpVersion: site.phpVersion ?? undefined,
     systemUser: site.systemUser ?? undefined,
     domains,
   };
@@ -174,8 +196,23 @@ export function serializeSiteDomain(
     isPrimary: d.isPrimary,
     position: d.position,
     aliases: parseSiteAliases(d.aliases),
+    preset: d.preset,
+    appStatus: d.appStatus,
+    appErrorMessage: d.appErrorMessage ?? null,
     filesRelPath: d.filesRelPath,
-    appPort: d.appPort ?? null,
+    phpVersion: d.phpVersion,
+    runtimeKey: d.runtimeKey,
+    gitRepository: d.gitRepository ?? null,
+    deployBranch: d.deployBranch ?? null,
+    envVars: parseJsonObject(d.envVars, {}),
+    cmsAdminUser: d.cmsAdminUser ?? null,
+    hasCmsAdminPassword: !!(
+      d as RawSiteDomain & { cmsAdminPasswordEnc?: string | null }
+    ).cmsAdminPasswordEnc,
+    managerPath: d.managerPath ?? null,
+    connectorsPath: d.connectorsPath ?? null,
+    cmsTablePrefix: d.cmsTablePrefix ?? null,
+    modxVersion: d.modxVersion ?? null,
     httpsRedirect: d.httpsRedirect,
     sslCertificate: d.sslCertificate
       ? serializeSslCertificate(d.sslCertificate)

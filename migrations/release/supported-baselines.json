@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "supportedBaselines": [
+    {
+      "id": "pre-domain-applications-2026-07-30",
+      "fingerprintSha256": "0b8d5a05923399d0e450eeab1bc2a529f9ab875c10ea840da8fd5ea6389aea64",
+      "fingerprintSha256Aliases": [
+        "1bf1ead83a0260cb58b1acfd3586a7c7fc8d85263269fb6130e95e64d4e8f139"
+      ],
+      "prismaMigrations": [
+        { "name": "0_init", "checksum": "12febe880e7764365df157ca696fa6cadaa25dd79c8cd168a0ea6b73703008ff" },
+        { "name": "10_backup_scopes", "checksum": "a75b98d5bf32151d64909221be3fa7fef8ce47467f3e28fd93e2a0d530d6f20e" },
+        { "name": "10_database_unique_name_per_type", "checksum": "bdaa1a9b786508e980c5c8b8a2532b0362cc8412b38224843341f56d433c5bc6" },
+        { "name": "10_site_cms_table_prefix", "checksum": "1efbb27fcd90bcf0e45709dc48d92d1cef8b8ff089b0a1b60e01227cefb1fc15" },
+        { "name": "11_backup_config_storage_relations", "checksum": "969ccfdb9f4d6a2ce616c60126e7b65a030998be6a5fb0e6d1b8dd557cdcbc2e" },
+        { "name": "12_site_backup_schedules_and_digest_queue", "checksum": "eeccd92c3a363c8d42d97bee08222f386b0e6d609d3b180e4c7996567d08128d" },
+        { "name": "13_backup_schedule_id", "checksum": "fcdd9aae7074d98880fb3d5edf99b671874c4deb03918d2226da2f86b236d5d8" },
+        { "name": "14_site_multi_domain", "checksum": "8a832b8464ea5efef2f406838eaac800186129e49f161a6f3930c3c93d4e68a5" },
+        { "name": "15_site_quick_commands", "checksum": "c8a9f247f18a4b6dfac9c6efd54307224a6e31d26d40825dcfc55afab6c1ca17" },
+        { "name": "1_system_migration_tables", "checksum": "a83f02c204612b10a89936e94bbf070af2e492d48adec8dc1404c33b037b32a1" },
+        { "name": "2_site_nginx_settings", "checksum": "0afa9e8458f89f62beb35d8241f7819af36367193d539ad6f7cee78cae1f4545" },
+        { "name": "3_site_nginx_rate_limit", "checksum": "d08bdaa6bec027fdfe0df01936d25523d43ff30354f3c5e10a4b97cc964af8fc" },
+        { "name": "4_proxy_audit_logs", "checksum": "4261746dd87266cd4987530df39c55d173360517a711cf1a72339ec2cb44c799" },
+        { "name": "5_hostpanel_migration_phase1", "checksum": "f6bbaaab99be27bfef918c790a31f13582931b7f1a23a600191b5b73c58e0a0e" },
+        { "name": "6_hostpanel_migration_sources", "checksum": "c8ff5fb501c80f7148ce8391529cc0507af87cf82e2082ccd2ef1cdb32f5adec" },
+        { "name": "7_vpn_management", "checksum": "a919bd60cf87d9707ce59e89e34b9ef99e4562a08b5a48face3c4306a1526d76" },
+        { "name": "8_country_blocks", "checksum": "fd2c8acc861cbe9a2b311d288cd32c75bc376bb091fef89f4a48c9bad630b090" },
+        { "name": "9_site_encrypted_secrets", "checksum": "7b7ef5fb83c66991437779792d90f1f778a7d6cd62e22b417c0a9f6dd25fc3e8" }
+      ]
+    }
+  ]
+}

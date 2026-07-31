@@ -4,6 +4,8 @@
 // Панель их обнаруживает и читает, но НЕ генерирует и НЕ редактирует.
 // Быстрые команды (Makefile/package.json) — отдельная сущность, не под PM2.
 
+import type { SiteType } from './enums';
+
 /** Допустимые источники команд/процессов. */
 export const NODE_COMMAND_SOURCES = ['npm', 'make'] as const;
 export type NodeCommandSource = (typeof NODE_COMMAND_SOURCES)[number];
@@ -48,11 +50,16 @@ export interface NodeProcessRuntime {
   cwd: string | null;
 }
 
-/** Основной домен сайта, из web-root которого найден Node/PM2 ecosystem. */
+/**
+ * Explicit application domain whose web-root contains a Node/PM2 ecosystem.
+ * `domainId` is never a nullable primary-domain fallback in the final contract;
+ * Node management selects a CUSTOM domain at the route/service boundary.
+ */
 export interface NodeDomainRef {
-  domainId: string | null;
+  domainId: string;
   domain: string;
   filesRelPath: string;
+  preset: SiteType;
   isPrimary: boolean;
   position: number;
 }

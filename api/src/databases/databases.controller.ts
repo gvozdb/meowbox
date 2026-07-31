@@ -15,6 +15,7 @@ import {
   UseInterceptors,
   UploadedFile,
   BadRequestException,
+  Headers,
 } from '@nestjs/common';
 import { FileInterceptor } from '@nestjs/platform-express';
 import { Throttle } from '@nestjs/throttler';
@@ -36,7 +37,7 @@ interface JwtUser {
   role: string;
 }
 
-@Controller('databases')
+@Controller('sites/:siteId/domains/:domainId/databases')
 export class DatabasesController {
   constructor(private readonly databasesService: DatabasesService) {}
 
@@ -44,7 +45,8 @@ export class DatabasesController {
   async findAll(
     @Query('type') type?: string,
     @Query('search') search?: string,
-    @Query('siteId') siteId?: string,
+    @Param('siteId', ParseUUIDPipe) siteId?: string,
+    @Param('domainId', ParseUUIDPipe) domainId?: string,
     @Query('page') page?: string,
     @Query('perPage') perPage?: string,
     @CurrentUser() user?: JwtUser,
@@ -52,9 +54,10 @@ export class DatabasesController {
     const result = await this.databasesService.findAll({
       userId: user!.id,
       role: user!.role,
+      siteId: siteId!,
+      domainId: domainId!,
       type,
       search,
-      siteId,
       page: page ? parseInt(page, 10) : 1,
       perPage: perPage ? parseInt(perPage, 10) : 20,
     });
@@ -64,10 +67,18 @@ export class DatabasesController {
 
   @Get(':id')
   async findById(
+    @Param('siteId', ParseUUIDPipe) siteId: string,
+    @Param('domainId', ParseUUIDPipe) domainId: string,
     @Param('id', ParseUUIDPipe) id: string,
     @CurrentUser() user?: JwtUser,
   ) {
-    const db = await this.databasesService.findById(id, user!.id, user!.role);
+    const db = await this.databasesService.findById(
+      siteId,
+      domainId,
+      id,
+      user!.id,
+      user!.role,
+    );
     return { success: true, data: db };
   }
 
@@ -75,21 +86,40 @@ export class DatabasesController {
   @Roles('ADMIN')
   @Throttle({ default: { limit: 5, ttl: 60_000 } })
   async create(
+    @Param('siteId', ParseUUIDPipe) siteId: string,
+    @Param('domainId', ParseUUIDPipe) domainId: string,
     @Body() dto: CreateDatabaseDto,
     @CurrentUser() user?: JwtUser,
   ) {
-    const result = await this.databasesService.create(dto, user!.id);
+    const result = await this.databasesService.create(
+      siteId,
+      domainId,
+      dto,
+      user!.id,
+      user!.role,
+    );
     return { success: true, data: result };
   }
 
   @Put(':id')
   @Throttle({ default: { limit: 10, ttl: 60_000 } })
   async update(
+    @Param('siteId', ParseUUIDPipe) siteId: string,
+    @Param('domainId', ParseUUIDPipe) domainId: string,
     @Param('id', ParseUUIDPipe) id: string,
     @Body() dto: UpdateDatabaseDto,
     @CurrentUser() user?: JwtUser,
+    @Headers('idempotency-key') idempotencyKey?: string,
   ) {
-    const result = await this.databasesService.update(id, dto, user!.id, user!.role);
+    const result = await this.databasesService.update(
+      siteId,
+      domainId,
+      id,
+      dto,
+      user!.id,
+      user!.role,
+      idempotencyKey,
+    );
     return { success: true, data: result };
   }
 
@@ -97,21 +127,39 @@ export class DatabasesController {
   @Roles('ADMIN')
   @Throttle({ default: { limit: 5, ttl: 60_000 } })
   async delete(
+    @Param('siteId', ParseUUIDPipe) siteId: string,
+    @Param('domainId', ParseUUIDPipe) domainId: string,
     @Param('id', ParseUUIDPipe) id: string,
     @CurrentUser() user?: JwtUser,
+    @Headers('idempotency-key') idempotencyKey?: string,
   ) {
-    await this.databasesService.delete(id, user!.id, user!.role);
-    return { success: true };
+    const result = await this.databasesService.delete(
+      siteId,
+      domainId,
+      id,
+      user!.id,
+      user!.role,
+      idempotencyKey,
+    );
+    return { success: true, data: result };
   }
 
   @Post(':id/reset-password')
   @Roles('ADMIN')
   @Throttle({ default: { limit: 3, ttl: 60_000 } })
   async resetPassword(
+    @Param('siteId', ParseUUIDPipe) siteId: string,
+    @Param('domainId', ParseUUIDPipe) domainId: string,
     @Param('id', ParseUUIDPipe) id: string,
     @CurrentUser() user?: JwtUser,
   ) {
-    const result = await this.databasesService.resetPassword(id, user!.id, user!.role);
+    const result = await this.databasesService.resetPassword(
+      siteId,
+      domainId,
+      id,
+      user!.id,
+      user!.role,
+    );
     return { success: true, data: result };
   }
 
@@ -121,20 +169,36 @@ export class DatabasesController {
   @Roles('ADMIN')
   @Throttle({ default: { limit: 10, ttl: 60_000 } })
   async revealPassword(
+    @Param('siteId', ParseUUIDPipe) siteId: string,
+    @Param('domainId', ParseUUIDPipe) domainId: string,
     @Param('id', ParseUUIDPipe) id: string,
     @CurrentUser() user?: JwtUser,
   ) {
-    const result = await this.databasesService.revealPassword(id, user!.id, user!.role);
+    const result = await this.databasesService.revealPassword(
+      siteId,
+      domainId,
+      id,
+      user!.id,
+      user!.role,
+    );
     return { success: true, data: result };
   }
 
   @Post(':id/adminer-ticket')
   @Throttle({ default: { limit: 10, ttl: 60_000 } })
   async createAdminerTicket(
+    @Param('siteId', ParseUUIDPipe) siteId: string,
+    @Param('domainId', ParseUUIDPipe) domainId: string,
     @Param('id', ParseUUIDPipe) id: string,
     @CurrentUser() user?: JwtUser,
   ) {
-    const result = await this.databasesService.createAdminerTicket(id, user!.id, user!.role);
+    const result = await this.databasesService.createAdminerTicket(
+      siteId,
+      domainId,
+      id,
+      user!.id,
+      user!.role,
+    );
     return { success: true, data: result };
   }
 
@@ -142,10 +206,18 @@ export class DatabasesController {
   @Roles('ADMIN')
   @Throttle({ default: { limit: 3, ttl: 300_000 } })
   async exportDatabase(
+    @Param('siteId', ParseUUIDPipe) siteId: string,
+    @Param('domainId', ParseUUIDPipe) domainId: string,
     @Param('id', ParseUUIDPipe) id: string,
     @CurrentUser() user?: JwtUser,
   ) {
-    const result = await this.databasesService.exportDatabase(id, user!.id, user!.role);
+    const result = await this.databasesService.exportDatabase(
+      siteId,
+      domainId,
+      id,
+      user!.id,
+      user!.role,
+    );
     return { success: true, data: result };
   }
 
@@ -153,13 +225,21 @@ export class DatabasesController {
   @Roles('ADMIN')
   @Header('Cache-Control', 'no-store')
   async downloadExport(
+    @Param('siteId', ParseUUIDPipe) siteId: string,
+    @Param('domainId', ParseUUIDPipe) domainId: string,
     @Param('id', ParseUUIDPipe) id: string,
     @Query('filePath') filePath: string,
     @Res({ passthrough: true }) res: Response,
     @CurrentUser() user?: JwtUser,
   ) {
     // Validate user has access to this database
-    await this.databasesService.findById(id, user!.id, user!.role);
+    await this.databasesService.findById(
+      siteId,
+      domainId,
+      id,
+      user!.id,
+      user!.role,
+    );
 
     // Safety: allowlist префиксов + защита от `..` + запрет symlink.
     const safePath = assertSafeFilePath(filePath, ALLOWED_DB_FILE_PREFIXES, {
@@ -203,16 +283,27 @@ export class DatabasesController {
   @Roles('ADMIN')
   @Throttle({ default: { limit: 3, ttl: 300_000 } })
   async importDatabase(
+    @Param('siteId', ParseUUIDPipe) siteId: string,
+    @Param('domainId', ParseUUIDPipe) domainId: string,
     @Param('id', ParseUUIDPipe) id: string,
     @Body() body: { filePath: string },
     @CurrentUser() user?: JwtUser,
+    @Headers('idempotency-key') idempotencyKey?: string,
   ) {
     // Safety: path traversal + symlink + extension guard.
     const safePath = assertSafeFilePath(body?.filePath, ALLOWED_DB_FILE_PREFIXES, {
       mustExist: true,
       extensions: ['sql', 'gz', 'zip', 'bz2', 'xz'],
     });
-    const result = await this.databasesService.importDatabase(id, user!.id, user!.role, safePath);
+    const result = await this.databasesService.importDatabase(
+      siteId,
+      domainId,
+      id,
+      user!.id,
+      user!.role,
+      safePath,
+      idempotencyKey,
+    );
     return { success: true, data: result };
   }
 
@@ -221,9 +312,12 @@ export class DatabasesController {
   @Throttle({ default: { limit: 3, ttl: 300_000 } })
   @UseInterceptors(FileInterceptor('file', { limits: { fileSize: 100 * 1024 * 1024 } }))
   async importUpload(
+    @Param('siteId', ParseUUIDPipe) siteId: string,
+    @Param('domainId', ParseUUIDPipe) domainId: string,
     @Param('id', ParseUUIDPipe) id: string,
     @UploadedFile() file: Express.Multer.File,
     @CurrentUser() user?: JwtUser,
+    @Headers('idempotency-key') idempotencyKey?: string,
   ) {
     if (!file) {
       throw new BadRequestException('SQL-файл не прикреплён');
@@ -241,7 +335,15 @@ export class DatabasesController {
       );
     }
 
-    const result = await this.databasesService.importUpload(id, user!.id, user!.role, file);
+    const result = await this.databasesService.importUpload(
+      siteId,
+      domainId,
+      id,
+      user!.id,
+      user!.role,
+      file,
+      idempotencyKey,
+    );
     return { success: true, data: result };
   }
 }

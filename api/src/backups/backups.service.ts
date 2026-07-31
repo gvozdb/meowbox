@@ -5,9 +5,18 @@ import {
   NotFoundException,
   ForbiddenException,
   BadRequestException,
+  ConflictException,
   Logger,
 } from '@nestjs/common';
-import { BackupType, BackupStatus, BackupStorageType, BackupEngine } from '../common/enums';
+import { Prisma } from '@prisma/client';
+import {
+  BackupType,
+  BackupStatus,
+  BackupStorageType,
+  BackupEngine,
+  DatabasePurpose,
+  DomainApplicationStatus,
+} from '../common/enums';
 import { PrismaService } from '../common/prisma.service';
 import { AgentRelayService } from '../gateway/agent-relay.service';
 import { NotificationDispatcherService } from '../notifications/notification-dispatcher.service';
@@ -23,7 +32,30 @@ import {
   TriggerBackupDto,
   UpdateAutoBackupSettingsDto,
 } from './backups.dto';
-import { parseStringArray, stringifyStringArray, parseJsonObject } from '../common/json-array';
+import {
+  parseJsonObject,
+  parseSiteAliases,
+  parseStringArray,
+  stringifyStringArray,
+} from '../common/json-array';
+import {
+  buildSiteBackupManifest,
+  parseSiteBackupManifest,
+  stringifySiteBackupManifest,
+  type SiteBackupManifestV2,
+} from './site-backup-manifest';
+import { OperationsService } from '../operations/operations.service';
+import { SiteDomainsService } from '../sites/site-domains.service';
+import {
+  createHostnameClaims,
+  HOSTNAME_REGISTRY_LOCK,
+  rethrowHostnameClaimConflict,
+} from '../sites/hostname-registry';
+import {
+  normalizeRestoreIncludePaths,
+  safeErrorMessage,
+} from '@meowbox/shared';
+import { createHash, randomUUID } from 'crypto';
 
 export interface UnifiedBackupRow {
   id: string;
@@ -70,6 +102,50 @@ interface LocationFull {
   resticPassword: string | null;
 }
 
+interface PreparedBackup {
+  id: string;
+  locationName?: string;
+  location?: LocationFull;
+  data: Prisma.BackupCreateManyInput;
+}
+
+function isTransactionContention(error: unknown): boolean {
+  return ['P1008', 'P2028', 'P2034'].includes(
+    String((error as { code?: unknown }).code || ''),
+  );
+}
+
+type RestorePhase =
+  | 'AWAITING_AGENT'
+  | 'APPLYING_METADATA'
+  | 'APPLYING_RUNTIME'
+  | 'ROLLING_BACK'
+  | 'ROLLBACK_FAILED';
+
+interface BackupRestoreContext {
+  version: 1;
+  restoreId: string;
+  operationId: string;
+  phase: RestorePhase;
+  exactMapping: boolean;
+  manifestChecksum: string | null;
+  rollbackManifest: string | null;
+  domainTargets: Array<{ sourceId: string; targetId: string }>;
+  databaseTargets: Array<{ sourceId: string; targetId: string }>;
+  startedAt: string;
+}
+
+interface ExactRestorePlan {
+  rollbackManifest: string;
+  domainTargets: BackupRestoreContext['domainTargets'];
+  databaseTargets: BackupRestoreContext['databaseTargets'];
+  databasesForAgent: Array<{
+    name: string;
+    sourceName: string;
+    type: string;
+  }>;
+}
+
 @Injectable()
 export class BackupsService {
   private readonly logger = new Logger('BackupsService');
@@ -85,6 +161,8 @@ export class BackupsService {
     // BackupExportsService не зависит от BackupsService напрямую сейчас.
     @Inject(forwardRef(() => BackupExportsService))
     private readonly backupExports: BackupExportsService,
+    private readonly operations: OperationsService,
+    private readonly siteDomains: SiteDomainsService,
   ) {}
 
   // ===========================================================================
@@ -214,15 +292,9 @@ export class BackupsService {
   async triggerBackup(dto: TriggerBackupDto, userId: string, role: string) {
     const site = await this.prisma.site.findUnique({
       where: { id: dto.siteId },
-      select: {
-        id: true,
-        name: true,
-        domain: true,
-        rootPath: true,
-        userId: true,
-        backupExcludes: true,
-        backupExcludeTables: true,
-        databases: { select: { id: true, name: true, type: true } },
+      include: {
+        domains: { orderBy: { position: 'asc' } },
+        databases: true,
       },
     });
 
@@ -322,20 +394,35 @@ export class BackupsService {
     }
     // Полезный список для нижестоящих вызовов агента: { name, type } — только то,
     // что реально надо дампить. site.databases используется тут только для проверок.
-    const dbsForAgent = selectedDatabases.map((d) => ({ name: d.name, type: d.type }));
-
-    await this.failImpossibleLegacyResticBackups(dto.siteId);
-
-    // Active-check
-    const active = await this.prisma.backup.findFirst({
-      where: {
-        siteId: dto.siteId,
-        status: { in: [BackupStatus.PENDING, BackupStatus.IN_PROGRESS] },
-      },
+    const domainRoots = Array.from(
+      new Map(
+        site.domains.map((domain) => [
+          domain.filesRelPath,
+          {
+            domainId: domain.id,
+            domain: domain.domain,
+            filesRelPath: domain.filesRelPath,
+            isPrimary: domain.isPrimary,
+            position: domain.position,
+          },
+        ]),
+      ).values(),
+    );
+    const dbsForAgent = selectedDatabases.map((d) => ({
+      id: d.id,
+      name: d.name,
+      type: d.type,
+      siteDomainId: d.siteDomainId,
+      purpose: d.purpose,
+    }));
+    const manifest = buildSiteBackupManifest({
+      site,
+      backupType,
+      includedDatabaseIds: backupIncludesDb
+        ? selectedDatabases.map((database) => database.id)
+        : [],
     });
-    if (active) {
-      throw new BadRequestException('A backup is already in progress for this site');
-    }
+    const serializedManifest = stringifySiteBackupManifest(manifest);
 
     // =========================================================================
     // Режим: либо через StorageLocation-id (новая схема), либо legacy
@@ -345,16 +432,16 @@ export class BackupsService {
       throw new BadRequestException('Restic требует явно выбранного StorageLocation');
     }
 
-    const createdBackups: Array<{ id: string; locationName?: string }> = [];
+    const preparedBackups: PreparedBackup[] = [];
 
     if (locationIds.length > 0) {
-      // Новая схема: создаём по одной Backup-записи на каждое хранилище
+      // Новая схема: резервируем по одной Backup-записи на каждое хранилище.
       const locations = await this.prisma.storageLocation.findMany({
         where: { id: { in: locationIds } },
       });
       const byId = new Map(locations.map((l) => [l.id, l]));
 
-      for (const locId of locationIds) {
+      for (const locId of new Set(locationIds)) {
         const loc = byId.get(locId);
         if (!loc) continue;
 
@@ -366,8 +453,19 @@ export class BackupsService {
           continue;
         }
 
-        const backup = await this.prisma.backup.create({
+        const id = randomUUID();
+        preparedBackups.push({
+          id,
+          locationName: loc.name,
+          location: {
+            id: loc.id,
+            name: loc.name,
+            type: loc.type,
+            config: parseJsonObject<Record<string, string>>(loc.config, {}),
+            resticPassword: loc.resticPassword,
+          },
           data: {
+            id,
             siteId: dto.siteId,
             configId,
             scheduleId: dto.scheduleId ?? null,
@@ -376,51 +474,16 @@ export class BackupsService {
             status: BackupStatus.PENDING,
             storageType: loc.type,
             storageLocationId: loc.id,
+            manifest: serializedManifest,
           },
         });
-
-        // Диспатчим агенту отдельный вызов на каждую локацию
-        const fullCfg = parseJsonObject<Record<string, string>>(loc.config, {});
-        const locFull: LocationFull = {
-          id: loc.id,
-          name: loc.name,
-          type: loc.type,
-          config: fullCfg,
-          resticPassword: loc.resticPassword,
-        };
-
-        this.dispatchBackup({
-          backupId: backup.id,
-          site: { ...site, databases: dbsForAgent },
-          engine,
-          backupType,
-          location: locFull,
-          excludePaths,
-          excludeTableData,
-          keepLocalCopy,
-          retention: retentionPolicy,
-        }).catch((err) => {
-          this.logger.error(
-            `Failed to dispatch backup ${backup.id}: ${(err as Error).message}`,
-          );
-          this.prisma.backup
-            .update({
-              where: { id: backup.id },
-              data: {
-                status: BackupStatus.FAILED,
-                errorMessage: `Dispatch failed: ${(err as Error).message}`,
-                completedAt: new Date(),
-              },
-            })
-            .catch(() => {});
-        });
-
-        createdBackups.push({ id: backup.id, locationName: loc.name });
       }
     } else {
-      // Legacy: один бэкап без StorageLocation
-      const backup = await this.prisma.backup.create({
+      const id = randomUUID();
+      preparedBackups.push({
+        id,
         data: {
+          id,
           siteId: dto.siteId,
           configId,
           scheduleId: dto.scheduleId ?? null,
@@ -428,8 +491,56 @@ export class BackupsService {
           engine,
           status: BackupStatus.PENDING,
           storageType: legacyStorageType as string,
+          manifest: serializedManifest,
         },
       });
+    }
+
+    if (preparedBackups.length === 0) {
+      throw new BadRequestException(
+        'Не найдено ни одного совместимого хранилища бэкапа',
+      );
+    }
+
+    await this.reserveSiteBackupRows(dto.siteId, preparedBackups);
+
+    for (const backup of preparedBackups) {
+      if (backup.location) {
+        this.dispatchBackup({
+          backupId: backup.id,
+          site: {
+            id: site.id,
+            name: site.name,
+            rootPath: site.rootPath,
+            domainRoots,
+          },
+          databases: dbsForAgent,
+          engine,
+          backupType,
+          location: backup.location,
+          excludePaths,
+          excludeTableData,
+          keepLocalCopy,
+          retention: retentionPolicy,
+          manifest: serializedManifest,
+        }).catch((err) => {
+          const message = safeErrorMessage(err, 'Backup dispatch failed');
+          this.logger.error(
+            `Failed to dispatch backup ${backup.id}: ${message}`,
+          );
+          this.prisma.backup
+            .update({
+              where: { id: backup.id },
+              data: {
+                status: BackupStatus.FAILED,
+                errorMessage: `Dispatch failed: ${message}`,
+                completedAt: new Date(),
+              },
+            })
+            .catch(() => {});
+        });
+        continue;
+      }
 
       try {
         this.agentRelay.emitToAgentAsync('backup:execute', {
@@ -437,56 +548,109 @@ export class BackupsService {
           siteId: site.id,
           siteName: site.name,
           rootPath: site.rootPath,
+          domainRoots,
           type: backupType,
           storageType: legacyStorageType,
           excludePaths,
           excludeTableData,
           storageConfig: legacyStorageConfig,
           keepLocalCopy,
-          databases: site.databases.map((db) => ({
-            name: db.name,
-            type: db.type,
-          })),
+          databases: dbsForAgent,
+          manifest: serializedManifest,
         });
       } catch (err) {
-        this.logger.error(`Failed to dispatch backup: ${(err as Error).message}`);
+        const message = safeErrorMessage(err, 'Backup dispatch failed');
+        this.logger.error(`Failed to dispatch backup: ${message}`);
         await this.prisma.backup.update({
           where: { id: backup.id },
           data: {
             status: BackupStatus.FAILED,
-            errorMessage: `Agent unavailable: ${(err as Error).message}`,
+            errorMessage: `Agent unavailable: ${message}`,
             completedAt: new Date(),
           },
         });
       }
-
-      createdBackups.push({ id: backup.id });
     }
 
     this.logger.log(
-      `Triggered ${createdBackups.length} backup(s) for "${site.name}" (engine=${engine}, type=${backupType})`,
+      `Triggered ${preparedBackups.length} backup(s) for "${site.name}" (engine=${engine}, type=${backupType})`,
     );
 
     return {
-      backups: createdBackups,
+      backups: preparedBackups.map(({ id, locationName }) => ({
+        id,
+        ...(locationName ? { locationName } : {}),
+      })),
       site: { id: site.id, name: site.name },
     };
   }
 
-  private async failImpossibleLegacyResticBackups(siteId: string): Promise<void> {
-    await this.prisma.backup.updateMany({
-      where: {
-        siteId,
-        status: { in: [BackupStatus.PENDING, BackupStatus.IN_PROGRESS] },
-        engine: BackupEngine.RESTIC,
-        storageLocationId: null,
-      },
-      data: {
-        status: BackupStatus.FAILED,
-        errorMessage: 'Некорректный legacy Restic backup без StorageLocation',
-        completedAt: new Date(),
-      },
-    });
+  private async reserveSiteBackupRows(
+    siteId: string,
+    preparedBackups: PreparedBackup[],
+  ): Promise<void> {
+    try {
+      await this.prisma.$transaction(async (tx) => {
+        const activeOperation = await tx.operation.findFirst({
+          where: {
+            status: { in: ['PENDING', 'RUNNING'] },
+            OR: [
+              { siteId },
+              {
+                locks: {
+                  some: { resourceKey: `site:${siteId}` },
+                },
+              },
+            ],
+          },
+          select: { id: true, type: true, status: true, currentStep: true },
+        });
+        if (activeOperation) {
+          throw new ConflictException({
+            message: 'Site operation is active',
+            operation: activeOperation,
+          });
+        }
+
+        await tx.backup.updateMany({
+          where: {
+            siteId,
+            status: { in: [BackupStatus.PENDING, BackupStatus.IN_PROGRESS] },
+            engine: BackupEngine.RESTIC,
+            storageLocationId: null,
+          },
+          data: {
+            status: BackupStatus.FAILED,
+            errorMessage:
+              'Некорректный legacy Restic backup без StorageLocation',
+            completedAt: new Date(),
+          },
+        });
+
+        const activeBackup = await tx.backup.findFirst({
+          where: {
+            siteId,
+            status: { in: [BackupStatus.PENDING, BackupStatus.IN_PROGRESS] },
+          },
+          select: { id: true, status: true },
+        });
+        if (activeBackup) {
+          throw new ConflictException({
+            message: 'A backup is already in progress for this site',
+            backup: activeBackup,
+          });
+        }
+
+        await tx.backup.createMany({
+          data: preparedBackups.map((backup) => backup.data),
+        });
+      });
+    } catch (error) {
+      if (isTransactionContention(error)) {
+        throw new ConflictException('Site backup scope is busy');
+      }
+      throw error;
+    }
   }
 
   // ===========================================================================
@@ -495,7 +659,25 @@ export class BackupsService {
 
   private async dispatchBackup(params: {
     backupId: string;
-    site: { id: string; name: string; rootPath: string; databases: { name: string; type: string }[] };
+    site: {
+      id: string;
+      name: string;
+      rootPath: string;
+      domainRoots: {
+        domainId: string;
+        domain: string;
+        filesRelPath: string;
+        isPrimary: boolean;
+        position: number;
+      }[];
+    };
+    databases: {
+      id: string;
+      name: string;
+      type: string;
+      siteDomainId: string;
+      purpose: string;
+    }[];
     engine: BackupEngine;
     backupType: BackupType;
     location: LocationFull;
@@ -503,10 +685,11 @@ export class BackupsService {
     excludeTableData: string[];
     keepLocalCopy: boolean;
     retention: { keepDaily: number; keepWeekly: number; keepMonthly: number; keepYearly: number };
+    manifest: string;
   }): Promise<void> {
     const { backupId, site, engine, backupType, location, excludePaths, excludeTableData, retention } = params;
 
-    if (engine === BackupEngine.RESTIC) {
+  if (engine === BackupEngine.RESTIC) {
       if (!RESTIC_COMPATIBLE.has(location.type) || !location.resticPassword) {
         throw new Error(`Restic not supported for location ${location.name} (type=${location.type})`);
       }
@@ -515,10 +698,12 @@ export class BackupsService {
         backupId,
         siteName: site.name,
         rootPath: site.rootPath,
+        domainRoots: site.domainRoots,
         type: backupType,
         excludePaths,
         excludeTableData,
-        databases: site.databases,
+        databases: params.databases.map((db) => ({ name: db.name, type: db.type })),
+        manifest: params.manifest,
         storage: {
           type: location.type,
           config: location.config,
@@ -532,20 +717,22 @@ export class BackupsService {
     }
 
     // TAR
-    this.agentRelay.emitToAgentAsync('backup:execute', {
-      backupId,
-      siteId: site.id,
-      siteName: site.name,
-      rootPath: site.rootPath,
-      type: backupType,
-      storageType: location.type,
-      excludePaths,
-      excludeTableData,
-      storageConfig: location.config,
-      keepLocalCopy: params.keepLocalCopy,
-      databases: site.databases,
-    });
-  }
+      this.agentRelay.emitToAgentAsync('backup:execute', {
+        backupId,
+        siteId: site.id,
+        siteName: site.name,
+        rootPath: site.rootPath,
+        domainRoots: site.domainRoots,
+        type: backupType,
+        storageType: location.type,
+        excludePaths,
+        excludeTableData,
+        storageConfig: location.config,
+        keepLocalCopy: params.keepLocalCopy,
+        databases: params.databases.map((db) => ({ name: db.name, type: db.type })),
+        manifest: params.manifest,
+      });
+    }
 
   // ===========================================================================
   // Progress + Completion callbacks
@@ -573,6 +760,9 @@ export class BackupsService {
     errorMessage?: string,
     snapshotId?: string,
   ) {
+    const safeBackupError = success
+      ? undefined
+      : safeErrorMessage(errorMessage, 'Backup failed', 2_000);
     await this.prisma.backup.update({
       where: { id: backupId },
       data: {
@@ -580,7 +770,7 @@ export class BackupsService {
         filePath: filePath || '',
         resticSnapshotId: snapshotId || null,
         sizeBytes: sizeBytes ? BigInt(sizeBytes) : null,
-        errorMessage,
+        errorMessage: safeBackupError,
         completedAt: new Date(),
         progress: success ? 100 : 0,
       },
@@ -619,7 +809,7 @@ export class BackupsService {
             resourceLabel: backup.site?.name || '—',
             success,
             sizeBytes,
-            errorMessage,
+            errorMessage: safeBackupError,
           },
           mode,
         )
@@ -635,7 +825,7 @@ export class BackupsService {
       title: success ? 'Backup Completed' : 'Backup Failed',
       message: success
         ? `${backup?.engine || 'TAR'} / ${backup?.type || 'FULL'} backup completed${sizeBytes ? ` (${(sizeBytes / 1048576).toFixed(1)} MB)` : ''}`
-        : `Backup failed: ${errorMessage || 'unknown error'}`,
+        : `Backup failed: ${safeBackupError || 'unknown error'}`,
       siteName: backup?.site?.name,
       timestamp: new Date(),
     }).catch((err) => this.logger.error(`Notification failed: ${(err as Error).message}`));
@@ -727,40 +917,26 @@ export class BackupsService {
     scope?: string,
     includePaths?: string[],
     databaseIds?: string[],
+    idempotencyKey?: string,
   ) {
     const safeScope = (scope === 'FILES_AND_DB' || scope === 'FILES_ONLY' || scope === 'DB_ONLY')
       ? scope
       : 'FILES_AND_DB';
-    // Жёсткая фильтрация includePaths:
-    //  - Не пустые/dot-only (".", "./", "/" → агент копировал бы ВЕСЬ корень
-    //    и обходил selective restore — см. H1 в audit).
-    //  - Без `..` и null-bytes (path-traversal через нормализацию).
-    //  - Только относительные, без backslash (Windows-style sep).
-    //  - Каждый сегмент ≤ 4096 символов, всего ≤ 200 шт.
-    const safeInclude = Array.isArray(includePaths)
-      ? includePaths
-          .map((s) => String(s).trim().replace(/^\.\/+/, '').replace(/\/+$/, ''))
-          .filter((s) =>
-            s.length > 0
-            && s.length <= 4096
-            && s !== '.'
-            && !s.includes('..')
-            && !s.includes('\0')
-            && !s.includes('\\')
-            && !s.startsWith('/'),
-          )
-          .slice(0, 200)
-      : [];
+    let safeInclude: string[];
+    try {
+      safeInclude = normalizeRestoreIncludePaths(includePaths);
+    } catch (error) {
+      throw new BadRequestException(
+        safeErrorMessage(error, 'Invalid restore include paths'),
+      );
+    }
     const backup = await this.prisma.backup.findUnique({
       where: { id: backupId },
       include: {
         site: {
-          select: {
-            id: true,
-            name: true,
-            rootPath: true,
-            userId: true,
-            databases: { select: { id: true, name: true, type: true } },
+          include: {
+            domains: { orderBy: { position: 'asc' } },
+            databases: true,
           },
         },
         storageLocation: true,
@@ -785,101 +961,836 @@ export class BackupsService {
       throw new BadRequestException('Only completed backups can be restored');
     }
 
+    let manifest: SiteBackupManifestV2 | null = null;
+    if (backup.manifest) {
+      try {
+        manifest = parseSiteBackupManifest(backup.manifest);
+      } catch (error) {
+        throw new BadRequestException(
+          safeErrorMessage(error, 'Backup manifest is invalid'),
+        );
+      }
+    }
+    const exactMapping =
+      manifest !== null &&
+      (backup.type === BackupType.FULL ||
+        backup.type === BackupType.DIFFERENTIAL) &&
+      safeScope === 'FILES_AND_DB' &&
+      safeInclude.length === 0 &&
+      databaseIds === undefined &&
+      manifest.content.includedDatabaseIds.length ===
+        manifest.databases.length;
+
+    const operation = await this.operations.begin({
+      idempotencyKey,
+      type: 'BACKUP_RESTORE',
+      siteId: backup.site.id,
+      globalLockKey: exactMapping ? HOSTNAME_REGISTRY_LOCK : null,
+      userId,
+      request: {
+        backupId: backup.id,
+        cleanup,
+        scope: safeScope,
+        includePaths: safeInclude,
+        databaseIds: databaseIds || null,
+        exactMapping,
+      },
+    });
+    if (operation.replayed) {
+      return {
+        id: backup.id,
+        operationId: operation.id,
+        operationStatus: operation.status,
+        result: operation.result,
+      };
+    }
+    try {
+      await this.assertRestoreSlotAvailable(backup);
+    } catch (error) {
+      await this.operations.fail(operation.id, error);
+      throw error;
+    }
+    await this.operations.start(operation.id, 'preflight');
+
+    let contextStored = false;
+    try {
+      const exactPlan =
+        exactMapping && manifest
+          ? await this.planExactRestore(backup.site, manifest)
+          : null;
+
     // ---- Селективный выбор БД для restore ----
     // Применяется только когда scope включает БД (FILES_AND_DB | DB_ONLY).
     // undefined → все БД (back-compat). Пустой массив с DB_ONLY → ошибка.
     const restoreIncludesDb = safeScope === 'FILES_AND_DB' || safeScope === 'DB_ONLY';
-    let dbsToRestore = backup.site.databases;
-    if (restoreIncludesDb && Array.isArray(databaseIds)) {
-      const allowed = new Set(backup.site.databases.map((d) => d.id));
-      const requested = databaseIds.filter((id) => allowed.has(id));
-      if (safeScope === 'DB_ONLY' && requested.length === 0) {
-        throw new BadRequestException(
-          'Не выбрано ни одной БД для восстановления (DB_ONLY с пустым databaseIds)',
+      let dbsToRestore = backup.site.databases;
+      if (restoreIncludesDb && Array.isArray(databaseIds)) {
+        const allowed = new Set(backup.site.databases.map((d) => d.id));
+        const requested = databaseIds.filter((id) => allowed.has(id));
+        if (safeScope === 'DB_ONLY' && requested.length === 0) {
+          throw new BadRequestException(
+            'Не выбрано ни одной БД для восстановления (DB_ONLY с пустым databaseIds)',
+          );
+        }
+        dbsToRestore = backup.site.databases.filter((d) =>
+          requested.includes(d.id),
         );
       }
-      dbsToRestore = backup.site.databases.filter((d) => requested.includes(d.id));
-    }
-    const dbsForAgent = dbsToRestore.map((d) => ({ name: d.name, type: d.type }));
+      const dbsForAgent =
+        exactPlan?.databasesForAgent ||
+        dbsToRestore.map((database) => ({
+          name: database.name,
+          sourceName: database.name,
+          type: database.type,
+        }));
+      const restoreId = randomUUID();
+      const restoreContext: BackupRestoreContext = {
+        version: 1,
+        restoreId,
+        operationId: operation.id,
+        phase: 'AWAITING_AGENT',
+        exactMapping,
+        manifestChecksum: manifest?.checksum || null,
+        rollbackManifest: exactPlan?.rollbackManifest || null,
+        domainTargets: exactPlan?.domainTargets || [],
+        databaseTargets: exactPlan?.databaseTargets || [],
+        startedAt: new Date().toISOString(),
+      };
+      await this.prisma.backup.update({
+        where: { id: backup.id },
+        data: { restoreContext: JSON.stringify(restoreContext) },
+      });
+      contextStored = true;
+      await this.operations.step(operation.id, 'restoring-content', 5);
 
     // ---- Restic-ветка ----
-    if (backup.engine === BackupEngine.RESTIC) {
-      if (!backup.resticSnapshotId) {
-        throw new BadRequestException('У этого Restic-бэкапа нет snapshotId');
-      }
-      if (!backup.storageLocation) {
-        throw new BadRequestException('Хранилище этого бэкапа удалено — восстановление невозможно');
-      }
-      const loc = await this.storageLocations.getFullConfigForAgent(backup.storageLocation.id);
-      if (!loc.resticPassword) {
-        throw new BadRequestException('У хранилища нет пароля Restic');
+      if (backup.engine === BackupEngine.RESTIC) {
+        if (!backup.resticSnapshotId) {
+          throw new BadRequestException('У этого Restic-бэкапа нет snapshotId');
+        }
+        if (!backup.storageLocation) {
+          throw new BadRequestException(
+            'Хранилище этого бэкапа удалено — восстановление невозможно',
+          );
+        }
+        const loc = await this.storageLocations.getFullConfigForAgent(
+          backup.storageLocation.id,
+        );
+        if (!loc.resticPassword) {
+          throw new BadRequestException('У хранилища нет пароля Restic');
+        }
+
+        this.agentRelay.emitToAgentAsync('restic:restore', {
+          backupId: backup.id,
+          restoreId,
+          siteName: backup.site.name,
+          snapshotId: backup.resticSnapshotId,
+          rootPath: backup.site.rootPath,
+          cleanup,
+          databases: dbsForAgent,
+          scope: safeScope,
+          includePaths: safeInclude,
+          storage: {
+            type: loc.type,
+            config: loc.config,
+            password: loc.resticPassword,
+          },
+        });
+        this.logger.log(`Restic restore triggered for backup ${backup.id}`);
+        return { id: backup.id, operationId: operation.id };
       }
 
-      this.agentRelay.emitToAgentAsync('restic:restore', {
+    // ---- TAR-ветка (legacy) ----
+    // DIFFERENTIAL: base backup должен быть completed
+      if (backup.type === BackupType.DIFFERENTIAL) {
+        if (!backup.baseBackup) {
+          throw new BadRequestException(
+            'Base backup not found — differential restore is impossible',
+          );
+        }
+        if (backup.baseBackup.status !== BackupStatus.COMPLETED) {
+          throw new BadRequestException('Base backup is not completed');
+        }
+      }
+
+      let storageConfig: Record<string, string> = parseJsonObject(
+        backup.config?.storageConfig,
+        {},
+      );
+      let storageType = backup.storageType;
+
+    // Если бэкап привязан к StorageLocation (новая схема) — используем её креды
+      if (backup.storageLocation) {
+        const loc = await this.storageLocations.getFullConfigForAgent(
+          backup.storageLocation.id,
+        );
+        storageConfig = loc.config;
+        storageType = loc.type;
+      }
+
+      const restoreParams: Record<string, unknown> = {
         backupId: backup.id,
+        restoreId,
+        siteId: backup.site.id,
         siteName: backup.site.name,
-        snapshotId: backup.resticSnapshotId,
         rootPath: backup.site.rootPath,
+        sourceRootPath: exactMapping ? manifest?.site.rootPath : undefined,
+        filePath: backup.filePath,
+        storageType,
+        storageConfig,
         cleanup,
         databases: dbsForAgent,
         scope: safeScope,
         includePaths: safeInclude,
-        storage: {
-          type: loc.type,
-          config: loc.config,
-          password: loc.resticPassword,
+      };
+
+      if (backup.type === BackupType.DIFFERENTIAL && backup.baseBackup) {
+        restoreParams.baseFilePath = backup.baseBackup.filePath;
+        restoreParams.baseStorageType = backup.baseBackup.storageType;
+        restoreParams.baseStorageConfig = backup.baseBackup.config?.storageConfig
+          ? parseJsonObject<Record<string, string>>(
+              backup.baseBackup.config.storageConfig,
+              storageConfig,
+            )
+          : storageConfig;
+      }
+
+      this.agentRelay.emitToAgentAsync('backup:restore', restoreParams);
+      this.logger.log(`TAR restore triggered for backup ${backup.id}`);
+      return { id: backup.id, operationId: operation.id };
+    } catch (error) {
+      if (contextStored) {
+        await this.prisma.backup
+          .update({
+            where: { id: backup.id },
+            data: { restoreContext: null },
+          })
+          .catch(() => undefined);
+      }
+      await this.operations.fail(operation.id, error);
+      throw error;
+    }
+  }
+
+  async updateRestoreProgress(
+    backupId: string,
+    restoreId: string,
+    progress: number,
+  ): Promise<void> {
+    const backup = await this.prisma.backup.findUnique({
+      where: { id: backupId },
+      select: { restoreContext: true },
+    });
+    const context = this.readRestoreContext(backup?.restoreContext);
+    if (!context || context.restoreId !== restoreId) return;
+    await this.operations
+      .step(
+        context.operationId,
+        'restoring-content',
+        Math.max(5, Math.min(85, Math.trunc(progress * 0.8))),
+      )
+      .catch(() => undefined);
+  }
+
+  async completeRestore(data: {
+    backupId: string;
+    restoreId: string;
+    success: boolean;
+    error?: string;
+  }): Promise<{ success: boolean; error?: string }> {
+    const backup = await this.prisma.backup.findUnique({
+      where: { id: data.backupId },
+      select: {
+        id: true,
+        siteId: true,
+        manifest: true,
+        restoreContext: true,
+      },
+    });
+    const context = this.readRestoreContext(backup?.restoreContext);
+    if (!backup || !context || context.restoreId !== data.restoreId) {
+      return {
+        success: false,
+        error: 'Stale or unknown restore completion event',
+      };
+    }
+    if (!data.success) {
+      const message = safeErrorMessage(data.error, 'Backup restore failed');
+      await this.operations.fail(context.operationId, message);
+      await this.prisma.backup.update({
+        where: { id: backup.id },
+        data: { restoreContext: null },
+      });
+      return { success: false, error: message };
+    }
+
+    let metadataApplied = false;
+    let restoredManifest: SiteBackupManifestV2 | null = null;
+    let rollbackManifest: SiteBackupManifestV2 | null = null;
+    try {
+      await this.operations.step(
+        context.operationId,
+        'applying-metadata',
+        88,
+      );
+      if (context.exactMapping) {
+        if (!backup.manifest || !context.rollbackManifest) {
+          throw new Error('Restore mapping context is incomplete');
+        }
+        restoredManifest = parseSiteBackupManifest(backup.manifest);
+        rollbackManifest = parseSiteBackupManifest(context.rollbackManifest);
+        if (restoredManifest.checksum !== context.manifestChecksum) {
+          throw new Error('Backup manifest changed during restore');
+        }
+        await this.writeRestoreContext(backup.id, {
+          ...context,
+          phase: 'APPLYING_METADATA',
+        });
+        await this.applyManifestMapping(
+          backup.siteId,
+          restoredManifest,
+          context,
+        );
+        metadataApplied = true;
+      }
+
+      await this.writeRestoreContext(backup.id, {
+        ...context,
+        phase: 'APPLYING_RUNTIME',
+      });
+      await this.operations.step(
+        context.operationId,
+        'regenerating-runtime',
+        94,
+      );
+      await this.siteDomains.regenerateRuntime(backup.siteId);
+      if (restoredManifest && rollbackManifest) {
+        await this.removeStalePools(
+          context,
+          rollbackManifest,
+          restoredManifest,
+        );
+      }
+
+      await this.operations.succeed(context.operationId, {
+        backupId: backup.id,
+        exactMapping: context.exactMapping,
+      });
+      await this.prisma.backup.update({
+        where: { id: backup.id },
+        data: { restoreContext: null },
+      });
+      return { success: true };
+    } catch (error) {
+      const message = safeErrorMessage(
+        error,
+        'Backup restore finalization failed',
+      );
+      let rollbackError: string | null = null;
+      if (metadataApplied && rollbackManifest && restoredManifest) {
+        try {
+          await this.writeRestoreContext(backup.id, {
+            ...context,
+            phase: 'ROLLING_BACK',
+          });
+          await this.applyManifestMapping(
+            backup.siteId,
+            rollbackManifest,
+            context,
+          );
+          await this.siteDomains.regenerateRuntime(backup.siteId);
+          await this.removeStalePools(
+            context,
+            restoredManifest,
+            rollbackManifest,
+          );
+        } catch (rollbackFailure) {
+          rollbackError = safeErrorMessage(
+            rollbackFailure,
+            'Runtime rollback failed',
+          );
+          await this.writeRestoreContext(backup.id, {
+            ...context,
+            phase: 'ROLLBACK_FAILED',
+          }).catch(() => undefined);
+        }
+      }
+      const finalMessage = rollbackError
+        ? `${message}; rollback failed: ${rollbackError}`
+        : message;
+      await this.operations.fail(context.operationId, finalMessage);
+      if (!rollbackError) {
+        await this.prisma.backup.update({
+          where: { id: backup.id },
+          data: { restoreContext: null },
+        });
+      }
+      return { success: false, error: finalMessage };
+    }
+  }
+
+  private async assertRestoreSlotAvailable(backup: {
+    id: string;
+    restoreContext: string | null;
+  }): Promise<void> {
+    const context = this.readRestoreContext(backup.restoreContext);
+    if (!backup.restoreContext) return;
+    if (!context) {
+      throw new BadRequestException(
+        'Backup has a corrupted restore context; operator intervention is required',
+      );
+    }
+    const operation = await this.prisma.operation.findUnique({
+      where: { id: context.operationId },
+      select: { status: true },
+    });
+    if (
+      operation?.status === 'PENDING' ||
+      operation?.status === 'RUNNING' ||
+      context.phase === 'ROLLBACK_FAILED'
+    ) {
+      throw new BadRequestException(
+        'This backup already has an active or unresolved restore',
+      );
+    }
+    const ageMs = Date.now() - Date.parse(context.startedAt);
+    if (!Number.isFinite(ageMs) || ageMs < 7 * 60 * 60 * 1000) {
+      throw new BadRequestException(
+        'Interrupted restore is still inside its safety window',
+      );
+    }
+    await this.prisma.backup.update({
+      where: { id: backup.id },
+      data: { restoreContext: null },
+    });
+  }
+
+  private async planExactRestore(
+    site: Parameters<typeof buildSiteBackupManifest>[0]['site'],
+    manifest: SiteBackupManifestV2,
+  ): Promise<ExactRestorePlan> {
+    if (
+      manifest.site.sourceId !== 'legacy-site' &&
+      manifest.site.sourceId !== site.id
+    ) {
+      throw new BadRequestException(
+        'Backup manifest belongs to another Site',
+      );
+    }
+    if (
+      manifest.site.name !== site.name ||
+      manifest.site.rootPath !== site.rootPath
+    ) {
+      throw new BadRequestException(
+        'Exact restore requires the original Site name and rootPath',
+      );
+    }
+    if (
+      manifest.domains.length !== site.domains.length ||
+      manifest.databases.length !== site.databases.length
+    ) {
+      throw new BadRequestException(
+        'Exact restore requires unchanged domain and database topology',
+      );
+    }
+
+    const currentDomainById = new Map(
+      site.domains.map((domain) => [domain.id, domain]),
+    );
+    const currentDomainByName = new Map(
+      site.domains.map((domain) => [domain.domain.toLowerCase(), domain]),
+    );
+    const domainTargets: ExactRestorePlan['domainTargets'] = [];
+    const usedDomainIds = new Set<string>();
+    for (const source of manifest.domains) {
+      const target =
+        currentDomainById.get(source.sourceId) ||
+        currentDomainByName.get(source.domain);
+      if (!target || usedDomainIds.has(target.id)) {
+        throw new BadRequestException(
+          `Domain mapping cannot be restored for "${source.domain}"`,
+        );
+      }
+      usedDomainIds.add(target.id);
+      domainTargets.push({ sourceId: source.sourceId, targetId: target.id });
+    }
+
+    const targetDomainIds = new Set(domainTargets.map((item) => item.targetId));
+    const allDomains = await this.prisma.siteDomain.findMany({
+      select: {
+        id: true,
+        domain: true,
+        aliases: true,
+        runtimeKey: true,
+        appPort: true,
+      },
+    });
+    const occupiedHostnames = new Map<string, string>();
+    const runtimeOwners = new Map<string, string>();
+    const portOwners = new Map<number, string>();
+    for (const domain of allDomains) {
+      occupiedHostnames.set(domain.domain.toLowerCase(), domain.id);
+      for (const alias of parseSiteAliases(domain.aliases)) {
+        occupiedHostnames.set(alias.domain.toLowerCase(), domain.id);
+      }
+      runtimeOwners.set(domain.runtimeKey, domain.id);
+      if (domain.appPort) portOwners.set(domain.appPort, domain.id);
+    }
+    for (const source of manifest.domains) {
+      const targetId = domainTargets.find(
+        (item) => item.sourceId === source.sourceId,
+      )!.targetId;
+      for (const hostname of [
+        source.domain,
+        ...parseSiteAliases(source.aliases).map((alias) => alias.domain),
+      ]) {
+        const owner = occupiedHostnames.get(hostname.toLowerCase());
+        if (owner && owner !== targetId) {
+          throw new BadRequestException(
+            `Hostname "${hostname}" is owned by another application`,
+          );
+        }
+      }
+      const runtimeOwner = runtimeOwners.get(source.runtimeKey);
+      if (runtimeOwner && runtimeOwner !== targetId) {
+        throw new BadRequestException(
+          `runtimeKey "${source.runtimeKey}" is already in use`,
+        );
+      }
+      if (source.appPort) {
+        const portOwner = portOwners.get(source.appPort);
+        if (portOwner && portOwner !== targetId) {
+          throw new BadRequestException(
+            `Application port ${source.appPort} is already in use`,
+          );
+        }
+      }
+    }
+    if (targetDomainIds.size !== site.domains.length) {
+      throw new BadRequestException('Domain topology has diverged from backup');
+    }
+
+    const currentDatabaseById = new Map(
+      site.databases.map((database) => [database.id, database]),
+    );
+    const currentDatabaseByIdentity = new Map(
+      site.databases.map((database) => [
+        `${database.type}:${database.name}`,
+        database,
+      ]),
+    );
+    const databaseTargets: ExactRestorePlan['databaseTargets'] = [];
+    const databasesForAgent: ExactRestorePlan['databasesForAgent'] = [];
+    const usedDatabaseIds = new Set<string>();
+    for (const source of manifest.databases) {
+      const target =
+        currentDatabaseById.get(source.sourceId) ||
+        currentDatabaseByIdentity.get(`${source.type}:${source.name}`);
+      if (
+        !target ||
+        usedDatabaseIds.has(target.id)
+      ) {
+        throw new BadRequestException(
+          `Database mapping cannot be restored for "${source.name}"`,
+        );
+      }
+      if (target.name !== source.name || target.type !== source.type) {
+        throw new BadRequestException(
+          `Database identity changed for "${source.name}"`,
+        );
+      }
+      usedDatabaseIds.add(target.id);
+      databaseTargets.push({
+        sourceId: source.sourceId,
+        targetId: target.id,
+      });
+      databasesForAgent.push({
+        name: target.name,
+        sourceName: source.name,
+        type: target.type,
+      });
+    }
+    if (usedDatabaseIds.size !== site.databases.length) {
+      throw new BadRequestException(
+        'Database topology has diverged from backup',
+      );
+    }
+
+    const rollbackManifest = stringifySiteBackupManifest(
+      buildSiteBackupManifest({
+        site,
+        backupType: BackupType.FULL,
+        includedDatabaseIds: site.databases.map((database) => database.id),
+      }),
+    );
+    return {
+      rollbackManifest,
+      domainTargets,
+      databaseTargets,
+      databasesForAgent,
+    };
+  }
+
+  private async applyManifestMapping(
+    siteId: string,
+    manifest: SiteBackupManifestV2,
+    context: BackupRestoreContext,
+  ): Promise<void> {
+    const domainTargetBySource = new Map(
+      context.domainTargets.map((item) => [item.sourceId, item.targetId]),
+    );
+    for (const { targetId } of context.domainTargets) {
+      domainTargetBySource.set(targetId, targetId);
+    }
+    const databaseTargetBySource = new Map(
+      context.databaseTargets.map((item) => [item.sourceId, item.targetId]),
+    );
+    for (const { targetId } of context.databaseTargets) {
+      databaseTargetBySource.set(targetId, targetId);
+    }
+    if (
+      manifest.domains.some(
+        (domain) => !domainTargetBySource.has(domain.sourceId),
+      ) ||
+      manifest.databases.some(
+        (database) => !databaseTargetBySource.has(database.sourceId),
+      )
+    ) {
+      throw new Error('Restore target mapping is incomplete');
+    }
+
+    await this.prisma.$transaction(async (tx) => {
+      const targetDomains = await tx.siteDomain.findMany({
+        where: {
+          siteId,
+          id: { in: [...domainTargetBySource.values()] },
+        },
+        select: { id: true },
+      });
+      const targetDatabases = await tx.database.findMany({
+        where: {
+          siteId,
+          id: { in: [...databaseTargetBySource.values()] },
+        },
+        select: { id: true },
+      });
+      if (
+        targetDomains.length !== manifest.domains.length ||
+        targetDatabases.length !== manifest.databases.length
+      ) {
+        throw new Error('Restore topology changed while content was restoring');
+      }
+      const targetDomainIds = [...domainTargetBySource.values()];
+      await tx.hostnameClaim.deleteMany({
+        where: { siteDomainId: { in: targetDomainIds } },
+      });
+
+      await tx.site.update({
+        where: { id: siteId },
+        data: {
+          displayName: manifest.site.displayName,
+          status:
+            manifest.site.status === 'STOPPED'
+              ? 'STOPPED'
+              : manifest.site.status === 'ERROR'
+                ? 'ERROR'
+                : 'RUNNING',
+          errorMessage:
+            manifest.site.status === 'ERROR'
+              ? manifest.site.errorMessage
+              : null,
+          backupExcludes: manifest.site.backupExcludes,
+          backupExcludeTables: manifest.site.backupExcludeTables,
+          metadata: manifest.site.metadata,
         },
       });
-      this.logger.log(`Restic restore triggered for backup ${backup.id}`);
-      return backup;
-    }
 
-    // ---- TAR-ветка (legacy) ----
-    // DIFFERENTIAL: base backup должен быть completed
-    if (backup.type === BackupType.DIFFERENTIAL) {
-      if (!backup.baseBackup) {
-        throw new BadRequestException('Base backup not found — differential restore is impossible');
+      for (const [index, domain] of manifest.domains.entries()) {
+        const targetId = domainTargetBySource.get(domain.sourceId)!;
+        const temporaryRuntimeKey = `r${createHash('sha256')
+          .update(`${context.restoreId}:${targetId}`)
+          .digest('hex')
+          .slice(0, 31)}`;
+        const temporaryDomain = `r${createHash('sha256')
+          .update(`hostname:${context.restoreId}:${targetId}`)
+          .digest('hex')
+          .slice(0, 30)}.invalid`;
+        await tx.siteDomain.update({
+          where: { id: targetId },
+          data: {
+            domain: temporaryDomain,
+            isPrimary: false,
+            position: -(index + 1),
+            runtimeKey: temporaryRuntimeKey,
+          },
+        });
       }
-      if (backup.baseBackup.status !== BackupStatus.COMPLETED) {
-        throw new BadRequestException('Base backup is not completed');
+      for (const domain of manifest.domains) {
+        const targetId = domainTargetBySource.get(domain.sourceId)!;
+        const appStatus =
+          domain.appStatus === DomainApplicationStatus.ERROR
+            ? DomainApplicationStatus.ERROR
+            : DomainApplicationStatus.RUNNING;
+        await tx.siteDomain.update({
+          where: { id: targetId },
+          data: {
+            domain: domain.domain,
+            isPrimary: domain.isPrimary,
+            position: domain.position,
+            aliases: domain.aliases,
+            filesRelPath: domain.filesRelPath,
+            preset: domain.preset,
+            appStatus,
+            appErrorMessage:
+              appStatus === DomainApplicationStatus.ERROR
+                ? domain.appErrorMessage
+                : null,
+            phpVersion: domain.phpVersion,
+            phpPoolCustom: domain.phpPoolCustom,
+            runtimeKey: domain.runtimeKey,
+            gitRepository: domain.gitRepository,
+            deployBranch: domain.deployBranch,
+            envVars: domain.envVars,
+            cmsAdminUser: domain.cmsAdminUser,
+            cmsAdminPasswordEnc: domain.cmsAdminPasswordEnc,
+            managerPath: domain.managerPath,
+            connectorsPath: domain.connectorsPath,
+            cmsTablePrefix: domain.cmsTablePrefix,
+            modxVersion: domain.modxVersion,
+            appPort: domain.appPort,
+            httpsRedirect: domain.httpsRedirect,
+            nginxClientMaxBodySize: domain.nginxClientMaxBodySize,
+            nginxFastcgiReadTimeout: domain.nginxFastcgiReadTimeout,
+            nginxFastcgiSendTimeout: domain.nginxFastcgiSendTimeout,
+            nginxFastcgiConnectTimeout: domain.nginxFastcgiConnectTimeout,
+            nginxFastcgiBufferSizeKb: domain.nginxFastcgiBufferSizeKb,
+            nginxFastcgiBufferCount: domain.nginxFastcgiBufferCount,
+            nginxHttp2: domain.nginxHttp2,
+            nginxHsts: domain.nginxHsts,
+            nginxGzip: domain.nginxGzip,
+            nginxRateLimitEnabled: domain.nginxRateLimitEnabled,
+            nginxRateLimitRps: domain.nginxRateLimitRps,
+            nginxRateLimitBurst: domain.nginxRateLimitBurst,
+            nginxCustomConfig: domain.nginxCustomConfig,
+          },
+        });
+        await createHostnameClaims(tx, {
+          siteDomainId: targetId,
+          domain: domain.domain,
+          aliases: domain.aliases,
+        });
+        await tx.sslCertificate.updateMany({
+          where: { siteId, domainId: targetId },
+          data: {
+            domains: JSON.stringify([
+              domain.domain,
+              ...parseSiteAliases(domain.aliases).map((alias) => alias.domain),
+            ]),
+          },
+        });
+      }
+
+      for (const database of manifest.databases) {
+        await tx.database.update({
+          where: { id: databaseTargetBySource.get(database.sourceId)! },
+          data: { purpose: DatabasePurpose.AUXILIARY },
+        });
+      }
+      for (const database of manifest.databases) {
+        const targetDomainId = domainTargetBySource.get(
+          database.sourceSiteDomainId,
+        );
+        if (!targetDomainId) {
+          throw new Error(
+            `Restore database "${database.name}" has no domain target`,
+          );
+        }
+        await tx.database.update({
+          where: { id: databaseTargetBySource.get(database.sourceId)! },
+          data: {
+            siteDomainId: targetDomainId,
+            purpose: database.purpose,
+          },
+        });
+      }
+    }).catch(rethrowHostnameClaimConflict);
+  }
+
+  private async removeStalePools(
+    context: BackupRestoreContext,
+    previous: SiteBackupManifestV2,
+    current: SiteBackupManifestV2,
+  ): Promise<void> {
+    const targetBySource = new Map(
+      context.domainTargets.map((item) => [item.sourceId, item.targetId]),
+    );
+    for (const { targetId } of context.domainTargets) {
+      targetBySource.set(targetId, targetId);
+    }
+    const currentByTarget = new Map(
+      current.domains.map((domain) => [
+        targetBySource.get(domain.sourceId),
+        domain,
+      ]),
+    );
+    for (const oldDomain of previous.domains) {
+      const targetId = targetBySource.get(oldDomain.sourceId);
+      const newDomain = currentByTarget.get(targetId);
+      if (
+        !targetId ||
+        !oldDomain.phpVersion ||
+        (newDomain?.runtimeKey === oldDomain.runtimeKey &&
+          newDomain?.phpVersion === oldDomain.phpVersion)
+      ) {
+        continue;
+      }
+      const removed = await this.agentRelay.emitToAgent('php:remove-pool', {
+        siteDomainId: targetId,
+        runtimeKey: oldDomain.runtimeKey,
+        phpVersion: oldDomain.phpVersion,
+      });
+      if (!removed.success) {
+        this.logger.warn(
+          `Stale PHP pool cleanup failed for ${oldDomain.runtimeKey}: ${
+            removed.error || 'unknown agent error'
+          }`,
+        );
       }
     }
+  }
 
-    let storageConfig: Record<string, string> = parseJsonObject(backup.config?.storageConfig, {});
-    let storageType = backup.storageType;
-
-    // Если бэкап привязан к StorageLocation (новая схема) — используем её креды
-    if (backup.storageLocation) {
-      const loc = await this.storageLocations.getFullConfigForAgent(backup.storageLocation.id);
-      storageConfig = loc.config;
-      storageType = loc.type;
+  private readRestoreContext(
+    raw: string | null | undefined,
+  ): BackupRestoreContext | null {
+    if (!raw) return null;
+    try {
+      const value = JSON.parse(raw) as Partial<BackupRestoreContext>;
+      if (
+        value.version !== 1 ||
+        typeof value.restoreId !== 'string' ||
+        typeof value.operationId !== 'string' ||
+        typeof value.phase !== 'string' ||
+        typeof value.exactMapping !== 'boolean' ||
+        typeof value.startedAt !== 'string' ||
+        !Array.isArray(value.domainTargets) ||
+        !Array.isArray(value.databaseTargets)
+      ) {
+        return null;
+      }
+      return value as BackupRestoreContext;
+    } catch {
+      return null;
     }
+  }
 
-    const restoreParams: Record<string, unknown> = {
-      backupId: backup.id,
-      siteId: backup.site.id,
-      siteName: backup.site.name,
-      rootPath: backup.site.rootPath,
-      filePath: backup.filePath,
-      storageType,
-      storageConfig,
-      cleanup,
-      databases: dbsForAgent,
-      scope: safeScope,
-      includePaths: safeInclude,
-    };
-
-    if (backup.type === BackupType.DIFFERENTIAL && backup.baseBackup) {
-      restoreParams.baseFilePath = backup.baseBackup.filePath;
-      restoreParams.baseStorageType = backup.baseBackup.storageType;
-      restoreParams.baseStorageConfig = backup.baseBackup.config?.storageConfig
-        ? parseJsonObject<Record<string, string>>(backup.baseBackup.config.storageConfig, storageConfig)
-        : storageConfig;
-    }
-
-    this.agentRelay.emitToAgentAsync('backup:restore', restoreParams);
-    this.logger.log(`TAR restore triggered for backup ${backup.id}`);
-    return backup;
+  private async writeRestoreContext(
+    backupId: string,
+    context: BackupRestoreContext,
+  ): Promise<void> {
+    await this.prisma.backup.update({
+      where: { id: backupId },
+      data: { restoreContext: JSON.stringify(context) },
+    });
   }
 
   // ===========================================================================
@@ -969,8 +1880,20 @@ export class BackupsService {
     scope?: string;
     includePaths?: string[];
     databaseIds?: string[];
+    idempotencyKey?: string;
   }) {
-    const { siteId, locationId, snapshotId, cleanup, userId, role, scope, includePaths, databaseIds } = params;
+    const {
+      siteId,
+      locationId,
+      snapshotId,
+      cleanup,
+      userId,
+      role,
+      scope,
+      includePaths,
+      databaseIds,
+      idempotencyKey,
+    } = params;
 
     await this.assertSiteAccess(siteId, userId, role);
 
@@ -1049,8 +1972,21 @@ export class BackupsService {
 
     // Дальше идём по обычному пути restore — весь прогресс и обработка ошибок
     // уже там отлажены.
-    await this.restoreBackup(backupId, userId, role, cleanup, scope, includePaths, databaseIds);
-    return { backupId, imported: !existing };
+    const restore = await this.restoreBackup(
+      backupId,
+      userId,
+      role,
+      cleanup,
+      scope,
+      includePaths,
+      databaseIds,
+      idempotencyKey,
+    );
+    return {
+      backupId,
+      imported: !existing,
+      operationId: restore.operationId,
+    };
   }
 
   // ===========================================================================
@@ -1222,7 +2158,19 @@ export class BackupsService {
           startedAt: true,
           completedAt: true,
           storageLocation: { select: { id: true, name: true, type: true } },
-          site: { select: { id: true, name: true, domain: true } },
+          site: {
+            select: {
+              id: true,
+              name: true,
+              domains: {
+                select: {
+                  domain: true,
+                  isPrimary: true,
+                  position: true,
+                },
+              },
+            },
+          },
         },
       }),
       this.prisma.serverPathBackup.findMany({
@@ -1270,6 +2218,7 @@ export class BackupsService {
 
     const rows: UnifiedBackupRow[] = [];
     for (const b of siteBackups) {
+      const primaryDomain = b.site?.domains.find((d) => d.isPrimary);
       rows.push({
         id: b.id,
         kind: 'SITE',
@@ -1277,7 +2226,7 @@ export class BackupsService {
         status: b.status,
         engine: b.engine,
         sourceName: b.site?.name || '—',
-        sourceSubtitle: b.site?.domain || '',
+        sourceSubtitle: primaryDomain?.domain || b.site?.domains[0]?.domain || '',
         sourceId: b.site?.id || null,
         sizeBytes: b.sizeBytes ?? null,
         progress: b.progress,

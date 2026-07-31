@@ -250,7 +250,7 @@ async function loadSources() {
 function onSourceChange() {
   const src = sources.value.find(s => s.id === selectedSource.value);
   if (src && src.types.length) {
-    selectedType.value = src.types[0];
+    selectedType.value = src.types[0] ?? '';
   } else {
     selectedType.value = '';
   }

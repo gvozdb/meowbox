@@ -8,6 +8,7 @@ import {
   DEFAULT_API_UPLOAD_LIMIT_MB,
 } from '@meowbox/shared';
 import { assertCredentialKeyConfigured } from './common/crypto/credentials-cipher';
+import { isReleaseMaintenanceActive } from './common/release-maintenance';
 
 // Прогреваем DNS-credentials key до старта Nest. Если файла .dns-key нет —
 // он будет автогенерирован сейчас, чтобы первый запрос пользователя на /api/dns
@@ -70,6 +71,31 @@ async function bootstrap() {
   // дефолтного сетапа Meowbox).
   const expressApp = app.getHttpAdapter().getInstance() as { set: (k: string, v: string | boolean) => void };
   expressApp.set('trust proxy', 'loopback');
+
+  app.use(
+    (
+      req: { method?: string },
+      res: {
+        setHeader: (name: string, value: string) => void;
+        status: (code: number) => { json: (body: unknown) => void };
+      },
+      next: () => void,
+    ) => {
+      const method = (req.method || 'GET').toUpperCase();
+      if (!['GET', 'HEAD', 'OPTIONS'].includes(method) && isReleaseMaintenanceActive()) {
+        res.setHeader('Retry-After', '30');
+        res.status(503).json({
+          success: false,
+          error: {
+            code: 'RELEASE_MAINTENANCE',
+            message: 'Panel writes are temporarily paused for a release migration',
+          },
+        });
+        return;
+      }
+      next();
+    },
+  );
 
   // --- Security: HTTP headers ---
   app.use(

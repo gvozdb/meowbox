@@ -9,9 +9,7 @@ import { Roles } from '../common/decorators/roles.decorator';
 import { CurrentUser } from '../common/decorators/current-user.decorator';
 import { LogsService } from './logs.service';
 
-// --- Per-site log endpoints (backward compat) ---
-
-@Controller('sites/:siteId/logs')
+@Controller('sites/:siteId/domains/:domainId/logs')
 @Roles('ADMIN', 'MANAGER')
 export class LogsController {
   constructor(private readonly logsService: LogsService) {}
@@ -19,16 +17,23 @@ export class LogsController {
   @Get()
   async getAvailable(
     @Param('siteId', ParseUUIDPipe) siteId: string,
+    @Param('domainId', ParseUUIDPipe) domainId: string,
     @CurrentUser('sub') userId: string,
     @CurrentUser('role') role: string,
   ) {
-    const data = await this.logsService.getAvailableLogs(siteId, userId, role);
+    const data = await this.logsService.getAvailableLogs(
+      siteId,
+      domainId,
+      userId,
+      role,
+    );
     return { success: true, data };
   }
 
   @Get('read')
   async read(
     @Param('siteId', ParseUUIDPipe) siteId: string,
+    @Param('domainId', ParseUUIDPipe) domainId: string,
     @Query('type') type: string,
     @Query('lines') lines: string,
     @CurrentUser('sub') userId: string,
@@ -38,6 +43,7 @@ export class LogsController {
     const logType = validTypes.includes(type) ? type : 'access';
     const data = await this.logsService.getSiteLogs(
       siteId,
+      domainId,
       userId,
       role,
       logType,

@@ -210,7 +210,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, watch, onBeforeUnmount } from 'vue';
+import { computed, onBeforeUnmount, reactive, ref, watch } from 'vue';
 import type {
   NodeProcessesResult,
   NodeProcessView,
@@ -218,11 +218,14 @@ import type {
   NodeDomainRef,
 } from '@meowbox/shared';
 
-const props = defineProps<{ siteId: string; active: boolean }>();
+const props = defineProps<{ siteId: string; domainId: string; active: boolean }>();
 
 const api = useApi();
 const toast = useMbToast();
 const confirm = useMbConfirm();
+const nodeApi = computed(
+  () => `/sites/${props.siteId}/domains/${props.domainId}/node`,
+);
 
 const data = ref<NodeProcessesResult | null>(null);
 const loading = ref(false);
@@ -232,15 +235,15 @@ const busy = reactive<Record<string, 'start' | 'stop' | 'restart' | 'reload' | '
 
 const logsModal = reactive({ open: false, loading: false, content: '', title: '', name: '' });
 
-let loaded = false;
+let loadedDomainId = '';
 let refreshTimer: ReturnType<typeof setInterval> | null = null;
 
 async function load(silent = false) {
   if (!silent) loading.value = true;
   error.value = null;
   try {
-    data.value = await api.get<NodeProcessesResult>(`/sites/${props.siteId}/node/processes`);
-    loaded = true;
+    data.value = await api.get<NodeProcessesResult>(`${nodeApi.value}/processes`);
+    loadedDomainId = props.domainId;
   } catch (e: unknown) {
     if (!silent) error.value = (e as Error).message || 'неизвестная ошибка';
   } finally {
@@ -270,10 +273,14 @@ function stopAutoRefresh() {
 }
 
 watch(
-  () => props.active,
-  (val) => {
-    if (val) {
-      if (!loaded) void load();
+  [() => props.active, () => props.domainId],
+  ([active, domainId], [, previousDomainId]) => {
+    if (domainId !== previousDomainId) {
+      data.value = null;
+      closeLogs();
+    }
+    if (active && domainId) {
+      if (loadedDomainId !== domainId) void load();
       startAutoRefresh();
     } else {
       stopAutoRefresh();
@@ -287,7 +294,7 @@ onBeforeUnmount(stopAutoRefresh);
 async function toggleAutostart(enabled: boolean) {
   autostartBusy.value = true;
   try {
-    await api.put(`/sites/${props.siteId}/node/autostart`, { enabled });
+    await api.put(`${nodeApi.value}/autostart`, { enabled });
     if (data.value) data.value.autostartEnabled = enabled;
     toast.success(enabled ? 'Автозагрузка включена' : 'Автозагрузка выключена');
   } catch (e: unknown) {
@@ -305,7 +312,7 @@ async function startProcess(proc: NodeProcessView, group: NodeEcosystemGroup) {
   }
   busy[proc.name] = 'start';
   try {
-    await api.post(`/sites/${props.siteId}/node/ecosystem/start`, { file, only: proc.name });
+    await api.post(`${nodeApi.value}/ecosystem/start`, { file, only: proc.name });
     toast.success(`Процесс «${proc.name}» запущен`);
     await load(true);
   } catch (e: unknown) {
@@ -323,7 +330,7 @@ async function doAction(proc: NodeProcessView, action: 'stop' | 'restart' | 'rel
     reload: 'перезагружен',
   };
   try {
-    await api.post(`/sites/${props.siteId}/node/processes/${encodeURIComponent(proc.name)}/${action}`);
+    await api.post(`${nodeApi.value}/processes/${encodeURIComponent(proc.name)}/${action}`);
     toast.success(`Процесс «${proc.name}» ${labels[action]}`);
     await load(true);
   } catch (e: unknown) {
@@ -343,7 +350,7 @@ async function removeProcess(proc: NodeProcessView) {
   if (!ok) return;
   busy[proc.name] = 'delete';
   try {
-    await api.del(`/sites/${props.siteId}/node/processes/${encodeURIComponent(proc.name)}`);
+    await api.del(`${nodeApi.value}/processes/${encodeURIComponent(proc.name)}`);
     toast.success(`Процесс «${proc.name}» удалён из PM2`);
     await load(true);
   } catch (e: unknown) {
@@ -365,7 +372,7 @@ async function reloadLogs() {
   logsModal.loading = true;
   try {
     const r = await api.get<{ content: string }>(
-      `/sites/${props.siteId}/node/processes/${encodeURIComponent(logsModal.name)}/logs?lines=200`,
+      `${nodeApi.value}/processes/${encodeURIComponent(logsModal.name)}/logs?lines=200`,
     );
     logsModal.content = r.content || '(пусто)';
   } catch (e: unknown) {

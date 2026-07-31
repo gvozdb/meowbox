@@ -1,3 +1,5 @@
+import type { SiteType } from '@meowbox/shared';
+
 /**
  * Re-export типов PlanItem на стороне агента. Дублируем определения, чтобы
  * не зависеть от api/ — agent должен компилироваться независимо. См. также
@@ -57,9 +59,14 @@ export interface PlanItem {
   sourceCmsVersion: string;
   sourcePhpVersion: string;
   sourceMysqlPrefix: string;
+  /** Explicit application preset; execution never guesses it. */
+  preset: SiteType;
 
   newName: string;
   newDomain: string;
+  /** Optional persisted SiteDomain identity; primary legacy defaults remain. */
+  domainId?: string;
+  runtimeKey?: string;
   newAliases: string[];
   /**
    * Если true — все алиасы создаются с `redirect=true` (301 на главный домен).
@@ -139,6 +146,7 @@ export interface ShortlistItem {
   sourceCmsVersion: string;
   sourcePhpVersion: string;
   sourceMysqlDb: string;     // показываем оператору, чтоб понимал что мигрируем
+  preset: SiteType;
   /** suggested newName (sanitized из sourceUser) — оператор поправит на step3 */
   newName: string;
   /** suggested newDomain (= hostpanel.site) — поправится на step3 */

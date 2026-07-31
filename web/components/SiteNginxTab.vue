@@ -353,6 +353,13 @@ function nginxBase(): string {
   return `/sites/${props.siteId}/domains/${props.domainId}/nginx`;
 }
 
+function nginxMutationKey(action: string): string {
+  const suffix =
+    globalThis.crypto?.randomUUID?.() ||
+    `${Date.now()}-${Math.random().toString(36).slice(2, 12)}`;
+  return `domain-nginx-${action}:${suffix}`;
+}
+
 async function loadAll() {
   if (!props.domainId) {
     loading.value = false;
@@ -414,7 +421,15 @@ async function saveSettings() {
   if (!settingsDirty.value) return;
   settingsSaving.value = true;
   try {
-    const r = await api.put<NginxSettingsResponse>(`${nginxBase()}/settings`, buildSettingsPayload());
+    const r = await api.put<NginxSettingsResponse>(
+      `${nginxBase()}/settings`,
+      buildSettingsPayload(),
+      {
+        headers: {
+          'Idempotency-Key': nginxMutationKey('settings'),
+        },
+      },
+    );
     defaults.value = r.defaults;
     formOriginal.value = JSON.parse(JSON.stringify(form.value));
     showBanner('ok', 'Параметры сохранены, конфиг nginx обновлён.');
@@ -437,6 +452,10 @@ async function saveCustom() {
   try {
     const r = await api.put<{ content: string }>(`${nginxBase()}/custom`, {
       content: customDraft.value,
+    }, {
+      headers: {
+        'Idempotency-Key': nginxMutationKey('custom'),
+      },
     });
     customOriginal.value = r.content ?? customDraft.value;
     customDraft.value = customOriginal.value;

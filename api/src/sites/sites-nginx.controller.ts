@@ -1,4 +1,13 @@
-import { Body, Controller, Get, Param, Post, Put, ParseUUIDPipe } from '@nestjs/common';
+import {
+  Body,
+  Controller,
+  Get,
+  Headers,
+  Param,
+  Post,
+  Put,
+  ParseUUIDPipe,
+} from '@nestjs/common';
 
 import { CurrentUser } from '../common/decorators/current-user.decorator';
 import { Roles } from '../common/decorators/roles.decorator';
@@ -52,6 +61,7 @@ export class SitesNginxController {
     @Param('domainId', new ParseUUIDPipe()) domainId: string,
     @Body() dto: UpdateSiteNginxSettingsDto,
     @CurrentUser() user: AuthCtx,
+    @Headers('idempotency-key') idempotencyKey?: string,
   ) {
     const data: NginxSettingsResponse = await this.service.updateSettings(
       id,
@@ -59,6 +69,7 @@ export class SitesNginxController {
       dto,
       user.id,
       user.role,
+      idempotencyKey,
     );
     return { success: true, data };
   }
@@ -83,8 +94,16 @@ export class SitesNginxController {
     @Param('domainId', new ParseUUIDPipe()) domainId: string,
     @Body() dto: UpdateSiteNginxCustomDto,
     @CurrentUser() user: AuthCtx,
+    @Headers('idempotency-key') idempotencyKey?: string,
   ) {
-    const data = await this.service.updateCustomConfig(id, domainId, dto, user.id, user.role);
+    const data = await this.service.updateCustomConfig(
+      id,
+      domainId,
+      dto,
+      user.id,
+      user.role,
+      idempotencyKey,
+    );
     return { success: true, data };
   }
 

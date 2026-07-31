@@ -26,6 +26,7 @@ import * as os from 'os';
 import * as crypto from 'crypto';
 import { CommandExecutor } from '../command-executor';
 import { DEFAULT_PHP_VERSION } from '@meowbox/shared';
+import { resolveSiteDomainRoot } from '../runtime/site-domain-runtime';
 
 /**
  * Содержимое PHP-скрипта. Вынесено сюда, чтобы не зависеть от файловой
@@ -125,7 +126,7 @@ export interface ChangeModxAdminPasswordParams {
   rootPath: string;
   /** Относительный путь до web-root внутри rootPath (обычно "www"). */
   filesRelPath?: string;
-  /** Версия PHP, как в Site.phpVersion (например "8.2"). */
+  /** Версия PHP, как в SiteDomain.phpVersion (например "8.2"). */
   phpVersion?: string;
   /** Per-site Linux user (если есть — используем sudo, иначе бежим под root). */
   systemUser?: string;
@@ -146,11 +147,7 @@ export interface ChangeModxAdminPasswordResult {
  * Резолв пути до web-root MODX (туда, где лежит index.php).
  */
 function resolveWwwDir(rootPath: string, filesRelPath?: string): string {
-  const rel = (filesRelPath || 'www')
-    .replace(/^\/+/, '')
-    .replace(/\.\.+/g, '')
-    .replace(/\/+$/, '');
-  return path.join(rootPath, rel || 'www');
+  return resolveSiteDomainRoot(rootPath, filesRelPath || 'www');
 }
 
 /**

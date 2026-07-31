@@ -2,8 +2,8 @@ import {
   SiteType,
   SiteStatus,
   UserRole,
-  PhpVersion,
   DatabaseType,
+  DatabasePurpose,
   BackupType,
   BackupStorageType,
   DeployStatus,
@@ -13,12 +13,14 @@ import {
   FirewallProtocol,
   CronJobStatus,
 } from './enums';
+import type { PhpVersion } from './enums';
 
 import type {
   User,
   Database,
   BackupStorageConfig,
   NotificationChannelConfig,
+  SiteAlias,
 } from './entities';
 
 // =============================================================================
@@ -98,31 +100,67 @@ export interface UpdateUserRequest {
 // Sites
 // =============================================================================
 
+/**
+ * Declarative application settings for one main domain. Runtime identity and
+ * status are server-assigned; generic forms intentionally do not expose
+ * appPort.
+ */
+export interface CreateSiteDomainRequest {
+  domain: string;
+  aliases?: SiteAlias[];
+  /** Required relative path; absolute runtime paths are never client input. */
+  filesRelPath: string;
+  preset: SiteType;
+  phpVersion?: PhpVersion | null;
+  phpPoolCustom?: string | null;
+  gitRepository?: string | null;
+  deployBranch?: string | null;
+  envVars?: Record<string, string>;
+  cmsAdminUser?: string | null;
+  /** Plaintext only at the API boundary; server stores encrypted data. */
+  cmsAdminPassword?: string | null;
+  managerPath?: string | null;
+  connectorsPath?: string | null;
+  cmsTablePrefix?: string | null;
+  httpsRedirect?: boolean;
+}
+
+/** Domain-scoped mutable application settings; runtimeKey/status stay server-owned. */
+export interface UpdateSiteDomainRequest {
+  domain?: string;
+  aliases?: SiteAlias[];
+  filesRelPath?: string;
+  phpVersion?: PhpVersion | null;
+  phpPoolCustom?: string | null;
+  gitRepository?: string | null;
+  deployBranch?: string | null;
+  envVars?: Record<string, string>;
+  cmsAdminUser?: string | null;
+  cmsAdminPassword?: string | null;
+  managerPath?: string | null;
+  connectorsPath?: string | null;
+  cmsTablePrefix?: string | null;
+  httpsRedirect?: boolean;
+}
+
 export interface CreateSiteRequest {
   name: string;
-  domain: string;
-  aliases?: string[];
-  type: SiteType;
-  phpVersion?: PhpVersion;
-  gitRepository?: string;
-  deployBranch?: string;
-  appPort?: number;
-  envVars?: Record<string, string>;
+  displayName?: string;
+  userId?: string;
+  metadata?: Record<string, unknown>;
+  /** At least one domain/application row; exactly one primary is selected server-side. */
+  domains: CreateSiteDomainRequest[];
 }
 
 export interface UpdateSiteRequest {
   name?: string;
-  domain?: string;
-  aliases?: string[];
-  phpVersion?: PhpVersion;
-  gitRepository?: string;
-  deployBranch?: string;
-  appPort?: number;
-  envVars?: Record<string, string>;
+  displayName?: string | null;
+  metadata?: Record<string, unknown> | null;
 }
 
 export interface SiteListQuery extends PaginationQuery {
-  type?: SiteType;
+  /** Matches any SiteDomain preset, not a singular Site type. */
+  preset?: SiteType;
   status?: SiteStatus;
   search?: string;
 }
@@ -136,7 +174,8 @@ export interface CreateDatabaseRequest {
   type: DatabaseType;
   dbUser: string;
   dbPassword: string;
-  siteId?: string;
+  siteDomainId: string;
+  purpose: DatabasePurpose;
 }
 
 export type DatabaseResponse = Omit<Database, 'dbPasswordHash'>;
@@ -203,6 +242,7 @@ export interface RollbackDeployRequest {
 
 export interface DeployListQuery extends PaginationQuery {
   siteId?: string;
+  siteDomainId?: string;
   status?: DeployStatus;
 }
 

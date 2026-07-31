@@ -92,14 +92,15 @@ export class DashboardService {
         issuer: true,
         expiresAt: true,
         daysRemaining: true,
-        site: { select: { name: true, domain: true } },
+        site: { select: { name: true } },
+        domain: { select: { domain: true } },
       },
     });
 
     return certs.map((c) => ({
       siteId: c.siteId,
       siteName: c.site.name,
-      domain: c.site.domain,
+      domain: c.domain?.domain || '',
       issuer: c.issuer,
       status: c.status,
       expiresAt: c.expiresAt?.toISOString() || null,

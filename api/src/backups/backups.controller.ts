@@ -4,6 +4,7 @@ import {
   Post,
   Delete,
   Body,
+  Headers,
   Param,
   Query,
   Res,
@@ -140,6 +141,7 @@ export class BackupsController {
     @Param('id', ParseUUIDPipe) id: string,
     @Body() body: RestoreBackupDto,
     @CurrentUser() user?: JwtUser,
+    @Headers('idempotency-key') idempotencyKey?: string,
   ) {
     const result = await this.backupsService.restoreBackup(
       id, user!.id, user!.role,
@@ -147,8 +149,15 @@ export class BackupsController {
       body?.scope,
       body?.includePaths,
       body?.databaseIds,
+      idempotencyKey,
     );
-    return { success: true, data: { backupId: result.id } };
+    return {
+      success: true,
+      data: {
+        backupId: result.id,
+        operationId: result.operationId,
+      },
+    };
   }
 
   // Дерево первого уровня rootPath в снапшоте — для UI selective restore.
@@ -173,6 +182,7 @@ export class BackupsController {
     @Param('snapshotId') snapshotId: string,
     @Body() body: RestoreResticSnapshotDto,
     @CurrentUser() user?: JwtUser,
+    @Headers('idempotency-key') idempotencyKey?: string,
   ) {
     if (!body?.locationId) {
       return { success: false, error: 'locationId обязателен' };
@@ -187,6 +197,7 @@ export class BackupsController {
       databaseIds: body?.databaseIds,
       userId: user!.id,
       role: user!.role,
+      idempotencyKey,
     });
     return { success: true, data: result };
   }

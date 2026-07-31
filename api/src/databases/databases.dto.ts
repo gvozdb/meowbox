@@ -5,6 +5,7 @@ import {
   IsOptional,
   MaxLength,
   Matches,
+  IsIn,
 } from 'class-validator';
 
 enum DatabaseType {
@@ -27,19 +28,19 @@ export class CreateDatabaseDto {
 
   @IsOptional()
   @IsString()
-  siteId?: string;
-
-  @IsOptional()
-  @IsString()
   @MaxLength(32)
   @Matches(/^[a-zA-Z0-9_]+$/, {
     message: 'Username can only contain letters, numbers, and underscores',
   })
   dbUser?: string;
+
+  @IsOptional()
+  @IsIn(['APP_PRIMARY', 'AUXILIARY'])
+  purpose?: 'APP_PRIMARY' | 'AUXILIARY';
 }
 
 export class UpdateDatabaseDto {
   @IsOptional()
-  @IsString()
-  siteId?: string;
+  @IsIn(['APP_PRIMARY', 'AUXILIARY'])
+  purpose?: 'APP_PRIMARY' | 'AUXILIARY';
 }

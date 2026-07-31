@@ -198,24 +198,6 @@ location ^~ /core/ {
     return 404;
 }
 `,
-  WORDPRESS: `# WordPress
-location / {
-    try_files $uri $uri/ /index.php?$args;
-}
-# Запрет PHP в /uploads/ и /files/
-location ~* /(?:uploads|files)/.*\\.php$ { deny all; }
-location = /xmlrpc.php { deny all; }
-`,
-  LARAVEL: `# Laravel / Symfony
-location / {
-    try_files $uri $uri/ /index.php?$query_string;
-}
-`,
-  STATIC_HTML: `# Статика — без PHP
-location / {
-    try_files $uri $uri/ =404;
-}
-`,
   CUSTOM: `# Кастомный сайт — добавь свои правила здесь.
 # Пример:
 #
@@ -229,5 +211,5 @@ location / {
  * Возвращает стартовый кастом для указанного типа сайта или generic если тип неизвестен.
  */
 export function initialCustomConfigFor(siteType: string): string {
-  return CMS_INITIAL_CUSTOM_CONFIG[siteType] ?? CMS_INITIAL_CUSTOM_CONFIG.CUSTOM;
+  return CMS_INITIAL_CUSTOM_CONFIG[siteType] ?? CMS_INITIAL_CUSTOM_CONFIG.CUSTOM!;
 }

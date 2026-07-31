@@ -8,19 +8,19 @@ import {
   Param,
   Query,
   ParseUUIDPipe,
+  GoneException,
+  Headers,
+  Req,
 } from '@nestjs/common';
 import { Throttle } from '@nestjs/throttler';
 import { SitesService } from './sites.service';
 import { ModxVersionsService } from './modx-versions.service';
 import {
-  CreateSiteDto,
-  UpdateSiteDto,
-  UpdateModxVersionDto,
+  CreateSiteRequestDto,
+  UpdateSiteContainerDto,
   DuplicateSiteDto,
   DeleteSiteOptionsDto,
   ChangeSshPasswordDto,
-  ChangeCmsAdminPasswordDto,
-  UpdatePhpPoolConfigDto,
 } from './sites.dto';
 import { CurrentUser } from '../common/decorators/current-user.decorator';
 import { Roles } from '../common/decorators/roles.decorator';
@@ -72,7 +72,7 @@ export class SitesController {
     @CurrentUser('role') role: string,
     @Query('page') page?: string,
     @Query('perPage') perPage?: string,
-    @Query('type') type?: string,
+    @Query('preset') preset?: string,
     @Query('status') status?: string,
     @Query('search') search?: string,
   ) {
@@ -81,7 +81,7 @@ export class SitesController {
       role,
       page: page ? parseInt(page, 10) : undefined,
       perPage: perPage ? parseInt(perPage, 10) : undefined,
-      type,
+      preset,
       status,
       search,
     });
@@ -106,10 +106,14 @@ export class SitesController {
   @Roles(UserRole.ADMIN)
   @Throttle({ default: { limit: 5, ttl: 60_000 } })
   async create(
-    @Body() dto: CreateSiteDto,
+    @Body() dto: CreateSiteRequestDto,
     @CurrentUser('sub') userId: string,
+    @Headers('idempotency-key') idempotencyKey?: string,
+    @Req() request?: { proxyAuthenticated?: boolean },
   ) {
-    const site = await this.sitesService.create(dto, userId);
+    const site = await this.sitesService.create(dto, userId, idempotencyKey, {
+      allowImportReservation: request?.proxyAuthenticated === true,
+    });
     return { success: true, data: site };
   }
 
@@ -126,15 +130,22 @@ export class SitesController {
     @Body() dto: DuplicateSiteDto,
     @CurrentUser('sub') userId: string,
     @CurrentUser('role') role: string,
+    @Headers('idempotency-key') idempotencyKey?: string,
   ) {
-    const site = await this.sitesService.duplicate(id, dto, userId, role);
+    const site = await this.sitesService.duplicate(
+      id,
+      dto,
+      userId,
+      role,
+      idempotencyKey,
+    );
     return { success: true, data: site };
   }
 
   @Put(':id')
   async update(
     @Param('id', ParseUUIDPipe) id: string,
-    @Body() dto: UpdateSiteDto,
+    @Body() dto: UpdateSiteContainerDto,
     @CurrentUser('sub') userId: string,
     @CurrentUser('role') role: string,
   ) {
@@ -212,14 +223,10 @@ export class SitesController {
    */
   @Post(':id/cms-admin-password')
   @Roles(UserRole.ADMIN)
-  async changeCmsAdminPassword(
-    @Param('id', ParseUUIDPipe) id: string,
-    @Body() body: ChangeCmsAdminPasswordDto,
-    @CurrentUser('sub') userId: string,
-    @CurrentUser('role') role: string,
-  ) {
-    const data = await this.sitesService.changeCmsAdminPassword(id, userId, role, body?.password);
-    return { success: true, data };
+  changeCmsAdminPassword() {
+    throw new GoneException(
+      'Use /sites/:siteId/domains/:domainId/modx/admin-password',
+    );
   }
 
   /**
@@ -227,14 +234,10 @@ export class SitesController {
    * Body: `{ targetVersion: "3.1.2-pl" }`
    */
   @Post(':id/update-modx')
-  async updateModxVersion(
-    @Param('id', ParseUUIDPipe) id: string,
-    @Body() dto: UpdateModxVersionDto,
-    @CurrentUser('sub') userId: string,
-    @CurrentUser('role') role: string,
-  ) {
-    const data = await this.sitesService.updateModxVersion(id, userId, role, dto);
-    return { success: true, data };
+  updateModxVersion() {
+    throw new GoneException(
+      'Use /sites/:siteId/domains/:domainId/modx/update',
+    );
   }
 
   /**
@@ -247,13 +250,10 @@ export class SitesController {
   @Post(':id/normalize-permissions')
   @Roles(UserRole.ADMIN)
   @Throttle({ default: { limit: 5, ttl: 60_000 } })
-  async normalizePermissions(
-    @Param('id', ParseUUIDPipe) id: string,
-    @CurrentUser('sub') userId: string,
-    @CurrentUser('role') role: string,
-  ) {
-    const data = await this.sitesService.normalizeSitePermissions(id, userId, role);
-    return { success: true, data };
+  normalizePermissions() {
+    throw new GoneException(
+      'Use /sites/:siteId/domains/:domainId/permissions/normalize',
+    );
   }
 
   /**
@@ -261,13 +261,10 @@ export class SitesController {
    * Возвращает список issues с опциональным id действия для починки.
    */
   @Get(':id/modx-doctor')
-  async modxDoctor(
-    @Param('id', ParseUUIDPipe) id: string,
-    @CurrentUser('sub') userId: string,
-    @CurrentUser('role') role: string,
-  ) {
-    const data = await this.sitesService.runModxDoctor(id, userId, role);
-    return { success: true, data };
+  modxDoctor() {
+    throw new GoneException(
+      'Use /sites/:siteId/domains/:domainId/modx/doctor',
+    );
   }
 
   /**
@@ -275,23 +272,17 @@ export class SitesController {
    */
   @Post(':id/cleanup-setup-dir')
   @Roles(UserRole.ADMIN)
-  async cleanupSetupDir(
-    @Param('id', ParseUUIDPipe) id: string,
-    @CurrentUser('sub') userId: string,
-    @CurrentUser('role') role: string,
-  ) {
-    const data = await this.sitesService.cleanupSetupDir(id, userId, role);
-    return { success: true, data };
+  cleanupSetupDir() {
+    throw new GoneException(
+      'Use /sites/:siteId/domains/:domainId/modx/cleanup-setup',
+    );
   }
 
   @Get(':id/metrics')
-  async getSiteMetrics(
-    @Param('id', ParseUUIDPipe) id: string,
-    @CurrentUser('sub') userId: string,
-    @CurrentUser('role') role: string,
-  ) {
-    const data = await this.sitesService.getSiteMetrics(id, userId, role);
-    return { success: true, data };
+  getSiteMetrics() {
+    throw new GoneException(
+      'Use /sites/:siteId/domains/:domainId/metrics',
+    );
   }
 
   /**
@@ -300,29 +291,17 @@ export class SitesController {
    * при каждой перегенерации (смена PHP, выпуск SSL, ручное сохранение).
    */
   @Get(':id/php-pool-config')
-  async getPhpPoolConfig(
-    @Param('id', ParseUUIDPipe) id: string,
-    @CurrentUser('sub') userId: string,
-    @CurrentUser('role') role: string,
-  ) {
-    const data = await this.sitesService.getPhpPoolConfig(id, userId, role);
-    return { success: true, data };
+  getPhpPoolConfig() {
+    throw new GoneException(
+      'Use /sites/:siteId/domains/:domainId/php-pool-config',
+    );
   }
 
   @Put(':id/php-pool-config')
-  async updatePhpPoolConfig(
-    @Param('id', ParseUUIDPipe) id: string,
-    @Body() body: UpdatePhpPoolConfigDto,
-    @CurrentUser('sub') userId: string,
-    @CurrentUser('role') role: string,
-  ) {
-    const data = await this.sitesService.updatePhpPoolConfig(
-      id,
-      userId,
-      role,
-      body?.custom ?? '',
+  updatePhpPoolConfig() {
+    throw new GoneException(
+      'Use /sites/:siteId/domains/:domainId/php-pool-config',
     );
-    return { success: true, data };
   }
 
   // Удаление сайта = userdel / rm -rf. Только ADMIN.
@@ -332,21 +311,16 @@ export class SitesController {
     @Param('id', ParseUUIDPipe) id: string,
     @CurrentUser('sub') userId: string,
     @CurrentUser('role') role: string,
-    // Опциональный body: DeleteSiteOptionsDto — все поля дефолт true (полное
-    // удаление). Отдельными флагами можно оставить SSL/бэкапы/файлы.
-    @Body() body: DeleteSiteOptionsDto = {},
+    @Body() body: DeleteSiteOptionsDto,
+    @Headers('idempotency-key') idempotencyKey?: string,
   ) {
-    await this.sitesService.delete(id, userId, role, {
-      removeSslCertificate: body.removeSslCertificate !== false,
-      removeBackupsLocal: body.removeBackupsLocal !== false,
-      removeBackupsRestic: body.removeBackupsRestic !== false,
-      removeBackupsRemote: body.removeBackupsRemote !== false,
-      removeDatabases: body.removeDatabases !== false,
-      removeFiles: body.removeFiles !== false,
-      removeSystemUser: body.removeSystemUser !== false,
-      removeNginxConfig: body.removeNginxConfig !== false,
-      removePhpPool: body.removePhpPool !== false,
-    });
-    return { success: true, data: null };
+    const data = await this.sitesService.delete(
+      id,
+      userId,
+      role,
+      body,
+      idempotencyKey,
+    );
+    return { success: true, data };
   }
 }

@@ -46,9 +46,9 @@
 
           <!-- Активный сервис: метрики + connection + actions -->
           <div v-if="item.active && detail[item.key]" class="ssvc__body">
-            <div v-if="detail[item.key].metrics.items.length" class="ssvc__metrics">
+            <div v-if="detail[item.key]?.metrics.items.length" class="ssvc__metrics">
               <div
-                v-for="m in detail[item.key].metrics.items"
+                v-for="m in detail[item.key]?.metrics.items || []"
                 :key="m.label"
                 class="ssvc__metric"
               >
@@ -60,7 +60,7 @@
             <div class="ssvc__connection">
               <div class="ssvc__connection-head">Connection info</div>
               <div
-                v-for="c in detail[item.key].connection.items"
+                v-for="c in detail[item.key]?.connection.items || []"
                 :key="c.label"
                 class="ssvc__conn-row"
               >
@@ -78,8 +78,8 @@
                   </svg>
                 </button>
               </div>
-              <p v-if="detail[item.key].connection.hint" class="ssvc__hint">
-                {{ detail[item.key].connection.hint }}
+              <p v-if="detail[item.key]?.connection.hint" class="ssvc__hint">
+                {{ detail[item.key]?.connection.hint }}
               </p>
             </div>
 
@@ -315,7 +315,7 @@ async function enableService(item: SvcItem) {
   try {
     const config: Record<string, unknown> = {};
     if (hasMemoryControl(item.key)) {
-      config.memoryMaxMb = memInputs[item.key] || MEM_DEFAULTS[item.key].def;
+      config.memoryMaxMb = memInputs[item.key] || MEM_DEFAULTS[item.key]?.def || 128;
     }
     await api.post(`/sites/${props.siteId}/services/${item.key}/enable`, { config });
     toast.success(`${item.catalog.name} активирован`);
@@ -376,7 +376,7 @@ async function reconfigure(item: SvcItem) {
   try {
     const config: Record<string, unknown> = {};
     if (hasMemoryControl(item.key)) {
-      config.memoryMaxMb = memInputs[item.key] || MEM_DEFAULTS[item.key].def;
+      config.memoryMaxMb = memInputs[item.key] || MEM_DEFAULTS[item.key]?.def || 128;
     }
     await api.patch(`/sites/${props.siteId}/services/${item.key}`, { config });
     toast.success('Настройки применены, демон перезапущен');

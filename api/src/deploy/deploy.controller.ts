@@ -33,17 +33,22 @@ export class DeployController {
   /**
    * Trigger a manual deploy.
    */
-  @Post('deploy/trigger')
+  @Post('sites/:siteId/domains/:domainId/deploy')
   @Throttle({ default: { limit: 5, ttl: 60000 } })
   async triggerDeploy(
     @Body() dto: TriggerDeployDto,
+    @Param('siteId', ParseUUIDPipe) siteId: string,
+    @Param('domainId', ParseUUIDPipe) domainId: string,
     @CurrentUser() user: JwtUser,
+    @Headers('idempotency-key') idempotencyKey?: string,
   ) {
     const { deployLog, site } = await this.deployService.triggerDeploy(
-      dto.siteId,
+      siteId,
+      domainId,
       user.id,
       user.role,
       dto.branch,
+      idempotencyKey,
     );
 
     return {
@@ -51,6 +56,7 @@ export class DeployController {
       data: {
         deployId: deployLog.id,
         siteId: site.id,
+        siteDomainId: domainId,
         branch: deployLog.branch,
         status: deployLog.status,
       },
@@ -60,13 +66,23 @@ export class DeployController {
   /**
    * Rollback to a specific deploy.
    */
-  @Post('deploys/:id/rollback')
+  @Post('sites/:siteId/domains/:domainId/deploys/:id/rollback')
   @Throttle({ default: { limit: 5, ttl: 60000 } })
   async rollbackDeploy(
+    @Param('siteId', ParseUUIDPipe) siteId: string,
+    @Param('domainId', ParseUUIDPipe) domainId: string,
     @Param('id', ParseUUIDPipe) id: string,
     @CurrentUser() user: JwtUser,
+    @Headers('idempotency-key') idempotencyKey?: string,
   ) {
-    const rollbackLog = await this.deployService.rollbackDeploy(id, user.id, user.role);
+    const rollbackLog = await this.deployService.rollbackDeploy(
+      siteId,
+      domainId,
+      id,
+      user.id,
+      user.role,
+      idempotencyKey,
+    );
     return {
       success: true,
       data: {
@@ -129,14 +145,14 @@ export class DeployController {
     };
 
     // Find site by domain
-    const site = await this.deployService.findSiteByDomain(domain);
-    if (!site) {
+    const app = await this.deployService.findSiteByDomain(domain);
+    if (!app) {
       return { success: false, message: 'Site not found' };
     }
 
     // Check branch matches
     const pushBranch = body.ref?.replace('refs/heads/', '') || '';
-    const deployBranch = site.deployBranch || 'main';
+    const deployBranch = app.deployBranch || 'main';
     if (pushBranch !== deployBranch) {
       return { success: true, message: `Branch ${pushBranch} ignored (watching ${deployBranch})` };
     }
@@ -144,8 +160,9 @@ export class DeployController {
     // Trigger deploy
     try {
       const { deployLog } = await this.deployService.triggerDeploy(
-        site.id,
-        site.userId,
+        app.site.id,
+        app.id,
+        app.site.userId,
         'ADMIN', // Webhook-triggered deploys run with admin privileges
         pushBranch,
       );
@@ -169,15 +186,17 @@ export class DeployController {
   /**
    * Get deploy logs for a site.
    */
-  @Get('sites/:siteId/deploys')
+  @Get('sites/:siteId/domains/:domainId/deploys')
   async listDeploys(
     @Param('siteId', ParseUUIDPipe) siteId: string,
+    @Param('domainId', ParseUUIDPipe) domainId: string,
     @Query('page') page?: string,
     @Query('perPage') perPage?: string,
     @CurrentUser() user?: JwtUser,
   ) {
     const logs = await this.deployService.findBySite({
       siteId,
+      domainId,
       userId: user!.id,
       role: user!.role,
       page: page ? parseInt(page, 10) : 1,
@@ -190,12 +209,20 @@ export class DeployController {
   /**
    * Get a single deploy log.
    */
-  @Get('deploys/:id')
+  @Get('sites/:siteId/domains/:domainId/deploys/:id')
   async getDeploy(
+    @Param('siteId', ParseUUIDPipe) siteId: string,
+    @Param('domainId', ParseUUIDPipe) domainId: string,
     @Param('id', ParseUUIDPipe) id: string,
     @CurrentUser() user?: JwtUser,
   ) {
-    const log = await this.deployService.findById(id, user!.id, user!.role);
+    const log = await this.deployService.findById(
+      siteId,
+      domainId,
+      id,
+      user!.id,
+      user!.role,
+    );
     return { success: true, data: log };
   }
 }

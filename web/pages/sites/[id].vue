@@ -19,18 +19,34 @@
 
         <div class="site-detail__header-main">
           <div class="site-detail__header-left">
-            <SiteTypeIcon :type="site.type" />
+            <SiteTypeIcon v-if="selectedDomain" :type="selectedDomain.preset" />
             <div>
               <h1 class="site-detail__title">{{ site.displayName || site.name }}</h1>
-              <p class="site-detail__domain">
-                <template v-if="siteDomains.length">
-                  <template v-for="(d, i) in siteDomains" :key="d.id">
-                    <a :href="domainHref(d, d.domain)" target="_blank" rel="noopener noreferrer" class="domain-link">{{ d.domain }}</a><span v-if="i < siteDomains.length - 1" class="site-detail__domain-sep">·</span>
-                  </template>
-                </template>
-                <a v-else :href="domainUrl(site.domain)" target="_blank" rel="noopener noreferrer" class="domain-link">{{ site.domain }}</a>
+              <div v-if="selectedDomain" class="site-detail__domain-context">
+                <select
+                  v-if="siteDomains.length > 1"
+                  class="site-detail__domain-select"
+                  :value="selectedDomain.id"
+                  aria-label="Выбранное приложение"
+                  @change="selectDomain(($event.target as HTMLSelectElement).value)"
+                >
+                  <option v-for="domain in siteDomains" :key="domain.id" :value="domain.id">
+                    {{ domain.domain }} · {{ typeLabels[domain.preset] || domain.preset }} · {{ appStatusLabel(domain.appStatus) }}
+                  </option>
+                </select>
+                <a
+                  v-else
+                  :href="domainHref(selectedDomain, selectedDomain.domain)"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  class="domain-link"
+                >{{ selectedDomain.domain }}</a>
+                <span
+                  class="site-detail__app-status"
+                  :class="`site-detail__app-status--${selectedDomain.appStatus.toLowerCase()}`"
+                >{{ appStatusLabel(selectedDomain.appStatus) }}</span>
                 <span v-if="site.displayName" class="site-detail__sysname">· {{ site.name }}</span>
-              </p>
+              </div>
             </div>
           </div>
           <div class="site-detail__header-right">
@@ -64,7 +80,7 @@
               </button>
               <button
                 class="site-detail__action-btn"
-                title="Дублировать сайт"
+                title="Дублировать выбранное приложение в новый сайт"
                 @click="openDuplicateDialog"
               >
                 <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
@@ -85,7 +101,7 @@
           <strong>Сайт перенесён с активным SSL</strong>
         </div>
         <p class="site-detail__hp-banner-text">
-          После того как привяжешь новый IP к домену <code>{{ site.domain }}</code>,
+          После того как привяжешь новый IP к домену <code>{{ primaryDomain?.domain }}</code>,
           проверь HTTPS и при необходимости нажми <strong>«Выпустить»</strong> на вкладке SSL,
           чтобы получить новый сертификат от Let's Encrypt.
         </p>
@@ -108,6 +124,23 @@
           <strong>Ошибка при создании/деплое сайта</strong>
         </div>
         <pre class="site-detail__error-banner-text">{{ site.errorMessage }}</pre>
+      </div>
+
+      <div
+        v-if="selectedDomain?.appStatus === 'ERROR'"
+        class="site-detail__error-banner"
+      >
+        <div class="site-detail__error-banner-head">
+          <strong>Ошибка приложения {{ selectedDomain.domain }}</strong>
+          <button
+            class="btn btn--sm btn--danger"
+            :disabled="retryingApplication"
+            @click="retrySelectedApplication"
+          >
+            {{ retryingApplication ? 'Запуск…' : 'Повторить' }}
+          </button>
+        </div>
+        <pre class="site-detail__error-banner-text">{{ selectedDomain.appErrorMessage || 'Причина не указана' }}</pre>
       </div>
 
       <!-- Tabs -->
@@ -140,29 +173,29 @@
               </div>
               <div class="info-row">
                 <span class="info-row__label">Корневой путь</span>
-                <span class="info-row__value info-row__value--mono">{{ site.rootPath }}</span>
+                <span class="info-row__value info-row__value--mono">{{ selectedApplicationRoot }}</span>
               </div>
               <div class="info-row">
                 <span class="info-row__label">Папка с веб файлами</span>
-                <span class="info-row__value info-row__value--mono">{{ site.filesRelPath || 'www' }}</span>
+                <span class="info-row__value info-row__value--mono">{{ selectedDomain?.filesRelPath || '—' }}</span>
                 <button class="info-row__btn" @click="openEditFilesRelPath" title="Изменить папку с веб файлами">
                   Изменить
                 </button>
               </div>
-              <div v-if="site.phpVersion" class="info-row">
+              <div v-if="selectedDomain?.phpVersion" class="info-row">
                 <span class="info-row__label">Версия PHP</span>
                 <select
                   class="info-row__select"
-                  :value="site.phpVersion"
+                  :value="selectedDomain.phpVersion"
                   :disabled="phpVersionChanging"
                   @change="changePhpVersion(($event.target as HTMLSelectElement).value)"
                 >
                   <option v-for="v in phpVersions" :key="v" :value="v">{{ v }}</option>
                 </select>
               </div>
-              <div v-if="site.appPort" class="info-row">
-                <span class="info-row__label">Порт</span>
-                <span class="info-row__value info-row__value--mono">:{{ site.appPort }}</span>
+              <div class="info-row">
+                <span class="info-row__label">Состояние приложения</span>
+                <span class="info-row__value">{{ appStatusLabel(selectedDomain?.appStatus) }}</span>
               </div>
             </div>
           </div>
@@ -196,38 +229,28 @@
             </div>
           </div>
 
-          <!-- 3. Домены и SSL — по одному блоку на каждый основной домен -->
+          <!-- 3. Выбранный домен и SSL -->
           <div class="info-card">
-            <h3 class="info-card__title">Домены и SSL</h3>
-            <div v-if="siteDomains.length" class="overview-domains">
-              <div
-                v-for="d in siteDomains"
-                :key="d.id"
-                class="overview-domain"
-              >
+            <h3 class="info-card__title">Домен и SSL</h3>
+            <div v-if="selectedDomain" class="overview-domains">
+              <div class="overview-domain">
                 <div class="overview-domain__head">
-                  <svg v-if="d.isPrimary" class="overview-domain__crown" width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><path d="M2 7l5 5 5-8 5 8 5-5v11a1 1 0 0 1-1 1H3a1 1 0 0 1-1-1z" /></svg>
-                  <a :href="domainHref(d, d.domain)" target="_blank" rel="noopener noreferrer" class="domain-link overview-domain__name">{{ d.domain }}</a>
+                  <svg v-if="selectedDomain.isPrimary" class="overview-domain__crown" width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><path d="M2 7l5 5 5-8 5 8 5-5v11a1 1 0 0 1-1 1H3a1 1 0 0 1-1-1z" /></svg>
+                  <a :href="domainHref(selectedDomain, selectedDomain.domain)" target="_blank" rel="noopener noreferrer" class="domain-link overview-domain__name">{{ selectedDomain.domain }}</a>
                   <span
                     class="ssl-pill"
-                    :class="`ssl-pill--${sslPillClass(d.sslCertificate?.status)}`"
-                  >{{ sslStatusLabel(d.sslCertificate?.status) }}</span>
+                    :class="`ssl-pill--${sslPillClass(selectedDomain.sslCertificate?.status)}`"
+                  >{{ sslStatusLabel(selectedDomain.sslCertificate?.status) }}</span>
                 </div>
-                <div v-if="d.aliases?.length" class="overview-domain__aliases">
+                <div v-if="selectedDomain.aliases?.length" class="overview-domain__aliases">
                   <span class="overview-domain__aliases-label">Алиасы:</span>
-                  <template v-for="(a, i) in d.aliases" :key="a.domain + i">
-                    <a :href="domainHref(d, a.domain)" target="_blank" rel="noopener noreferrer" class="domain-link">{{ a.domain }}</a><span v-if="a.redirect" class="info-row__aliases-arrow"> →</span><span v-if="i < d.aliases.length - 1">, </span>
+                  <template v-for="(a, i) in selectedDomain.aliases" :key="a.domain + i">
+                    <a :href="domainHref(selectedDomain, a.domain)" target="_blank" rel="noopener noreferrer" class="domain-link">{{ a.domain }}</a><span v-if="a.redirect" class="info-row__aliases-arrow"> →</span><span v-if="i < selectedDomain.aliases.length - 1">, </span>
                   </template>
                 </div>
-                <div v-if="d.sslCertificate?.expiresAt" class="overview-domain__ssl-meta">
-                  SSL истекает: {{ formatDate(d.sslCertificate.expiresAt) }}
+                <div v-if="selectedDomain.sslCertificate?.expiresAt" class="overview-domain__ssl-meta">
+                  SSL истекает: {{ formatDate(selectedDomain.sslCertificate.expiresAt) }}
                 </div>
-              </div>
-            </div>
-            <div v-else class="info-card__rows">
-              <div class="info-row">
-                <span class="info-row__label">Домен</span>
-                <a :href="domainUrl(site.domain)" target="_blank" rel="noopener noreferrer" class="info-row__value info-row__value--mono domain-link">{{ site.domain }}</a>
               </div>
             </div>
           </div>
@@ -238,22 +261,22 @@
             <div class="info-card__rows">
               <div class="info-row">
                 <span class="info-row__label">Базы данных</span>
-                <span class="info-row__value">{{ site.databases?.length || 0 }}</span>
+                <span class="info-row__value">{{ selectedDomainDatabases.length }}</span>
                 <!-- Если БД есть — даём кнопку «Adminer» прямо в строке. Для одной БД сразу
                      открываем её, для нескольких — мини-меню по клику. -->
                 <button
-                  v-if="site.databases?.length === 1"
+                  v-if="singleSelectedDatabase"
                   class="info-row__btn info-row__btn--text"
-                  :disabled="openingAdminer === site.databases[0].id"
-                  :title="`Открыть «${site.databases[0].name}» в Adminer`"
-                  @click="openAdminer(site.databases[0].id)"
+                  :disabled="openingAdminer === singleSelectedDatabase.id"
+                  :title="`Открыть «${singleSelectedDatabase.name}» в Adminer`"
+                  @click="openAdminer(singleSelectedDatabase.id)"
                 >
-                  <svg v-if="openingAdminer !== site.databases[0].id" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M3 5v14a9 3 0 0 0 18 0V5"/><path d="M3 12a9 3 0 0 0 18 0"/></svg>
+                  <svg v-if="openingAdminer !== singleSelectedDatabase.id" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M3 5v14a9 3 0 0 0 18 0V5"/><path d="M3 12a9 3 0 0 0 18 0"/></svg>
                   <span v-else class="spinner-small" />
                   Adminer
                 </button>
                 <button
-                  v-else-if="(site.databases?.length || 0) > 1"
+                  v-else-if="selectedDomainDatabases.length > 1"
                   class="info-row__btn info-row__btn--text"
                   title="Выбрать БД для Adminer"
                   @click="adminerPickerOpen = !adminerPickerOpen"
@@ -263,9 +286,9 @@
                 </button>
               </div>
               <!-- Picker для случая нескольких БД -->
-              <div v-if="adminerPickerOpen && (site.databases?.length || 0) > 1" class="adminer-picker">
+              <div v-if="adminerPickerOpen && selectedDomainDatabases.length > 1" class="adminer-picker">
                 <button
-                  v-for="db in site.databases"
+                  v-for="db in selectedDomainDatabases"
                   :key="db.id"
                   class="adminer-picker__item"
                   :disabled="openingAdminer === db.id"
@@ -274,6 +297,12 @@
                   <span class="adminer-picker__name">{{ db.name }}</span>
                   <span class="adminer-picker__meta">{{ db.type }}</span>
                 </button>
+              </div>
+              <div v-if="selectedApplication?.primaryDatabase" class="info-row">
+                <span class="info-row__label">Основная БД</span>
+                <span class="info-row__value info-row__value--mono">
+                  {{ selectedApplication.primaryDatabase.name }}
+                </span>
               </div>
               <div class="info-row">
                 <span class="info-row__label">Бэкапы</span>
@@ -332,10 +361,10 @@
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 7l9-4 9 4-9 4-9-4z"/><path d="M3 12l9 4 9-4"/><path d="M3 17l9 4 9-4"/></svg>
               <span>{{ cmsTitle }}</span>
             </h3>
-            <div v-if="site.cmsAdminUser" class="info-card__rows">
+            <div v-if="selectedDomain?.cmsAdminUser" class="info-card__rows">
               <div class="info-row">
                 <span class="info-row__label">URL админки</span>
-                <span class="info-row__value info-row__value--mono">{{ site.domain }}/{{ managerPathSafe }}/</span>
+                <span class="info-row__value info-row__value--mono">{{ selectedDomain.domain }}/{{ managerPathSafe }}/</span>
                 <button class="info-row__btn" :disabled="cmsAutoLoginBusy" @click="openCmsAdmin" :title="cmsAutoLoginBusy ? 'Логиню…' : 'Открыть (auto-login)'">
                   <svg v-if="!cmsAutoLoginBusy" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6" /><polyline points="15,3 21,3 21,9" /><line x1="10" y1="14" x2="21" y2="3" /></svg>
                   <span v-else class="spinner-small" />
@@ -343,14 +372,16 @@
               </div>
               <div class="info-row">
                 <span class="info-row__label">Логин</span>
-                <span class="info-row__value info-row__value--mono">{{ site.cmsAdminUser }}</span>
+                <span class="info-row__value info-row__value--mono">{{ selectedDomain.cmsAdminUser }}</span>
               </div>
               <div class="info-row">
                 <span class="info-row__label">Пароль</span>
                 <span v-if="cmsPassword" class="info-row__value info-row__value--mono">{{ cmsPasswordVisible ? cmsPassword : '••••••••••••' }}</span>
-                <span v-else class="info-row__value info-row__value--muted">Не загружен</span>
-                <button class="info-row__btn" @click="toggleCmsPassword">
-                  {{ cmsPassword ? (cmsPasswordVisible ? 'Скрыть' : 'Показать') : 'Загрузить' }}
+                <span v-else class="info-row__value info-row__value--muted">
+                  {{ selectedDomain.hasCmsAdminPassword ? 'Сохранён' : 'Не настроен' }}
+                </span>
+                <button v-if="cmsPassword" class="info-row__btn" @click="cmsPasswordVisible = !cmsPasswordVisible">
+                  {{ cmsPasswordVisible ? 'Скрыть' : 'Показать' }}
                 </button>
                 <button class="info-row__btn info-row__btn--text" title="Сменить пароль MODX-админа" @click="openCmsAdminPasswordModal">
                   <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4 12.5-12.5z"/></svg>
@@ -359,23 +390,23 @@
               </div>
               <div v-if="isModxSite" class="info-row">
                 <span class="info-row__label">Версия</span>
-                <span v-if="site.modxVersion" class="info-row__value info-row__value--mono">{{ site.modxVersion }}</span>
+                <span v-if="selectedDomain.modxVersion" class="info-row__value info-row__value--mono">{{ selectedDomain.modxVersion }}</span>
                 <span v-else class="info-row__value info-row__value--muted">Не установлена</span>
                 <button class="info-row__btn info-row__btn--text" @click="openModxUpdateModal" title="Апгрейд версии">
                   <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="23,4 23,10 17,10" /><path d="M20.49,15a9,9,0,1,1-2.12-9.36L23,10" /></svg>
                   Апгрейд
                 </button>
               </div>
-              <div v-if="isModxSite && site.cmsTablePrefix" class="info-row">
+              <div v-if="isModxSite && selectedDomain.cmsTablePrefix" class="info-row">
                 <span class="info-row__label">Префикс таблиц</span>
-                <span class="info-row__value info-row__value--mono">{{ site.cmsTablePrefix }}</span>
+                <span class="info-row__value info-row__value--mono">{{ selectedDomain.cmsTablePrefix }}</span>
                 <span class="info-row__value info-row__value--muted" title="Изменить нельзя — таблицы уже созданы с этим префиксом">read-only</span>
               </div>
             </div>
             <div v-else-if="isModxSite" class="info-card__rows">
               <div class="info-row">
                 <span class="info-row__label">Версия</span>
-                <span v-if="site.modxVersion" class="info-row__value info-row__value--mono">{{ site.modxVersion }}</span>
+                <span v-if="selectedDomain?.modxVersion" class="info-row__value info-row__value--mono">{{ selectedDomain.modxVersion }}</span>
                 <span v-else class="info-row__value info-row__value--muted">Не установлена</span>
                 <button class="info-row__btn info-row__btn--text" @click="openModxUpdateModal" title="Апгрейд версии">
                   <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="23,4 23,10 17,10" /><path d="M20.49,15a9,9,0,1,1-2.12-9.36L23,10" /></svg>
@@ -405,7 +436,12 @@
         </div>
 
         <!-- Быстрый доступ — one-shot команды (build/deploy/lint) -->
-        <SiteQuickAccess :site-id="siteId" />
+        <SiteQuickAccess
+          v-if="isCustomDomain && selectedDomainId"
+          :key="selectedDomainId"
+          :site-id="siteId"
+          :domain-id="selectedDomainId"
+        />
 
         <!-- 6. Состояние и мониторинг — широкий блок на всю ширину с графиками -->
         <section class="overview-block overview-block--monitor">
@@ -638,7 +674,7 @@
                     <label class="domain-modal__label">Сейчас</label>
                     <div class="domain-modal__chip domain-modal__chip--current">
                       <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="10" /></svg>
-                      <code>{{ site?.filesRelPath || 'www' }}</code>
+                      <code>{{ selectedDomain?.filesRelPath || '—' }}</code>
                     </div>
                   </div>
                   <div class="domain-modal__arrow">
@@ -674,14 +710,14 @@
                       <code>{{ site?.rootPath }}/{{ editFilesRelPathValue.trim() || 'www' }}</code>.
                       Конфиг будет проверен <code>nginx -t</code> и перезагружен.
                     </li>
-                    <li v-if="site?.phpVersion">
-                      PHP-FPM пул сайта будет пересобран — на случай если в кастомном
+                    <li v-if="selectedDomain?.phpVersion">
+                      PHP-FPM пул домена будет пересобран — на случай если в кастомном
                       php-конфиге (<code>php-fpm pool</code>) есть пути с прежней папкой.
                     </li>
                     <li class="domain-modal__impact-danger">
                       <b>Папка на диске НЕ переедет автоматически.</b> Перенеси содержимое сам:
                       <pre class="domain-modal__cmd">sudo -u {{ site?.systemUser }} mkdir -p {{ site?.rootPath }}/{{ editFilesRelPathValue.trim() || 'www' }}
-sudo mv {{ site?.rootPath }}/{{ site?.filesRelPath || 'www' }}/* {{ site?.rootPath }}/{{ editFilesRelPathValue.trim() || 'www' }}/</pre>
+sudo mv {{ selectedApplicationRoot }}/* {{ site?.rootPath }}/{{ editFilesRelPathValue.trim() || 'www' }}/</pre>
                       После — проверь права на промежуточные папки (<code>chmod 750</code>),
                       чтобы nginx прошёл по дереву.
                     </li>
@@ -698,7 +734,7 @@ sudo mv {{ site?.rootPath }}/{{ site?.filesRelPath || 'www' }}/* {{ site?.rootPa
                 </button>
                 <button
                   class="btn btn--danger"
-                  :disabled="savingFilesRelPath || !editFilesRelPathValue.trim() || editFilesRelPathValue.trim() === (site?.filesRelPath || 'www')"
+                  :disabled="savingFilesRelPath || !editFilesRelPathValue.trim() || editFilesRelPathValue.trim() === selectedDomain?.filesRelPath"
                   @click="saveFilesRelPath"
                 >
                   <svg v-if="!savingFilesRelPath" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><polyline points="20 6 9 17 4 12" /></svg>
@@ -837,8 +873,11 @@ sudo mv {{ site?.rootPath }}/{{ site?.filesRelPath || 'www' }}/* {{ site?.rootPa
       <!-- Tab content: Databases -->
       <div v-if="activeTab === 'databases'" class="tab-content">
         <SiteDatabasesTab
+          v-if="selectedDomainId"
+          :key="selectedDomainId"
           :site-id="siteId"
-          :site-name="site.name"
+          :domain-id="selectedDomainId"
+          :site-name="selectedDomain?.runtimeKey || site.name"
           :active="activeTab === 'databases'"
           @changed="reloadSiteAfterDbChange"
         />
@@ -847,9 +886,11 @@ sudo mv {{ site?.rootPath }}/{{ site?.filesRelPath || 'www' }}/* {{ site?.rootPa
       <!-- Tab content: SSL -->
       <div v-if="activeTab === 'ssl'" class="tab-content">
         <SiteSslTab
+          v-if="selectedDomain"
+          :key="selectedDomain.id"
           :site-id="siteId"
-          :domains="siteDomains"
-          :initial-domain-id="sslActiveDomainId"
+          :domains="[selectedDomain]"
+          :initial-domain-id="selectedDomain.id"
           @changed="reloadSiteAfterDomainChange"
         />
       </div>
@@ -863,8 +904,9 @@ sudo mv {{ site?.rootPath }}/{{ site?.filesRelPath || 'www' }}/* {{ site?.rootPa
       <div v-if="activeTab === 'domains'" class="tab-content">
         <SiteDomainsTab
           :site-id="siteId"
+          :site-name="site?.name || ''"
           :domains="siteDomains"
-          :site-default-rel-path="site?.filesRelPath || 'www'"
+          :default-files-rel-path="primaryDomain?.filesRelPath || 'www'"
           :site-root-path="site?.rootPath || null"
           @changed="reloadSiteAfterDomainChange"
           @navigate-ssl="navigateToDomainSsl"
@@ -1751,10 +1793,11 @@ sudo mv {{ site?.rootPath }}/{{ site?.filesRelPath || 'www' }}/* {{ site?.rootPa
       <Teleport to="body">
         <div v-if="duplicateDialog.open" class="modal-overlay" @mousedown.self="duplicateDialog.open = false">
           <div class="modal">
-            <h2 class="modal__title">Дублировать сайт</h2>
+            <h2 class="modal__title">Дублировать приложение</h2>
             <p class="modal__text">
-              Создаётся новый сайт с отдельным Linux-юзером, БД, nginx/PHP-FPM конфигами.
-              Файлы <code>{{ site.filesRelPath || 'www' }}/</code> копируются через rsync;
+              Копируется приложение <strong>{{ selectedDomain?.domain }}</strong> в новый сайт
+              с отдельным Linux-юзером, БД, nginx/PHP-FPM конфигами.
+              Файлы <code>{{ selectedDomain?.filesRelPath || '—' }}/</code> копируются через rsync;
               БД (если есть) дампится и восстанавливается. SSL и алиасы не копируются.
             </p>
             <div class="form-row">
@@ -1783,16 +1826,6 @@ sudo mv {{ site?.rootPath }}/{{ site?.filesRelPath || 'www' }}/* {{ site?.rootPa
                 class="form-input"
                 :disabled="duplicateDialog.submitting"
               />
-            </div>
-            <div class="restore-options" style="margin-top:0.5rem;">
-              <label class="restore-option">
-                <input v-model="duplicateDialog.copyBackupConfigs" type="checkbox" :disabled="duplicateDialog.submitting" />
-                <span class="restore-option__label">Копировать настройки бэкапов</span>
-              </label>
-              <label class="restore-option">
-                <input v-model="duplicateDialog.copyCronJobs" type="checkbox" :disabled="duplicateDialog.submitting" />
-                <span class="restore-option__label">Копировать cron-задачи</span>
-              </label>
             </div>
             <div v-if="duplicateDialog.error" class="modal__text" style="color:#f87171;white-space:pre-wrap;margin-top:0.5rem;">
               {{ duplicateDialog.error }}
@@ -1828,25 +1861,12 @@ sudo mv {{ site?.rootPath }}/{{ site?.filesRelPath || 'www' }}/* {{ site?.rootPa
 
       <!-- Tab content: Nginx -->
       <div v-if="activeTab === 'nginx'" class="tab-content">
-        <!-- Per-domain subtab bar (главный — первым) -->
-        <div v-if="siteDomains.length" class="domain-subtab-bar">
-          <button
-            v-for="d in siteDomains"
-            :key="d.id"
-            class="domain-subtab"
-            :class="{ 'domain-subtab--active': nginxCurrentDomainId === d.id }"
-            @click="nginxActiveDomainId = d.id"
-          >
-            <svg v-if="d.isPrimary" class="domain-subtab__crown" width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><path d="M2 7l5 5 5-8 5 8 5-5v11a1 1 0 0 1-1 1H3a1 1 0 0 1-1-1z" /></svg>
-            <span>{{ d.domain }}</span>
-          </button>
-        </div>
         <SiteNginxTab
-          v-if="nginxCurrentDomainId"
-          :key="nginxCurrentDomainId"
+          v-if="selectedDomainId"
+          :key="selectedDomainId"
           :site-id="siteId"
           :site-name="site.name"
-          :domain-id="nginxCurrentDomainId"
+          :domain-id="selectedDomainId"
         />
         <div v-else class="domain-subtab-empty">У сайта нет основных доменов.</div>
       </div>
@@ -1856,7 +1876,7 @@ sudo mv {{ site?.rootPath }}/{{ site?.filesRelPath || 'www' }}/* {{ site?.rootPa
         <div class="config-view">
           <div class="config-view__header">
             <span class="config-view__path">
-              /etc/php/{{ site.phpVersion }}/fpm/pool.d/{{ site.name }}.conf
+              /etc/php/{{ selectedDomain?.phpVersion }}/fpm/pool.d/{{ selectedDomain?.runtimeKey }}.conf
             </span>
             <div class="config-view__actions">
               <button
@@ -1945,13 +1965,13 @@ php_value[max_execution_time] = 300"
             <div class="deploy-trigger__info">
               <h3 class="deploy-trigger__title">Деплой из Git</h3>
               <p class="deploy-trigger__desc">
-                Получить последние изменения из <span class="deploy-trigger__mono">{{ site.gitRepository || 'нет репозитория' }}</span>
-                ветка <span class="deploy-trigger__mono">{{ site.deployBranch || 'main' }}</span>
+                Получить последние изменения из <span class="deploy-trigger__mono">{{ selectedDomain?.gitRepository || 'нет репозитория' }}</span>
+                ветка <span class="deploy-trigger__mono">{{ selectedDomain?.deployBranch || 'main' }}</span>
               </p>
             </div>
             <button
               class="deploy-trigger__btn"
-              :disabled="!site.gitRepository || deploying"
+              :disabled="!selectedDomain?.gitRepository || deploying"
               @click="triggerDeploy"
             >
               <svg v-if="!deploying" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
@@ -2020,7 +2040,13 @@ php_value[max_execution_time] = 300"
 
       <!-- Tab content: Node.js -->
       <div v-if="activeTab === 'node'" class="tab-content">
-        <SiteNodeTab :site-id="siteId" :active="activeTab === 'node'" />
+        <SiteNodeTab
+          v-if="selectedDomainId"
+          :key="selectedDomainId"
+          :site-id="siteId"
+          :domain-id="selectedDomainId"
+          :active="activeTab === 'node'"
+        />
       </div>
 
       <!-- Tab content: Danger Zone -->
@@ -2191,7 +2217,7 @@ php_value[max_execution_time] = 300"
           <h3 class="modal__title">Сменить пароль MODX-админа</h3>
           <p class="modal__text">
             Пароль будет обновлён через bootstrap MODX (<code>$user-&gt;changePassword(...)</code>) для логина
-            <strong class="info-row__value--mono">{{ site?.cmsAdminUser }}</strong>. Старый пароль не нужен — мы пишем напрямую в БД сайта.
+            <strong class="info-row__value--mono">{{ selectedDomain?.cmsAdminUser }}</strong>. Старый пароль не нужен — мы пишем напрямую в БД приложения.
           </p>
           <div class="form-group" style="margin-bottom: 0.75rem;">
             <label class="form-label">Новый пароль (мин. 8 символов)</label>
@@ -2239,10 +2265,10 @@ php_value[max_execution_time] = 300"
         <div class="modal">
           <h3 class="modal__title">Апгрейд MODX</h3>
           <p class="modal__text">
-            Текущая версия: <strong class="info-row__value--mono">{{ site?.modxVersion || '— (неизвестна)' }}</strong>
+            Текущая версия: <strong class="info-row__value--mono">{{ selectedDomain?.modxVersion || '— (неизвестна)' }}</strong>
           </p>
           <p class="modal__text modal__text--hint">
-            <span v-if="site?.type === 'MODX_3'">MODX 3 будет обновлён через <code>composer require modx/revolution</code>, затем запустится <code>setup/index.php --installmode=upgrade</code>. Выбор той же версии перезапишет файлы ядра.</span>
+            <span v-if="selectedDomain?.preset === 'MODX_3'">MODX 3 будет обновлён через <code>composer require modx/revolution</code>, затем запустится <code>setup/index.php --installmode=upgrade</code>. Выбор той же версии перезапишет файлы ядра.</span>
             <span v-else>MODX Revo: скачается ZIP указанной версии, файлы накатятся поверх (<code>config.inc.php</code> сохранится), затем запустится setup в режиме upgrade. Выбор той же версии перезапишет файлы ядра.</span>
           </p>
           <div class="form-group" style="margin-bottom: 0.75rem;">
@@ -2429,7 +2455,7 @@ php_value[max_execution_time] = 300"
               </div>
               <div class="doctor-meta__row">
                 <span class="doctor-meta__label">Версия MODX</span>
-                <span class="doctor-meta__value info-row__value--mono">{{ doctorResult.modxVersion || (site?.modxVersion || '—') }}</span>
+                <span class="doctor-meta__value info-row__value--mono">{{ doctorResult.modxVersion || (selectedDomain?.modxVersion || '—') }}</span>
               </div>
               <div class="doctor-meta__row">
                 <span class="doctor-meta__label">config.inc.php</span>
@@ -2520,8 +2546,21 @@ interface SiteDomainDetail {
   isPrimary: boolean;
   position: number;
   aliases: SiteAlias[];
-  filesRelPath: string | null;
-  appPort: number | null;
+  preset: 'MODX_REVO' | 'MODX_3' | 'CUSTOM';
+  appStatus: 'PROVISIONING' | 'RUNNING' | 'DEPLOYING' | 'UPDATING' | 'ERROR';
+  appErrorMessage: string | null;
+  filesRelPath: string;
+  phpVersion: string | null;
+  runtimeKey: string;
+  gitRepository: string | null;
+  deployBranch: string | null;
+  envVars: Record<string, string>;
+  cmsAdminUser: string | null;
+  hasCmsAdminPassword: boolean;
+  managerPath: string | null;
+  connectorsPath: string | null;
+  cmsTablePrefix: string | null;
+  modxVersion: string | null;
   httpsRedirect: boolean;
   sslCertificate: SiteSslCert | null;
   createdAt: string;
@@ -2532,43 +2571,24 @@ interface SiteDetail {
   id: string;
   name: string;
   displayName?: string | null;
-  domain: string;
-  // API после маппинга отдаёт массив объектов. Для старых ответов (если сервер
-  // ещё не задеплоен) поддерживаем и строковый формат.
-  aliases: Array<SiteAlias | string>;
   /** Все основные домены сайта (главный — первым, isPrimary=true). */
   domains?: SiteDomainDetail[];
-  type: string;
   status: string;
-  phpVersion: string | null;
-  appPort: number | null;
   rootPath: string;
-  filesRelPath?: string | null;
   nginxConfigPath: string;
   systemUser: string | null;
-  cmsAdminUser?: string | null;
-  cmsTablePrefix?: string | null;
-  managerPath?: string | null;
-  modxVersion?: string | null;
-  gitRepository: string | null;
-  deployBranch: string | null;
-  envVars: Record<string, string>;
   errorMessage?: string | null;
   /**
    * JSON-строка с произвольной мета-инфой о сайте. Миграции пишут сюда
    * `requiresSslReissue: true` — UI показывает баннер «после переключения DNS
    * перевыпусти SSL».
    */
-  metadata?: string | null;
+  metadata?: string | Record<string, unknown> | null;
   createdAt: string;
-  sslCertificate: {
-    status: string;
-    expiresAt: string | null;
-    /** SAN-домены, реально покрытые сертификатом. Массив после mapSsl на бэке. */
-    domains?: string[];
-  } | null;
   databases: Array<{
     id: string;
+    siteDomainId: string;
+    purpose: 'APP_PRIMARY' | 'AUXILIARY';
     name: string;
     type: string;
     sizeBytes: number;
@@ -2578,6 +2598,32 @@ interface SiteDetail {
     backups: number;
     cronJobs: number;
   };
+}
+
+interface DomainApplicationDetail {
+  id: string;
+  domain: string;
+  preset: SiteDomainDetail['preset'];
+  appStatus: SiteDomainDetail['appStatus'];
+  appErrorMessage: string | null;
+  filesRelPath: string;
+  phpVersion: string | null;
+  runtimeKey: string;
+  gitRepository: string | null;
+  deployBranch: string | null;
+  cmsAdminUser: string | null;
+  hasCmsAdminPassword: boolean;
+  managerPath: string | null;
+  connectorsPath: string | null;
+  cmsTablePrefix: string | null;
+  modxVersion: string | null;
+  canonicalUrl: string;
+  primaryDatabase: {
+    id: string;
+    name: string;
+    type: string;
+    purpose: 'APP_PRIMARY';
+  } | null;
 }
 
 const route = useRoute();
@@ -2600,7 +2646,10 @@ const sslReissueMigrationBanner = computed(() => {
   if (!site.value?.metadata) return false;
   if (sslReissueBannerDismissed.value) return false;
   try {
-    const meta = JSON.parse(site.value.metadata) as Record<string, unknown>;
+    const meta =
+      typeof site.value.metadata === 'string'
+        ? (JSON.parse(site.value.metadata) as Record<string, unknown>)
+        : site.value.metadata;
     if (meta.requiresSslReissue !== true) return false;
     return true;
   } catch {
@@ -2626,6 +2675,7 @@ function dismissSslReissueBanner() {
 async function reloadSiteAfterDbChange() {
   try {
     site.value = await api.get<SiteDetail>(`/sites/${siteId}`);
+    await loadSelectedApplication();
   } catch {
     /* свежих данных нет — пользователь увидит счётчик после следующей загрузки */
   }
@@ -2686,12 +2736,19 @@ const MODX_VERSIONS_FALLBACK_3: Array<{ value: string; label: string }> = [
   { value: '3.1.2-pl', label: 'MODX 3.1.2 (latest)' },
 ];
 
-const isModxSite = computed(() => site.value?.type === 'MODX_REVO' || site.value?.type === 'MODX_3');
+const isModxSite = computed(
+  () =>
+    selectedDomain.value?.preset === 'MODX_REVO' ||
+    selectedDomain.value?.preset === 'MODX_3',
+);
+const isCustomDomain = computed(() => selectedDomain.value?.preset === 'CUSTOM');
 const modxRevoVersions = ref<Array<{ value: string; label: string }>>([...MODX_VERSIONS_FALLBACK_REVO]);
 const modx3Versions = ref<Array<{ value: string; label: string }>>([...MODX_VERSIONS_FALLBACK_3]);
 const modxVersionsLoading = ref(false);
 const modxAvailableVersions = computed(() => {
-  return site.value?.type === 'MODX_3' ? modx3Versions.value : modxRevoVersions.value;
+  return selectedDomain.value?.preset === 'MODX_3'
+    ? modx3Versions.value
+    : modxRevoVersions.value;
 });
 
 async function loadModxVersions(forceRefresh = false) {
@@ -2729,28 +2786,100 @@ const primaryDomain = computed<SiteDomainDetail | null>(
   () => siteDomains.value.find((d) => d.isPrimary) || siteDomains.value[0] || null,
 );
 
-// Subtab-навигация: какой домен открыт во вкладках SSL / Nginx.
-// `*ActiveDomainId` — явный выбор оператора; `*CurrentDomainId` — резолвит
-// его к валидному домену (фолбэк на главный, если выбор пуст/устарел).
-const sslActiveDomainId = ref<string | null>(null);
-const nginxActiveDomainId = ref<string | null>(null);
-
-const nginxCurrentDomainId = computed<string | null>(() => {
-  const list = siteDomains.value;
-  if (!list.length) return null;
-  if (nginxActiveDomainId.value && list.some((d) => d.id === nginxActiveDomainId.value)) {
-    return nginxActiveDomainId.value;
-  }
-  return (list.find((d) => d.isPrimary) || list[0]).id;
+const requestedDomainId = computed(() => {
+  const value = route.query.domain;
+  return typeof value === 'string' ? value : null;
 });
+const selectedDomain = computed<SiteDomainDetail | null>(() => {
+  const requested = requestedDomainId.value;
+  return (
+    siteDomains.value.find((domain) => domain.id === requested) ||
+    primaryDomain.value
+  );
+});
+const selectedDomainId = computed(() => selectedDomain.value?.id || '');
+const selectedDomainApi = computed(
+  () => `/sites/${siteId}/domains/${selectedDomainId.value}`,
+);
+const selectedApplication = ref<DomainApplicationDetail | null>(null);
+const selectedDomainDatabases = computed(
+  () =>
+    site.value?.databases?.filter(
+      (database) => database.siteDomainId === selectedDomainId.value,
+    ) || [],
+);
+const singleSelectedDatabase = computed(() =>
+  selectedDomainDatabases.value.length === 1
+    ? selectedDomainDatabases.value[0] || null
+    : null,
+);
+
+async function selectDomain(domainId: string): Promise<void> {
+  if (!siteDomains.value.some((domain) => domain.id === domainId)) return;
+  await router.replace({
+    query: {
+      ...route.query,
+      domain: domainId,
+    },
+  });
+}
+
+async function loadSelectedApplication(): Promise<void> {
+  const domainId = selectedDomainId.value;
+  if (!domainId) {
+    selectedApplication.value = null;
+    return;
+  }
+  try {
+    const application = await api.get<DomainApplicationDetail>(
+      `${selectedDomainApi.value}/application`,
+    );
+    if (selectedDomainId.value !== domainId) return;
+    selectedApplication.value = application;
+    const domain = selectedDomain.value;
+    if (domain && domain.id === application.id) {
+      Object.assign(domain, {
+        appStatus: application.appStatus,
+        appErrorMessage: application.appErrorMessage,
+        filesRelPath: application.filesRelPath,
+        phpVersion: application.phpVersion,
+        runtimeKey: application.runtimeKey,
+        gitRepository: application.gitRepository,
+        deployBranch: application.deployBranch,
+        cmsAdminUser: application.cmsAdminUser,
+        hasCmsAdminPassword: application.hasCmsAdminPassword,
+        managerPath: application.managerPath,
+        connectorsPath: application.connectorsPath,
+        cmsTablePrefix: application.cmsTablePrefix,
+        modxVersion: application.modxVersion,
+      });
+    }
+  } catch {
+    selectedApplication.value = null;
+  }
+}
+
+watch(
+  [siteDomains, requestedDomainId],
+  ([domains, requested]) => {
+    if (!domains.length) return;
+    const fallback =
+      domains.find((domain) => domain.id === requested) ||
+      domains.find((domain) => domain.isPrimary) ||
+      domains[0];
+    if (!fallback) return;
+    if (requested !== fallback.id) void selectDomain(fallback.id);
+  },
+  { immediate: true },
+);
 
 /** Перейти на вкладку SSL/Nginx конкретного домена (из вкладки «Домены»). */
 function navigateToDomainSsl(domainId: string) {
-  sslActiveDomainId.value = domainId;
+  void selectDomain(domainId);
   activeTab.value = 'ssl';
 }
 function navigateToDomainNginx(domainId: string) {
-  nginxActiveDomainId.value = domainId;
+  void selectDomain(domainId);
   activeTab.value = 'nginx';
 }
 
@@ -2758,8 +2887,25 @@ function navigateToDomainNginx(domainId: string) {
 async function reloadSiteAfterDomainChange() {
   try {
     site.value = await api.get<SiteDetail>(`/sites/${siteId}`);
+    await loadSelectedApplication();
   } catch {
     /* best-effort — оператор увидит свежие данные при следующей загрузке */
+  }
+}
+
+const retryingApplication = ref(false);
+async function retrySelectedApplication() {
+  if (!selectedDomain.value || retryingApplication.value) return;
+  retryingApplication.value = true;
+  try {
+    await api.post(`${selectedDomainApi.value}/application/retry`, {});
+    selectedDomain.value.appStatus = 'PROVISIONING';
+    selectedDomain.value.appErrorMessage = null;
+    useMbToast().success('Повторное создание приложения запущено');
+  } catch (error) {
+    useMbToast().error((error as Error).message || 'Не удалось повторить операцию');
+  } finally {
+    retryingApplication.value = false;
   }
 }
 
@@ -2805,24 +2951,6 @@ const editFilesRelPathValue = ref('');
 const editFilesRelPathError = ref('');
 const savingFilesRelPath = ref(false);
 
-/** Set доменов, покрытых legacy-сертификатом главного домена (lowercase). */
-const certDomainsLower = computed(() => {
-  const arr = site.value?.sslCertificate?.domains || [];
-  return new Set(arr.map((d) => d.toLowerCase()));
-});
-
-/**
- * URL главного домена сайта для legacy-фолбэка (когда `site.domains` ещё не
- * пришёл со старого сервера). https — только если домен покрыт активным
- * (не expired) сертом, иначе http (иначе браузер кинет cert-mismatch).
- */
-function domainUrl(domain: string): string {
-  const s = site.value?.sslCertificate?.status;
-  const valid = s === 'ACTIVE' || s === 'EXPIRING_SOON';
-  const covered = certDomainsLower.value.has(domain.toLowerCase());
-  return `${valid && covered ? 'https' : 'http'}://${domain}`;
-}
-
 // Deploy state
 const deploying = ref(false);
 const deployLogs = ref<Array<{
@@ -2851,14 +2979,27 @@ const typeLabels: Record<string, string> = {
   MODX_REVO: 'MODX Revolution',
   MODX_3: 'MODX 3',
   CUSTOM: 'Пустой',
-  // Legacy (не отображается в фильтрах, но встречается у старых записей):
-  NUXT_3: 'Nuxt 3',
-  REACT: 'React',
-  NESTJS: 'NestJS',
-  STATIC_HTML: 'Статика',
 };
 
-const typeLabel = computed(() => typeLabels[site.value?.type || ''] || site.value?.type || '');
+const typeLabel = computed(() => {
+  const preset = selectedDomain.value?.preset || '';
+  return typeLabels[preset] || preset;
+});
+const selectedApplicationRoot = computed(() => {
+  if (!site.value || !selectedDomain.value) return '—';
+  return `${site.value.rootPath}/${selectedDomain.value.filesRelPath}`;
+});
+
+function appStatusLabel(status?: SiteDomainDetail['appStatus']): string {
+  const labels: Record<SiteDomainDetail['appStatus'], string> = {
+    PROVISIONING: 'Создаётся',
+    RUNNING: 'Работает',
+    DEPLOYING: 'Деплой',
+    UPDATING: 'Обновляется',
+    ERROR: 'Ошибка',
+  };
+  return status ? labels[status] : 'Нет данных';
+}
 
 const tabs = computed(() => [
   { id: 'overview', label: 'Обзор' },
@@ -2866,27 +3007,31 @@ const tabs = computed(() => [
   { id: 'dns', label: 'DNS' },
   { id: 'ssl', label: 'SSL' },
   { id: 'nginx', label: 'Nginx' },
-  { id: 'php', label: 'PHP', hidden: !site.value?.phpVersion },
-  { id: 'databases', label: 'Базы данных', count: site.value?.databases?.length || 0 },
+  { id: 'php', label: 'PHP', hidden: !selectedDomain.value?.phpVersion },
+  { id: 'databases', label: 'Базы данных', count: selectedDomainDatabases.value.length },
   { id: 'files', label: 'Файлы' },
+  { id: 'env', label: 'ENV', hidden: !isCustomDomain.value },
+  { id: 'deploy', label: 'Деплой', hidden: !isCustomDomain.value },
   { id: 'backups', label: 'Бэкапы', count: site.value?._count?.backups || 0 },
   { id: 'cron', label: 'Крон', count: site.value?._count?.cronJobs || 0 },
   { id: 'services', label: 'Сервисы' },
-  { id: 'node', label: 'Node.js' },
+  { id: 'node', label: 'Node.js', hidden: !isCustomDomain.value },
   { id: 'logs', label: 'Логи' },
   { id: 'danger', label: 'Опасная зона', farRight: true },
 ].filter((t: { hidden?: boolean }) => !t.hidden));
 
 const envEntries = computed(() => {
-  if (!site.value?.envVars) return [];
-  return Object.entries(site.value.envVars);
+  if (!selectedDomain.value?.envVars) return [];
+  return Object.entries(selectedDomain.value.envVars);
 });
 const envShowValues = ref(false);
 const envNewKey = ref('');
 const envNewVal = ref('');
 const envSaving = ref(false);
 const envOriginal = ref('');
-const envDirty = computed(() => JSON.stringify(site.value?.envVars || {}) !== envOriginal.value);
+const envDirty = computed(
+  () => JSON.stringify(selectedDomain.value?.envVars || {}) !== envOriginal.value,
+);
 
 const sshHost = computed(() => {
   if (typeof window !== 'undefined') {
@@ -2946,6 +3091,13 @@ async function submitSshPasswordChange() {
   }
 }
 
+function domainMutationKey(action: string): string {
+  const suffix =
+    globalThis.crypto?.randomUUID?.() ||
+    `${Date.now()}-${Math.random().toString(36).slice(2, 12)}`;
+  return `domain-${action}:${suffix}`;
+}
+
 // ─── MODX admin password change ───
 function openCmsAdminPasswordModal() {
   cmsAdminPasswordInput.value = '';
@@ -2963,6 +3115,7 @@ function closeCmsAdminPasswordModal() {
 }
 
 async function submitCmsAdminPasswordChange() {
+  if (!selectedDomain.value) return;
   cmsAdminPasswordError.value = '';
   const pwd = cmsAdminPasswordInput.value.trim();
   if (pwd) {
@@ -2981,13 +3134,22 @@ async function submitCmsAdminPasswordChange() {
   }
   cmsAdminPasswordSaving.value = true;
   try {
-    const res = await api.post<{ password: string }>(`/sites/${siteId}/cms-admin-password`, {
-      password: pwd || undefined,
-    });
+    const res = await api.post<{ password: string }>(
+      `${selectedDomainApi.value}/modx/admin-password`,
+      {
+        password: pwd || undefined,
+      },
+      {
+        headers: {
+          'Idempotency-Key': domainMutationKey('modx-password'),
+        },
+      },
+    );
     cmsAdminPasswordNewValue.value = res?.password || '';
     // Обновляем видимый пароль в info-card.
     cmsPassword.value = res?.password || null;
     cmsPasswordVisible.value = true;
+    selectedDomain.value.hasCmsAdminPassword = true;
   } catch (e) {
     cmsAdminPasswordError.value = (e as Error)?.message || 'Не удалось сменить пароль';
   } finally {
@@ -3015,17 +3177,17 @@ function closeModxUpdateModal() {
 }
 
 async function submitModxUpdate() {
-  if (!modxTargetVersion.value || !site.value) return;
+  if (!modxTargetVersion.value || !selectedDomain.value) return;
   modxUpdateError.value = '';
   modxUpdateSuccess.value = '';
   modxUpdating.value = true;
   try {
     const res = await api.post<{ version: string; previousVersion: string | null }>(
-      `/sites/${siteId}/update-modx`,
+      `${selectedDomainApi.value}/modx/update`,
       { targetVersion: modxTargetVersion.value },
     );
     modxUpdateSuccess.value = res?.version || modxTargetVersion.value;
-    if (site.value) site.value.modxVersion = res?.version || modxTargetVersion.value;
+    selectedDomain.value.modxVersion = res?.version || modxTargetVersion.value;
   } catch (e) {
     modxUpdateError.value = (e as Error)?.message || 'Не удалось обновить MODX';
   } finally {
@@ -3038,12 +3200,15 @@ const openingAdminer = ref<string | null>(null);
 const adminerPickerOpen = ref(false);
 
 async function openAdminer(dbId: string) {
-  if (openingAdminer.value) return;
+  if (openingAdminer.value || !selectedDomain.value) return;
   openingAdminer.value = dbId;
   // Open blank tab synchronously, чтобы popup-blocker не зарезал.
   const win = window.open('about:blank', '_blank');
   try {
-    const data = await api.post<{ url: string }>(`/databases/${dbId}/adminer-ticket`, {});
+    const data = await api.post<{ url: string }>(
+      `${selectedDomainApi.value}/databases/${dbId}/adminer-ticket`,
+      {},
+    );
     if (!data?.url) throw new Error('SSO endpoint вернул пустой URL');
     if (win) win.location.href = data.url;
     else window.location.href = data.url;
@@ -3068,11 +3233,11 @@ const normalizePermsHint =
   'Чинит chown/chmod рекурсивно по правилу: owner=systemUser, dirs=0750, files=0640, +x — только для каталогов и уже-исполняемых файлов. Безопасно для node_modules/.bin (бинарники сохранят exec). Для MODX расширяет cache/export/packages до g+w.';
 
 async function onNormalizePermissions() {
-  if (normalizingPerms.value || !site.value) return;
+  if (normalizingPerms.value || !site.value || !selectedDomain.value) return;
   const ok = await useMbConfirm().ask({
     title: 'Нормализация прав и владельца',
     message:
-      `Запустить нормализацию прав и владельца для сайта «${site.value.name}»?\n\n` +
+      `Запустить нормализацию прав для «${selectedDomain.value.domain}» в ${selectedApplicationRoot.value}?\n\n` +
       'Операция безопасна (chmod использует символьный X — exec на бинарниках node_modules/.bin и shell-скриптах сохраняется). На больших сайтах может занять до минуты.',
     confirmText: 'Запустить',
     cancelText: 'Отмена',
@@ -3084,8 +3249,13 @@ async function onNormalizePermissions() {
   const toast = useMbToast();
   try {
     const res = await api.post<{ steps: Array<{ cmd: string; ok: boolean; error?: string }>; modxCorePath?: string }>(
-      `/sites/${siteId}/normalize-permissions`,
+      `${selectedDomainApi.value}/permissions/normalize`,
       {},
+      {
+        headers: {
+          'Idempotency-Key': domainMutationKey('permissions'),
+        },
+      },
     );
     const stepCount = res?.steps?.length || 0;
     normalizePermsResult.value = { stepCount };
@@ -3137,10 +3307,11 @@ function closeDoctorModal() {
 }
 
 async function runDoctor() {
+  if (!selectedDomain.value) return;
   doctorLoading.value = true;
   doctorError.value = '';
   try {
-    const res = await api.get<DoctorResult>(`/sites/${siteId}/modx-doctor`);
+    const res = await api.get<DoctorResult>(`${selectedDomainApi.value}/modx/doctor`);
     doctorResult.value = res;
   } catch (e) {
     doctorError.value = (e as Error)?.message || 'Не удалось запустить диагностику';
@@ -3172,10 +3343,26 @@ async function runDoctorFix(issue: DoctorIssue) {
   doctorFixingId.value = issue.id;
   try {
     if (issue.fix === 'normalize-permissions') {
-      await api.post(`/sites/${siteId}/normalize-permissions`, {});
+      await api.post(
+        `${selectedDomainApi.value}/permissions/normalize`,
+        {},
+        {
+          headers: {
+            'Idempotency-Key': domainMutationKey('permissions'),
+          },
+        },
+      );
       toast.success('Права нормализованы.');
     } else if (issue.fix === 'cleanup-setup-dir') {
-      await api.post(`/sites/${siteId}/cleanup-setup-dir`, {});
+      await api.post(
+        `${selectedDomainApi.value}/modx/cleanup-setup`,
+        {},
+        {
+          headers: {
+            'Idempotency-Key': domainMutationKey('modx-cleanup'),
+          },
+        },
+      );
       toast.success('Директория setup/ удалена.');
     }
     // Перезапускаем диагностику, чтобы пользователь увидел, что issue ушёл.
@@ -3201,124 +3388,39 @@ function doctorFixLabel(fix: NonNullable<DoctorIssue['fix']>): string {
   return 'Починить';
 }
 
-async function toggleCmsPassword() {
-  if (cmsPassword.value) {
-    cmsPasswordVisible.value = !cmsPasswordVisible.value;
-    return;
-  }
-  try {
-    const res = await api.get<{ cms?: { user: string; password: string; url: string } }>(`/sites/${siteId}/ssh`);
-    cmsPassword.value = res?.cms?.password || null;
-    cmsPasswordVisible.value = true;
-  } catch {
-    cmsPassword.value = null;
-  }
-}
-
 // Нормализуем managerPath: MODX разрешает кастомный путь до /manager/
 // (например, /cp/ или /admin-xyz/). В UI и в auto-login должна быть
 // именно кастомная папка, иначе 404.
 const managerPathSafe = computed(() => {
-  const raw = (site.value?.managerPath || 'manager').toString();
+  const raw = (selectedDomain.value?.managerPath || 'manager').toString();
   // Сносим любые слеши по краям — URL строится как `/${managerPathSafe}/`.
   return raw.replace(/^\/+|\/+$/g, '') || 'manager';
 });
 
 const cmsAutoLoginBusy = ref(false);
 
-/**
- * Открываем админку MODX с автологином.
- *
- * Почему не просто GET + кликать кнопку? MODX 3 manager — это обычная
- * HTML-форма на POST /{managerPath}/ с полями username + password
- * (+ login_context=mgr). Если в новой вкладке сделать HTML-form.submit() —
- * браузер отправит запрос, MODX создаст сессию, вернёт 302 на дашборд.
- *
- * Подводные камни (с которыми мы живём сознательно):
- *  • Пароль лежит в DOM и в POST body. Для своего dashboard-а это
- *    приемлемо — юзер уже видит пароль во вкладке «Обзор» руками.
- *  • Refresh открывшейся вкладки покажет «Отправить данные повторно?» —
- *    это редкий кейс, юзер просто отклонит и зайдёт через обычный UI.
- *  • CSRF: форма логина MODX не требует CSRF-токена (иначе нельзя было
- *    бы логиниться извне). Защищены уже ACTIONS внутри админки, не логин.
- */
 async function openCmsAdmin() {
-  if (!site.value?.domain || !site.value?.cmsAdminUser) return;
-
-  // Нужен пароль. Если уже загружен — используем; иначе тянем с API.
-  let password = cmsPassword.value;
-  if (!password) {
-    cmsAutoLoginBusy.value = true;
-    try {
-      const res = await api.get<{ cms?: { user: string; password: string; url: string } }>(
-        `/sites/${siteId}/ssh`,
-      );
-      password = res?.cms?.password || null;
-      if (!password) {
-        // Нет пароля в системе — откроем форму без автологина.
-        const schemeNP = site.value?.sslCertificate?.status === 'ACTIVE' ? 'https' : 'http';
-        window.open(`${schemeNP}://${site.value.domain}/${managerPathSafe.value}/`, '_blank', 'noopener,noreferrer');
-        return;
-      }
-      cmsPassword.value = password;
-    } catch {
-      // Если API отвалился — хотя бы откроем обычный URL.
-      const schemeErr = site.value?.sslCertificate?.status === 'ACTIVE' ? 'https' : 'http';
-      window.open(`${schemeErr}://${site.value.domain}/${managerPathSafe.value}/`, '_blank', 'noopener,noreferrer');
-      return;
-    } finally {
-      cmsAutoLoginBusy.value = false;
-    }
-  }
-
-  const scheme = site.value?.sslCertificate?.status === 'ACTIVE' ? 'https' : 'http';
-  const action = `${scheme}://${site.value.domain}/${managerPathSafe.value}/`;
-
-  // Создаём одноразовую форму, target=_blank — откроется в новой вкладке.
-  // После submit удаляем её из DOM, чтобы не болталась.
-  const form = document.createElement('form');
-  form.method = 'POST';
-  form.action = action;
-  form.target = '_blank';
-  // Явный rel="noopener noreferrer" — для form Chrome/Firefox НЕ ставят
-  // noopener по умолчанию (в отличие от <a target=_blank>). Без этого
-  // открытое окно может через window.opener.location перенаправить
-  // нашу панель на фишинг-страницу.
-  form.rel = 'noopener noreferrer';
-  form.style.display = 'none';
-  form.enctype = 'application/x-www-form-urlencoded';
-
-  const addField = (name: string, value: string) => {
-    const input = document.createElement('input');
-    input.type = 'hidden';
-    input.name = name;
-    input.value = value;
-    form.appendChild(input);
-  };
-  // Полный набор полей, который ждёт manager/index.php при логине MODX:
-  //   username, password        — очевидно
-  //   login_context=mgr         — контекст (иначе роутит на фронт)
-  //   rememberme=1              — иначе сессия мрёт через ~20 минут idle
-  //   login=1                   — маркер что это именно сабмит формы логина
-  //   modhash                   — пустая строка, MODX сверяет хеш поля, но
-  //                                пустое значение = «без hash» (и это ок)
-  //   returnUrl=/{managerPath}/ — куда редиректить после успешного логина;
-  //                                без него MODX может кидать на / вместо /manager/
-  const mgr = managerPathSafe.value;
-  addField('username', site.value.cmsAdminUser);
-  addField('password', password);
-  addField('login_context', 'mgr');
-  addField('rememberme', '1');
-  addField('login', '1');
-  addField('modhash', '');
-  addField('returnUrl', `/${mgr}/`);
-
-  document.body.appendChild(form);
+  if (!selectedDomain.value?.cmsAdminUser || cmsAutoLoginBusy.value) return;
+  const target = window.open('about:blank', '_blank');
+  if (target) target.opener = null;
+  cmsAutoLoginBusy.value = true;
   try {
-    form.submit();
+    const handoff = await api.post<{ token: string }>(
+      `${selectedDomainApi.value}/modx/admin-login`,
+      {},
+    );
+    const html = await api.rawText(
+      `/domain-app-login/${encodeURIComponent(handoff.token)}`,
+    );
+    if (!target) throw new Error('Браузер заблокировал новое окно');
+    target.document.open();
+    target.document.write(html);
+    target.document.close();
+  } catch (error) {
+    target?.close();
+    useMbToast().error((error as Error).message || 'Не удалось открыть MODX');
   } finally {
-    // Чуть подождём чтобы submit стартовал, потом убираем форму.
-    setTimeout(() => form.remove(), 1000);
+    cmsAutoLoginBusy.value = false;
   }
 }
 
@@ -3341,8 +3443,14 @@ async function loadInstalledPhpVersions() {
       // Если у сайта стоит версия, которой больше нет в списке (например,
       // источник на 7.2, а на этой машине 7.2 не установлен) — добавляем
       // её в список с пометкой, чтобы select мог корректно отрендерить.
-      if (site.value?.phpVersion && !phpVersions.value.includes(site.value.phpVersion)) {
-        phpVersions.value = [site.value.phpVersion, ...phpVersions.value];
+      if (
+        selectedDomain.value?.phpVersion &&
+        !phpVersions.value.includes(selectedDomain.value.phpVersion)
+      ) {
+        phpVersions.value = [
+          selectedDomain.value.phpVersion,
+          ...phpVersions.value,
+        ];
       }
     }
   } catch {
@@ -3351,11 +3459,11 @@ async function loadInstalledPhpVersions() {
 }
 
 async function changePhpVersion(newVersion: string) {
-  if (!site.value || newVersion === site.value.phpVersion) return;
+  if (!selectedDomain.value || newVersion === selectedDomain.value.phpVersion) return;
   phpVersionChanging.value = true;
   try {
-    await api.put(`/sites/${siteId}`, { phpVersion: newVersion });
-    site.value.phpVersion = newVersion;
+    await api.put(selectedDomainApi.value, { phpVersion: newVersion });
+    selectedDomain.value.phpVersion = newVersion;
   } catch {
     // revert dropdown on error
   } finally {
@@ -3465,25 +3573,30 @@ function maskEnvValue(val: string): string {
 
 function addEnvVar() {
   const key = envNewKey.value.trim().toUpperCase().replace(/[^A-Z0-9_]/g, '_');
-  if (!key || !site.value) return;
-  site.value.envVars = { ...site.value.envVars, [key]: envNewVal.value };
+  if (!key || !selectedDomain.value) return;
+  selectedDomain.value.envVars = {
+    ...selectedDomain.value.envVars,
+    [key]: envNewVal.value,
+  };
   envNewKey.value = '';
   envNewVal.value = '';
 }
 
 function removeEnvVar(key: string) {
-  if (!site.value?.envVars) return;
-  const copy = { ...site.value.envVars };
+  if (!selectedDomain.value?.envVars) return;
+  const copy = { ...selectedDomain.value.envVars };
   delete copy[key];
-  site.value.envVars = copy;
+  selectedDomain.value.envVars = copy;
 }
 
 async function saveEnvVars() {
-  if (!site.value || envSaving.value) return;
+  if (!selectedDomain.value || envSaving.value) return;
   envSaving.value = true;
   try {
-    await api.put(`/sites/${siteId}`, { envVars: site.value.envVars });
-    envOriginal.value = JSON.stringify(site.value.envVars);
+    await api.put(selectedDomainApi.value, {
+      envVars: selectedDomain.value.envVars,
+    });
+    envOriginal.value = JSON.stringify(selectedDomain.value.envVars);
   } catch {
     // Save failed
   } finally {
@@ -3498,7 +3611,7 @@ async function saveEnvVars() {
 
 // ─── PHP-FPM pool editor ───
 async function loadPhpPoolConfig() {
-  if (!site.value) return;
+  if (!selectedDomain.value?.phpVersion) return;
   // Очищаем закешированный конфиг ДО запроса — иначе при переключении на
   // вкладку виден старый custom/rendered блок, и юзер думает что сервер
   // не знает про его правки из прошлой сессии.
@@ -3510,7 +3623,7 @@ async function loadPhpPoolConfig() {
   phpPoolRendered.value = null;
   try {
     const res = await api.get<{ custom: string; rendered: string | null; phpVersion: string }>(
-      `/sites/${siteId}/php-pool-config`,
+      `${selectedDomainApi.value}/php-pool-config`,
     );
     phpPoolCustom.value = res.custom || '';
     phpPoolCustomOriginal.value = phpPoolCustom.value;
@@ -3523,21 +3636,26 @@ async function loadPhpPoolConfig() {
 }
 
 async function savePhpPoolConfig() {
-  if (!site.value || phpPoolSaving.value) return;
+  if (!selectedDomain.value?.phpVersion || phpPoolSaving.value) return;
   phpPoolSaving.value = true;
   phpPoolError.value = '';
   phpPoolSuccess.value = '';
   try {
     const res = await api.put<{ custom: string }>(
-      `/sites/${siteId}/php-pool-config`,
+      `${selectedDomainApi.value}/php-pool-config`,
       { custom: phpPoolCustom.value },
+      {
+        headers: {
+          'Idempotency-Key': domainMutationKey('php-pool'),
+        },
+      },
     );
     phpPoolCustom.value = res.custom || '';
     phpPoolCustomOriginal.value = phpPoolCustom.value;
     phpPoolSuccess.value = 'Кастомный PHP-конфиг сохранён, php-fpm перезагружен';
     // Перечитываем рендер — увидеть, что custom-блок реально попал в файл.
     const re = await api.get<{ custom: string; rendered: string | null }>(
-      `/sites/${siteId}/php-pool-config`,
+      `${selectedDomainApi.value}/php-pool-config`,
     );
     phpPoolRendered.value = re.rendered;
   } catch (err: unknown) {
@@ -3548,16 +3666,16 @@ async function savePhpPoolConfig() {
 }
 
 function openEditFilesRelPath() {
-  editFilesRelPathValue.value = site.value?.filesRelPath || 'www';
+  editFilesRelPathValue.value = selectedDomain.value?.filesRelPath || 'www';
   editFilesRelPathError.value = '';
   showEditFilesRelPath.value = true;
 }
 
 async function saveFilesRelPath() {
-  if (!site.value) return;
+  if (!selectedDomain.value) return;
   const next = editFilesRelPathValue.value.trim();
   editFilesRelPathError.value = '';
-  const current = site.value.filesRelPath || 'www';
+  const current = selectedDomain.value.filesRelPath;
   if (!next || next === current) return;
   // Клиентская валидация: без leading `/`, без `..`, только [A-Za-z0-9._-] в сегментах.
   if (!/^[A-Za-z0-9._-]+(?:\/[A-Za-z0-9._-]+)*$/.test(next)) {
@@ -3566,7 +3684,7 @@ async function saveFilesRelPath() {
   }
   savingFilesRelPath.value = true;
   try {
-    await api.put(`/sites/${siteId}`, { filesRelPath: next });
+    await api.put(selectedDomainApi.value, { filesRelPath: next });
     site.value = await api.get<SiteDetail>(`/sites/${siteId}`);
     showEditFilesRelPath.value = false;
   } catch (err: unknown) {
@@ -3599,8 +3717,6 @@ const duplicateDialog = reactive({
   name: '',
   displayName: '',
   domain: '',
-  copyBackupConfigs: false,
-  copyCronJobs: false,
   submitting: false,
   error: '',
 });
@@ -3613,29 +3729,27 @@ function openDuplicateDialog() {
     ? `${site.value.displayName} (копия)`
     : '';
   duplicateDialog.domain = '';
-  duplicateDialog.copyBackupConfigs = false;
-  duplicateDialog.copyCronJobs = false;
   duplicateDialog.submitting = false;
   duplicateDialog.error = '';
 }
 
 async function performDuplicate() {
-  if (!site.value) return;
+  if (!site.value || !selectedDomain.value) return;
   if (!duplicateDialog.name || !duplicateDialog.domain) return;
   duplicateDialog.submitting = true;
   duplicateDialog.error = '';
   try {
-    const res = await api.post<{ id: string }>(`/sites/${siteId}/duplicate`, {
+    const res = await api.post<{ siteId: string }>(`/sites/${siteId}/duplicate`, {
+      siteDomainId: selectedDomain.value.id,
       name: duplicateDialog.name.trim(),
       domain: duplicateDialog.domain.trim(),
+      filesRelPath: selectedDomain.value.filesRelPath,
       displayName: duplicateDialog.displayName?.trim() || undefined,
-      copyBackupConfigs: duplicateDialog.copyBackupConfigs || undefined,
-      copyCronJobs: duplicateDialog.copyCronJobs || undefined,
     });
     duplicateDialog.open = false;
     // Переходим на страницу нового сайта — пользователь увидит прогресс провижининга.
-    if (res?.id) {
-      await navigateTo(`/sites/${res.id}`);
+    if (res?.siteId) {
+      await navigateTo(`/sites/${res.siteId}`);
     }
   } catch (err: unknown) {
     duplicateDialog.error = (err as Error).message || 'Не удалось дублировать сайт';
@@ -3645,14 +3759,21 @@ async function performDuplicate() {
 }
 
 async function triggerDeploy() {
-  if (!site.value?.gitRepository || deploying.value) return;
+  if (!selectedDomain.value?.gitRepository || deploying.value) return;
   deploying.value = true;
   activeDeployOutput.value = '';
   try {
-    const result = await api.post<{ deployId: string; status: string; branch: string }>('/deploy/trigger', {
-      siteId: siteId,
-      branch: site.value.deployBranch || 'main',
-    });
+    const result = await api.post<{ deployId: string; status: string; branch: string }>(
+      `${selectedDomainApi.value}/deploy`,
+      {
+        branch: selectedDomain.value.deployBranch || 'main',
+      },
+      {
+        headers: {
+          'Idempotency-Key': `domain-deploy-${crypto.randomUUID()}`,
+        },
+      },
+    );
     activeDeployLog.value = {
       id: result.deployId,
       status: result.status,
@@ -3685,7 +3806,7 @@ async function pollDeployLog(deployId: string) {
         commitMessage: string | null;
         output: string;
         durationMs: number | null;
-      }>(`/deploys/${deployId}`);
+      }>(`${selectedDomainApi.value}/deploys/${deployId}`);
 
       activeDeployLog.value = log;
       activeDeployOutput.value = log.output || '';
@@ -3717,7 +3838,7 @@ async function loadDeployLogs() {
     // сайта с тем же id (это разные сайты на разных серверах). Бывший прямой
     // $fetch без proxy-префикса давал misleading данные.
     const response = await api.get<{ logs?: typeof deployLogs.value }>(
-      `/sites/${siteId}/deploys?perPage=10`,
+      `${selectedDomainApi.value}/deploys?perPage=10`,
     );
     deployLogs.value = response.logs || [];
   } catch {
@@ -3734,7 +3855,7 @@ async function viewDeployLog(deployId: string) {
       commitSha: string | null;
       commitMessage: string | null;
       output: string;
-    }>(`/deploys/${deployId}`);
+    }>(`${selectedDomainApi.value}/deploys/${deployId}`);
     activeDeployLog.value = log;
     activeDeployOutput.value = log.output || '';
   } catch {
@@ -3746,7 +3867,15 @@ async function rollbackDeploy(dl: { id: string; commitSha: string | null }) {
   if (!dl.commitSha || rollingBack.value) return;
   rollingBack.value = dl.id;
   try {
-    await api.post(`/deploys/${dl.id}/rollback`);
+    await api.post(
+      `${selectedDomainApi.value}/deploys/${dl.id}/rollback`,
+      undefined,
+      {
+        headers: {
+          'Idempotency-Key': `domain-rollback-${crypto.randomUUID()}`,
+        },
+      },
+    );
     // Reload deploy logs and site status
     await loadDeployLogs();
     site.value = await api.get<SiteDetail>(`/sites/${siteId}`);
@@ -3808,7 +3937,7 @@ async function fmLoad() {
   fmLoading.value = true;
   try {
     const res = await api.get<FmItem[]>(
-      `/sites/${siteId}/files?path=${encodeURIComponent(fmCurrentPath.value)}`,
+      `${selectedDomainApi.value}/files?path=${encodeURIComponent(fmCurrentPath.value)}`,
     );
     fmFiles.value = res || [];
   } catch {
@@ -3827,7 +3956,7 @@ async function fmOpenFile(item: FmItem) {
   if (!site.value) return;
   try {
     const content = await api.get<string>(
-      `/sites/${siteId}/files/read?path=${encodeURIComponent(item.path)}`,
+      `${selectedDomainApi.value}/files/read?path=${encodeURIComponent(item.path)}`,
     );
     fmEditPath.value = item.path;
     fmEditContent.value = content || '';
@@ -3841,7 +3970,7 @@ async function fmSaveFile() {
   if (!site.value || fmSaving.value) return;
   fmSaving.value = true;
   try {
-    await api.put(`/sites/${siteId}/files/write`, {
+    await api.put(`${selectedDomainApi.value}/files/write`, {
       path: fmEditPath.value,
       content: fmEditContent.value,
     });
@@ -3868,7 +3997,7 @@ async function fmCreatePrompt(type: 'file' | 'directory') {
   });
   if (!name || !site.value) return;
   try {
-    await api.post(`/sites/${siteId}/files/create`, {
+    await api.post(`${selectedDomainApi.value}/files/create`, {
       path: fmCurrentPath.value === '/' ? `/${name}` : `${fmCurrentPath.value}/${name}`,
       type,
     });
@@ -3885,7 +4014,7 @@ async function fmDownloadFile(item: FmItem) {
   fmDownloading.value = item.path;
   try {
     await api.download(
-      `/sites/${siteId}/files/download?path=${encodeURIComponent(item.path)}`,
+      `${selectedDomainApi.value}/files/download?path=${encodeURIComponent(item.path)}`,
       item.name,
     );
   } catch (err) {
@@ -3901,12 +4030,11 @@ function fmTriggerUpload() {
 
 async function fmUploadFile(event: Event) {
   const input = event.target as HTMLInputElement;
-  if (!input.files?.length || !site.value) return;
-
-  const file = input.files[0];
+  const file = input.files?.[0];
+  if (!file || !selectedDomain.value) return;
   try {
     await api.upload(
-      `/sites/${siteId}/files/upload?path=${encodeURIComponent(fmCurrentPath.value)}`,
+      `${selectedDomainApi.value}/files/upload?path=${encodeURIComponent(fmCurrentPath.value)}`,
       file,
     );
     fmLoad();
@@ -3927,7 +4055,7 @@ async function fmDeleteItem(item: FmItem) {
   });
   if (!ok) return;
   try {
-    await api.del(`/sites/${siteId}/files?path=${encodeURIComponent(item.path)}`);
+    await api.del(`${selectedDomainApi.value}/files?path=${encodeURIComponent(item.path)}`);
     fmLoad();
   } catch {
     // Delete failed
@@ -3966,7 +4094,7 @@ async function loadSiteMetrics() {
   if (!site.value) return;
   siteMetricsLoading.value = true;
   try {
-    const data = await api.get<SiteMetricsInfo>(`/sites/${siteId}/metrics`);
+    const data = await api.get<SiteMetricsInfo>(`${selectedDomainApi.value}/metrics`);
     siteMetricsData.value = data || { cpuPercent: 0, memoryBytes: 0, diskBytes: 0, requestCount: 0 };
   } catch {
     // Metrics unavailable
@@ -4002,11 +4130,11 @@ const healthSummary = ref<HealthSummary>({
 });
 
 async function loadSiteHealth() {
-  if (!site.value) return;
+  if (!selectedDomain.value) return;
   healthLoading.value = true;
   try {
     const resp = await api.get<HealthPing[] | { data: HealthPing[] }>(
-      `/health/${siteId}/pings?hours=24`,
+      `/health/${siteId}/domains/${selectedDomainId.value}/pings?hours=24`,
     );
     const list: HealthPing[] = Array.isArray(resp)
       ? resp
@@ -4215,15 +4343,15 @@ function goActivityPage(p: number) {
 
 // ─── CMS (объединённый блок Admin + версия для не-custom сайтов) ───
 const hasCmsInfo = computed(() => {
-  if (!site.value) return false;
-  // Показываем блок для любых «не-custom» типов — сейчас это MODX_*
-  const t = site.value.type;
-  if (t === 'CUSTOM') return false;
-  return !!(site.value.cmsAdminUser || site.value.modxVersion || isModxSite.value);
+  const domain = selectedDomain.value;
+  return !!(
+    domain &&
+    isModxSite.value &&
+    (domain.cmsAdminUser || domain.modxVersion || domain.preset)
+  );
 });
 const cmsTitle = computed(() => {
-  if (!site.value) return 'CMS';
-  const t = site.value.type;
+  const t = selectedDomain.value?.preset;
   if (t === 'MODX_REVO') return 'MODX Revolution';
   if (t === 'MODX_3') return 'MODX 3';
   return 'CMS';
@@ -4433,14 +4561,24 @@ async function saveSiteExcludes() {
 
 // Рекомендуемые таблицы БД (без данных) по типу сайта.
 function recommendedExcludeTablesForSite(): string[] {
-  const t = (site.value?.type || '').toUpperCase();
-  if (t.startsWith('MODX')) {
-    return ['modx_session', 'modx_manager_log', 'modx_event_log'];
-  }
-  if (t === 'WORDPRESS' || t === 'WP') {
-    return ['wp_options'];
-  }
-  return [];
+  return [
+    ...new Set(
+      siteDomains.value.flatMap((domain) => {
+        if (
+          domain.preset !== 'MODX_REVO' &&
+          domain.preset !== 'MODX_3'
+        ) {
+          return [];
+        }
+        const prefix = domain.cmsTablePrefix || 'modx_';
+        return [
+          `${prefix}session`,
+          `${prefix}manager_log`,
+          `${prefix}event_log`,
+        ];
+      }),
+    ),
+  ];
 }
 
 const siteBackupDialog = reactive({
@@ -4492,16 +4630,16 @@ async function loadSiteStorageLocations() {
 // Всегда относительны rootPath (т.е. /var/www/<name>/...) — пишем без ведущего слеша.
 // Минимум — только мусор/кеш, который точно не нужен в бэкапе.
 function recommendedExcludesForSite(): string[] {
-  const t = (site.value?.type || '').toUpperCase();
-  // Общие — node_modules/.git/*.log агент уже жёстко исключает в коде,
-  // тут даём только пользовательские дефолты.
-  if (t.startsWith('MODX')) {
-    return ['www/core/cache'];
-  }
-  if (t === 'WORDPRESS' || t === 'WP') {
-    return ['www/wp-content/cache'];
-  }
-  return [];
+  return [
+    ...new Set(
+      siteDomains.value
+        .filter(
+          (domain) =>
+            domain.preset === 'MODX_REVO' || domain.preset === 'MODX_3',
+        )
+        .map((domain) => `${domain.filesRelPath}/core/cache`),
+    ),
+  ];
 }
 
 function openSiteBackupDialog() {
@@ -4579,6 +4717,13 @@ async function loadSnapshotsInPicker() {
   }
 }
 
+function backupRestoreIdempotencyKey(prefix: string): string {
+  const suffix =
+    globalThis.crypto?.randomUUID?.() ||
+    `${Date.now()}-${Math.random().toString(36).slice(2, 12)}`;
+  return `${prefix}:${suffix}`;
+}
+
 async function restoreFromPickedSnapshot() {
   if (!snapshotPicker.selectedId || !snapshotPicker.locationId) return;
   const ok = await useMbConfirm().ask({
@@ -4590,10 +4735,18 @@ async function restoreFromPickedSnapshot() {
   if (!ok) return;
   snapshotPicker.restoring = true;
   try {
-    await api.post(`/sites/${siteId}/restic-snapshots/${encodeURIComponent(snapshotPicker.selectedId)}/restore`, {
-      locationId: snapshotPicker.locationId,
-      cleanup: snapshotPicker.cleanup,
-    });
+    await api.post(
+      `/sites/${siteId}/restic-snapshots/${encodeURIComponent(snapshotPicker.selectedId)}/restore`,
+      {
+        locationId: snapshotPicker.locationId,
+        cleanup: snapshotPicker.cleanup,
+      },
+      {
+        headers: {
+          'Idempotency-Key': backupRestoreIdempotencyKey('restic-restore'),
+        },
+      },
+    );
     snapshotPicker.open = false;
     restoringBackup.value = true;
     restoreProgress.value = 0;
@@ -5285,12 +5438,20 @@ async function doRestoreSiteBackup() {
     && (site.value?.databases?.length || 0) > 0
     && !restoreSelectedAllDbs.value;
   try {
-    await api.post(`/backups/${restoringSiteBackup.value.id}/restore`, {
-      cleanup: restoreCleanup.value,
-      scope: restoreScope.value,
-      ...(includePaths ? { includePaths } : {}),
-      ...(sendDbIds ? { databaseIds: restoreDatabaseIds.value } : {}),
-    });
+    await api.post(
+      `/backups/${restoringSiteBackup.value.id}/restore`,
+      {
+        cleanup: restoreCleanup.value,
+        scope: restoreScope.value,
+        ...(includePaths ? { includePaths } : {}),
+        ...(sendDbIds ? { databaseIds: restoreDatabaseIds.value } : {}),
+      },
+      {
+        headers: {
+          'Idempotency-Key': backupRestoreIdempotencyKey('backup-restore'),
+        },
+      },
+    );
     showSiteRestoreModal.value = false;
     restoringSiteBackup.value = null;
   } catch (err) {
@@ -5431,12 +5592,18 @@ async function deleteCronJob(id: string) {
 }
 
 // ─── Site Logs ───
-const logTypes = [
-  { id: 'access', label: 'Лог доступа' },
-  { id: 'error', label: 'Лог ошибок' },
-  { id: 'php', label: 'Ошибки PHP' },
-  { id: 'app', label: 'Лог приложения' },
-];
+const logTypes = computed(() =>
+  [
+    { id: 'access', label: 'Лог доступа' },
+    { id: 'error', label: 'Лог ошибок' },
+    {
+      id: 'php',
+      label: 'Ошибки PHP',
+      hidden: !selectedDomain.value?.phpVersion,
+    },
+    { id: 'app', label: 'Лог приложения' },
+  ].filter((type) => !type.hidden),
+);
 
 const logActiveType = ref('access');
 const logLoading = ref(false);
@@ -5479,11 +5646,11 @@ function toggleLogAutoRefresh() {
 }
 
 async function loadLogs() {
-  if (!site.value) return;
+  if (!selectedDomain.value) return;
   logLoading.value = true;
   try {
     const data = await api.get<{ type: string; path: string; lines: string[]; totalLines: number }>(
-      `/sites/${siteId}/logs/read?type=${logActiveType.value}&lines=500`,
+      `${selectedDomainApi.value}/logs/read?type=${logActiveType.value}&lines=500`,
     );
     logLines.value = data?.lines || [];
     // Auto-scroll to bottom
@@ -5528,9 +5695,58 @@ watch(activeTab, (tab) => {
   // Исключение: если у юзера есть несохранённые правки (dirty) — не трогаем,
   // иначе затрём его работу.
   // (Nginx теперь обрабатывает SiteNginxTab сам — удалили loadNginxConfig.)
-  if (tab === 'php' && site.value?.phpVersion && !phpPoolDirty.value) {
+  if (tab === 'php' && selectedDomain.value?.phpVersion && !phpPoolDirty.value) {
     loadPhpPoolConfig();
   }
+  if (tab === 'deploy' && deployLogs.value.length === 0) {
+    loadDeployLogs();
+  }
+});
+
+watch(selectedDomainId, (domainId, previousDomainId) => {
+  if (!domainId || domainId === previousDomainId) return;
+
+  adminerPickerOpen.value = false;
+  openingAdminer.value = null;
+  cmsPassword.value = null;
+  cmsPasswordVisible.value = false;
+  doctorResult.value = null;
+  normalizePermsResult.value = null;
+  phpPoolCustom.value = '';
+  phpPoolCustomOriginal.value = '';
+  phpPoolRendered.value = null;
+  phpPoolError.value = '';
+  phpPoolSuccess.value = '';
+  fmCurrentPath.value = '/';
+  fmFiles.value = [];
+  fmCloseEditor();
+  logLines.value = [];
+  if (logActiveType.value === 'php' && !selectedDomain.value?.phpVersion) {
+    logActiveType.value = 'access';
+  }
+  if (logAutoRefresh.value) toggleLogAutoRefresh();
+  deployLogs.value = [];
+  activeDeployLog.value = null;
+  activeDeployOutput.value = '';
+  if (deployPollTimer) {
+    clearInterval(deployPollTimer);
+    deployPollTimer = undefined;
+  }
+  envOriginal.value = JSON.stringify(selectedDomain.value?.envVars || {});
+  void loadSelectedApplication();
+  void loadSiteMetrics();
+  void loadSiteHealth();
+
+  if (!tabs.value.some((tab) => tab.id === activeTab.value)) {
+    activeTab.value = 'overview';
+    return;
+  }
+  if (activeTab.value === 'files') void fmLoad();
+  if (activeTab.value === 'logs') void loadLogs();
+  if (activeTab.value === 'php' && selectedDomain.value?.phpVersion) {
+    void loadPhpPoolConfig();
+  }
+  if (activeTab.value === 'deploy') void loadDeployLogs();
 });
 
 // ===========================================================================
@@ -5575,7 +5791,7 @@ const migrateTargetServers = computed(() => {
 watch(showMigrateModal, (open) => {
   if (!open) return;
   migrateTargetName.value = site.value?.name || '';
-  migrateTargetDomain.value = site.value?.domain || '';
+  migrateTargetDomain.value = primaryDomain.value?.domain || '';
   migrateReissueSsl.value = false;
   migrateError.value = '';
 });
@@ -5688,7 +5904,8 @@ onMounted(async () => {
     } catch {
       /* ignore disabled storage */
     }
-    envOriginal.value = JSON.stringify(site.value?.envVars || {});
+    envOriginal.value = JSON.stringify(selectedDomain.value?.envVars || {});
+    await loadSelectedApplication();
     syncSiteExcludesFromSite();
     // Load deploy logs, site metrics, and servers in background
     loadDeployLogs();
@@ -5719,7 +5936,7 @@ onMounted(async () => {
       loadCronJobs();
     }
     // tab === 'nginx' — компонент SiteNginxTab сам грузит данные при mount.
-    if (tab === 'php' && site.value?.phpVersion && !phpPoolDirty.value) {
+    if (tab === 'php' && selectedDomain.value?.phpVersion && !phpPoolDirty.value) {
       loadPhpPoolConfig();
     }
   } catch {
@@ -5829,6 +6046,54 @@ onBeforeUnmount(() => {
   gap: 0.35rem;
 }
 .site-detail__domain-sep { color: var(--text-faint); }
+
+.site-detail__domain-context {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.45rem;
+  margin-top: 0.2rem;
+  min-width: 0;
+  font-size: 0.8rem;
+  font-family: 'JetBrains Mono', monospace;
+  color: var(--text-muted);
+}
+
+.site-detail__domain-select {
+  min-width: min(360px, 52vw);
+  max-width: 100%;
+  padding: 0.38rem 2rem 0.38rem 0.62rem;
+  border: 1px solid var(--border-secondary);
+  border-radius: 8px;
+  background: var(--bg-elevated);
+  color: var(--text-heading);
+  font: inherit;
+}
+
+.site-detail__app-status {
+  padding: 0.16rem 0.42rem;
+  border: 1px solid var(--border-secondary);
+  border-radius: 999px;
+  font: 600 0.65rem/1.2 'DM Sans', sans-serif;
+  color: var(--text-muted);
+}
+
+.site-detail__app-status--running {
+  border-color: rgba(34, 197, 94, 0.3);
+  color: #4ade80;
+}
+
+.site-detail__app-status--error {
+  border-color: rgba(239, 68, 68, 0.35);
+  color: #f87171;
+}
+
+.site-detail__app-status--provisioning,
+.site-detail__app-status--deploying,
+.site-detail__app-status--updating {
+  border-color: rgba(var(--primary-rgb), 0.35);
+  color: var(--primary-text);
+}
 
 /* Per-domain subtab bar (вкладки SSL / Nginx) */
 .domain-subtab-bar {
@@ -5973,6 +6238,9 @@ html.theme-light .ssl-pill--err { color: #b91c1c; }
   align-items: center;
   gap: 0.5rem;
   margin-bottom: 0.5rem;
+}
+.site-detail__error-banner-head .btn {
+  margin-left: auto;
 }
 .site-detail__error-banner-text {
   margin: 0;
@@ -8564,6 +8832,18 @@ html.theme-light .domain-modal__cmd {
   .site-detail__header-right {
     align-self: stretch;
     justify-content: space-between;
+  }
+
+  .site-detail__header-left,
+  .site-detail__header-left > div,
+  .site-detail__domain-context {
+    width: 100%;
+    min-width: 0;
+  }
+
+  .site-detail__domain-select {
+    min-width: 0;
+    width: 100%;
   }
 
   .site-detail__tabs {

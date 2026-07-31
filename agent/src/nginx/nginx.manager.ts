@@ -23,6 +23,7 @@
 
 import * as fs from 'fs/promises';
 import * as path from 'path';
+import { randomUUID } from 'crypto';
 
 import { CommandExecutor } from '../command-executor';
 import {
@@ -39,18 +40,13 @@ import {
   renderNginxSite,
 } from './templates';
 import { sanitizeCustomNginxConfig } from './sanitize-custom';
+import {
+  NGINX_ZONES_HEADER,
+  renderNginxZones,
+} from './zones-template';
 
 const ZONES_PATH = '/etc/nginx/conf.d/meowbox-zones.conf';
 const SYSTEM_CA_BUNDLE = '/etc/ssl/certs/ca-certificates.crt';
-
-const ZONES_HEADER =
-`# === Meowbox global rate-limit zones (управляется агентом) ===
-# Файл регенерируется при создании/удалении сайта и при изменении rate-limit настроек.
-# Не редактируй вручную — изменения будут затёрты.
-
-# Legacy fallback zone (для конфигов сайтов, которые ещё не пере-генерены под per-zone).
-limit_req_zone $binary_remote_addr zone=site_limit:10m rate=30r/s;
-`;
 
 function stoppedServerNames(domain: string, aliases: NginxDomainAlias[] | undefined): string {
   const names = new Set<string>();
@@ -201,8 +197,7 @@ export class NginxManager {
           }
         }
         for (const [filename, content] of Object.entries(dom.chunks)) {
-          await fs.writeFile(path.join(domDir, filename), content, 'utf8');
-          await fs.chmod(path.join(domDir, filename), 0o644).catch(() => {});
+          await this.writeAtomicFile(path.join(domDir, filename), content, 0o644);
         }
 
         // 95-custom.conf — особая логика сохранения.
@@ -212,22 +207,18 @@ export class NginxManager {
         const forceWrite = domInput?.forceWriteCustom === true;
         const customContent = dom.customChunk?.content;
         if (forceWrite) {
-          await fs.writeFile(customPath, customContent ?? '', 'utf8');
-          await fs.chmod(customPath, 0o644).catch(() => {});
+          await this.writeAtomicFile(customPath, customContent ?? '', 0o644);
         } else if (!customExists && typeof customContent === 'string') {
-          await fs.writeFile(customPath, customContent, 'utf8');
-          await fs.chmod(customPath, 0o644).catch(() => {});
+          await this.writeAtomicFile(customPath, customContent, 0o644);
         }
         // Файл существует и forceWriteCustom=false — оставляем (юзерский кастом).
       }
 
       // 3. Главный файл.
-      await fs.writeFile(mainPath, rendered.mainConfig, 'utf8');
-      await fs.chmod(mainPath, 0o644).catch(() => {});
+      await this.writeAtomicFile(mainPath, rendered.mainConfig, 0o644);
 
       // 4. Симлинк sites-enabled.
-      await fs.unlink(enabledLink).catch(() => {});
-      await fs.symlink(mainPath, enabledLink);
+      await this.replaceSymlinkAtomic(mainPath, enabledLink);
 
       // 5. Тестируем и применяем.
       const test = await this.testConfig();
@@ -235,7 +226,12 @@ export class NginxManager {
         await this.restoreFromBackup(site.siteName, backup);
         return { success: false, error: `nginx -t failed: ${test.error}` };
       }
-      await this.reload();
+      const reload = await this.reload();
+      if (!reload.success) {
+        await this.restoreFromBackup(site.siteName, backup);
+        await this.reload().catch(() => {});
+        return { success: false, error: `nginx reload failed: ${reload.error || 'unknown error'}` };
+      }
       return { success: true };
     } catch (err) {
       await this.restoreFromBackup(site.siteName, backup).catch(() => {});
@@ -259,11 +255,9 @@ export class NginxManager {
       await fs.mkdir(SITES_AVAILABLE, { recursive: true });
       await fs.mkdir(SITES_ENABLED, { recursive: true });
 
-      await fs.writeFile(mainPath, renderStoppedNginxSite(site), 'utf8');
-      await fs.chmod(mainPath, 0o644).catch(() => {});
+      await this.writeAtomicFile(mainPath, renderStoppedNginxSite(site), 0o644);
 
-      await fs.unlink(enabledLink).catch(() => {});
-      await fs.symlink(mainPath, enabledLink);
+      await this.replaceSymlinkAtomic(mainPath, enabledLink);
 
       const test = await this.testConfig();
       if (!test.success) {
@@ -271,7 +265,12 @@ export class NginxManager {
         return { success: false, error: `nginx -t failed: ${test.error}` };
       }
 
-      await this.reload();
+      const reload = await this.reload();
+      if (!reload.success) {
+        await this.restoreFromBackup(site.siteName, backup);
+        await this.reload().catch(() => {});
+        return { success: false, error: `nginx reload failed: ${reload.error || 'unknown error'}` };
+      }
       return { success: true };
     } catch (err) {
       await this.restoreFromBackup(site.siteName, backup).catch(() => {});
@@ -303,19 +302,29 @@ export class NginxManager {
 
       // Срезаем директивы, ломающие `nginx -t` в server-контексте, до записи —
       // иначе сразу попадём в rollback ниже без внятной причины.
-      await fs.writeFile(customPath, sanitizeCustomNginxConfig(content), 'utf8');
-      await fs.chmod(customPath, 0o644).catch(() => {});
+      await this.writeAtomicFile(customPath, sanitizeCustomNginxConfig(content), 0o644);
 
       const test = await this.testConfig();
       if (!test.success) {
         try {
-          await fs.copyFile(backupPath, customPath);
+          const previous = await fs.readFile(backupPath, 'utf8');
+          await this.writeAtomicFile(customPath, previous, 0o644);
         } catch {
           await fs.unlink(customPath).catch(() => {});
         }
         return { success: false, error: `nginx -t failed: ${test.error}` };
       }
-      await this.reload();
+      const reload = await this.reload();
+      if (!reload.success) {
+        try {
+          const previous = await fs.readFile(backupPath, 'utf8');
+          await this.writeAtomicFile(customPath, previous, 0o644);
+        } catch {
+          await fs.unlink(customPath).catch(() => {});
+        }
+        await this.reload().catch(() => {});
+        return { success: false, error: `nginx reload failed: ${reload.error || 'unknown error'}` };
+      }
       await fs.unlink(backupPath).catch(() => {});
       return { success: true };
     } catch (err) {
@@ -394,8 +403,7 @@ export class NginxManager {
     zones: Array<{ zoneName: string; rps: number; enabled: boolean }>,
   ): Promise<{ success: boolean; error?: string }> {
     const backupPath = `${ZONES_PATH}.bak`;
-    const lines: string[] = [ZONES_HEADER.trimEnd(), ''];
-    const seen = new Set<string>();
+    let legacyZoneRefs: Iterable<string> = [];
 
     // Сначала добавляем legacy-зоны, реально упоминаемые в существующих
     // чанках сайтов (`limit_req zone=NAME ...`). Иначе при дроп-перегенерации
@@ -405,25 +413,11 @@ export class NginxManager {
     // не пройдёт. Catch-22. Слияние ломает цепочку без рисков (лишняя зона
     // ничего не ломает, только держит чуть-чуть памяти).
     try {
-      const legacy = await this.collectLegacyZoneRefs();
-      for (const name of legacy) {
-        const safe = name.replace(/[^a-zA-Z0-9_-]/g, '_');
-        if (!safe || safe === 'site_limit' || seen.has(safe)) continue;
-        seen.add(safe);
-        lines.push(`limit_req_zone $binary_remote_addr zone=${safe}:1m rate=30r/s;`);
-      }
+      legacyZoneRefs = await this.collectLegacyZoneRefs();
     } catch { /* best-effort: если не смогли пройтись по диску — игнорируем */ }
-
-    for (const z of zones) {
-      const safe = String(z.zoneName || '').replace(/[^a-zA-Z0-9_-]/g, '_');
-      if (!safe || safe === 'site_limit' || seen.has(safe)) continue;
-      seen.add(safe);
-      const rate = z.rps && z.rps > 0 ? z.rps : 30;
-      // Зона создаётся даже если rate-limit отключён — чтобы конфиг сайта,
-      // который ещё ссылается на неё, не падал на `nginx -t`.
-      lines.push(`limit_req_zone $binary_remote_addr zone=${safe}:1m rate=${rate}r/s;`);
-    }
-    const content = lines.join('\n') + '\n';
+    // Зона создаётся даже если rate-limit отключён — существующий конфиг
+    // может ещё ссылаться на неё до своей регенерации.
+    const content = renderNginxZones(zones, legacyZoneRefs);
 
     try { await fs.copyFile(ZONES_PATH, backupPath); } catch { /* ничего ещё нет */ }
 
@@ -508,7 +502,7 @@ export class NginxManager {
     try { current = await fs.readFile(ZONES_PATH, 'utf8'); } catch { /* отсутствует — создадим */ }
     if (current.includes(zoneId)) return;
 
-    const base = current && current.trim().length > 0 ? current : ZONES_HEADER;
+    const base = current && current.trim().length > 0 ? current : NGINX_ZONES_HEADER;
     const next = base.endsWith('\n') ? `${base}${newLine}\n` : `${base}\n${newLine}\n`;
     await fs.mkdir(path.dirname(ZONES_PATH), { recursive: true });
     await fs.writeFile(ZONES_PATH, next, 'utf8');
@@ -705,6 +699,30 @@ export class NginxManager {
     try { await fs.access(p); return true; } catch { return false; }
   }
 
+  /** Replace a managed file without exposing a partially written config. */
+  private async writeAtomicFile(filePath: string, content: string, mode = 0o644): Promise<void> {
+    const tempPath = `${filePath}.tmp-${process.pid}-${randomUUID()}`;
+    try {
+      await fs.writeFile(tempPath, content, { encoding: 'utf8', mode });
+      await fs.chmod(tempPath, mode).catch(() => {});
+      await fs.rename(tempPath, filePath);
+    } finally {
+      await fs.unlink(tempPath).catch(() => {});
+    }
+  }
+
+  /** Atomically repoint the existing sites-enabled link after candidate writes. */
+  private async replaceSymlinkAtomic(target: string, linkPath: string): Promise<void> {
+    const tempLink = `${linkPath}.tmp-${process.pid}-${randomUUID()}`;
+    try {
+      await fs.unlink(tempLink).catch(() => {});
+      await fs.symlink(target, tempLink);
+      await fs.rename(tempLink, linkPath);
+    } finally {
+      await fs.unlink(tempLink).catch(() => {});
+    }
+  }
+
   /**
    * Снимок состояния сайта: содержимое главного файла + всего дерева
    * meowbox/{siteName}/ (рекурсивно). Используется для отката, если
@@ -742,7 +760,8 @@ export class NginxManager {
     const siteDir = this.siteIncludeDir(siteName);
 
     if (backup.main !== null) {
-      await fs.writeFile(mainPath, backup.main, 'utf8').catch(() => {});
+      await this.writeAtomicFile(mainPath, backup.main, 0o644).catch(() => {});
+      await this.replaceSymlinkAtomic(mainPath, enabledLink).catch(() => {});
     } else {
       // Сайта не было до регенерации — убираем main и symlink, иначе
       // dangling symlink в sites-enabled валит nginx -t у других сайтов.
@@ -757,7 +776,7 @@ export class NginxManager {
     for (const [relPath, content] of Object.entries(backup.tree)) {
       const abs = path.join(siteDir, relPath);
       await fs.mkdir(path.dirname(abs), { recursive: true }).catch(() => {});
-      await fs.writeFile(abs, content, 'utf8').catch(() => {});
+      await this.writeAtomicFile(abs, content, 0o644).catch(() => {});
     }
   }
 }

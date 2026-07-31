@@ -37,104 +37,40 @@ model User {
   auditLogs            AuditLog[]
   aiSessions           AiSession[]
   backupExports        BackupExport[]
+  operations           Operation[]
 
   @@map("users")
 }
 
 model Site {
-  id                         String   @id @default(uuid())
-  // `name` — системное имя (= имя Linux-юзера, имя БД, имя БД-юзера). Уникально.
-  // Должно начинаться с буквы, [a-z0-9_-], max 32 символов.
-  name                       String   @unique
-  // `displayName` — человекочитаемое название для списка сайтов.
-  // Необязательное: если null/пусто — UI показывает `name`.
-  displayName                String?  @map("display_name")
-  domain                     String   @unique
-  aliases                    String   @default("[]") // JSON string[]
-  type                       String // SiteType
-  status                     String   @default("STOPPED") // SiteStatus
-  // Последнее сообщение об ошибке (для статуса ERROR). Пишется при провале
-  // провижининга/деплоя, показывается в UI; очищается при успешном запуске.
-  errorMessage               String?  @map("error_message")
-  phpVersion                 String?  @map("php_version")
-  gitRepository              String?  @map("git_repository")
-  deployBranch               String?  @map("deploy_branch")
-  appPort                    Int?     @map("app_port")
-  envVars                    String   @default("{}") @map("env_vars") // JSON object
-  rootPath                   String   @map("root_path")
-  nginxConfigPath            String   @map("nginx_config_path")
-  systemUser                 String?  @map("site_user")
+  id              String  @id @default(uuid())
+  // `name` — системное имя (= общий Linux-юзер и стабильный legacy runtime key
+  // primary domain). Уникально, [a-z0-9_-], max 32 символов.
+  name            String  @unique
+  displayName     String? @map("display_name")
+  // Global Site/container state. Per-application state lives on SiteDomain.
+  status          String  @default("STOPPED") // SiteStatus
+  errorMessage    String? @map("error_message")
+  rootPath        String  @map("root_path")
+  nginxConfigPath String  @map("nginx_config_path")
+  systemUser      String? @map("site_user")
   /// AES-256-GCM, HKDF(master,'meowbox:ssh:v1'). См. spec master-key-unification.
-  sshPasswordEnc             String?  @map("ssh_password_enc")
-  cmsAdminUser               String?  @map("cms_admin_user")
-  /// AES-256-GCM, HKDF(master,'meowbox:cms:v1').
-  cmsAdminPasswordEnc        String?  @map("cms_admin_password_enc")
-  managerPath                String?  @map("manager_path")
-  connectorsPath             String?  @map("connectors_path")
-  // Префикс таблиц в БД CMS (MODX). Задаётся ОДИН РАЗ при создании сайта,
-  // дальше не меняется (read-only в UI) — иначе пришлось бы переименовывать
-  // таблицы. Формат: ^[a-z][a-z0-9_]*_$ (например, `xkqzwfa_`). Если null —
-  // fallback на MODX_DB_DEFAULTS.TABLE_PREFIX ("modx_").
-  cmsTablePrefix             String?  @map("cms_table_prefix")
-  // Версия установленной CMS (для MODX: "2.8.8-pl", "3.1.2-pl" и т.п.).
-  modxVersion                String?  @map("modx_version")
-  // Кастомный фрагмент php-fpm пула — дописывается в конец pool-конфига при
-  // генерации на агенте. Переживает смену phpVersion (переносится в новый пул).
-  // null/пусто — никаких кастомных overrides.
-  phpPoolCustom              String?  @map("php_pool_custom")
-  // Модули CUSTOM-сайта (для MODX всегда true). PHP включён по наличию phpVersion.
-  dbEnabled                  Boolean  @default(false) @map("db_enabled")
-  httpsRedirect              Boolean  @default(true) @map("https_redirect")
-  // Относительный путь до web-root внутри rootPath (обычно "www", но можно "public_html" и т.п.).
-  filesRelPath               String   @default("www") @map("files_rel_path")
-  // -----------------------------------------------------------------------
-  // Layered nginx settings — параметризуют шаблоны в meowbox/{siteName}/*.conf.
-  // Перегенерируются при PUT /sites/:id/nginx/settings. null/0 → дефолты из
-  // shared/nginx-defaults.ts.
-  // -----------------------------------------------------------------------
-  /// max body размер (значение в формате nginx: "32M", "100M", "1G"). Default "32M".
-  nginxClientMaxBodySize     String?  @map("nginx_client_max_body_size")
-  /// fastcgi_read_timeout (сек). Default 60.
-  nginxFastcgiReadTimeout    Int?     @map("nginx_fastcgi_read_timeout")
-  /// fastcgi_send_timeout (сек). Default 60.
-  nginxFastcgiSendTimeout    Int?     @map("nginx_fastcgi_send_timeout")
-  /// fastcgi_connect_timeout (сек). Default 60.
-  nginxFastcgiConnectTimeout Int?     @map("nginx_fastcgi_connect_timeout")
-  /// fastcgi_buffer_size (KB). Default 32.
-  nginxFastcgiBufferSizeKb   Int?     @map("nginx_fastcgi_buffer_size_kb")
-  /// fastcgi_buffers count (штук, размер каждого = nginxFastcgiBufferSizeKb / 2). Default 16.
-  nginxFastcgiBufferCount    Int?     @map("nginx_fastcgi_buffer_count")
-  /// HTTP/2 включён (только при SSL). Default true.
-  nginxHttp2                 Boolean  @default(true) @map("nginx_http2")
-  /// Strict-Transport-Security header (max-age=63072000; includeSubDomains). Default false.
-  nginxHsts                  Boolean  @default(false) @map("nginx_hsts")
-  /// gzip компрессия. Default true.
-  nginxGzip                  Boolean  @default(true) @map("nginx_gzip")
-  /// Per-site rate limiting (nginx limit_req). Если null/false — директива не пишется.
-  nginxRateLimitEnabled      Boolean  @default(true) @map("nginx_rate_limit_enabled")
-  /// requests-per-second в zone-объявлении (limit_req_zone ... rate=Xr/s). Default 30.
-  nginxRateLimitRps          Int?     @map("nginx_rate_limit_rps")
-  /// burst для limit_req. Default 60.
-  nginxRateLimitBurst        Int?     @map("nginx_rate_limit_burst")
-  /// Кастомный конфиг — содержимое 95-custom.conf, инклюдится В ТЕЛО основного server-блока.
-  /// Юзер редактирует через UI. Панель НЕ перезаписывает этот блок при операциях.
-  /// При установке CMS (MODX) сюда автоматически дописываются её правила (try_files и т.п.) —
-  /// пользователь дальше может править их под себя.
-  nginxCustomConfig          String?  @map("nginx_custom_config")
+  sshPasswordEnc  String? @map("ssh_password_enc")
+
   // Per-site дефолтные excludes для бэкапов (JSON string[]). Пустой массив или
   // null — fallback на глобальные дефолты из panel_settings.backup-defaults.
-  backupExcludes             String?  @map("backup_excludes")
+  backupExcludes      String?  @map("backup_excludes")
   // Per-site список таблиц БД, которые дампятся БЕЗ данных (только структура).
   // JSON string[]. null/[] — fallback на глобальные.
-  backupExcludeTables        String?  @map("backup_exclude_tables")
+  backupExcludeTables String?  @map("backup_exclude_tables")
   // Произвольный JSON для маркеров и meta-данных. Пример:
   //   { "migrationId": "<HostpanelMigration.id>", "importedFrom": "vm120", "originalUid": 1002 }
   // Используется hostpanel-миграцией для контракта cleanup'а: cleanup трогает
   // только сайты с metadata.migrationId === currentMigrationId.
-  metadata                   String? // JSON object
-  userId                     String   @map("user_id")
-  createdAt                  DateTime @default(now()) @map("created_at")
-  updatedAt                  DateTime @updatedAt @map("updated_at")
+  metadata            String? // JSON object
+  userId              String   @map("user_id")
+  createdAt           DateTime @default(now()) @map("created_at")
+  updatedAt           DateTime @updatedAt @map("updated_at")
 
   user            User               @relation(fields: [userId], references: [id], onDelete: Cascade)
   databases       Database[]
@@ -149,10 +85,10 @@ model Site {
   dnsZones        DnsZone[]
   services        SiteService[]
   quickCommands   SiteQuickCommand[]
+  operations      Operation[]
 
   @@index([userId])
   @@index([status])
-  @@index([type])
   @@map("sites")
 }
 
@@ -181,36 +117,44 @@ model SiteQuickCommand {
 }
 
 // =============================================================================
-// Основной домен сайта. Один Site = N основных доменов (мульти-доменное
-// приложение: фронт / админка / API на разных доменах). Каждый основной домен —
-// собственный server-блок nginx, собственный SSL-сертификат, собственный набор
-// layered nginx-настроек и 95-custom.conf, собственный (опционально) web-root.
-//
-// Хомдира linux-юзера — ОБЩАЯ на весь сайт (Site.rootPath). Домены различаются
-// только относительным web-root (`filesRelPath`): null → наследует
-// Site.filesRelPath, иначе — собственная поддиректория внутри Site.rootPath.
-// На диске НИЧЕГО не переименовывается при смене домена.
-//
-// Ровно один домен помечен `isPrimary` ("главный", корона в UI) — он
-// зеркалируется в Site.domain для обратной совместимости со старым кодом.
+// Основной домен сайта и единственная граница приложения. Каждый SiteDomain
+// владеет ровно одним preset/runtime; aliases принадлежат этому же приложению.
+// Хомдира Linux-пользователя остаётся общей на Site, но filesRelPath всегда
+// materialized и относителен к Site.rootPath.
 // =============================================================================
 model SiteDomain {
   id                         String   @id @default(uuid())
   siteId                     String   @map("site_id")
   /// Доменное имя. Глобально уникально среди всех основных доменов.
   domain                     String   @unique
-  /// Главный домен сайта (ровно один на сайт). position=0, корона в UI,
-  /// зеркалируется в Site.domain.
+  /// Главный домен сайта (ровно один на сайт). position=0, корона в UI.
   isPrimary                  Boolean  @default(false) @map("is_primary")
   /// Порядок в списке доменов сайта (главный — 0).
   position                   Int      @default(0)
   /// Алиасы этого домена. JSON: [{ "domain": string, "redirect": boolean }].
   /// redirect=true → 301 на этот основной домен; false → отдаёт тот же сайт.
   aliases                    String   @default("[]")
-  /// web-root этого домена ОТНОСИТЕЛЬНО Site.rootPath. null → наследует
-  /// Site.filesRelPath (общий дефолт сайта). Заданное значение — собственная
-  /// поддиректория (разные домены одного сайта могут смотреть в разные папки).
-  filesRelPath               String?  @map("files_rel_path")
+  /// web-root этого домена ОТНОСИТЕЛЬНО Site.rootPath. Всегда explicit.
+  filesRelPath               String   @map("files_rel_path")
+  /// MODX_REVO | MODX_3 | CUSTOM (SiteType; validated in runtime for SQLite).
+  preset                     String // SiteType
+  /// PROVISIONING | RUNNING | DEPLOYING | UPDATING | ERROR.
+  appStatus                  String   @default("PROVISIONING") @map("app_status") // DomainApplicationStatus
+  appErrorMessage            String?  @map("app_error_message")
+  phpVersion                 String?  @map("php_version")
+  phpPoolCustom              String?  @map("php_pool_custom")
+  /// Immutable global key for PHP pool/socket/log and operation artifacts.
+  runtimeKey                 String   @unique @map("runtime_key")
+  gitRepository              String?  @map("git_repository")
+  deployBranch               String?  @map("deploy_branch")
+  envVars                    String   @default("{}") @map("env_vars") // JSON object
+  cmsAdminUser               String?  @map("cms_admin_user")
+  /// AES-256-GCM, HKDF(master,'meowbox:cms:v1').
+  cmsAdminPasswordEnc        String?  @map("cms_admin_password_enc")
+  managerPath                String?  @map("manager_path")
+  connectorsPath             String?  @map("connectors_path")
+  cmsTablePrefix             String?  @map("cms_table_prefix")
+  modxVersion                String?  @map("modx_version")
   /// Порт приложения для reverse-proxy (Node и т.п.). null — нет proxy.
   appPort                    Int?     @map("app_port")
   /// 301 HTTP→HTTPS для этого домена (действует при активном SSL).
@@ -233,11 +177,33 @@ model SiteDomain {
   createdAt                  DateTime @default(now()) @map("created_at")
   updatedAt                  DateTime @updatedAt @map("updated_at")
 
-  site           Site            @relation(fields: [siteId], references: [id], onDelete: Cascade)
+  site           Site              @relation(fields: [siteId], references: [id], onDelete: Cascade)
   sslCertificate SslCertificate?
+  databases      Database[]
+  deployLogs     DeployLog[]
+  healthPings    HealthCheckPing[]
+  auditLogs      AuditLog[]
+  operations     Operation[]
+  hostnameClaims HostnameClaim[]
 
-  @@index([siteId])
+  @@unique([siteId, position])
+  @@index([siteId, appStatus])
+  @@index([preset])
   @@map("site_domains")
+}
+
+/// Normalized global registry for canonical domains and aliases.
+/// The hostname primary key makes reservation atomic across all Sites.
+model HostnameClaim {
+  hostname     String   @id
+  siteDomainId String   @map("site_domain_id")
+  kind         String // CANONICAL | ALIAS
+  createdAt    DateTime @default(now()) @map("created_at")
+
+  siteDomain SiteDomain @relation(fields: [siteDomainId], references: [id], onDelete: Cascade)
+
+  @@index([siteDomainId])
+  @@map("hostname_claims")
 }
 
 // =============================================================================
@@ -303,15 +269,22 @@ model Database {
   // NULL для legacy-записей, созданных до этой колонки — у них Adminer
   // потребует ресет пароля.
   dbPasswordEnc  String?  @map("db_password_enc")
-  siteId         String?  @map("site_id")
+  // Keep Site ownership for aggregate queries/deletion checks. It must match
+  // siteDomain.siteId; service transactions validate this cross-relation.
+  siteId         String   @map("site_id")
+  siteDomainId   String   @map("site_domain_id")
+  purpose        String // DatabasePurpose: APP_PRIMARY | AUXILIARY
   sizeBytes      BigInt   @default(0) @map("size_bytes")
   createdAt      DateTime @default(now()) @map("created_at")
   updatedAt      DateTime @updatedAt @map("updated_at")
 
-  site Site? @relation(fields: [siteId], references: [id], onDelete: SetNull)
+  site       Site       @relation(fields: [siteId], references: [id], onDelete: Cascade)
+  siteDomain SiteDomain @relation(fields: [siteDomainId], references: [id], onDelete: Restrict)
+  operations Operation[]
 
   @@unique([name, type])
   @@index([siteId])
+  @@index([siteDomainId, purpose])
   @@map("databases")
 }
 
@@ -627,6 +600,12 @@ model Backup {
   sizeBytes         BigInt?   @map("size_bytes")
   progress          Int       @default(0)
   errorMessage      String?   @map("error_message")
+  // Versioned domain/application mapping captured with the backup. Contains
+  // encrypted credentials only; never expose through public backup responses.
+  manifest          String?
+  // Durable in-flight restore state (operation id, nonce and phase). Cleared
+  // after restore finalization so stale agent events cannot complete a retry.
+  restoreContext    String?   @map("restore_context")
   startedAt         DateTime? @map("started_at")
   completedAt       DateTime? @map("completed_at")
   baseBackupId      String?   @map("base_backup_id")
@@ -712,6 +691,8 @@ model SslCertificate {
 model DeployLog {
   id            String    @id @default(uuid())
   siteId        String    @map("site_id")
+  siteDomainId  String    @map("site_domain_id")
+  operationId   String?   @unique @map("operation_id")
   status        String    @default("PENDING") // DeployStatus
   commitSha     String?   @map("commit_sha")
   commitMessage String?   @map("commit_message")
@@ -723,9 +704,12 @@ model DeployLog {
   completedAt   DateTime? @map("completed_at")
   createdAt     DateTime  @default(now()) @map("created_at")
 
-  site Site @relation(fields: [siteId], references: [id], onDelete: Cascade)
+  site       Site       @relation(fields: [siteId], references: [id], onDelete: Cascade)
+  siteDomain SiteDomain @relation(fields: [siteDomainId], references: [id], onDelete: Cascade)
+  operation  Operation? @relation(fields: [operationId], references: [id], onDelete: SetNull)
 
   @@index([siteId])
+  @@index([siteDomainId, createdAt])
   @@index([status])
   @@map("deploy_logs")
 }
@@ -831,22 +815,82 @@ model MetricsSnapshot {
 }
 
 model AuditLog {
-  id        String   @id @default(uuid())
-  userId    String   @map("user_id")
-  action    String // AuditAction
-  entity    String
-  entityId  String?  @map("entity_id")
-  details   String? // JSON object
-  ipAddress String   @map("ip_address")
-  userAgent String?  @map("user_agent")
-  createdAt DateTime @default(now()) @map("created_at")
+  id           String   @id @default(uuid())
+  userId       String   @map("user_id")
+  siteDomainId String?  @map("site_domain_id")
+  operationId  String?  @map("operation_id")
+  action       String // AuditAction
+  entity       String
+  entityId     String?  @map("entity_id")
+  details      String? // JSON object
+  ipAddress    String   @map("ip_address")
+  userAgent    String?  @map("user_agent")
+  createdAt    DateTime @default(now()) @map("created_at")
 
-  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  user       User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  siteDomain SiteDomain? @relation(fields: [siteDomainId], references: [id], onDelete: SetNull)
 
   @@index([userId])
+  @@index([siteDomainId, createdAt])
+  @@index([operationId])
   @@index([action])
   @@index([createdAt])
   @@map("audit_logs")
+}
+
+/// Durable state for site/domain mutations. Idempotency keys are global UUIDs;
+/// OperationLock.resourceKey enforces one active lock for every acquired scope.
+model Operation {
+  id                String    @id @default(uuid())
+  idempotencyKey    String    @unique @map("idempotency_key")
+  requestHash       String    @map("request_hash")
+  type              String
+  status            String    @default("PENDING") // OperationStatus
+  siteId            String?   @map("site_id")
+  siteDomainId      String?   @map("site_domain_id")
+  databaseId        String?   @map("database_id")
+  globalLockKey     String?   @map("global_lock_key")
+  parentOperationId String?   @map("parent_operation_id")
+  createdByUserId   String    @map("created_by_user_id")
+  currentStep       String?   @map("current_step")
+  progress          Int       @default(0)
+  result            String? // JSON object, secrets forbidden
+  errorMessage      String?   @map("error_message")
+  startedAt         DateTime? @map("started_at")
+  completedAt       DateTime? @map("completed_at")
+  createdAt         DateTime  @default(now()) @map("created_at")
+  updatedAt         DateTime  @updatedAt @map("updated_at")
+
+  site            Site?           @relation(fields: [siteId], references: [id], onDelete: SetNull)
+  siteDomain      SiteDomain?     @relation(fields: [siteDomainId], references: [id], onDelete: SetNull)
+  database        Database?       @relation(fields: [databaseId], references: [id], onDelete: SetNull)
+  createdByUser   User            @relation(fields: [createdByUserId], references: [id], onDelete: Restrict)
+  parentOperation Operation?      @relation("OperationHierarchy", fields: [parentOperationId], references: [id], onDelete: Cascade)
+  childOperations Operation[]     @relation("OperationHierarchy")
+  locks           OperationLock[]
+  deployLog       DeployLog?
+
+  @@index([siteId, status])
+  @@index([siteDomainId, status])
+  @@index([databaseId, status])
+  @@index([globalLockKey, status])
+  @@index([parentOperationId, createdAt])
+  @@index([createdAt])
+  @@map("operations")
+}
+
+/// Accumulating resource locks for operations that touch several Sites/domains.
+/// Rows are removed only when their owner reaches a terminal status.
+model OperationLock {
+  resourceKey String   @id @map("resource_key")
+  operationId String   @map("operation_id")
+  kind        String
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  operation Operation @relation(fields: [operationId], references: [id], onDelete: Cascade)
+
+  @@index([operationId])
+  @@map("operation_locks")
 }
 
 // Audit-лог проксирующих запросов: master→slave (direction=OUT) и
@@ -880,14 +924,17 @@ model ProxyAuditLog {
 model HealthCheckPing {
   id             String   @id @default(uuid())
   siteId         String   @map("site_id")
+  siteDomainId   String?  @map("site_domain_id")
   reachable      Boolean
   statusCode     Int?     @map("status_code")
   responseTimeMs Int      @default(0) @map("response_time_ms")
   createdAt      DateTime @default(now()) @map("created_at")
 
-  site Site @relation(fields: [siteId], references: [id], onDelete: Cascade)
+  site       Site        @relation(fields: [siteId], references: [id], onDelete: Cascade)
+  siteDomain SiteDomain? @relation(fields: [siteDomainId], references: [id], onDelete: SetNull)
 
   @@index([siteId, createdAt])
+  @@index([siteDomainId, createdAt])
   @@map("health_check_pings")
 }
 

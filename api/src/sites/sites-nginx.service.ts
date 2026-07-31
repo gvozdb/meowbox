@@ -18,6 +18,7 @@
 
 import {
   BadRequestException,
+  ConflictException,
   ForbiddenException,
   Injectable,
   InternalServerErrorException,
@@ -27,6 +28,7 @@ import {
 import {
   NGINX_DEFAULTS,
   resolveNginxSettings,
+  safeErrorMessage,
   siteNginxOverrides,
   type ResolvedNginxSettings,
   type SiteNginxOverrides,
@@ -34,6 +36,7 @@ import {
 
 import { PrismaService } from '../common/prisma.service';
 import { AgentRelayService } from '../gateway/agent-relay.service';
+import { OperationsService } from '../operations/operations.service';
 import { SiteDomainsService } from './site-domains.service';
 
 import { UpdateSiteNginxSettingsDto, UpdateSiteNginxCustomDto } from './sites.dto';
@@ -59,6 +62,7 @@ export class SitesNginxService {
     private readonly prisma: PrismaService,
     private readonly agentRelay: AgentRelayService,
     private readonly siteDomains: SiteDomainsService,
+    private readonly operations: OperationsService,
   ) {}
 
   // ---------------------------------------------------------------------------
@@ -90,8 +94,14 @@ export class SitesNginxService {
     dto: UpdateSiteNginxSettingsDto,
     userId: string,
     role: string,
+    idempotencyKey?: string,
   ): Promise<NginxSettingsResponse> {
-    await this.requireDomain(siteId, domainId, userId, role);
+    const domain = await this.requireDomain(
+      siteId,
+      domainId,
+      userId,
+      role,
+    );
 
     const data: Record<string, unknown> = {};
     if (dto.clientMaxBodySize !== undefined) {
@@ -131,21 +141,86 @@ export class SitesNginxService {
       return this.getSettings(siteId, domainId, userId, role);
     }
 
-    await this.prisma.siteDomain.update({ where: { id: domainId }, data });
-
-    // Изменились rate-limit поля → обновляем глобальный zones-файл
-    // (limit_req_zone на каждый SiteDomain).
     const rateLimitChanged =
       dto.rateLimitEnabled !== undefined ||
       dto.rateLimitRps !== undefined ||
       dto.rateLimitBurst !== undefined;
-    if (rateLimitChanged) {
-      await this.siteDomains.regenerateGlobalZones();
+    const previousData = Object.fromEntries(
+      Object.keys(data).map((key) => [
+        key,
+        (domain as unknown as Record<string, unknown>)[key],
+      ]),
+    );
+    const operation = await this.operations.begin({
+      idempotencyKey,
+      type: 'DOMAIN_NGINX_SETTINGS_UPDATE',
+      siteId,
+      siteDomainId: domainId,
+      userId,
+      request: dto,
+    });
+    if (operation.replayed) {
+      if (operation.status !== 'SUCCEEDED') {
+        throw new ConflictException(
+          `Nginx settings operation is ${operation.status}`,
+        );
+      }
+      return this.getSettings(siteId, domainId, userId, role);
     }
+    await this.operations.start(operation.id, 'commit-metadata');
 
-    await this.siteDomains.regenerateNginx(siteId);
+    let metadataApplied = false;
+    try {
+      await this.prisma.siteDomain.update({ where: { id: domainId }, data });
+      metadataApplied = true;
 
-    return this.getSettings(siteId, domainId, userId, role);
+      // Изменились rate-limit поля → обновляем глобальный zones-файл
+      // (limit_req_zone на каждый SiteDomain).
+      if (rateLimitChanged) {
+        await this.operations.step(operation.id, 'render-global-zones', 35);
+        await this.siteDomains.regenerateGlobalZones();
+      }
+
+      await this.operations.step(operation.id, 'render-nginx', 70);
+      await this.siteDomains.regenerateNginx(siteId);
+      const response = await this.getSettings(siteId, domainId, userId, role);
+      await this.operations.succeed(operation.id, { siteDomainId: domainId });
+      return response;
+    } catch (error) {
+      const rollbackErrors: string[] = [];
+      if (metadataApplied) {
+        await this.prisma.siteDomain
+          .update({ where: { id: domainId }, data: previousData })
+          .catch((rollbackError) => {
+            rollbackErrors.push(
+              `metadata: ${safeErrorMessage(rollbackError)}`,
+            );
+          });
+        if (rateLimitChanged) {
+          await this.siteDomains.regenerateGlobalZones().catch((rollbackError) => {
+            rollbackErrors.push(
+              `global zones: ${safeErrorMessage(rollbackError)}`,
+            );
+          });
+        }
+        await this.siteDomains.regenerateNginx(siteId).catch((rollbackError) => {
+          rollbackErrors.push(`Nginx: ${safeErrorMessage(rollbackError)}`);
+        });
+      }
+      const failure =
+        rollbackErrors.length > 0
+          ? new Error(
+              `${safeErrorMessage(error)}; rollback failed: ${rollbackErrors.join(
+                '; ',
+              )}`,
+            )
+          : error;
+      await this.operations.fail(operation.id, failure).catch(() => undefined);
+      if (rollbackErrors.length > 0) {
+        throw new InternalServerErrorException(safeErrorMessage(failure));
+      }
+      throw error;
+    }
   }
 
   // ---------------------------------------------------------------------------
@@ -180,6 +255,7 @@ export class SitesNginxService {
     dto: UpdateSiteNginxCustomDto,
     userId: string,
     role: string,
+    idempotencyKey?: string,
   ): Promise<{ content: string; testResult: { success: boolean; error?: string } }> {
     const domain = await this.requireDomain(siteId, domainId, userId, role);
     const content = (dto.content ?? '').slice(0, 256 * 1024);
@@ -188,23 +264,111 @@ export class SitesNginxService {
       throw new InternalServerErrorException('Агент не подключён — невозможно применить кастомный конфиг.');
     }
 
-    // Валидируем через агент (nginx:set-custom → nginx -t). domainId — агент
-    // знает, какой именно server-блок переписать.
-    const result = await this.agentRelay.emitToAgent<unknown>('nginx:set-custom', {
-      siteName: domain.site.name,
-      domainId,
-      content,
+    const previousContent = domain.nginxCustomConfig ?? '';
+    const operation = await this.operations.begin({
+      idempotencyKey,
+      type: 'DOMAIN_NGINX_CUSTOM_UPDATE',
+      siteId,
+      siteDomainId: domainId,
+      userId,
+      request: { content },
     });
-    if (!result.success) {
-      throw new BadRequestException(result.error || 'nginx -t failed (custom config invalid)');
+    if (operation.replayed) {
+      if (operation.status !== 'SUCCEEDED') {
+        throw new ConflictException(
+          `Nginx custom config operation is ${operation.status}`,
+        );
+      }
+      const current = await this.getCustomConfig(
+        siteId,
+        domainId,
+        userId,
+        role,
+      );
+      return {
+        content: current.content,
+        testResult: { success: true },
+      };
     }
+    await this.operations.start(operation.id, 'validate-nginx');
 
-    await this.prisma.siteDomain.update({
-      where: { id: domainId },
-      data: { nginxCustomConfig: content },
-    });
+    let runtimeApplied = false;
+    let metadataApplied = false;
+    try {
+      // Валидируем через агент (nginx:set-custom → nginx -t). domainId — агент
+      // знает, какой именно server-блок переписать.
+      const result = await this.agentRelay.emitToAgent<unknown>(
+        'nginx:set-custom',
+        {
+          siteName: domain.site.name,
+          domainId,
+          content,
+        },
+      );
+      if (!result.success) {
+        throw new BadRequestException(
+          result.error || 'nginx -t failed (custom config invalid)',
+        );
+      }
+      runtimeApplied = true;
 
-    return { content, testResult: { success: true } };
+      await this.operations.step(operation.id, 'commit-metadata', 75);
+      await this.prisma.siteDomain.update({
+        where: { id: domainId },
+        data: { nginxCustomConfig: content },
+      });
+      metadataApplied = true;
+      await this.operations.succeed(operation.id, { siteDomainId: domainId });
+      return { content, testResult: { success: true } };
+    } catch (error) {
+      const rollbackErrors: string[] = [];
+      if (runtimeApplied) {
+        await this.agentRelay
+          .emitToAgent('nginx:set-custom', {
+            siteName: domain.site.name,
+            domainId,
+            content: previousContent,
+          })
+          .then((result) => {
+            if (!result.success) {
+              rollbackErrors.push(
+                `Nginx: ${safeErrorMessage(
+                  result.error,
+                  'unknown agent error',
+                )}`,
+              );
+            }
+          })
+          .catch((rollbackError) => {
+            rollbackErrors.push(`Nginx: ${safeErrorMessage(rollbackError)}`);
+          });
+      }
+      if (metadataApplied || runtimeApplied) {
+        await this.prisma.siteDomain
+          .update({
+            where: { id: domainId },
+            data: { nginxCustomConfig: previousContent },
+          })
+          .catch((rollbackError) => {
+            rollbackErrors.push(
+              `metadata: ${safeErrorMessage(rollbackError)}`,
+            );
+          });
+      }
+      const failure =
+        rollbackErrors.length > 0
+          ? new Error(
+              `${safeErrorMessage(error)}; rollback failed: ${rollbackErrors.join(
+                '; ',
+              )}`,
+            )
+          : error;
+      await this.operations.fail(operation.id, failure).catch(() => undefined);
+      if (rollbackErrors.length > 0) {
+        throw new InternalServerErrorException(safeErrorMessage(failure));
+      }
+      throw error;
+    }
   }
 
   // ---------------------------------------------------------------------------

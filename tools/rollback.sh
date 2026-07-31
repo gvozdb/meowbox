@@ -1,97 +1,224 @@
 #!/usr/bin/env bash
 # =============================================================================
-# Rollback — откат панели на предыдущий релиз / снапшот.
+# Recovery for a pre-commit release transaction.
 #
-# Usage:
-#   bash tools/rollback.sh                    # откат на предыдущий релиз
-#   bash tools/rollback.sh release <name>     # на конкретный релиз
-#   bash tools/rollback.sh snapshot <name>    # восстановление БД + .env из снапшота
+# A release-only symlink rollback is unsafe after Prisma has changed SQLite.
+# This command restores the matched SQLite + managed-config snapshot + release
+# pointer as one recovery unit.  It never auto-rolls back a committed release.
 # =============================================================================
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PANEL_DIR="$(dirname "$SCRIPT_DIR")"
-RELEASES_DIR="$PANEL_DIR/releases"
+# shellcheck source=tools/release-lib.sh
+source "$SCRIPT_DIR/release-lib.sh"
+
 STATE_DIR="${MEOWBOX_STATE_DIR:-$PANEL_DIR/state}"
 [[ -d "$STATE_DIR" ]] || STATE_DIR="$PANEL_DIR"
 DATA_DIR="$STATE_DIR/data"
 [[ -d "$DATA_DIR" ]] || DATA_DIR="$PANEL_DIR/data"
-SNAP_ROOT="$DATA_DIR/snapshots"
+SNAP_ROOT="${MEOWBOX_SNAPSHOT_ROOT:-$DATA_DIR/snapshots}"
+DB_FILE="${MEOWBOX_DATABASE_FILE:-$DATA_DIR/meowbox.db}"
+LOCK_FILE="${MEOWBOX_RELEASE_LOCK_FILE:-$DATA_DIR/migrations/release-update.lock}"
+TRANSACTION_ROOT="$DATA_DIR/migrations/release-transactions"
 
 say() { echo "[rollback] $*"; }
-err() { echo "[rollback] ✗ $*" >&2; exit 1; }
+die() { echo "[rollback] ✗ $*" >&2; exit 1; }
 
-# ----- Dev-mode guard -----
 if [[ -f "$PANEL_DIR/.dev-mode" ]]; then
-  echo "❌ Это dev-сервер (.dev-mode). rollback.sh оперирует releases/ — на dev это сломает git workspace."
-  echo "   Откат на dev = 'git checkout <commit>' + 'make dev' (rebuild)."
-  exit 1
+  die "release rollback is unavailable on a dev workspace"
+fi
+for command in python3 flock; do mb_require_command "$command" || die "missing dependency"; done
+mkdir -p "$(dirname "$LOCK_FILE")"
+exec 9>>"$LOCK_FILE"
+if [[ "${MEOWBOX_RELEASE_LOCK_HELD:-}" != "1" ]]; then
+  flock -n 9 || die "another release update/recovery owns $LOCK_FILE"
 fi
 
-mode="${1:-release}"
-target="${2:-}"
+mode="${1:-precommit}"
+argument="${2:-}"
+
+journal_value() {
+  local journal="$1"
+  local key="$2"
+  python3 - "$journal" "$key" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as handle:
+    value = json.load(handle)
+for component in sys.argv[2].split('.'):
+    value = value.get(component) if isinstance(value, dict) else None
+if value is None:
+    raise SystemExit(1)
+if isinstance(value, bool):
+    print("true" if value else "false")
+else:
+    print(value)
+PY
+}
+
+journal_mark_rolled_back() {
+  local journal="$1"
+  python3 - "$journal" <<'PY' | mb_atomic_write_stdin "$journal"
+import json
+import sys
+from datetime import datetime, timezone
+
+with open(sys.argv[1], encoding="utf-8") as handle:
+    payload = json.load(handle)
+payload["phase"] = "rolled-back"
+payload["committed"] = False
+payload["rolledBackAt"] = datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+print(json.dumps(payload, indent=2, sort_keys=True))
+PY
+}
+
+restore_db() {
+  local snapshot_dir="$1"
+  local source="$snapshot_dir/meowbox.db"
+  [[ -f "$source" ]] || return 0
+  mkdir -p "$(dirname "$DB_FILE")"
+  local temporary="$DB_FILE.rollback-$$"
+  [[ ! -e "$temporary" ]] || die "temporary rollback DB path already exists"
+  cp --preserve=mode,ownership,timestamps -- "$source" "$temporary"
+  mv -f -- "$temporary" "$DB_FILE"
+  rm -f -- "$DB_FILE-wal" "$DB_FILE-shm" "$DB_FILE-journal"
+  say "✓ SQLite restored from online-backup snapshot"
+}
+
+restore_state_files() {
+  local snapshot_dir="$1"
+  local state_snapshot="$snapshot_dir/state"
+  [[ -d "$state_snapshot" ]] || return 0
+  local env_target="$STATE_DIR/.env"
+  [[ -f "$env_target" ]] || env_target="$PANEL_DIR/.env"
+  [[ -e "$state_snapshot/.env" ]] && cp -a -- "$state_snapshot/.env" "$env_target"
+  [[ -e "$state_snapshot/servers.json" ]] && cp -a -- "$state_snapshot/servers.json" "$DATA_DIR/servers.json"
+  for key_file in "$state_snapshot"/.master-key "$state_snapshot"/.vpn-key "$state_snapshot"/.dns-key "$state_snapshot"/*.legacy.*; do
+    [[ -e "$key_file" ]] || continue
+    cp -a -- "$key_file" "$DATA_DIR/$(basename "$key_file")"
+  done
+  if [[ -f "$state_snapshot/vpn.tar.gz" ]]; then
+    rm -rf -- "$STATE_DIR/vpn"
+    tar --extract --gzip --file "$state_snapshot/vpn.tar.gz" --directory "$STATE_DIR" --numeric-owner --acls --xattrs --selinux
+  fi
+}
+
+reload_managed_runtime() {
+  local snapshot_dir="$1"
+  local paths="$snapshot_dir/runtime-config/paths.txt"
+  local versions=()
+  if [[ -f "$paths" ]]; then
+    while IFS= read -r candidate; do
+      if [[ "$candidate" =~ ^/etc/php/([0-9]+\.[0-9]+)/fpm/pool\.d/ ]]; then
+        versions+=("${BASH_REMATCH[1]}")
+      fi
+    done < "$paths"
+  fi
+  if command -v nginx >/dev/null 2>&1; then
+    nginx -t || die "restored Nginx config did not validate"
+  fi
+  local seen=" "
+  for version in "${versions[@]}"; do
+    [[ "$seen" == *" $version "* ]] && continue
+    seen+="$version "
+    systemctl reload "php${version}-fpm" || die "could not reload restored php${version}-fpm"
+  done
+  if command -v nginx >/dev/null 2>&1; then
+    systemctl reload nginx || die "could not reload restored nginx"
+  fi
+}
+
+restore_snapshot() {
+  local snapshot_dir="$1"
+  local release_target="${2:-}"
+  [[ -f "$snapshot_dir/manifest.json" ]] || die "invalid snapshot: $snapshot_dir"
+  say "stopping candidate panel processes"
+  if command -v pm2 >/dev/null 2>&1; then
+    pm2 stop meowbox-api meowbox-web meowbox-agent >/dev/null 2>&1 || true
+  fi
+  restore_db "$snapshot_dir"
+  mb_restore_runtime_config "$snapshot_dir"
+  restore_state_files "$snapshot_dir"
+  if [[ -n "$release_target" ]]; then
+    [[ -d "$release_target" ]] || die "snapshot release target no longer exists: $release_target"
+    mb_atomic_switch_symlink "$release_target" "$PANEL_DIR/current"
+    say "✓ current restored → $release_target"
+  fi
+  reload_managed_runtime "$snapshot_dir"
+  if command -v pm2 >/dev/null 2>&1; then
+    pm2 start "$PANEL_DIR/ecosystem.config.js" --update-env >/dev/null 2>&1 || \
+      pm2 reload "$PANEL_DIR/ecosystem.config.js" --update-env >/dev/null 2>&1 || \
+      die "could not restart old panel processes"
+  fi
+  MEOWBOX_RELEASE_LOCK_HELD=1 bash "$SCRIPT_DIR/healthcheck.sh" --strict || die "old release health check failed after restore"
+}
+
+quarantine_failed_candidate() {
+  local candidate="$1"
+  local transaction_id="$2"
+  [[ -n "$candidate" && -d "$candidate" ]] || return 0
+  local releases_root="$PANEL_DIR/releases"
+  local candidate_name
+  candidate_name="$(basename "$candidate")"
+  [[ "$candidate_name" =~ ^[A-Za-z0-9._-]{1,160}$ ]] || die "unsafe candidate release name in journal"
+  if ! python3 - "$releases_root" "$candidate" <<'PY'
+import pathlib
+import sys
+
+root = pathlib.Path(sys.argv[1]).resolve()
+candidate = pathlib.Path(sys.argv[2]).resolve()
+if candidate.parent != root or not candidate.is_dir():
+    raise SystemExit(3)
+PY
+  then
+    # Before U07 the journal intentionally names the transaction staging
+    # directory.  It is not a release target and must simply remain with the
+    # transaction; never let that harmless path make DB/config recovery fail.
+    return 0
+  fi
+  local destination="$TRANSACTION_ROOT/$transaction_id/failed-candidate-$candidate_name"
+  [[ ! -e "$destination" ]] || die "failed candidate quarantine path already exists: $destination"
+  mv -- "$candidate" "$destination"
+  say "✓ failed candidate retained at $destination; target version can be staged again"
+}
 
 case "$mode" in
-  release)
-    [[ -d "$RELEASES_DIR" ]] || err "Релизной структуры нет ($RELEASES_DIR не существует) — rollback в этом режиме невозможен"
-    [[ -L "$PANEL_DIR/current" ]] || err "Симлинк current отсутствует"
-    current_target="$(readlink -f "$PANEL_DIR/current")"
-    current_name="$(basename "$current_target")"
-
-    if [[ -n "$target" ]]; then
-      tgt_dir="$RELEASES_DIR/$target"
-    else
-      # предыдущий = последний release ≠ текущий
-      tgt_dir=""
-      for d in $(ls -1t "$RELEASES_DIR"); do
-        if [[ "$d" != "$current_name" ]]; then
-          tgt_dir="$RELEASES_DIR/$d"
-          break
-        fi
-      done
-      [[ -n "$tgt_dir" ]] || err "Нет других релизов в $RELEASES_DIR"
+  precommit)
+    transaction_id="$argument"
+    if [[ -z "$transaction_id" ]]; then
+      [[ -L "$TRANSACTION_ROOT/current" ]] || die "no active release transaction journal"
+      transaction_id="$(basename "$(readlink -f "$TRANSACTION_ROOT/current")")"
     fi
-    [[ -d "$tgt_dir" ]] || err "Релиз $tgt_dir не найден"
-
-    say "Switching current: $current_name → $(basename "$tgt_dir")"
-    ln -sfn "$tgt_dir" "$PANEL_DIR/current"
-    pm2 reload "$PANEL_DIR/ecosystem.config.js" --update-env
-    sleep 5
-    bash "$SCRIPT_DIR/healthcheck.sh"
-    say "OK: rolled back to $(basename "$tgt_dir")"
+    [[ "$transaction_id" =~ ^[A-Za-z0-9._-]{8,128}$ ]] || die "unsafe transaction id"
+    journal="$TRANSACTION_ROOT/$transaction_id/journal.json"
+    [[ -f "$journal" ]] || die "transaction journal not found: $transaction_id"
+    [[ "$(journal_value "$journal" committed || true)" != "true" ]] || die "transaction is committed; automatic DB rollback is forbidden"
+    snapshot_dir="$(journal_value "$journal" snapshotDir)"
+    previous_release="$(journal_value "$journal" previousRelease || true)"
+    candidate_release="$(journal_value "$journal" candidateRelease || true)"
+    [[ -d "$snapshot_dir" ]] || die "transaction snapshot missing: $snapshot_dir"
+    restore_snapshot "$snapshot_dir" "$previous_release"
+    quarantine_failed_candidate "$candidate_release" "$transaction_id"
+    journal_mark_rolled_back "$journal"
+    say "OK: pre-commit transaction $transaction_id restored"
     ;;
-
   snapshot)
-    [[ -n "$target" ]] || err "Usage: rollback.sh snapshot <snapshot-name>"
-    snap_dir="$SNAP_ROOT/$target"
-    [[ -d "$snap_dir" ]] || err "Snapshot $snap_dir не найден"
-
-    say "Останавливаю PM2 для безопасной замены БД..."
-    pm2 stop meowbox-api meowbox-web meowbox-agent || true
-
-    if [[ -f "$snap_dir/meowbox.db" ]]; then
-      cp "$snap_dir/meowbox.db" "$DATA_DIR/meowbox.db"
-      say "✓ meowbox.db restored"
-    fi
-    if [[ -f "$snap_dir/.env" ]]; then
-      ENV_FILE="$STATE_DIR/.env"
-      [[ -d "$STATE_DIR" && "$STATE_DIR" != "$PANEL_DIR" ]] || ENV_FILE="$PANEL_DIR/.env"
-      cp "$snap_dir/.env" "$ENV_FILE"
-      chmod 600 "$ENV_FILE"
-      say "✓ .env restored"
-    fi
-    if [[ -f "$snap_dir/servers.json" ]]; then
-      cp "$snap_dir/servers.json" "$DATA_DIR/servers.json"
-      say "✓ servers.json restored"
-    fi
-
-    pm2 start "$PANEL_DIR/ecosystem.config.js" || pm2 reload "$PANEL_DIR/ecosystem.config.js"
-    sleep 5
-    bash "$SCRIPT_DIR/healthcheck.sh"
-    say "OK: snapshot $target restored"
+    [[ -n "$argument" ]] || die "Usage: rollback.sh snapshot <snapshot-name>"
+    [[ "$argument" =~ ^[A-Za-z0-9._-]+$ ]] || die "unsafe snapshot name"
+    snapshot_dir="$SNAP_ROOT/$argument"
+    [[ -d "$snapshot_dir" ]] || die "snapshot not found: $snapshot_dir"
+    # Explicit snapshot recovery is an operator action, not an automatic
+    # after-commit rollback.  It still restores all coupled layers.
+    release_target="$(mb_snapshot_json_value "$snapshot_dir" currentRelease 2>/dev/null || true)"
+    restore_snapshot "$snapshot_dir" "$release_target"
+    say "OK: explicit snapshot $argument restored"
     ;;
-
+  release)
+    die "release-only rollback is unsafe after schema migration; use a matched snapshot during explicit maintenance"
+    ;;
   *)
-    err "Неизвестный режим: $mode. Используй: release | snapshot"
+    die "Usage: rollback.sh [precommit [transaction-id] | snapshot <snapshot-name>]"
     ;;
 esac

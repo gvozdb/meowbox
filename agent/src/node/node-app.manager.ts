@@ -4,7 +4,7 @@ import * as os from 'os';
 import * as path from 'path';
 import { CommandExecutor } from '../command-executor';
 import { SITES_BASE_PATH, isUnderAllowedSiteRoot, TIMEOUTS } from '../config';
-import { PM2_ECOSYSTEM_FILENAMES } from '@meowbox/shared';
+import { PM2_ECOSYSTEM_FILENAMES, SiteType } from '@meowbox/shared';
 import type {
   NodeAppDefinition,
   NodeDomainRef,
@@ -345,9 +345,10 @@ try {
     const rootInputs: NodeDomainRef[] = Array.isArray(domainRootsOrFilesRelPath) && domainRootsOrFilesRelPath.length
       ? domainRootsOrFilesRelPath
       : [{
-          domainId: null,
+          domainId: `legacy-${user}`,
           domain: user,
           filesRelPath: typeof domainRootsOrFilesRelPath === 'string' ? domainRootsOrFilesRelPath : 'www',
+          preset: SiteType.CUSTOM,
           isPrimary: true,
           position: 0,
         }];
@@ -357,9 +358,10 @@ try {
       const filesRelPath = this.normalizeRelPath(input.filesRelPath);
       const webRoot = this.webRoot(user, filesRelPath);
       const domain: NodeDomainRef = {
-        domainId: input.domainId ?? null,
+        domainId: input.domainId || `legacy-${user}-${filesRelPath.replace(/[^A-Za-z0-9_-]/g, '_')}`,
         domain: input.domain || filesRelPath,
         filesRelPath,
+        preset: input.preset,
         isPrimary: input.isPrimary === true,
         position: Number.isFinite(input.position) ? input.position : 0,
       };

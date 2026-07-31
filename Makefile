@@ -1,6 +1,6 @@
 .PHONY: start stop restart logs logs-api logs-web logs-agent status install build deploy seed \
         migrate migrate-prisma migrate-system migrate-status new-migration link-shared \
-        snapshot rollback update update-check healthcheck ip-allow ip-allow-list ip-allow-clear \
+        snapshot rollback update update-dry-run update-check healthcheck ip-allow ip-allow-list ip-allow-clear \
         dev dev-build dev-pull dev-force
 
 # =============================================================================
@@ -30,16 +30,25 @@ install:
 	cd migrations && npm install
 	@$(MAKE) link-shared
 	@$(MAKE) build
-	@echo "Meowbox installed. Run 'make migrate' to apply pending migrations."
+	@echo "Meowbox dev dependencies installed. Production schema changes must use 'make update' (fresh production bootstrap uses install.sh)."
 
 # --- Migrations ---
-# Применяет pending Prisma + system миграции. Используется в make deploy и при первом install.
+# Прямой путь оставлен только для явно отмеченной dev-рабочей копии. В
+# production domain release требует clone/map/snapshot/quiesce из make update.
 migrate: migrate-prisma migrate-system
 
 migrate-prisma:
+	@if [ ! -f .dev-mode ]; then \
+		echo "[migrate-prisma] production direct deploy is blocked; use make update (or install.sh for an absent fresh DB)" >&2; \
+		exit 1; \
+	fi
 	cd api && npx prisma migrate deploy
 
 migrate-system:
+	@if [ ! -f .dev-mode ]; then \
+		echo "[migrate-system] production direct system migration is blocked; use make update" >&2; \
+		exit 1; \
+	fi
 	@if [ ! -f migrations/dist/runner.js ]; then \
 		echo "[migrate-system] runner not built — building..."; \
 		cd migrations && npm run build; \
@@ -123,6 +132,9 @@ healthcheck:
 # make update-check        — только проверить, есть ли новая версия
 update:
 	@bash tools/update.sh $(v)
+
+update-dry-run:
+	@bash tools/update.sh $(v) --dry-run
 
 update-check:
 	@bash tools/update.sh --check

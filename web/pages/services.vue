@@ -913,7 +913,7 @@ async function loadConfigFile(file: string) {
   try {
     // Если уже загружали — берём из локального кеша (вместе с локальными правками).
     if (file in editor.contents) {
-      editor.content = editor.contents[file];
+      editor.content = editor.contents[file] ?? '';
       editor.loading = false;
       return;
     }
@@ -971,7 +971,7 @@ async function saveAndRestart() {
       );
       lastResult = res;
       // Обновим origin/dirty.
-      editor.originals[f.file] = editor.contents[f.file];
+      editor.originals[f.file] = editor.contents[f.file] ?? '';
       editor.dirty[f.file] = false;
     }
     editor.saveResult = lastResult;

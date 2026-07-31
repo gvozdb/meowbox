@@ -26,7 +26,8 @@ export function stringifyStringArray(arr: string[] | null | undefined): string {
 }
 
 /**
- * Парсит JSON-объект, хранящийся в SQLite как TEXT. Для Site.envVars, BackupConfig.storageConfig и т. п.
+ * Парсит JSON-объект, хранящийся в SQLite как TEXT. Для
+ * SiteDomain.envVars, BackupConfig.storageConfig и т. п.
  */
 export function parseJsonObject<T = Record<string, unknown>>(
   raw: string | null | undefined,

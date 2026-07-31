@@ -478,7 +478,8 @@ async function importFile(event: Event, db: DbItem) {
   const input = event.target as HTMLInputElement;
   if (!input.files?.length) return;
 
-  const file = input.files[0];
+  const file = input.files.item(0);
+  if (!file) return;
   try {
     showToast(`Импорт ${file.name}...`);
     await api.upload(`/databases/${db.id}/import-upload`, file);

@@ -935,15 +935,15 @@
         <div v-if="item.status === 'FAILED'" class="force-retry-block">
           <div v-if="forceRetryCheck[item.id]?.canForceRetry" class="alert alert--warning">
             <strong>🧹 Найден leak от предыдущей попытки:</strong>
-            <code v-for="src in forceRetryCheck[item.id].leakSources" :key="src" class="chip" style="margin: 0 0.3rem">{{ src }}</code>
+            <code v-for="src in forceRetryCheck[item.id]?.leakSources || []" :key="src" class="chip" style="margin: 0 0.3rem">{{ src }}</code>
             <span class="hint" style="margin-top: 0.4rem; display: block">
               Можно очистить эти артефакты и сразу повторить миграцию.
-              Имя <code>{{ forceRetryCheck[item.id].name }}</code> НЕ занято
+              Имя <code>{{ forceRetryCheck[item.id]?.name }}</code> НЕ занято
               ни реальным сайтом, ни другой активной миграцией — безопасно.
             </span>
           </div>
-          <div v-else-if="forceRetryCheck[item.id] && !forceRetryCheck[item.id].canForceRetry" class="hint" style="font-size: 0.85em; opacity: 0.7">
-            Force-retry недоступен: {{ forceRetryCheck[item.id].reason }}
+          <div v-else-if="forceRetryCheck[item.id] && !forceRetryCheck[item.id]?.canForceRetry" class="hint" style="font-size: 0.85em; opacity: 0.7">
+            Force-retry недоступен: {{ forceRetryCheck[item.id]?.reason }}
           </div>
         </div>
 
@@ -1025,9 +1025,12 @@ definePageMeta({ middleware: 'auth' });
 
 interface PlanItem {
   sourceSiteId: number;
+  sourceName: string;
   sourceUser: string;
   sourceDomain: string;
   sourceCms: 'modx' | null;
+  preset: 'MODX_REVO' | 'MODX_3' | 'CUSTOM';
+  sourceMysqlDb: string;
   sourcePhpVersion: string;
   newName: string;
   newDomain: string;
@@ -1317,7 +1320,7 @@ function pickClosestPhp(source: string, available: string[]): string | null {
   if (!available.length) return null;
   if (available.includes(source)) return source;
   const parse = (v: string): [number, number] => {
-    const [m, n] = v.split('.').map(Number);
+    const [m = 0, n = 0] = v.split('.').map(Number);
     return [Number.isFinite(m) ? m : 0, Number.isFinite(n) ? n : 0];
   };
   const [sM, sN] = parse(source);
@@ -1332,7 +1335,7 @@ function pickClosestPhp(source: string, available: string[]): string | null {
     if (aND !== bND) return aND - bND;
     return (bM * 100 + bN) - (aM * 100 + aN); // tiebreak: новее
   });
-  return sorted[0];
+  return sorted[0] ?? null;
 }
 
 async function loadSlavePhpVersions() {
@@ -1441,8 +1444,7 @@ function goToStep(target: number) {
  * упадёт; оператор увидит warning и поправит вручную).
  */
 const defaultForcedPhp = computed(() => {
-  if (slavePhpVersions.value.length > 0) return slavePhpVersions.value[0];
-  return '8.2';
+  return slavePhpVersions.value[0] ?? '8.2';
 });
 
 /**
@@ -1589,20 +1591,23 @@ const probing = ref(false);
 async function startProbe() {
   if (!discovery.value) return;
   if (selectedItems.value.size === 0) return;
+  const migrationId = discovery.value.id;
   probing.value = true;
   // Чистим лог и подписываемся заново — теперь будут события phase=plan
   discoverLog.value = [];
   discoverProgress.step = 0;
   discoverProgress.total = 0;
-  subscribeDiscoverLog(discovery.value.id);
+  subscribeDiscoverLog(migrationId);
   try {
-    await api.post(`/admin/migrate-hostpanel/${discovery.value.id}/probe`, {
+    await api.post(`/admin/migrate-hostpanel/${migrationId}/probe`, {
       itemIds: Array.from(selectedItems.value),
     });
     // Poll
     while (true) {
       await new Promise((r) => setTimeout(r, 2000));
-      const m = await api.get<Migration>(`/admin/migrate-hostpanel/${discovery.value.id}`);
+      const m: Migration = await api.get<Migration>(
+        `/admin/migrate-hostpanel/${migrationId}`,
+      );
       discovery.value = m;
       if (m.status === 'READY' || m.status === 'PARTIAL') {
         // selectedItems уже содержит UUID'ы выбранных, сохраняем выборку.

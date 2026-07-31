@@ -753,9 +753,13 @@ const subscriptionUrl = ref('');
 const subQr = ref('');
 
 const servicesByProto = computed(() => {
-  const acc: Record<string, VpnServiceListItem[]> = { VLESS_REALITY: [], AMNEZIA_WG: [] };
+  const acc: {
+    VLESS_REALITY: VpnServiceListItem[];
+    AMNEZIA_WG: VpnServiceListItem[];
+  } = { VLESS_REALITY: [], AMNEZIA_WG: [] };
   for (const s of services.value) {
-    (acc[s.protocol] ?? (acc[s.protocol] = [])).push(s);
+    if (s.protocol === 'VLESS_REALITY') acc.VLESS_REALITY.push(s);
+    if (s.protocol === 'AMNEZIA_WG') acc.AMNEZIA_WG.push(s);
   }
   return acc;
 });
@@ -1114,8 +1118,10 @@ async function openAccess(u: VpnUserListItem, preselectServiceId?: string) {
   } else if (hasVless) {
     accessTab.value = 'sub';
   } else if (u.services.length > 0) {
-    accessTab.value = u.services[0].serviceId;
-    void loadCredsForTab(u.services[0].serviceId);
+    const firstService = u.services[0];
+    if (!firstService) return;
+    accessTab.value = firstService.serviceId;
+    void loadCredsForTab(firstService.serviceId);
   } else {
     accessTab.value = 'sub';
   }

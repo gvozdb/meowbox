@@ -8,6 +8,7 @@ import {
 import { PrismaService } from '../common/prisma.service';
 import { AgentRelayService } from '../gateway/agent-relay.service';
 import { artifactAnchor, siteDomainLogBase } from '@meowbox/shared';
+import { DomainContextService } from '../sites/domain-context.service';
 
 export interface LogSource {
   id: string;
@@ -22,6 +23,7 @@ export class LogsService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly agentRelay: AgentRelayService,
+    private readonly domainContext: DomainContextService,
   ) {}
 
   /**
@@ -32,19 +34,31 @@ export class LogsService {
 
     // Site sources
     const where = role === 'ADMIN' ? {} : { userId };
-    const sites = await this.prisma.site.findMany({
-      where,
-      select: { id: true, name: true, domain: true },
-      orderBy: { name: 'asc' },
+    const domains = await this.prisma.siteDomain.findMany({
+      where: { site: where },
+      select: {
+        id: true,
+        domain: true,
+        preset: true,
+        phpVersion: true,
+        runtimeKey: true,
+        site: { select: { name: true } },
+      },
+      orderBy: [{ site: { name: 'asc' } }, { position: 'asc' }],
     });
 
-    for (const site of sites) {
+    for (const domain of domains) {
       sources.push({
-        id: `site:${site.id}`,
-        name: site.name,
+        id: `domain:${domain.id}`,
+        name: `${domain.site.name} · ${domain.domain}`,
         type: 'site',
-        types: ['access', 'error', 'php', 'app'],
-        domain: site.domain,
+        types: [
+          'access',
+          'error',
+          ...(domain.phpVersion ? ['php'] : []),
+          ...(domain.preset === 'CUSTOM' ? ['app'] : []),
+        ],
+        domain: domain.domain,
       });
     }
 
@@ -79,9 +93,21 @@ export class LogsService {
   ) {
     const maxLines = Math.min(lines || 200, 1000);
 
-    if (source.startsWith('site:')) {
-      const siteId = source.slice(5);
-      return this.getSiteLogs(siteId, userId, role, type, maxLines);
+    if (source.startsWith('domain:')) {
+      const domainId = source.slice(7);
+      const domain = await this.prisma.siteDomain.findUnique({
+        where: { id: domainId },
+        select: { siteId: true },
+      });
+      if (!domain) throw new NotFoundException('Domain application not found');
+      return this.getSiteLogs(
+        domain.siteId,
+        domainId,
+        userId,
+        role,
+        type,
+        maxLines,
+      );
     }
 
     if (source.startsWith('system:')) {
@@ -100,7 +126,9 @@ export class LogsService {
       return result.data;
     }
 
-    throw new BadRequestException('Invalid source format. Use site:{id} or system:{service}');
+    throw new BadRequestException(
+      'Invalid source format. Use domain:{id} or system:{service}',
+    );
   }
 
   /**
@@ -112,23 +140,30 @@ export class LogsService {
     userId: string,
     role: string,
   ): Promise<string> {
-    if (source.startsWith('site:')) {
-      const siteId = source.slice(5);
-      const site = await this.getSiteOrFail(siteId, userId, role);
+    if (source.startsWith('domain:')) {
+      const domainId = source.slice(7);
+      const record = await this.prisma.siteDomain.findUnique({
+        where: { id: domainId },
+        select: { siteId: true },
+      });
+      if (!record) throw new NotFoundException('Domain application not found');
+      const { site, domain } =
+        await this.domainContext.requireOwnedSiteDomain(
+          record.siteId,
+          domainId,
+          userId,
+          role,
+        );
 
-      // Map type to file path (must match agent LogReader.resolveLogPath).
       switch (type) {
         case 'access':
-          return `/var/log/nginx/${siteDomainLogBase({ siteName: site.name, domain: site.domain })}-access.log`;
+          return `/var/log/nginx/${siteDomainLogBase({ siteName: site.name, domain: domain.domain })}-access.log`;
         case 'error':
-          return `/var/log/nginx/${siteDomainLogBase({ siteName: site.name, domain: site.domain })}-error.log`;
+          return `/var/log/nginx/${siteDomainLogBase({ siteName: site.name, domain: domain.domain })}-error.log`;
         case 'php':
-          return `/var/log/php/${artifactAnchor({ siteName: site.name, domain: site.domain })}-error.log`;
+          return `/var/log/php/${domain.runtimeKey}-error.log`;
         case 'app':
-          if (site.name) {
-            return `/root/.pm2/logs/${site.name}-out.log`;
-          }
-          throw new BadRequestException('App logs not available for this site');
+          return `/root/.pm2/logs/${domain.runtimeKey}-out.log`;
         default:
           throw new BadRequestException(`Unknown log type: ${type}`);
       }
@@ -152,20 +187,27 @@ export class LogsService {
     throw new BadRequestException('Invalid source format');
   }
 
-  // --- Per-site methods (kept for backward compat) ---
-
   async getSiteLogs(
     siteId: string,
+    domainId: string,
     userId: string,
     role: string,
     type: string,
     lines?: number,
   ) {
-    const site = await this.getSiteOrFail(siteId, userId, role);
+    const { site, domain } =
+      await this.domainContext.requireOwnedSiteDomain(
+        siteId,
+        domainId,
+        userId,
+        role,
+      );
 
     const result = await this.agentRelay.emitToAgent('site:logs', {
+      siteDomainId: domainId,
       systemUser: site.systemUser,
-      domain: site.domain,
+      domain: domain.domain,
+      runtimeKey: domain.runtimeKey,
       type,
       siteName: site.name,
       lines: lines || 200,
@@ -178,12 +220,25 @@ export class LogsService {
     return result.data;
   }
 
-  async getAvailableLogs(siteId: string, userId: string, role: string) {
-    const site = await this.getSiteOrFail(siteId, userId, role);
+  async getAvailableLogs(
+    siteId: string,
+    domainId: string,
+    userId: string,
+    role: string,
+  ) {
+    const { site, domain } =
+      await this.domainContext.requireOwnedSiteDomain(
+        siteId,
+        domainId,
+        userId,
+        role,
+      );
 
     const result = await this.agentRelay.emitToAgent('site:logs:available', {
+      siteDomainId: domainId,
       systemUser: site.systemUser,
-      domain: site.domain,
+      domain: domain.domain,
+      runtimeKey: domain.runtimeKey,
       siteName: site.name,
     });
 
@@ -192,26 +247,5 @@ export class LogsService {
     }
 
     return result.data;
-  }
-
-  private async getSiteOrFail(siteId: string, userId: string, role: string) {
-    const site = await this.prisma.site.findUnique({
-      where: { id: siteId },
-      select: {
-        id: true,
-        name: true,
-        domain: true,
-        systemUser: true,
-        userId: true,
-      },
-    });
-
-    if (!site) throw new NotFoundException('Site not found');
-    if (!site.systemUser) throw new NotFoundException('Site has no system user');
-    if (role !== 'ADMIN' && site.userId !== userId) {
-      throw new ForbiddenException('Access denied');
-    }
-
-    return site;
   }
 }

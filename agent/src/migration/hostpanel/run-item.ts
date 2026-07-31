@@ -40,6 +40,7 @@ import { PhpFpmManager } from '../../php/phpfpm.manager';
 import { CronManager } from '../../cron/cron.manager';
 import { CommandExecutor } from '../../command-executor';
 import { SITES_BASE_PATH, LETSENCRYPT_LIVE_DIR } from '../../config';
+import { isModxPreset, normalizeHostpanelPreset } from '@meowbox/shared';
 
 interface RunCtx {
   socket: Socket | null;
@@ -78,7 +79,8 @@ interface RunCtx {
     /**
      * Логин/пароль MODX-админа, перенесённые с источника (`manager_user`/
      * `manager_pass` из `modx_host_hostpanel_sites`). На hostpanel они хранятся
-     * в плейне → переезжают 1-в-1 в `Site.cmsAdminUser`/`cmsAdminPassword`,
+     * в плейне → переезжают 1-в-1 в
+     * `SiteDomain.cmsAdminUser`/`cmsAdminPassword`,
      * и блок CMS на странице сайта показывает Логин/Пароль/URL без отдельной
      * настройки оператором. Если не удалось вытащить — оставляем null,
      * UI покажет cmsAdminUser=null и блок свернётся в «Версия only»
@@ -154,8 +156,17 @@ export async function runItem(args: {
   /** Soft-cancel: возвращает true → между стейджами кидаем 'Cancelled'. */
   isCancelled?: () => boolean;
 }): Promise<RunItemResult> {
+  const plan = {
+    ...args.plan,
+    preset: normalizeHostpanelPreset(
+      args.plan.preset,
+      args.plan.sourceCms,
+      args.plan.sourceCmsVersion,
+    ),
+  };
   const ctx: RunCtx = {
     ...args,
+    plan,
     ssh: new SshSourceBridge({
       host: args.creds.host,
       port: args.creds.port,
@@ -204,7 +215,7 @@ export async function runItem(args: {
     // там значения вырезаются из sourceRows (spec §3.2 — не храним секреты
     // в открытом виде в БД мастера). Поэтому берём заново здесь, in-memory,
     // и отдаём мастеру через RunItemResult.creds.cmsAdminUser/Password —
-    // он сразу сохранит в Site.cmsAdminUser/cmsAdminPassword.
+    // он сразу сохранит в SiteDomain.cmsAdminUser/cmsAdminPassword.
     try {
       await fetchCmsAdminCreds(ctx);
       if (ctx.usedCreds.cmsAdminUser) {
@@ -242,7 +253,7 @@ export async function runItem(args: {
 
     // 6. patch-modx (только для MODX)
     const s6 = next();
-    if (ctx.plan.sourceCms === 'modx') {
+    if (isModxPreset(ctx.plan.preset)) {
       await patchModxStage(ctx);
     } else {
       log(ctx, '  not MODX — skip');
@@ -371,7 +382,7 @@ async function preflightStage(ctx: RunCtx) {
   // Проверка БД-конфликта: spec §2.2 требует «Database.name свободно». Master
   // делает то же на checkName, но между UI-валидацией и start может пройти
   // время → защищаемся ещё раз перед db-create.
-  if (ctx.plan.sourceCms === 'modx' || ctx.plan.dbExcludeDataTables?.length) {
+  if (isModxPreset(ctx.plan.preset) || ctx.plan.dbExcludeDataTables?.length) {
     const dbCheck = await ctx.exec.execute('mariadb', [
       '-N', '-B', '-e',
       `SELECT 1 FROM information_schema.schemata WHERE schema_name='${ctx.plan.newName}'`,
@@ -914,7 +925,11 @@ async function applyNginxStage(ctx: RunCtx) {
   // в один элемент `domains[]`. domainId стабильный — генерим из newName
   // (миграция всегда один домен на сайт), API после persist пере-создаст Site
   // и регенерит конфиг авторитетно из БД.
-  const domainId = `migrated-${ctx.plan.newName}`;
+  const domainId = ctx.plan.domainId || `migrated-${ctx.plan.newName}`;
+  // Hostpanel migration is the primary domain path. Keeping newName as the
+  // default preserves the historical pool/socket/log identity; a future
+  // persisted runtimeKey can be supplied without renaming the artifact.
+  const runtimeKey = ctx.plan.runtimeKey || ctx.plan.newName;
   // Имя rate-limit зоны: в обычном потоке его присылает API, но миграция
   // создаёт Site в БД master ПОСЛЕ apply-nginx
   // (см. migration-hostpanel.service.ts::persistMigratedSiteRecords). Поэтому
@@ -931,8 +946,6 @@ async function applyNginxStage(ctx: RunCtx) {
   const result = await nginx.createSiteConfig({
     siteName: ctx.plan.newName,
     rootPath: homeDir,
-    phpEnabled: true,
-    phpVersion: ctx.plan.phpVersion,
     systemUser: ctx.plan.newName,
     domains: [
       {
@@ -940,6 +953,10 @@ async function applyNginxStage(ctx: RunCtx) {
         domain: ctx.plan.newDomain,
         aliases,
         filesRelPath,
+        preset: ctx.plan.preset,
+        phpVersion: ctx.plan.phpVersion,
+        runtimeKey,
+        isPrimary: true,
         sslEnabled,
         httpsRedirect: sslEnabled,
         zoneName,
@@ -961,10 +978,14 @@ async function applyPhpFpmStage(ctx: RunCtx) {
   const fpm = new PhpFpmManager();
   const result = await fpm.createPool({
     siteName: ctx.plan.newName,
+    domainId: ctx.plan.domainId || `migrated-${ctx.plan.newName}`,
     domain: ctx.plan.newDomain,
     phpVersion: ctx.plan.phpVersion,
+    runtimeKey: ctx.plan.runtimeKey || ctx.plan.newName,
     user: ctx.plan.newName,
     rootPath: path.join(SITES_BASE_PATH, ctx.plan.newName),
+    filesRelPath: ctx.plan.filesRelPath || 'www',
+    pmMaxChildren: ctx.plan.phpFpm.pmMaxChildren,
     sslEnabled: !!ctx.plan.ssl?.transfer,
     customConfig: ctx.plan.phpFpm.custom || null,
   } as Parameters<typeof fpm.createPool>[0]);
@@ -1223,7 +1244,7 @@ async function cleanupArtifacts(ctx: RunCtx) {
   }
   if (ctx.created.phpfpm) {
     const fpm = new PhpFpmManager();
-    await fpm.removePool(ctx.plan.newName, ctx.plan.phpVersion).catch(() => {});
+    await fpm.removePool(ctx.plan.runtimeKey || ctx.plan.newName, ctx.plan.phpVersion).catch(() => {});
   }
   if (ctx.created.db) {
     try {
@@ -1448,7 +1469,8 @@ function extractMariaDbError(raw: string): string {
 /**
  * Тянет `manager_user`/`manager_pass` MODX-админа с источника
  * (`modx_host_hostpanel_sites.id = sourceSiteId`). На hostpanel пароль лежит
- * в плейне → можем 1-в-1 переложить в `Site.cmsAdminUser`/`cmsAdminPassword`,
+ * в плейне → можем 1-в-1 переложить в
+ * `SiteDomain.cmsAdminUser`/`cmsAdminPassword`,
  * чтобы блок CMS на странице сайта показывал Логин/Пароль/URL без отдельной
  * настройки оператором.
  *
@@ -1457,7 +1479,7 @@ function extractMariaDbError(raw: string): string {
  *
  * Кладём в `ctx.usedCreds.cmsAdminUser`/`cmsAdminPassword`, мастер забирает
  * через `RunItemResult.creds`. Открытым текстом в БД мастера ничего не
- * сохраняется кроме итогового `Site.cmsAdminPassword` — это **тот же**
+ * сохраняется кроме итогового `SiteDomain.cmsAdminPassword` — это **тот же**
  * пароль, что лежит в открытом виде в hostpanel-таблице источника, никаких
  * новых утечек не вносим.
  */

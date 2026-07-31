@@ -1066,7 +1066,7 @@ async function loadInstalledPhpVersions() {
         siteDefaultsForm.defaultPhpVersion &&
         !installedPhpVersions.value.includes(siteDefaultsForm.defaultPhpVersion)
       ) {
-        siteDefaultsForm.defaultPhpVersion = installedPhpVersions.value[0];
+        siteDefaultsForm.defaultPhpVersion = installedPhpVersions.value[0] ?? '';
       }
     } else {
       installedPhpVersions.value = [];

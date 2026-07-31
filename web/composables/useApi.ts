@@ -2,6 +2,7 @@ interface ApiOptions {
   method?: 'GET' | 'POST' | 'PUT' | 'DELETE' | 'PATCH';
   body?: unknown;
   requireAuth?: boolean;
+  headers?: Record<string, string>;
   /**
    * Принудительно бить только в локальный мастер-API, игнорируя выбранный
    * в сайдбаре slave. Нужно для master-only ресурсов (например, палитры
@@ -109,10 +110,17 @@ export function useApi() {
   }
 
   async function request<T>(endpoint: string, options: ApiOptions = {}): Promise<T> {
-    const { method = 'GET', body, requireAuth = true, noProxy = false } = options;
+    const {
+      method = 'GET',
+      body,
+      requireAuth = true,
+      noProxy = false,
+      headers: customHeaders,
+    } = options;
 
     const headers: Record<string, string> = {
       'Content-Type': 'application/json',
+      ...customHeaders,
     };
 
     if (requireAuth) {
@@ -299,7 +307,9 @@ export function useApi() {
         onProgress(Math.min(99, Math.round((received / contentLength) * 100)));
       }
 
-      const blob = new Blob(chunks);
+      const blob = new Blob(
+        chunks.map((chunk) => chunk.slice().buffer as ArrayBuffer),
+      );
       onProgress(100);
       triggerBlobDownload(blob, filename);
     } else {
@@ -324,7 +334,12 @@ export function useApi() {
   /**
    * Upload a file to an API endpoint (multipart/form-data, with auth).
    */
-  async function upload<T>(endpoint: string, file: File, extraFields?: Record<string, string>): Promise<T> {
+  async function upload<T>(
+    endpoint: string,
+    file: File,
+    extraFields?: Record<string, string>,
+    options?: { headers?: Record<string, string> },
+  ): Promise<T> {
     const token = localStorage.getItem('accessToken');
     const prefix = endpoint.startsWith('/servers') || endpoint.startsWith('/proxy/') ? '' : getProxyPrefix();
 
@@ -338,7 +353,10 @@ export function useApi() {
 
     const response = await fetch(`${baseUrl}${prefix}${endpoint}`, {
       method: 'POST',
-      headers: { Authorization: `Bearer ${token || ''}` },
+      headers: {
+        Authorization: `Bearer ${token || ''}`,
+        ...options?.headers,
+      },
       body: formData,
     });
 
@@ -356,30 +374,93 @@ export function useApi() {
     return json.data;
   }
 
+  async function rawText(endpoint: string): Promise<string> {
+    const prefix = endpoint.startsWith('/servers') || endpoint.startsWith('/proxy/')
+      ? ''
+      : getProxyPrefix();
+    const fetchText = async () => {
+      const token = localStorage.getItem('accessToken');
+      return fetch(`${baseUrl}${prefix}${endpoint}`, {
+        headers: { Authorization: `Bearer ${token || ''}` },
+        cache: 'no-store',
+      });
+    };
+
+    let response = await fetchText();
+    if (response.status === 401 && (await tryRefreshToken())) {
+      response = await fetchText();
+    }
+    if (!response.ok) {
+      let message = `Ошибка запроса (${response.status})`;
+      try {
+        const body = await response.json();
+        message = body?.error?.message || message;
+      } catch {
+        /* response is not JSON */
+      }
+      throw new Error(Array.isArray(message) ? message.join(', ') : message);
+    }
+    return response.text();
+  }
+
   return {
-    get: <T>(endpoint: string, opts?: { noProxy?: boolean }) =>
-      request<T>(endpoint, { noProxy: opts?.noProxy }),
-    post: <T>(endpoint: string, body?: unknown, opts?: { noProxy?: boolean }) =>
-      request<T>(endpoint, { method: 'POST', body, noProxy: opts?.noProxy }),
-    put: <T>(endpoint: string, body?: unknown, opts?: { noProxy?: boolean }) =>
-      request<T>(endpoint, { method: 'PUT', body, noProxy: opts?.noProxy }),
-    del: <T>(endpoint: string, body?: unknown) =>
-      request<T>(endpoint, { method: 'DELETE', body }),
+    get: <T>(
+      endpoint: string,
+      opts?: { noProxy?: boolean; headers?: Record<string, string> },
+    ) => request<T>(endpoint, { noProxy: opts?.noProxy, headers: opts?.headers }),
+    post: <T>(
+      endpoint: string,
+      body?: unknown,
+      opts?: { noProxy?: boolean; headers?: Record<string, string> },
+    ) =>
+      request<T>(endpoint, {
+        method: 'POST',
+        body,
+        noProxy: opts?.noProxy,
+        headers: opts?.headers,
+      }),
+    put: <T>(
+      endpoint: string,
+      body?: unknown,
+      opts?: { noProxy?: boolean; headers?: Record<string, string> },
+    ) =>
+      request<T>(endpoint, {
+        method: 'PUT',
+        body,
+        noProxy: opts?.noProxy,
+        headers: opts?.headers,
+      }),
+    del: <T>(
+      endpoint: string,
+      body?: unknown,
+      opts?: { headers?: Record<string, string> },
+    ) => request<T>(endpoint, { method: 'DELETE', body, headers: opts?.headers }),
     // alias `delete` для DRY: исторически было только `del` (зарезервированное
     // слово в JS как имя method-call было нормально, но кто-то по привычке
     // пишет `api.delete(...)` — раньше это давало "p.delete is not a function".
     // Поддерживаем оба имени, чтобы новые коллеги/места не ловили этот баг.
-    delete: <T>(endpoint: string, body?: unknown) =>
-      request<T>(endpoint, { method: 'DELETE', body }),
-    patch: <T>(endpoint: string, body?: unknown) =>
-      request<T>(endpoint, { method: 'PATCH', body }),
+    delete: <T>(
+      endpoint: string,
+      body?: unknown,
+      opts?: { headers?: Record<string, string> },
+    ) => request<T>(endpoint, { method: 'DELETE', body, headers: opts?.headers }),
+    patch: <T>(
+      endpoint: string,
+      body?: unknown,
+      opts?: { headers?: Record<string, string> },
+    ) => request<T>(endpoint, { method: 'PATCH', body, headers: opts?.headers }),
     publicPost: <T>(endpoint: string, body?: unknown) =>
       request<T>(endpoint, { method: 'POST', body, requireAuth: false }),
     publicGet: <T>(endpoint: string) =>
       request<T>(endpoint, { requireAuth: false }),
     getWithMeta: <T>(endpoint: string) => requestWithMeta<T>(endpoint),
     download,
-    upload: <T>(endpoint: string, file: File, extraFields?: Record<string, string>) =>
-      upload<T>(endpoint, file, extraFields),
+    rawText,
+    upload: <T>(
+      endpoint: string,
+      file: File,
+      extraFields?: Record<string, string>,
+      options?: { headers?: Record<string, string> },
+    ) => upload<T>(endpoint, file, extraFields, options),
   };
 }

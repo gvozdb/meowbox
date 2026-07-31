@@ -31,17 +31,6 @@ export default defineNuxtConfig({
     },
   },
 
-  // Security headers
-  routeRules: {
-    '/**': {
-      headers: {
-        'X-Frame-Options': 'DENY',
-        'X-Content-Type-Options': 'nosniff',
-        'Referrer-Policy': 'strict-origin-when-cross-origin',
-      },
-    },
-  },
-
   // Vite HMR through Nginx reverse proxy (только в dev; в prod Nuxt пересобран).
   // Порт берётся из env, чтоб совпадал с тем, что проксирует nginx.
   vite: {
@@ -56,9 +45,19 @@ export default defineNuxtConfig({
   },
 
   // Minimal build output
+  // @ts-expect-error Nuxt 3.17 omits Nitro fields from its public config type.
   nitro: {
     compressPublicAssets: true,
     minify: true,
+    routeRules: {
+      '/**': {
+        headers: {
+          'X-Frame-Options': 'DENY',
+          'X-Content-Type-Options': 'nosniff',
+          'Referrer-Policy': 'strict-origin-when-cross-origin',
+        },
+      },
+    },
   },
 
   typescript: {

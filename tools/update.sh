@@ -1,547 +1,992 @@
 #!/usr/bin/env bash
 # =============================================================================
-# Update — главный скрипт обновления панели.
+# Transactional release updater.
 #
-# Скачивает релиз с GitHub Releases, проверяет подпись, разворачивает в
-# releases/<version>/, прогоняет миграции, переключает симлинк current,
-# делает pm2 reload, healthcheck. При фейле — автоматический rollback.
-#
-# Usage:
-#   bash tools/update.sh                  # latest stable release
-#   bash tools/update.sh v1.4.2           # конкретная версия
-#   bash tools/update.sh --check          # только проверить, есть ли обновление
-#   bash tools/update.sh --dry-run        # симуляция без изменений
-#
-# Stages (выводятся в stdout префиксом [stage:NAME]):
-#   preflight, snapshot, download, verify, extract, install, migrate, switch,
-#   reload, healthcheck, cleanup
-#
-# Env:
-#   GITHUB_REPO=gvozdb/meowbox
-#   MEOWBOX_KEEP_RELEASES=5
+# The only mutating path is the phase sequence below.  `--dry-run` stages a
+# candidate in a temporary directory, runs the real migration path on an
+# SQLite backup clone and proves hashes of live DB/config inputs are unchanged.
 # =============================================================================
-set -euo pipefail
+set -Eeuo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PANEL_DIR="$(dirname "$SCRIPT_DIR")"
-RELEASES_DIR="$PANEL_DIR/releases"
-# STATE_DIR строго привязан к PANEL_DIR/state. НЕ берём из env, потому что
-# старый PM2-процесс (который и спавнит update.sh через UI-trigger) выставляет
-# MEOWBOX_STATE_DIR на release dir предыдущей версии (releases/<old_v>/state),
-# и эта дрянь наследуется в update.sh → миграции пишут в неправильный путь.
-STATE_DIR="$PANEL_DIR/state"
-LOCK_FILE="${MEOWBOX_UPDATE_LOCK:-/var/run/meowbox-update.lock}"
-GITHUB_REPO="${GITHUB_REPO:-gvozdb/meowbox}"
-KEEP_RELEASES="${MEOWBOX_KEEP_RELEASES:-3}"
+# shellcheck source=tools/release-lib.sh
+source "$SCRIPT_DIR/release-lib.sh"
+# shellcheck source=tools/release-transaction-policy.sh
+source "$SCRIPT_DIR/release-transaction-policy.sh"
 
-# CLI
+STATE_DIR="${MEOWBOX_STATE_DIR:-$PANEL_DIR/state}"
+[[ -d "$STATE_DIR" ]] || STATE_DIR="$PANEL_DIR"
+DATA_DIR="$STATE_DIR/data"
+[[ -d "$DATA_DIR" ]] || DATA_DIR="$PANEL_DIR/data"
+DB_FILE="${MEOWBOX_DATABASE_FILE:-$DATA_DIR/meowbox.db}"
+RELEASES_DIR="$PANEL_DIR/releases"
+TRANSACTION_ROOT="$DATA_DIR/migrations/release-transactions"
+REPORT_ROOT="$DATA_DIR/migrations/reports"
+LOCK_FILE="${MEOWBOX_RELEASE_LOCK_FILE:-$DATA_DIR/migrations/release-update.lock}"
+GITHUB_REPO="${GITHUB_REPO:-gvozdb/meowbox}"
+QUIESCE_HOOK="${MEOWBOX_QUIESCE_HOOK:-}"
+RUNTIME_RENDER_HOOK="${MEOWBOX_RUNTIME_RENDER_HOOK:-}"
+RUNTIME_VALIDATE_HOOK="${MEOWBOX_RUNTIME_VALIDATE_HOOK:-}"
+RUNTIME_APPLY_HOOK="${MEOWBOX_RUNTIME_APPLY_HOOK:-}"
+MAPPER_EVIDENCE_HOOK="${MEOWBOX_MAPPER_EVIDENCE_HOOK:-}"
+AGENT_HEALTH_HOOK="${MEOWBOX_AGENT_HEALTH_HOOK:-}"
+REPRESENTATIVE_READ_HOOK="${MEOWBOX_REPRESENTATIVE_READ_HOOK:-}"
+QUIESCE_HOOK_WAS_CONFIGURED=false
+AGENT_HEALTH_HOOK_WAS_CONFIGURED=false
+REPRESENTATIVE_READ_HOOK_WAS_CONFIGURED=false
+[[ -n "$QUIESCE_HOOK" ]] && QUIESCE_HOOK_WAS_CONFIGURED=true
+[[ -n "$AGENT_HEALTH_HOOK" ]] && AGENT_HEALTH_HOOK_WAS_CONFIGURED=true
+[[ -n "$REPRESENTATIVE_READ_HOOK" ]] && REPRESENTATIVE_READ_HOOK_WAS_CONFIGURED=true
+
 TARGET=""
 DRY_RUN=false
 CHECK_ONLY=false
-TRIGGERED_BY="${MEOWBOX_TRIGGERED_BY:-cli}"
-for arg in "$@"; do
-  case "$arg" in
-    --dry-run)  DRY_RUN=true ;;
-    --check)    CHECK_ONLY=true ;;
-    --triggered-by=*) TRIGGERED_BY="${arg#--triggered-by=}" ;;
-    v*)         TARGET="$arg" ;;
-    *)          ;;
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --dry-run) DRY_RUN=true; shift ;;
+    --check) CHECK_ONLY=true; shift ;;
+    --triggered-by=*) shift ;;
+    v*) TARGET="$1"; shift ;;
+    *)
+      echo "Usage: update.sh [vX.Y.Z] [--dry-run] [--check]" >&2
+      exit 2
+      ;;
   esac
 done
 
-# ----- Dev-mode guard -----
-# Если в корне панели лежит .dev-mode → этот сервер живёт прямо из git workspace
-# (releases/<v>/, current/, tarball'ы тут не нужны). update.sh скачает tarball,
-# распакует поверх, переименует api/ в releases/<v>/api/ → разъебёт git workspace
-# и подменит исходники бинарниками. На dev для этого есть `make dev` (tools/dev.sh).
+say() { echo "[update] $*"; }
+stage() { echo "[stage:$1] $2"; }
+die() { echo "[update] ✗ $*" >&2; exit 1; }
+
 if [[ -f "$PANEL_DIR/.dev-mode" ]]; then
-  echo "❌ Это dev-сервер (найден $PANEL_DIR/.dev-mode)."
-  echo "   update.sh для прода. На dev используй: make dev"
-  echo "   (git pull → пересборка изменённых пакетов → pm2 reload)"
-  exit 1
+  die "release update is unavailable on a dev workspace; use make dev"
+fi
+for command in curl tar sha256sum node npm npx python3 flock pm2 nginx systemctl sqlite3 df du stat; do mb_require_command "$command" || die "missing dependency"; done
+[[ -f "$DB_FILE" ]] || die "panel SQLite database is missing: $DB_FILE"
+ENV_FILE="$STATE_DIR/.env"
+[[ -f "$ENV_FILE" ]] || ENV_FILE="$PANEL_DIR/.env"
+if [[ -z "${MEOWBOX_QUIESCE_TIMEOUT:-}" ]]; then
+  MEOWBOX_QUIESCE_TIMEOUT="$(mb_read_env_value "$ENV_FILE" MEOWBOX_QUIESCE_TIMEOUT || true)"
+fi
+MEOWBOX_QUIESCE_TIMEOUT="${MEOWBOX_QUIESCE_TIMEOUT:-120}"
+[[ "$MEOWBOX_QUIESCE_TIMEOUT" =~ ^[0-9]+$ ]] &&
+  (( MEOWBOX_QUIESCE_TIMEOUT >= 1 && MEOWBOX_QUIESCE_TIMEOUT <= 1800 )) ||
+  die "MEOWBOX_QUIESCE_TIMEOUT must be an integer between 1 and 1800"
+if [[ -z "${MEOWBOX_RELEASE_MIN_FREE_KB:-}" ]]; then
+  MEOWBOX_RELEASE_MIN_FREE_KB="$(mb_read_env_value "$ENV_FILE" MEOWBOX_RELEASE_MIN_FREE_KB || true)"
+fi
+MEOWBOX_RELEASE_MIN_FREE_KB="${MEOWBOX_RELEASE_MIN_FREE_KB:-524288}"
+# A dry-run must not initialise release state just by being invoked.  The lock
+# itself is intentionally pre-created by install/bootstrap so every updater,
+# runner and recovery process contends on exactly the same inode.
+if $DRY_RUN || $CHECK_ONLY; then
+  [[ -d "$(dirname "$LOCK_FILE")" && -e "$LOCK_FILE" ]] || \
+    die "release flock is not initialised; complete installation before a read-only check/dry-run"
+else
+  mkdir -p "$TRANSACTION_ROOT" "$REPORT_ROOT" "$(dirname "$LOCK_FILE")" "$RELEASES_DIR"
+  chmod 0700 "$TRANSACTION_ROOT" "$REPORT_ROOT" || true
 fi
 
-# ----- Hookable stage logging -----
-stage()  { echo "[stage:$1] $2"; }
-say()    { echo "[update] $*"; }
-err()    { echo "[update] ✗ $*" >&2; }
-abort()  { err "$1"; exit 1; }
+# A descriptor-based flock replaces the stale PID-file scheme.  The same path
+# is passed to runner children; direct runner calls re-exec under this lock.
+exec 9>>"$LOCK_FILE"
+flock -n 9 || die "another updater, system migration or startup repair owns $LOCK_FILE"
+export MEOWBOX_RELEASE_LOCK_HELD=1
+export MEOWBOX_RELEASE_LOCK_FILE="$LOCK_FILE"
 
-# ----- Lock -----
-acquire_lock() {
-  if [[ -e "$LOCK_FILE" ]]; then
-    pid="$(cat "$LOCK_FILE" 2>/dev/null || true)"
-    if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
-      abort "Другой update.sh уже идёт (pid $pid). Подожди или убей вручную."
-    fi
-    say "Stale lock (pid $pid) — удаляю"
-    rm -f "$LOCK_FILE"
-  fi
-  echo $$ > "$LOCK_FILE"
-  trap 'cleanup_old_releases; rm -f "$LOCK_FILE"' EXIT
-}
-
-# Чистка старых релизов — должна работать ВСЕГДА (через trap EXIT), а не
-# только на happy-path после healthcheck. Раньше при любом сбое (zависший
-# pm2 reload, healthcheck timeout, abort на середине) релизы копились в
-# releases/ и забивали диск.
-cleanup_old_releases() {
-  if [[ ! -d "$RELEASES_DIR" ]]; then return 0; fi
-  ls -1t "$RELEASES_DIR" 2>/dev/null | tail -n +$((KEEP_RELEASES + 1)) | while read -r old; do
-    rm -rf "$RELEASES_DIR/$old" 2>/dev/null || true
-    echo "[cleanup] removed: $old"
-  done
-}
-
-# ----- 0. Preflight -----
-stage preflight "Проверка окружения"
-acquire_lock
-
-command -v curl >/dev/null    || abort "curl не установлен"
-command -v tar >/dev/null     || abort "tar не установлен"
-command -v sha256sum >/dev/null || abort "sha256sum не установлен"
-command -v node >/dev/null    || abort "node не установлен"
-command -v pm2 >/dev/null     || abort "pm2 не установлен"
-
-# Auto-trigger миграции legacy → release раскладки.
-# Если current/ нет, но в корне лежат api/, web/ и VERSION — мы в legacy
-# layout. Прогоняем migrate-legacy-to-release.sh ОДИН раз перед download.
-if [[ ! -L "$PANEL_DIR/current" ]] && \
-   [[ -d "$PANEL_DIR/api" ]] && \
-   [[ -d "$PANEL_DIR/web" ]] && \
-   [[ -f "$PANEL_DIR/VERSION" ]]; then
-  stage migrate-legacy "Detected legacy layout — конвертирую в release"
-  bash "$SCRIPT_DIR/migrate-legacy-to-release.sh" || abort "migrate-legacy-to-release.sh упал"
-  # После миграции $PANEL_DIR/tools стал симлинком → current/tools. Дальше
-  # все подскрипты вызываются через $SCRIPT_DIR, который остаётся логическим
-  # путём ($PANEL_DIR/tools). НЕ резолвим pwd -P — иначе snapshot.sh и прочие
-  # пойдут от physical-пути releases/<v>/, а не от /opt/meowbox/, и сложат
-  # данные в /opt/meowbox/releases/<v>/state/, что бесполезно.
-  SCRIPT_DIR="$PANEL_DIR/tools"
-  RELEASES_DIR="$PANEL_DIR/releases"
-fi
-
-# Свободное место — минимум 2GB
-avail_kb="$(df -P "$PANEL_DIR" | awk 'NR==2{print $4}')"
-[[ "$avail_kb" -gt $((2 * 1024 * 1024)) ]] || abort "Свободного места <2GB на $PANEL_DIR"
-
-# Текущая версия
+CURRENT_RELEASE=""
 CURRENT_VERSION="unknown"
-if [[ -L "$PANEL_DIR/current" ]] && [[ -f "$PANEL_DIR/current/VERSION" ]]; then
-  CURRENT_VERSION="$(cat "$PANEL_DIR/current/VERSION")"
+if [[ -L "$PANEL_DIR/current" ]]; then
+  CURRENT_RELEASE="$(readlink -f "$PANEL_DIR/current")"
+  [[ -d "$CURRENT_RELEASE" ]] || die "current points to a missing release"
+  [[ -f "$CURRENT_RELEASE/VERSION" ]] && CURRENT_VERSION="$(tr -d '[:space:]' < "$CURRENT_RELEASE/VERSION")"
+else
+  die "legacy layout has no current release symlink; migrate layout explicitly before transactional update"
 fi
-say "Текущая версия: $CURRENT_VERSION"
 
-# Latest version из GitHub (только tag_name, без скачивания tarball)
 fetch_latest() {
   local auth=()
   [[ -n "${GITHUB_TOKEN:-}" ]] && auth=(-H "Authorization: Bearer $GITHUB_TOKEN")
-  curl -sfL "${auth[@]}" -H "Accept: application/vnd.github+json" \
-    "https://api.github.com/repos/$GITHUB_REPO/releases/latest" \
-    | python3 -c "import sys,json; print(json.load(sys.stdin).get('tag_name',''))"
+  curl -fsSL "${auth[@]}" -H "Accept: application/vnd.github+json" \
+    "https://api.github.com/repos/$GITHUB_REPO/releases/latest" |
+    python3 -c 'import json,sys; print(json.load(sys.stdin).get("tag_name", ""))'
 }
 
 if [[ -z "$TARGET" ]]; then
-  TARGET="$(fetch_latest || true)"
-  [[ -n "$TARGET" ]] || abort "Не удалось получить latest release с GitHub. Проверь GITHUB_REPO=$GITHUB_REPO"
-fi
-say "Target: $TARGET"
-
-if [[ "$CURRENT_VERSION" == "$TARGET" ]] && [[ "$CHECK_ONLY" == "true" ]]; then
-  say "Уже на $TARGET — обновление не требуется"
-  exit 0
-fi
-
-if [[ "$CHECK_ONLY" == "true" ]]; then
-  say "Доступно обновление: $CURRENT_VERSION → $TARGET"
-  exit 0
-fi
-
-if [[ "$DRY_RUN" == "true" ]]; then
-  say "DRY-RUN: установил бы $TARGET. Выход."
-  exit 0
-fi
-
-# ----- 1. Snapshot -----
-stage snapshot "Создаю snapshot БД и конфигов"
-SNAP_PATH="$(bash "$SCRIPT_DIR/snapshot.sh" | tail -1)"
-say "Snapshot: $SNAP_PATH"
-
-# ----- 2. Download -----
-stage download "Скачиваю tarball $TARGET"
-TMP_DIR="$(mktemp -d)"
-# Перезаписываем trap из acquire_lock — добавляем чистку TMP_DIR.
-# КРИТИЧНО: cleanup_old_releases ОБЯЗАТЕЛЬНО оставляем, иначе старые релизы
-# никогда не чистятся (trap EXIT — единственное место, где это происходит).
-trap 'cleanup_old_releases; rm -rf "$TMP_DIR"; rm -f "$LOCK_FILE"' EXIT
-TARBALL="$TMP_DIR/meowbox-$TARGET.tar.gz"
-SUMS="$TMP_DIR/SHA256SUMS"
-
-# Стратегия:
-#   1) Сначала пытаемся curl — для публичных релизов это всегда работает,
-#      не требует gh auth и не зависит от ключа в state.
-#   2) Если curl упал (приватный репо / 404 / network) — пробуем gh, но только
-#      если он установлен И аутентифицирован (`gh auth status` = 0). Иначе
-#      проброс понятной ошибки, без бесполезного "gh release download упал".
-download_release_via_curl() {
-  local auth_hdr=()
-  [[ -n "${GITHUB_TOKEN:-}" ]] && auth_hdr=(-H "Authorization: Bearer $GITHUB_TOKEN")
-  # NB: НЕ слать Accept: application/octet-stream сюда — GitHub отвечает 415.
-  local http_code
-  http_code="$(curl -sIL -o /dev/null -w '%{http_code}' "${auth_hdr[@]}" \
-    -H "Accept: application/vnd.github+json" \
-    "https://api.github.com/repos/$GITHUB_REPO/releases/tags/$TARGET" 2>/dev/null || echo 000)"
-  if [[ "$http_code" != "200" ]]; then
-    return 1
+  if [[ -n "${MEOWBOX_UPDATE_CANDIDATE_DIR:-}" ]]; then
+    TARGET="${MEOWBOX_UPDATE_CANDIDATE_VERSION:-candidate-$(date -u +%Y%m%d%H%M%S)}"
+  else
+    TARGET="$(fetch_latest || true)"
   fi
-  curl -sfL "${auth_hdr[@]}" \
-    "https://github.com/$GITHUB_REPO/releases/download/$TARGET/meowbox-$TARGET.tar.gz" \
-    -o "$TARBALL" 2>/dev/null || return 2
-  curl -sfL "${auth_hdr[@]}" \
-    "https://github.com/$GITHUB_REPO/releases/download/$TARGET/SHA256SUMS" \
-    -o "$SUMS" 2>/dev/null || return 3
-  return 0
+fi
+[[ "$TARGET" =~ ^[A-Za-z0-9._-]{1,128}$ ]] || die "invalid target version"
+say "current=$CURRENT_VERSION target=$TARGET"
+
+if $CHECK_ONLY; then
+  if [[ "$TARGET" == "$CURRENT_VERSION" ]]; then say "already current"; else say "update available: $CURRENT_VERSION → $TARGET"; fi
+  exit 0
+fi
+if [[ "$TARGET" == "$CURRENT_VERSION" ]]; then
+  say "already current; second run is a no-op"
+  exit 0
+fi
+
+TRANSACTION_ID="$(date -u +%Y%m%dT%H%M%SZ)-$$-${RANDOM}"
+if $DRY_RUN; then
+  TX_DIR="$(mktemp -d "${TMPDIR:-/tmp}/meowbox-release-dry-run.XXXXXX")"
+else
+  TX_DIR="$TRANSACTION_ROOT/$TRANSACTION_ID"
+  [[ ! -e "$TX_DIR" ]] || die "transaction directory already exists"
+  mkdir -p "$TX_DIR"
+  chmod 0700 "$TX_DIR"
+  mb_atomic_switch_symlink "$TX_DIR" "$TRANSACTION_ROOT/current"
+fi
+CANDIDATE_DIR="$TX_DIR/stage/release"
+DRY_DIR="$TX_DIR/dry-run"
+RUNTIME_STAGE="$TX_DIR/runtime-stage"
+RUNTIME_MANIFEST="$TX_DIR/runtime-manifest.json"
+JOURNAL="$TX_DIR/journal.json"
+SNAPSHOT_DIR=""
+ROLLBACK_ARMED=false
+COMMITTED=false
+REPORT_JSON="$REPORT_ROOT/$TRANSACTION_ID.json"
+REPORT_TEXT="$REPORT_ROOT/$TRANSACTION_ID.txt"
+if $DRY_RUN; then
+  # Keep only redacted reports outside the clone tree: the clone itself is
+  # removed on exit because it can contain encrypted panel records.  A
+  # read-only rehearsal must not create state/data report directories or alter
+  # durable release metadata.
+  DRY_REPORT_ROOT="${MEOWBOX_DRY_RUN_REPORT_DIR:-${TMPDIR:-/tmp}/meowbox-release-reports}"
+  mkdir -p "$DRY_REPORT_ROOT"
+  chmod 0700 "$DRY_REPORT_ROOT" || true
+  REPORT_JSON="$DRY_REPORT_ROOT/$TRANSACTION_ID.json"
+  REPORT_TEXT="$DRY_REPORT_ROOT/$TRANSACTION_ID.txt"
+fi
+
+journal_update() {
+  $DRY_RUN && return 0
+  local phase="$1"
+  local message="$2"
+  local committed="${3:-false}"
+  export JOURNAL_PHASE="$phase" JOURNAL_MESSAGE="$message" JOURNAL_COMMITTED="$committed"
+  export JOURNAL_TARGET="$TARGET" JOURNAL_CURRENT="$CURRENT_RELEASE" JOURNAL_TX="$TRANSACTION_ID"
+  export JOURNAL_SNAPSHOT="$SNAPSHOT_DIR" JOURNAL_RUNTIME_MANIFEST="$RUNTIME_MANIFEST" JOURNAL_CANDIDATE="$CANDIDATE_DIR"
+  python3 -c '
+import json, os, pathlib, sys
+from datetime import datetime, timezone
+target = pathlib.Path(sys.argv[1])
+try:
+    payload = json.loads(target.read_text(encoding="utf-8"))
+except FileNotFoundError:
+    payload = {"version": 1, "transactionId": os.environ["JOURNAL_TX"], "createdAt": datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")}
+payload.update({
+    "phase": os.environ["JOURNAL_PHASE"],
+    "message": os.environ["JOURNAL_MESSAGE"],
+    "targetVersion": os.environ["JOURNAL_TARGET"],
+    "previousRelease": os.environ["JOURNAL_CURRENT"],
+    "snapshotDir": os.environ["JOURNAL_SNAPSHOT"] or None,
+    "runtimeManifest": os.environ["JOURNAL_RUNTIME_MANIFEST"],
+    "candidateRelease": os.environ["JOURNAL_CANDIDATE"] or None,
+    "committed": os.environ["JOURNAL_COMMITTED"] == "true",
+    "updatedAt": datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z"),
+})
+print(json.dumps(payload, indent=2, sort_keys=True))
+' "$JOURNAL" | mb_atomic_write_stdin "$JOURNAL"
 }
 
-download_release_via_gh() {
-  command -v gh >/dev/null 2>&1 || return 10
-  gh auth status >/dev/null 2>&1 || return 11
-  (cd "$TMP_DIR" && gh release download "$TARGET" --repo "$GITHUB_REPO" \
-    --pattern "meowbox-$TARGET.tar.gz" --pattern "SHA256SUMS" --skip-existing) \
-    >/dev/null 2>&1 || return 12
-  return 0
+# The journal is the rollback authority, not the process-local COMMITTED flag.
+# Atomic replacement gives a hard kill either the old uncommitted record or
+# the new committed record; EXIT recovery must honor that durable boundary.
+journal_commit_state() {
+  [[ -f "$JOURNAL" ]] || {
+    printf '%s\n' absent
+    return 0
+  }
+  python3 - "$JOURNAL" <<'PY'
+import json
+import sys
+
+try:
+    value = json.load(open(sys.argv[1], encoding="utf-8")).get("committed")
+except Exception:
+    print("unknown")
+    raise SystemExit(0)
+print("committed" if value is True else "uncommitted" if value is False else "unknown")
+PY
 }
 
-if download_release_via_curl; then
-  say "✓ tarball скачан через curl"
-elif download_release_via_gh; then
-  say "✓ tarball скачан через gh CLI"
-else
-  rc_curl=$?
-  # Подробная диагностика: что именно не сработало.
-  msg="Не удалось скачать релиз $TARGET (repo=$GITHUB_REPO)."
-  if ! command -v gh >/dev/null 2>&1; then
-    msg="$msg gh CLI не установлен."
-  elif ! gh auth status >/dev/null 2>&1; then
-    msg="$msg gh CLI установлен, но не аутентифицирован (gh auth login)."
+write_report() {
+  local result="$1"
+  local detail="$2"
+  local db_hash="${3:-unknown}"
+  local config_hash="${4:-unknown}"
+  export REPORT_RESULT="$result" REPORT_DETAIL="$detail" REPORT_TARGET="$TARGET" REPORT_CURRENT="$CURRENT_VERSION"
+  export REPORT_DB_HASH="$db_hash" REPORT_CONFIG_HASH="$config_hash" REPORT_TX="$TRANSACTION_ID"
+  python3 -c '
+import json, os
+from datetime import datetime, timezone
+payload = {
+  "version": 1,
+  "transactionId": os.environ["REPORT_TX"],
+  "result": os.environ["REPORT_RESULT"],
+  "detail": os.environ["REPORT_DETAIL"],
+  "currentVersion": os.environ["REPORT_CURRENT"],
+  "targetVersion": os.environ["REPORT_TARGET"],
+  "liveInputHash": {"database": os.environ["REPORT_DB_HASH"], "managedRuntime": os.environ["REPORT_CONFIG_HASH"]},
+  "createdAt": datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z"),
+}
+print(json.dumps(payload, indent=2, sort_keys=True))
+' | mb_atomic_write_stdin "$REPORT_JSON"
+  python3 - "$REPORT_JSON" <<'PY' | mb_atomic_write_stdin "$REPORT_TEXT"
+import json
+import sys
+data = json.load(open(sys.argv[1], encoding="utf-8"))
+print(f"release dry-run/update report: {data['result']}")
+print(f"transaction: {data['transactionId']}")
+print(f"current → target: {data['currentVersion']} → {data['targetVersion']}")
+print(f"detail: {data['detail']}")
+print(f"live database hash: {data['liveInputHash']['database']}")
+print(f"managed runtime hash: {data['liveInputHash']['managedRuntime']}")
+PY
+}
+
+on_exit() {
+  local status=$?
+  trap - EXIT
+  if [[ $status -ne 0 ]]; then
+    write_report fail "release transaction stopped before completion; inspect retained redacted journal and candidate logs" \
+      "${DRY_RUN_DB_HASH:-unknown}" "${DRY_RUN_CONFIG_HASH:-unknown}" || true
+    local durable_commit_state
+    durable_commit_state="$(journal_commit_state)"
+    local failure_action
+    failure_action="$(
+      mb_update_failure_action \
+        "$ROLLBACK_ARMED" \
+        "$COMMITTED" \
+        "$durable_commit_state"
+    )"
+    if [[ "$failure_action" == "rollback" ]]; then
+      echo "[update] pre-commit failure; restoring SQLite, managed runtime and previous release" >&2
+      if MEOWBOX_RELEASE_LOCK_HELD=1 MEOWBOX_RELEASE_LOCK_FILE="$LOCK_FILE" \
+        bash "$SCRIPT_DIR/rollback.sh" precommit "$TRANSACTION_ID"; then
+        run_hook "$QUIESCE_HOOK" resume --transaction "$TRANSACTION_ID" --rollback || \
+          echo "[update] old release restored but maintenance gate resume needs operator repair" >&2
+      else
+        echo "[update] rollback failed; preserve transaction $TRANSACTION_ID for operator recovery" >&2
+      fi
+    elif [[ "$failure_action" == "forward-repair" ]]; then
+      journal_update forward-repair "post-commit failure; forward repair required" true || true
+      echo "[update] post-commit failure; automatic DB rollback is forbidden" >&2
+      if ! post_commit_forward_repair; then
+        echo "[update] post-commit forward repair did not complete; keep the new release serving and repair explicitly" >&2
+      fi
+    elif [[ "$failure_action" == "manual" ]]; then
+      # A corrupt/indeterminate journal cannot prove that the durable
+      # boundary was not crossed. Preserve it for explicit recovery rather
+      # than restoring an old SQLite image blindly.
+      echo "[update] journal commit state is indeterminate; automatic DB rollback is forbidden" >&2
+    fi
   fi
-  msg="$msg Если репо приватный — экспортируй GITHUB_TOKEN или авторизуй gh."
-  abort "$msg"
-fi
+  if $DRY_RUN; then
+    rm -rf -- "$TX_DIR"
+  fi
+  exit "$status"
+}
+trap on_exit EXIT
 
-# ----- 3. Verify -----
-stage verify "Проверка checksum + attestation"
-(cd "$TMP_DIR" && sha256sum -c SHA256SUMS) || abort "Checksum не совпал — релиз повреждён или подменён!"
-say "✓ SHA256 OK"
-
-if command -v gh >/dev/null 2>&1; then
-  if gh attestation verify "$TARBALL" --owner "$(echo "$GITHUB_REPO" | cut -d/ -f1)" 2>/dev/null; then
-    say "✓ Attestation verified"
+run_hook() {
+  local hook="$1"
+  shift
+  [[ -n "$hook" ]] || die "required integration hook is not configured"
+  if [[ -x "$hook" ]]; then
+    "$hook" "$@"
+  elif [[ -f "$hook" && "$hook" == *.js ]]; then
+    node "$hook" "$@"
   else
-    say "⚠ Attestation не проверилась (gh не аутентифицирован?). Продолжаю на свой риск."
+    die "integration hook is not executable/Node script: $hook"
   fi
-else
-  say "⚠ gh CLI не установлен — пропускаю attestation verify"
-fi
+}
 
-# ----- 4. Extract -----
-stage extract "Распаковка в releases/$TARGET"
-RELEASE_DIR="$RELEASES_DIR/$TARGET"
-if [[ -d "$RELEASE_DIR" ]]; then
-  say "Релиз $TARGET уже существует — удаляю и переразворачиваю"
-  rm -rf "$RELEASE_DIR"
-fi
-mkdir -p "$RELEASE_DIR"
-# Тарболл собирается в CI как `meowbox/...` на верхнем уровне (см. release.yml).
-# Разворачиваем напрямую в RELEASE_DIR со --strip-components=1, чтобы убрать
-# верхний `meowbox/`. Если по какой-то причине формат другой — fallback через
-# временный каталог + cp.
-if ! tar -xzf "$TARBALL" -C "$RELEASE_DIR" --strip-components=1; then
-  err "tar --strip-components=1 не сработал, пробую fallback через TMP_DIR"
-  rm -rf "$RELEASE_DIR"
-  mkdir -p "$RELEASE_DIR"
-  tar -xzf "$TARBALL" -C "$TMP_DIR" || abort "Не удалось распаковать tarball"
-  if [[ -d "$TMP_DIR/meowbox" ]]; then
-    cp -a "$TMP_DIR/meowbox/." "$RELEASE_DIR/"
+resolve_release_hook() {
+  local configured="$1"
+  local fallback_name="$2"
+  local label="$3"
+  local resolved="$configured"
+  [[ -n "$resolved" ]] || resolved="$CANDIDATE_DIR/migrations/dist/$fallback_name"
+  [[ -f "$resolved" || -x "$resolved" ]] || die "$label integration hook is required"
+  printf '%s\n' "$resolved"
+}
+
+prepare_release_health_hooks() {
+  QUIESCE_HOOK="$(resolve_release_hook "$QUIESCE_HOOK" quiesce.js "quiesce")"
+  AGENT_HEALTH_HOOK="$(resolve_release_hook "$AGENT_HEALTH_HOOK" agent-health.js "agent health")"
+  REPRESENTATIVE_READ_HOOK="$(resolve_release_hook "$REPRESENTATIVE_READ_HOOK" representative-read.js "representative API-read")"
+  export MEOWBOX_QUIESCE_HOOK="$QUIESCE_HOOK"
+  export MEOWBOX_AGENT_HEALTH_HOOK="$AGENT_HEALTH_HOOK"
+  export MEOWBOX_REPRESENTATIVE_READ_HOOK="$REPRESENTATIVE_READ_HOOK"
+  # These checks are part of the dry-run contract.  They may inspect the
+  # currently serving agent/API, but must not mutate panel state or runtime.
+  run_hook "$AGENT_HEALTH_HOOK" check --mode dry-run --release-dir "$CANDIDATE_DIR" --database "$DB_FILE"
+  run_hook "$REPRESENTATIVE_READ_HOOK" check --mode dry-run --release-dir "$CANDIDATE_DIR" --database "$DB_FILE"
+}
+
+refresh_candidate_health_hook_paths() {
+  if ! $QUIESCE_HOOK_WAS_CONFIGURED; then
+    QUIESCE_HOOK="$CANDIDATE_DIR/migrations/dist/quiesce.js"
+  fi
+  if ! $AGENT_HEALTH_HOOK_WAS_CONFIGURED; then
+    AGENT_HEALTH_HOOK="$CANDIDATE_DIR/migrations/dist/agent-health.js"
+  fi
+  if ! $REPRESENTATIVE_READ_HOOK_WAS_CONFIGURED; then
+    REPRESENTATIVE_READ_HOOK="$CANDIDATE_DIR/migrations/dist/representative-read.js"
+  fi
+  export MEOWBOX_QUIESCE_HOOK="$QUIESCE_HOOK"
+  export MEOWBOX_AGENT_HEALTH_HOOK="$AGENT_HEALTH_HOOK"
+  export MEOWBOX_REPRESENTATIVE_READ_HOOK="$REPRESENTATIVE_READ_HOOK"
+}
+
+check_release_capacity() {
+  local filesystem_path="$1"
+  local database_bytes candidate_kb available_kb required_kb reserve_kb
+  database_bytes="$(stat -c '%s' "$DB_FILE")"
+  candidate_kb="$(du -sk --apparent-size "$CANDIDATE_DIR" | awk '{print $1}')"
+  available_kb="$(df -Pk "$filesystem_path" | awk 'NR == 2 { print $4 }')"
+  reserve_kb="$MEOWBOX_RELEASE_MIN_FREE_KB"
+  [[ "$reserve_kb" =~ ^[0-9]+$ ]] || die "MEOWBOX_RELEASE_MIN_FREE_KB must be a non-negative integer"
+  required_kb=$(( (database_bytes + 1023) / 1024 + candidate_kb + reserve_kb ))
+  [[ "$available_kb" =~ ^[0-9]+$ ]] || die "cannot determine free disk space for $filesystem_path"
+  (( available_kb >= required_kb )) || die "insufficient free space for clone/snapshot/candidate on $filesystem_path (need ${required_kb}KiB, have ${available_kb}KiB)"
+}
+
+preflight_serving_health() {
+  nginx -t >/dev/null || die "current Nginx configuration does not validate"
+  systemctl is-active --quiet nginx || die "Nginx service is not active"
+  bash "$SCRIPT_DIR/healthcheck.sh" --strict --release-dir "$CURRENT_RELEASE"
+}
+
+runtime_schema_required() {
+  python3 - "$1" <<'PY'
+import sqlite3
+import sys
+import urllib.parse
+db = sqlite3.connect("file:" + urllib.parse.quote(sys.argv[1], safe="/") + "?mode=ro", uri=True)
+try:
+    tables = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    if "site_domains" not in tables:
+        raise SystemExit(1)
+    columns = {row[1] for row in db.execute("PRAGMA table_info('site_domains')")}
+    raise SystemExit(0 if {"preset", "runtime_key", "app_status"}.issubset(columns) else 1)
+finally:
+    db.close()
+PY
+}
+
+write_noop_runtime_manifest() {
+  python3 -c 'import json; print(json.dumps({"version": 1, "requiresRuntimeCutover": False, "artifacts": [], "phpServices": [], "socketPaths": [], "httpProbes": []}, indent=2, sort_keys=True))' | mb_atomic_write_stdin "$RUNTIME_MANIFEST"
+}
+
+validate_runtime_manifest() {
+  local manifest="$1"
+  local stage_root="$2"
+  python3 - "$manifest" "$stage_root" <<'PY'
+import hashlib
+import json
+import os
+import pathlib
+import re
+import sys
+from urllib.parse import urlparse
+
+manifest_path, stage_root = map(pathlib.Path, sys.argv[1:])
+root = stage_root.resolve()
+with manifest_path.open(encoding="utf-8") as handle:
+    data = json.load(handle)
+if data.get("version") != 1 or type(data.get("requiresRuntimeCutover")) is not bool or not isinstance(data.get("artifacts"), list):
+    raise SystemExit("invalid runtime manifest envelope")
+if data["artifacts"] and not data["requiresRuntimeCutover"]:
+    raise SystemExit("runtime manifest with artifacts must require a runtime cutover")
+seen = set()
+def allowed(target):
+    return (
+        target == os.path.normpath(target) and target.startswith("/") and "\x00" not in target and (
+            target.startswith("/etc/nginx/meowbox/") or
+            re.fullmatch(r"/etc/nginx/sites-(?:available|enabled)/[a-z][a-z0-9_-]{0,63}\.conf", target) is not None or
+            target == "/etc/nginx/conf.d/meowbox-zones.conf" or
+            re.fullmatch(r"/etc/php/\d+\.\d+/fpm/pool\.d/[A-Za-z0-9._-]+\.conf", target) is not None or
+            re.fullmatch(r"/etc/logrotate\.d/meowbox[A-Za-z0-9._-]*", target) is not None
+        )
+    )
+for artifact in data["artifacts"]:
+    if not isinstance(artifact, dict): raise SystemExit("invalid runtime artifact")
+    action, target = artifact.get("action"), artifact.get("target")
+    if action not in {"create", "replace", "delete"} or not isinstance(target, str) or not allowed(target) or target in seen:
+        raise SystemExit("unsafe/duplicate runtime artifact")
+    if "postCommitOnly" in artifact and type(artifact["postCommitOnly"]) is not bool:
+        raise SystemExit("postCommitOnly must be boolean")
+    if artifact.get("postCommitOnly") is True and action != "delete":
+        raise SystemExit("postCommitOnly is allowed only for delete artifacts")
+    for field, maximum in (("mode", 0o7777), ("uid", 2**31 - 1), ("gid", 2**31 - 1)):
+        if field in artifact and (type(artifact[field]) is not int or artifact[field] < 0 or artifact[field] > maximum):
+            raise SystemExit(f"invalid runtime artifact {field}")
+    has_uid, has_gid = "uid" in artifact, "gid" in artifact
+    if has_uid != has_gid:
+        raise SystemExit("runtime artifact uid/gid must be declared together")
+    if action == "delete" and any(field in artifact for field in ("mode", "uid", "gid")):
+        raise SystemExit("delete artifact cannot declare file metadata")
+    if action == "create" and ("mode" not in artifact or not has_uid or not has_gid):
+        raise SystemExit("create artifact requires mode, uid and gid")
+    seen.add(target)
+    if action == "delete":
+        if "stagedPath" in artifact or "sha256" in artifact: raise SystemExit("delete artifact cannot carry staged bytes")
+        continue
+    staged, digest = artifact.get("stagedPath"), artifact.get("sha256")
+    if not isinstance(staged, str) or not isinstance(digest, str) or not re.fullmatch(r"[a-f0-9]{64}", digest):
+        raise SystemExit("write artifact requires stagedPath + sha256")
+    candidate = pathlib.Path(staged).resolve()
+    if candidate == root or root not in candidate.parents or not candidate.is_file():
+        raise SystemExit("staged artifact escapes/missing from runtime stage")
+    content = candidate.read_bytes()
+    if hashlib.sha256(content).hexdigest() != digest:
+        raise SystemExit("staged artifact checksum mismatch")
+    if b"\0" in content: raise SystemExit("staged artifact contains NUL")
+services = data.get("phpServices", [])
+if not isinstance(services, list) or len(set(services)) != len(services): raise SystemExit("duplicate/invalid PHP services")
+for service in services:
+    if not isinstance(service, str) or not re.fullmatch(r"php\d+\.\d+-fpm", service): raise SystemExit("unsafe PHP service")
+sockets = data.get("socketPaths", [])
+if not isinstance(sockets, list) or len(set(sockets)) != len(sockets): raise SystemExit("duplicate/invalid PHP sockets")
+for socket in sockets:
+    if not isinstance(socket, str) or not re.fullmatch(r"/var/run/php/php\d+\.\d+-fpm-[a-z][a-z0-9._-]{0,63}\.sock", socket): raise SystemExit("unsafe PHP socket")
+probes = data.get("httpProbes", [])
+if not isinstance(probes, list): raise SystemExit("invalid HTTP probe list")
+probe_keys = set()
+for probe in probes:
+    if not isinstance(probe, dict) or not isinstance(probe.get("url"), str): raise SystemExit("invalid HTTP probe")
+    parsed = urlparse(probe["url"])
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname or parsed.username or parsed.password or re.search(r"[\x00-\x1f\x7f]", probe["url"]):
+        raise SystemExit("unsafe HTTP probe URL")
+    statuses = probe.get("expectedStatus", [200, 301, 302])
+    if not isinstance(statuses, list) or not statuses or any(type(status) is not int or status < 100 or status > 599 for status in statuses):
+        raise SystemExit("invalid HTTP probe expectedStatus")
+    key = (probe["url"], tuple(sorted(set(statuses))))
+    if key in probe_keys: raise SystemExit("duplicate HTTP probe")
+    probe_keys.add(key)
+validations = data.get("validations", [])
+if not isinstance(validations, list) or any(not isinstance(value, str) or not value or len(value) > 160 for value in validations):
+    raise SystemExit("invalid runtime validation labels")
+PY
+}
+
+runtime_plan_hash() {
+  python3 - "$1" <<'PY'
+import hashlib
+import json
+import sys
+data = json.load(open(sys.argv[1], encoding="utf-8"))
+items = []
+for item in data.get("artifacts", []):
+    items.append({key: item.get(key) for key in ("action", "target", "sha256", "mode", "uid", "gid", "postCommitOnly")})
+payload = {"requiresRuntimeCutover": data.get("requiresRuntimeCutover"), "artifacts": sorted(items, key=lambda item: item["target"]), "phpServices": sorted(data.get("phpServices", [])), "socketPaths": sorted(data.get("socketPaths", [])), "httpProbes": sorted(data.get("httpProbes", []), key=lambda item: item.get("url", "")), "validations": sorted(data.get("validations", []))}
+print(hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()).hexdigest())
+PY
+}
+
+prepare_runtime() {
+  local database="$1"
+  local mode="$2"
+  rm -rf -- "$RUNTIME_STAGE"
+  mkdir -p "$RUNTIME_STAGE"
+  local renderer="$RUNTIME_RENDER_HOOK"
+  [[ -n "$renderer" ]] || renderer="$CANDIDATE_DIR/migrations/dist/runtime-renderer.js"
+  if [[ -f "$renderer" || -x "$renderer" ]]; then
+    run_hook "$renderer" --mode "$mode" --db "$database" --stage "$RUNTIME_STAGE" --manifest "$RUNTIME_MANIFEST"
+  elif runtime_schema_required "$database"; then
+    die "domain runtime schema requires a staged renderer hook (MEOWBOX_RUNTIME_RENDER_HOOK)"
   else
-    abort "В tarball нет ожидаемой папки meowbox/ — релиз повреждён"
+    write_noop_runtime_manifest
   fi
-fi
-# Sanity check: должны быть основные пакеты после распаковки.
-for required in api/dist/main.js shared/dist/index.js VERSION; do
-  [[ -e "$RELEASE_DIR/$required" ]] || abort "После распаковки нет $required — релиз повреждён"
-done
+  validate_runtime_manifest "$RUNTIME_MANIFEST" "$RUNTIME_STAGE"
+  local changes
+  changes="$(python3 - "$RUNTIME_MANIFEST" <<'PY'
+import json,sys
+print(len(json.load(open(sys.argv[1], encoding="utf-8")).get("artifacts", [])))
+PY
+)"
+  local validator="$RUNTIME_VALIDATE_HOOK"
+  [[ -n "$validator" ]] || validator="$CANDIDATE_DIR/migrations/dist/runtime-validator.js"
+  # A final domain schema still needs an all-config/service/resource-envelope
+  # validation even when a renderer reports no filesystem diff.
+  if [[ "$changes" != "0" ]] || runtime_schema_required "$database"; then
+    [[ -f "$validator" || -x "$validator" ]] || die "runtime artifacts require staged PHP-FPM/Nginx validation hook"
+    run_hook "$validator" --mode "$mode" --db "$database" --stage "$RUNTIME_STAGE" --manifest "$RUNTIME_MANIFEST"
+  fi
+}
 
-# Симлинки на shared state
-ln -sfn "$STATE_DIR/data" "$RELEASE_DIR/data" 2>/dev/null || true
-ln -sfn "$STATE_DIR/.env" "$RELEASE_DIR/.env" 2>/dev/null || true
-
-# ----- Heal: relative DATABASE_URL → absolute (баг до v0.3.8) -----
-# До v0.3.8 install.sh писал DATABASE_URL=file:../../state/data/meowbox.db,
-# что Prisma резолвила относительно schema.prisma (api/prisma/), и БД создавалась
-# в releases/<v>/state/data/, а не в общем state/. Чиним и переносим.
-if [[ -f "$STATE_DIR/.env" ]] && grep -qE '^DATABASE_URL="file:\.\.' "$STATE_DIR/.env"; then
-  ABS_DB="file:$STATE_DIR/data/meowbox.db"
-  say "DATABASE_URL был относительным — переписываю на $ABS_DB"
-  sed -i "s|^DATABASE_URL=.*|DATABASE_URL=\"$ABS_DB\"|" "$STATE_DIR/.env"
-fi
-# Перенос orphan БД из releases/*/state/data/ в state/data/, если основной нет.
-if [[ ! -f "$STATE_DIR/data/meowbox.db" ]]; then
-  for orphan_dir in "$RELEASES_DIR"/*/state/data; do
-    if [[ -f "$orphan_dir/meowbox.db" ]]; then
-      say "Найдена orphan БД в $orphan_dir — переношу в $STATE_DIR/data/"
-      mv "$orphan_dir/meowbox.db" "$STATE_DIR/data/meowbox.db"
-      [[ -f "$orphan_dir/meowbox.db-journal" ]] && mv "$orphan_dir/meowbox.db-journal" "$STATE_DIR/data/" || true
-      [[ -f "$orphan_dir/meowbox.db-wal" ]] && mv "$orphan_dir/meowbox.db-wal" "$STATE_DIR/data/" || true
-      [[ -f "$orphan_dir/meowbox.db-shm" ]] && mv "$orphan_dir/meowbox.db-shm" "$STATE_DIR/data/" || true
-      chmod 600 "$STATE_DIR/data/meowbox.db" || true
-      break
+stage_candidate() {
+  stage U01-stage "download, verify and stage candidate release"
+  mkdir -p "$(dirname "$CANDIDATE_DIR")"
+  if [[ -n "${MEOWBOX_UPDATE_CANDIDATE_DIR:-}" ]]; then
+    [[ -d "$MEOWBOX_UPDATE_CANDIDATE_DIR" ]] || die "candidate directory does not exist"
+    cp -a -- "$MEOWBOX_UPDATE_CANDIDATE_DIR/." "$CANDIDATE_DIR"
+  else
+    local download_dir="$TX_DIR/download"
+    mkdir -p "$download_dir"
+    local tarball="$download_dir/meowbox-$TARGET.tar.gz"
+    local sums="$download_dir/SHA256SUMS"
+    local auth=()
+    [[ -n "${GITHUB_TOKEN:-}" ]] && auth=(-H "Authorization: Bearer $GITHUB_TOKEN")
+    curl -fsSL "${auth[@]}" "https://github.com/$GITHUB_REPO/releases/download/$TARGET/meowbox-$TARGET.tar.gz" -o "$tarball"
+    curl -fsSL "${auth[@]}" "https://github.com/$GITHUB_REPO/releases/download/$TARGET/SHA256SUMS" -o "$sums"
+    (cd "$download_dir" && sha256sum -c "$(basename "$sums")") || die "candidate checksum verification failed"
+    mkdir -p "$CANDIDATE_DIR"
+    tar -xzf "$tarball" -C "$CANDIDATE_DIR" --strip-components=1 --no-same-owner --no-same-permissions
+  fi
+  for required in \
+    api/prisma/schema.prisma \
+    agent/dist/nginx/templates.js \
+    agent/dist/nginx/nginx.manager.js \
+    agent/dist/nginx/zones-template.js \
+    agent/dist/php/pool-template.js \
+    agent/dist/runtime/logrotate-template.js \
+    migrations/dist/runner.js \
+    migrations/dist/release-cli.js \
+    migrations/dist/runtime-evidence.js \
+    migrations/dist/runtime-renderer.js \
+    migrations/dist/runtime-validator.js \
+    migrations/dist/runtime-apply.js \
+    migrations/dist/quiesce.js \
+    migrations/dist/agent-health.js \
+    migrations/dist/representative-read.js \
+    migrations/release/supported-baselines.json \
+    VERSION
+  do
+    [[ -f "$CANDIDATE_DIR/$required" ]] || die "candidate is missing required release artifact: $required"
+  done
+  find "$CANDIDATE_DIR/api/prisma/migrations" -type f -name migration.sql -print -quit | grep -q . || die "candidate contains no Prisma migration SQL"
+  find "$CANDIDATE_DIR/migrations/dist/system" -type f -name '*domain-runtime-release.js' -print -quit | grep -q . || die "candidate contains no compiled domain-runtime system migration"
+  ln -sfnT "$STATE_DIR/data" "$CANDIDATE_DIR/data"
+  ln -sfnT "$STATE_DIR/.env" "$CANDIDATE_DIR/.env"
+  for package in api agent web; do
+    if [[ -f "$CANDIDATE_DIR/$package/package-lock.json" ]]; then
+      (cd "$CANDIDATE_DIR/$package" && npm ci --omit=dev --no-audit --no-fund)
     fi
   done
-fi
-# Удаляем мусорные releases/*/state/ (если пустые после переноса).
-for orphan_state in "$RELEASES_DIR"/*/state; do
-  if [[ -d "$orphan_state" ]]; then
-    rmdir "$orphan_state/data" 2>/dev/null || true
-    rmdir "$orphan_state" 2>/dev/null || true
-  fi
-done
-
-# ----- 5. Install prod deps -----
-# shared/ и migrations/ — собранные артефакты без runtime-deps (зависимости
-# резолвятся через симлинки), поэтому npm ci там не нужен и упадёт без
-# package-lock.json в тарболле.
-stage install "Установка production-зависимостей"
-for pkg in agent api web; do
-  if [[ -f "$RELEASE_DIR/$pkg/package-lock.json" ]]; then
-    (cd "$RELEASE_DIR/$pkg" && npm ci --omit=dev --no-audit --no-fund) \
-      || abort "npm ci провалился в $pkg"
-  fi
-done
-
-# @meowbox/shared не объявлен в dependencies — линкуем вручную после npm ci.
-for pkg in api agent web migrations; do
-  mkdir -p "$RELEASE_DIR/$pkg/node_modules/@meowbox"
-  ln -sfn "../../../shared" "$RELEASE_DIR/$pkg/node_modules/@meowbox/shared"
-done
-if [[ -d "$RELEASE_DIR/api/node_modules/@prisma/client" ]]; then
-  mkdir -p "$RELEASE_DIR/migrations/node_modules/@prisma"
-  ln -sfn "../../../api/node_modules/@prisma/client" "$RELEASE_DIR/migrations/node_modules/@prisma/client"
-fi
-
-# Prisma client регенерация (нужен после npm ci)
-if [[ -f "$RELEASE_DIR/api/prisma/schema.prisma" ]]; then
-  (cd "$RELEASE_DIR/api" && DATABASE_URL="file:$STATE_DIR/data/meowbox.db" npx prisma generate) || true
-fi
-
-# ----- 6. Migrations -----
-# Prisma: используем `db push` (а не `migrate deploy`), потому что install.sh
-# создаёт DB через `db push` без миграционного tracking (нет _prisma_migrations
-# таблицы). `migrate deploy` упал бы с P3005 на любом legacy-инстансе.
-# Для self-hosted панели единый источник истины — schema.prisma; ветвление
-# миграций не нужно. --skip-generate (клиент уже сгенерирован выше),
-# --accept-data-loss безопасен пока мы не дропаем колонки в апдейте.
-stage migrate "Применение миграций (Prisma db push + system)"
-if [[ -f "$RELEASE_DIR/api/prisma/schema.prisma" ]]; then
-  (cd "$RELEASE_DIR/api" && DATABASE_URL="file:$STATE_DIR/data/meowbox.db" \
-    npx prisma db push --skip-generate --accept-data-loss) \
-    || abort "Prisma db push провалилась"
-fi
-if [[ -f "$RELEASE_DIR/migrations/dist/runner.js" ]]; then
-  MEOWBOX_STATE_DIR="$STATE_DIR" \
-    DATABASE_URL="file:$STATE_DIR/data/meowbox.db" \
-    node "$RELEASE_DIR/migrations/dist/runner.js" up \
-    || abort "System migrations failed"
-fi
-
-# ----- 7. Switch -----
-stage switch "Переключение current → $TARGET"
-PREV_TARGET=""
-if [[ -L "$PANEL_DIR/current" ]]; then
-  PREV_TARGET="$(readlink -f "$PANEL_DIR/current")"
-fi
-ln -sfn "$RELEASE_DIR" "$PANEL_DIR/current"
-
-# ----- 8. Sentinel + sync panel root  -----
-# КРИТИЧНО: успех апдейта = «файлы накатились + миграции применились +
-# current → новый релиз». Это уже произошло. Всё что ниже (pm2 reload,
-# healthcheck) — обслуживание, оно МОЖЕТ упасть и не должно влиять на
-# статус апдейта. Поэтому пишем sentinel + Update OK ЗДЕСЬ. Если pm2
-# reload убьёт нас на следующем шаге, API (новый или старый) при resume
-# увидит sentinel и пометит апдейт как succeeded — а не failed как
-# раньше, когда sentinel был в самом конце.
-#
-# Sync panel root (tools/, Makefile, install.sh, bootstrap.sh) тоже
-# делаем здесь, ДО reload — чтобы пользователь сразу мог запустить
-# новый Makefile/CLI вне зависимости от того, прошёл reload или нет.
-sync_panel_file() {
-  local src="$1" dst="$2"
-  if [[ ! -e "$src" ]]; then return 0; fi
-  local src_real dst_real
-  src_real="$(readlink -f "$src" 2>/dev/null || echo "$src")"
-  dst_real="$(readlink -f "$dst" 2>/dev/null || echo "$dst")"
-  if [[ "$src_real" == "$dst_real" ]]; then
-    return 0  # release-layout с current symlink, копировать не надо
-  fi
-  if [[ -d "$src" ]]; then
-    cp -rf "$src/." "$dst/" 2>/dev/null || true
-  else
-    cp -f "$src" "$dst" 2>/dev/null || true
-  fi
-}
-sync_panel_file "$RELEASE_DIR/tools" "$PANEL_DIR/tools"
-for f in Makefile install.sh bootstrap.sh; do
-  sync_panel_file "$RELEASE_DIR/$f" "$PANEL_DIR/$f"
-done
-
-# Sentinel ДО pm2 reload. API resume опирается на его наличие.
-say "✓ Update OK: $CURRENT_VERSION → $TARGET"
-echo "$TARGET" > "$STATE_DIR/.update-success" 2>/dev/null || true
-
-# ----- 9. Reload PM2 (best-effort, не валит апдейт) -----
-stage reload "PM2 reload"
-# pm2 reload — best-effort. Sentinel уже на диске (см. стадию switch),
-# поэтому что бы ни случилось дальше, апдейт уже зарегистрирован как успешный.
-# Ошибки reload только логируются (через say/err), abort не делаем.
-#
-# КРИТИЧНО (legacy-compat): обновляем ecosystem.config.js из релиза + временно
-# убираем `wait_ready: true`/`listen_timeout` ПЕРЕД reload. Иначе PM2 будет ждать
-# сигнал `process.send('ready')` от нового воркера до listen_timeout (10s) и
-# часто валит graceful reload — особенно при апгрейде с pre-0.5.0 версий, где
-# в коде api ready-сигнал ещё не шлётся. После reload восстанавливаем canonical
-# ecosystem.config.js из release (там wait_ready: true, и новый код шлёт ready).
-ECOSYSTEM_FILE="$PANEL_DIR/ecosystem.config.js"
-# Хэш до копирования — нужен чтобы понять, изменился ли ecosystem.config.js в
-# этом релизе. Если изменился — простой `pm2 restart --update-env` не подхватит
-# новый файл (он только освежает env из in-memory PM2 конфига); тогда нужен
-# `pm2 reload <file> --only <name>` который перечитывает файл (но при этом
-# остаётся graceful, без полного delete процесса — важно когда update.sh
-# запущен из панели и юзер ждёт ответа от api).
-ECO_OLD_HASH=""
-if [[ -f "$ECOSYSTEM_FILE" ]]; then
-  ECO_OLD_HASH="$(sha256sum "$ECOSYSTEM_FILE" 2>/dev/null | cut -d' ' -f1 || echo '')"
-fi
-if [[ -f "$RELEASE_DIR/ecosystem.config.js" ]]; then
-  # NB: после migrate-legacy-to-release.sh $PANEL_DIR/ecosystem.config.js —
-  # симлинк на current/ecosystem.config.js. После switch он резолвится в тот же
-  # файл, что и $RELEASE_DIR/ecosystem.config.js → `cp -f src dst` падает с
-  # "are the same file", set -e валит апдейт ДО pm2 reload. Поэтому сравниваем
-  # реальные пути и пропускаем копирование, если они совпадают.
-  src_real="$(readlink -f "$RELEASE_DIR/ecosystem.config.js" 2>/dev/null || echo "$RELEASE_DIR/ecosystem.config.js")"
-  dst_real="$(readlink -f "$ECOSYSTEM_FILE" 2>/dev/null || echo "$ECOSYSTEM_FILE")"
-  if [[ "$src_real" == "$dst_real" ]]; then
-    say "  ecosystem.config.js: panel-root — симлинк на release, копирование не нужно"
-  else
-    cp -f "$RELEASE_DIR/ecosystem.config.js" "$ECOSYSTEM_FILE"
-    say "  ecosystem.config.js обновлён из релиза"
-  fi
-fi
-# Бэкап + патч: убираем wait_ready/listen_timeout на время reload.
-ECO_BAK="$STATE_DIR/.ecosystem.bak"
-cp -f "$ECOSYSTEM_FILE" "$ECO_BAK"
-sed -i '/^[[:space:]]*wait_ready:[[:space:]]*true,*$/d; /^[[:space:]]*listen_timeout:[[:space:]]*[0-9]\+,*$/d' "$ECOSYSTEM_FILE"
-# Сравниваем хэши ДО-cp и ПОСЛЕ-cp+sed. Если совпали — файл не менялся,
-# хватит restart --update-env. Если разные — обязателен reload <file>,
-# чтобы PM2 перечитал новый env-блок (например, при v0.6.31 → v0.6.32
-# добавились пробросы криптоключей из state/.env).
-ECO_NEW_HASH="$(sha256sum "$ECOSYSTEM_FILE" 2>/dev/null | cut -d' ' -f1 || echo '')"
-ECO_CHANGED=0
-if [[ -n "$ECO_OLD_HASH" && "$ECO_OLD_HASH" != "$ECO_NEW_HASH" ]]; then
-  ECO_CHANGED=1
-  say "  ecosystem.config.js изменился — буду использовать pm2 reload <file> для перечитывания"
-fi
-
-# КРИТИЧНО: api рестартим ПОСЛЕДНИМ + отдельной командой + с timeout.
-# Контекст: update.sh запущен из старого api-процесса. Любой `pm2 reload`
-# процесса api в fork-mode шлёт ему SIGINT и ждёт graceful shutdown до
-# kill_timeout (5s). Если в коде старого api нет enableShutdownHooks
-# (pre-v0.5.2 — а это все версии у заказчиков) — он висит в event loop'е,
-# pm2 в итоге SIGKILL'ит, потом стартует новый воркер. Сценарий долгий,
-# и в редких случаях pm2-daemon уходит в гонку перезапусков.
-#
-# Раньше использовали `pm2 reload ecosystem.config.js` — это рестарт ВСЕХ
-# трёх (api+agent+web) одной командой. Если api зависал, agent и web даже
-# не стартовали, а update.sh висел на CLI вызове часами. Теперь:
-# 1) Перезапускаем agent и web по одному с timeout 30s
-# 2) api — последним, тоже с timeout, fallback на `pm2 delete + start`
-# Каждый шаг ограничен — update.sh ВСЕГДА доходит до cleanup.
-
-pm2_safe_restart() {
-  local name="$1"
-  # Логика выбора метода (от самого щадящего к самому жёсткому):
-  #   1) ecosystem не менялся → `pm2 restart --update-env`.
-  #      Graceful (SIGINT + kill_timeout). Только обновляет env из in-memory
-  #      PM2 конфига. Что нужно в 99% обновлений.
-  #   2) ecosystem менялся → `pm2 reload <file> --only <name> --update-env`.
-  #      Тоже graceful, НО перечитывает ecosystem.config.js (подхватит новые
-  #      env-блоки, изменённые пути, и т.д.). Это редкий случай — раз в
-  #      несколько релизов.
-  #   3) И тот и тот fallback → `pm2 delete + pm2 start <file> --only <name>`.
-  #      Жёстко, не graceful, на 1-2 секунды API недоступен. Срабатывает
-  #      только если первые два упали (зависший процесс, повреждённый
-  #      pm2 daemon).
-  # update.sh запущен detached от api через setsid → даже fallback delete
-  # сам update.sh не убивает.
-  if [[ "${ECO_CHANGED:-0}" -eq 1 ]]; then
-    say "  → reload $name (ecosystem.config.js обновился)"
-    if ! timeout 30 pm2 reload "$ECOSYSTEM_FILE" --only "$name" --update-env >/dev/null 2>&1; then
-      say "    pm2 reload упал — fallback на delete+start"
-      timeout 10 pm2 delete "$name" >/dev/null 2>&1 || true
-      timeout 30 pm2 start "$ECOSYSTEM_FILE" --only "$name" --update-env >/dev/null 2>&1 || \
-        say "    delete+start тоже не сработал — pm2 daemon в плохом состоянии"
-    fi
-  else
-    say "  → restart $name (graceful, ecosystem.config.js без изменений)"
-    if ! timeout 30 pm2 restart "$name" --update-env >/dev/null 2>&1; then
-      say "    timeout — fallback: delete + start --only $name"
-      timeout 10 pm2 delete "$name" >/dev/null 2>&1 || true
-      timeout 30 pm2 start "$ECOSYSTEM_FILE" --only "$name" --update-env >/dev/null 2>&1 || \
-        say "    delete+start тоже не сработал — pm2 daemon в плохом состоянии"
-    fi
-  fi
+  for package in api agent web migrations; do
+    mkdir -p "$CANDIDATE_DIR/$package/node_modules/@meowbox"
+    ln -sfn "../../../shared" "$CANDIDATE_DIR/$package/node_modules/@meowbox/shared"
+  done
+  mkdir -p "$CANDIDATE_DIR/migrations/node_modules/@prisma"
+  ln -sfn "../../../api/node_modules/@prisma/client" "$CANDIDATE_DIR/migrations/node_modules/@prisma/client"
+  (cd "$CANDIDATE_DIR/api" && DATABASE_URL="file:$DB_FILE" npx prisma generate)
+  journal_update stage "candidate staged and package contract verified"
 }
 
-pm2_safe_restart meowbox-agent
-pm2_safe_restart meowbox-web
-# api — В САМОМ КОНЦЕ. После этого вызова update.sh продолжает работать
-# (он detached от api), но дочерние api-процесс'ы (старый+новый) сменятся.
-pm2_safe_restart meowbox-api
-sleep 3
+release_cli() {
+  node "$CANDIDATE_DIR/migrations/dist/release-cli.js" "$@"
+}
 
-# Восстанавливаем canonical ecosystem.config.js. Следующий reload (через
-# панель или CLI) будет уже graceful: новый код шлёт ready signal +
-# enableShutdownHooks → старый воркер выходит за <100ms, новый стартует
-# за ~1с — zero-downtime.
-if [[ -f "$ECO_BAK" ]]; then
-  mv -f "$ECO_BAK" "$ECOSYSTEM_FILE"
-fi
+prisma_deploy() {
+  local database="$1"
+  (cd "$CANDIDATE_DIR/api" && DATABASE_URL="file:$database" npx prisma migrate deploy --schema prisma/schema.prisma)
+}
 
-# Верификация: все три процесса должны быть online. Если нет — abort.
-PM2_JSON="$(pm2 jlist 2>/dev/null || echo '[]')"
-RELOAD_FAIL=0
-for P in meowbox-api meowbox-agent meowbox-web; do
-  ST="$(echo "$PM2_JSON" | python3 -c "import sys,json; d=json.load(sys.stdin); print(next((p['pm2_env']['status'] for p in d if p['name']=='$P'), 'missing'))" 2>/dev/null || echo "?")"
-  if [[ "$ST" != "online" ]]; then
-    err "PM2 reload: $P в статусе '$ST' (ожидался 'online')"
-    RELOAD_FAIL=1
+source_hash_inputs() {
+  mb_hash_paths "$DB_FILE" "$DB_FILE-wal" "$DB_FILE-shm" "$DB_FILE-journal"
+}
+
+source_file_fingerprint() {
+  mb_sqlite_file_fingerprint "$DB_FILE"
+}
+
+managed_runtime_hash() {
+  local paths_file="$1"
+  mb_hash_path_file "$paths_file"
+}
+
+baseline_decision() {
+  python3 - "$1" <<'PY'
+import json
+import sys
+
+payload = json.load(open(sys.argv[1], encoding="utf-8"))
+value = payload.get("assessment", {}).get("decision")
+if value not in {"fresh", "baseline-required", "already-tracked"}:
+    raise SystemExit("baseline report has no safe decision")
+print(value)
+PY
+}
+
+baseline_mapping_required() {
+  python3 - "$1" <<'PY'
+import json
+import sys
+
+value = json.load(open(sys.argv[1], encoding="utf-8")).get("assessment", {}).get("legacyMappingRequired")
+if type(value) is not bool:
+    raise SystemExit("baseline report has no explicit legacy mapping decision")
+print("true" if value else "false")
+PY
+}
+
+map_report_value() {
+  local report="$1"
+  local field="$2"
+  python3 - "$report" "$field" <<'PY'
+import json
+import re
+import sys
+
+payload = json.load(open(sys.argv[1], encoding="utf-8"))
+value = payload.get("envelope", {}).get(sys.argv[2])
+if not isinstance(value, str) or not re.fullmatch(r"[a-f0-9]{64}", value):
+    raise SystemExit("map report has no valid envelope fingerprint")
+print(value)
+PY
+}
+
+write_baseline_counts_from_map() {
+  local report="$1"
+  local output="$2"
+  python3 - "$report" "$output" <<'PY'
+import json
+import os
+import pathlib
+import sys
+import tempfile
+
+payload = json.load(open(sys.argv[1], encoding="utf-8"))
+rows = payload.get("envelope", {}).get("rows")
+if not isinstance(rows, list):
+    raise SystemExit("map report has no row envelope")
+keys = {"SITE": "sites", "DOMAIN": "siteDomains", "DATABASE": "databases"}
+counts = {value: 0 for value in keys.values()}
+seen = set()
+for row in rows:
+    if not isinstance(row, dict) or row.get("recordKind") not in keys or not isinstance(row.get("sourceId"), str):
+        raise SystemExit("map report has an invalid row")
+    key = (row["recordKind"], row["sourceId"])
+    if key in seen:
+        raise SystemExit("map report has duplicate source rows")
+    seen.add(key)
+    counts[keys[row["recordKind"]]] += 1
+target = pathlib.Path(sys.argv[2])
+target.parent.mkdir(parents=True, exist_ok=True)
+fd, temporary = tempfile.mkstemp(prefix=f".{target.name}.tmp-", dir=target.parent)
+try:
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        json.dump(counts, handle, sort_keys=True)
+        handle.write("\n")
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.replace(temporary, target)
+finally:
+    try:
+        os.unlink(temporary)
+    except FileNotFoundError:
+        pass
+PY
+}
+
+write_fresh_baseline_counts() {
+  printf '%s\n' '{"databases":0,"siteDomains":0,"sites":0}' | mb_atomic_write_stdin "$1"
+}
+
+# A checksum-verified post-domain Prisma history does not have legacy source
+# fields to map. Preserve its current ownership counts as the invariant
+# baseline before a later candidate migration runs.
+write_current_baseline_counts() {
+  local database="$1"
+  local output="$2"
+  python3 - "$database" <<'PY' | mb_atomic_write_stdin "$output"
+import json
+import os
+import sqlite3
+import sys
+import urllib.parse
+
+database = os.path.abspath(sys.argv[1])
+connection = sqlite3.connect("file:" + urllib.parse.quote(database, safe="/") + "?mode=ro", uri=True)
+try:
+    counts = {}
+    for table, key in (("sites", "sites"), ("site_domains", "siteDomains"), ("databases", "databases")):
+        present = connection.execute("SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = ?", (table,)).fetchone()
+        if present is None:
+            raise SystemExit(f"required invariant table is missing: {table}")
+        counts[key] = connection.execute(f'SELECT COUNT(*) FROM "{table}"').fetchone()[0]
+    print(json.dumps(counts, sort_keys=True))
+finally:
+    connection.close()
+PY
+}
+
+prepare_mapper_evidence() {
+  local database="$1"
+  local output="$2"
+  local mode="$3"
+  local evidence_hook="$MAPPER_EVIDENCE_HOOK"
+  [[ -n "$evidence_hook" ]] || evidence_hook="$CANDIDATE_DIR/migrations/dist/runtime-evidence.js"
+  [[ -f "$evidence_hook" || -x "$evidence_hook" ]] || \
+    die "legacy mapper requires a read-only runtime evidence hook (MEOWBOX_MAPPER_EVIDENCE_HOOK)"
+  run_hook "$evidence_hook" scan --mode "$mode" --db "$database" --output "$output"
+  [[ -f "$output" ]] || die "runtime evidence hook did not produce $output"
+}
+
+run_dry_run() {
+  stage U02-dry-run "clone migration, baseline, mapper, invariants and staged runtime validation"
+  mkdir -p "$DRY_DIR"
+  local legacy_paths="$DRY_DIR/legacy-paths.txt"
+  local manifest_paths="$DRY_DIR/manifest-paths.txt"
+  local all_paths="$DRY_DIR/managed-paths.txt"
+  local clone_db="$DRY_DIR/meowbox.db"
+  local clone_map="$DRY_DIR/migration-map.json"
+  local baseline_report="$DRY_DIR/baseline.json"
+  local baseline_applied_report="$DRY_DIR/baseline-applied.json"
+  local baseline_counts="$DRY_DIR/baseline-counts.json"
+  local mapper_evidence="$DRY_DIR/runtime-evidence.json"
+  local invariant_report="$DRY_DIR/invariants.json"
+  mb_collect_legacy_managed_paths "$DB_FILE" "$legacy_paths"
+  local legacy_config_before legacy_config_after
+  legacy_config_before="$(mb_hash_path_file "$legacy_paths")"
+  local db_before db_file_before
+  db_before="$(source_hash_inputs)"
+  db_file_before="$(source_file_fingerprint)"
+  # Capture the proof before invoking any pluggable integration.  Candidate
+  # hooks are contractual read-only checks in dry-run mode, but a violation is
+  # still detected by the final live-hash comparison below.
+  prepare_release_health_hooks
+  check_release_capacity "$DRY_DIR"
+  preflight_serving_health
+  mb_sqlite_backup "$DB_FILE" "$clone_db"
+  # Assess first without changing the clone.  The map is then bound to the
+  # exact clone image before Prisma writes its bookkeeping history; that same
+  # ordering is repeated after live quiescence.
+  release_cli baseline --db "$clone_db" --api-dir "$CANDIDATE_DIR/api" --contract "$CANDIDATE_DIR/migrations/release/supported-baselines.json" --json > "$baseline_report"
+  local decision mapping_required
+  decision="$(baseline_decision "$baseline_report")"
+  mapping_required="$(baseline_mapping_required "$baseline_report")"
+  if [[ "$mapping_required" == "true" ]]; then
+    prepare_mapper_evidence "$clone_db" "$mapper_evidence" dry-run
+    release_cli map --db "$clone_db" --output "$clone_map" --map-table _meowbox_domain_migration_map \
+      --runtime-evidence "$mapper_evidence" --apply-map --write-mode clone --json
+    write_baseline_counts_from_map "$clone_map" "$baseline_counts"
+    cp -- "$clone_map" "$TX_DIR/dry-run-migration-map.json"
+  elif [[ "$decision" == "fresh" ]]; then
+    write_fresh_baseline_counts "$baseline_counts"
   else
-    say "  $P online"
+    write_current_baseline_counts "$clone_db" "$baseline_counts"
   fi
-done
-if [[ $RELOAD_FAIL -eq 1 ]]; then
-  err "⚠ PM2 reload отработал не до конца, но апдейт зарегистрирован как успешный (sentinel уже на диске). Запусти 'pm2 reload all' вручную или через панель."
+  printf '%s\n' "$mapping_required" | mb_atomic_write_stdin "$TX_DIR/dry-run-mapping-required"
+  release_cli baseline --db "$clone_db" --api-dir "$CANDIDATE_DIR/api" --contract "$CANDIDATE_DIR/migrations/release/supported-baselines.json" --apply --write-mode clone --json > "$baseline_applied_report"
+  prisma_deploy "$clone_db"
+  release_cli invariants --db "$clone_db" --phase final --baseline-counts "$baseline_counts" --json > "$invariant_report"
+  prepare_runtime "$clone_db" dry-run
+  mb_collect_manifest_paths "$RUNTIME_MANIFEST" "$manifest_paths"
+  mb_merge_path_files "$all_paths" "$legacy_paths" "$manifest_paths"
+  local config_before
+  config_before="$(managed_runtime_hash "$all_paths")"
+  # The maintenance integration owns the authoritative active-operation check.
+  # Absence is a blocker rather than a best-effort warning.
+  run_hook "$QUIESCE_HOOK" check --transaction "$TRANSACTION_ID" --candidate "$CANDIDATE_DIR" --database "$DB_FILE"
+  MEOWBOX_STATE_DIR="$DRY_DIR/state" MEOWBOX_RUNTIME_MANIFEST="$RUNTIME_MANIFEST" MEOWBOX_RUNTIME_STAGE="$RUNTIME_STAGE" \
+    MEOWBOX_RUNTIME_VALIDATED=1 DATABASE_URL="file:$clone_db" node "$CANDIDATE_DIR/migrations/dist/runner.js" up --dry-run
+  local db_after db_file_after config_after
+  db_after="$(source_hash_inputs)"
+  db_file_after="$(source_file_fingerprint)"
+  config_after="$(managed_runtime_hash "$all_paths")"
+  legacy_config_after="$(mb_hash_path_file "$legacy_paths")"
+  [[ "$db_before" == "$db_after" ]] || die "dry-run changed live SQLite input hash"
+  [[ "$db_file_before" == "$db_file_after" ]] || die "dry-run changed live SQLite main/WAL/SHM fingerprint"
+  [[ "$legacy_config_before" == "$legacy_config_after" ]] || die "dry-run changed live managed runtime hash"
+  [[ "$config_before" == "$config_after" ]] || die "dry-run changed live managed runtime hash"
+  cp -- "$all_paths" "$TX_DIR/managed-runtime-paths.txt"
+  cp -- "$baseline_report" "$TX_DIR/dry-run-baseline.json"
+  cp -- "$baseline_applied_report" "$TX_DIR/dry-run-baseline-applied.json"
+  cp -- "$baseline_counts" "$TX_DIR/dry-run-baseline-counts.json"
+  cp -- "$invariant_report" "$TX_DIR/dry-run-invariants.json"
+  printf '%s\n' "$db_before" > "$TX_DIR/dry-run-source-db.hash"
+  printf '%s\n' "$db_file_before" > "$TX_DIR/dry-run-source-file.hash"
+  printf '%s\n' "$decision" > "$TX_DIR/dry-run-baseline-decision"
+  printf '%s\n' "$config_before" > "$TX_DIR/dry-run-managed-runtime.hash"
+  printf '%s\n' "$(runtime_plan_hash "$RUNTIME_MANIFEST")" > "$TX_DIR/dry-run-runtime-plan.hash"
+  write_report pass "clone migration and staged runtime validation completed without live mutations" "$db_before" "$config_before"
+  DRY_RUN_DB_HASH="$db_before"
+  DRY_RUN_CONFIG_HASH="$config_before"
+  journal_update dry-run "clone path passed; live DB/config hashes unchanged"
+  say "dry-run report: $REPORT_JSON"
+}
+
+apply_database() {
+  stage U05-database "baseline, deterministic map, migrate deploy and invariant checks"
+  local expected_hash expected_file_hash actual_hash actual_file_hash
+  expected_hash="$(<"$TX_DIR/dry-run-source-db.hash")"
+  expected_file_hash="$(<"$TX_DIR/dry-run-source-file.hash")"
+  actual_hash="$(source_hash_inputs)"
+  actual_file_hash="$(source_file_fingerprint)"
+  [[ "$expected_hash" == "$actual_hash" ]] || die "SQLite changed after dry-run/snapshot; rerun dry-run before any database mutation"
+  [[ "$expected_file_hash" == "$actual_file_hash" ]] || die "SQLite main/WAL/SHM changed after dry-run/snapshot; rerun dry-run before any database mutation"
+  [[ "$SNAPSHOT_SOURCE_FILE_HASH" == "$actual_file_hash" ]] || die "SQLite no longer matches the snapshot-bound mapper source image"
+  [[ "$(managed_runtime_hash "$TX_DIR/managed-runtime-paths.txt")" == "$SNAPSHOT_CONFIG_HASH" ]] || \
+    die "managed runtime changed before the database phase; rerun dry-run before mutation"
+  local live_assessment="$TX_DIR/live-baseline-assessment.json"
+  local live_map="$TX_DIR/live-migration-map.json"
+  local live_counts="$TX_DIR/live-baseline-counts.json"
+  local live_evidence="$TX_DIR/live-runtime-evidence.json"
+  release_cli baseline --db "$DB_FILE" --api-dir "$CANDIDATE_DIR/api" --contract "$CANDIDATE_DIR/migrations/release/supported-baselines.json" --json > "$live_assessment"
+  local dry_decision live_decision dry_mapping_required live_mapping_required
+  dry_decision="$(<"$TX_DIR/dry-run-baseline-decision")"
+  live_decision="$(baseline_decision "$live_assessment")"
+  dry_mapping_required="$(<"$TX_DIR/dry-run-mapping-required")"
+  live_mapping_required="$(baseline_mapping_required "$live_assessment")"
+  [[ "$dry_decision" == "$live_decision" ]] || die "baseline decision changed after dry-run; refusing stale release plan"
+  [[ "$dry_mapping_required" == "$live_mapping_required" ]] || die "legacy mapper requirement changed after dry-run; refusing stale release plan"
+  if [[ "$live_mapping_required" == "true" ]]; then
+    prepare_mapper_evidence "$DB_FILE" "$live_evidence" apply
+    release_cli map --db "$DB_FILE" --output "$live_map" --map-table _meowbox_domain_migration_map \
+      --runtime-evidence "$live_evidence" --apply-map --write-mode live --json
+    [[ "$(map_report_value "$live_map" sourceFileSha256)" == "$SNAPSHOT_SOURCE_FILE_HASH" ]] || \
+      die "live mapper source fingerprint no longer matches the matched snapshot"
+    [[ "$(map_report_value "$live_map" mapSha256)" == "$(map_report_value "$TX_DIR/dry-run-migration-map.json" mapSha256)" ]] || \
+      die "migration mapping changed after dry-run; refusing stale map"
+    write_baseline_counts_from_map "$live_map" "$live_counts"
+  elif [[ "$live_decision" == "fresh" ]]; then
+    write_fresh_baseline_counts "$live_counts"
+  else
+    write_current_baseline_counts "$DB_FILE" "$live_counts"
+  fi
+  [[ "$(managed_runtime_hash "$TX_DIR/managed-runtime-paths.txt")" == "$SNAPSHOT_CONFIG_HASH" ]] || \
+    die "mapper evidence changed managed runtime input; rollback is required"
+  release_cli baseline --db "$DB_FILE" --api-dir "$CANDIDATE_DIR/api" --contract "$CANDIDATE_DIR/migrations/release/supported-baselines.json" --apply --write-mode live --json > "$TX_DIR/live-baseline.json"
+  prisma_deploy "$DB_FILE"
+  release_cli invariants --db "$DB_FILE" --phase final --baseline-counts "$live_counts" --json > "$TX_DIR/live-invariants.json"
+  journal_update database "SQLite baseline/map/migrate/invariants completed"
+}
+
+prepare_apply_runtime() {
+  stage U06-runtime "re-render and validate managed runtime candidates"
+  prepare_runtime "$DB_FILE" apply
+  local expected actual
+  expected="$(<"$TX_DIR/dry-run-runtime-plan.hash")"
+  actual="$(runtime_plan_hash "$RUNTIME_MANIFEST")"
+  [[ "$expected" == "$actual" ]] || die "runtime artifact plan changed after dry-run; retry from a fresh dry-run"
+  mb_collect_manifest_paths "$RUNTIME_MANIFEST" "$TX_DIR/apply-manifest-paths.txt"
+  mb_merge_path_files "$TX_DIR/apply-managed-paths.txt" "$TX_DIR/managed-runtime-paths.txt" "$TX_DIR/apply-manifest-paths.txt"
+  journal_update runtime "staged runtime candidate revalidated"
+}
+
+switch_release() {
+  stage U07-switch "commit managed runtime, atomically switch release, then restart panel"
+  local final_release="$RELEASES_DIR/$TARGET"
+  [[ ! -e "$final_release" ]] || die "target release directory already exists: $final_release"
+  local staged_candidate="$CANDIDATE_DIR"
+  # Persist the final destination before rename.  A hard kill between mv(2)
+  # and a later journal write must still leave rollback enough information to
+  # quarantine the invisible candidate and allow an idempotent retry.
+  CANDIDATE_DIR="$final_release"
+  journal_update switch-intent "candidate release destination reserved; runtime switch pending"
+  # Move candidate before the symlink switch; it is still invisible to PM2.
+  mv -- "$staged_candidate" "$CANDIDATE_DIR"
+  refresh_candidate_health_hook_paths
+  # Persist the moved candidate before any mutable runtime work.  A rollback
+  # can then quarantine it under the transaction instead of blocking a safe
+  # retry because releases/$TARGET already exists.
+  journal_update switch-stage "candidate release moved; runtime switch pending"
+  MEOWBOX_STATE_DIR="$STATE_DIR" MEOWBOX_RUNTIME_MANIFEST="$RUNTIME_MANIFEST" MEOWBOX_RUNTIME_STAGE="$RUNTIME_STAGE" \
+    MEOWBOX_RUNTIME_VALIDATED=1 DATABASE_URL="file:$DB_FILE" node "$CANDIDATE_DIR/migrations/dist/runner.js" up
+  local changes
+  changes="$(python3 - "$RUNTIME_MANIFEST" <<'PY'
+import json,sys
+print(len(json.load(open(sys.argv[1], encoding="utf-8")).get("artifacts", [])))
+PY
+)"
+  if [[ "$changes" != "0" ]]; then
+    local apply_hook="$RUNTIME_APPLY_HOOK"
+    [[ -n "$apply_hook" ]] || apply_hook="$CANDIDATE_DIR/migrations/dist/runtime-apply.js"
+    [[ -f "$apply_hook" || -x "$apply_hook" ]] || die "runtime artifacts require switch/reload/socket verification hook"
+    run_hook "$apply_hook" switch --db "$DB_FILE" --stage "$RUNTIME_STAGE" --manifest "$RUNTIME_MANIFEST"
+  fi
+  mb_atomic_switch_symlink "$CANDIDATE_DIR" "$PANEL_DIR/current"
+  pm2 reload "$PANEL_DIR/ecosystem.config.js" --update-env
+  journal_update switch "managed config and current release switched"
+}
+
+verify_release() {
+  stage U08-verify "final PM2/API/Web/agent/Nginx/PHP/HTTP/SQLite verification"
+  MEOWBOX_DATABASE_FILE="$DB_FILE" MEOWBOX_RELEASE_HEALTH_HOOKS_REQUIRED=1 \
+    bash "$SCRIPT_DIR/healthcheck.sh" --strict --manifest "$RUNTIME_MANIFEST" --release-dir "$CANDIDATE_DIR" --expected-version "$TARGET"
+  release_cli invariants --db "$DB_FILE" --phase final --baseline-counts "$TX_DIR/live-baseline-counts.json" --json > "$TX_DIR/final-invariants.json"
+  journal_update verify "final health and invariants passed"
+}
+
+forward_repair() {
+  local apply_hook="$RUNTIME_APPLY_HOOK"
+  [[ -n "$apply_hook" ]] || apply_hook="$CANDIDATE_DIR/migrations/dist/runtime-apply.js"
+  if [[ -f "$apply_hook" || -x "$apply_hook" ]]; then
+    run_hook "$apply_hook" cleanup --db "$DB_FILE" --stage "$RUNTIME_STAGE" --manifest "$RUNTIME_MANIFEST" || return 1
+  fi
+  return 0
+}
+
+verify_post_commit_cleanup() {
+  MEOWBOX_DATABASE_FILE="$DB_FILE" MEOWBOX_RELEASE_HEALTH_HOOKS_REQUIRED=1 \
+    bash "$SCRIPT_DIR/healthcheck.sh" --strict --manifest "$RUNTIME_MANIFEST" --release-dir "$CANDIDATE_DIR" --expected-version "$TARGET"
+}
+
+post_commit_forward_repair() {
+  run_hook "$QUIESCE_HOOK" resume --transaction "$TRANSACTION_ID" --candidate "$CANDIDATE_DIR" --database "$DB_FILE" || return 1
+  forward_repair || return 1
+  verify_post_commit_cleanup
+}
+
+stage_candidate
+run_dry_run
+if $DRY_RUN; then
+  say "dry-run passed; no production DB, managed config, services or release link were changed"
+  exit 0
 fi
 
-# ----- 10. Healthcheck (best-effort) -----
-# Тоже не валит апдейт. Если упал — пишем warning, но статус остаётся
-# succeeded. Migrations уже применены, current/ переключён, файлы на месте.
-# Откат symlink'а без отката миграций приведёт к рассинхрону схемы — это
-# хуже чем «новый код + healthcheck warning».
-stage healthcheck "Проверка работоспособности"
-if ! bash "$SCRIPT_DIR/healthcheck.sh"; then
-  err "⚠ Healthcheck failed — апдейт зарегистрирован как успешный, но сервисы не отвечают. Проверь pm2 logs."
-fi
+stage U03-snapshot "SQLite backup + metadata-preserving managed runtime snapshot"
+SNAPSHOT_DIR="$(MEOWBOX_STATE_DIR="$STATE_DIR" MEOWBOX_DATABASE_FILE="$DB_FILE" MEOWBOX_RELEASE_LOCK_HELD=1 \
+  bash "$SCRIPT_DIR/snapshot.sh" --transaction "$TRANSACTION_ID" --paths-file "$TX_DIR/managed-runtime-paths.txt" --no-rotate | tail -n 1)"
+[[ -d "$SNAPSHOT_DIR" ]] || die "snapshot did not produce a directory"
+SNAPSHOT_SOURCE_HASH="$(mb_snapshot_json_value "$SNAPSHOT_DIR" database.sourceHash)"
+SNAPSHOT_SOURCE_FILE_HASH="$(mb_snapshot_json_value "$SNAPSHOT_DIR" database.sourceFileHash)"
+SNAPSHOT_CONFIG_HASH="$(mb_snapshot_json_value "$SNAPSHOT_DIR" managedRuntime.sourceHash)"
+[[ "$SNAPSHOT_SOURCE_HASH" == "$(<"$TX_DIR/dry-run-source-db.hash")" ]] || die "SQLite changed between dry-run and snapshot; retry update"
+[[ "$SNAPSHOT_SOURCE_FILE_HASH" == "$(<"$TX_DIR/dry-run-source-file.hash")" ]] || die "SQLite main/WAL/SHM changed between dry-run and snapshot; retry update"
+[[ "$SNAPSHOT_CONFIG_HASH" == "$(<"$TX_DIR/dry-run-managed-runtime.hash")" ]] || die "managed runtime changed between dry-run and snapshot; retry update"
+journal_update snapshot "consistent DB/config/release/process snapshot complete"
 
-# ----- 11. Cleanup -----
-# Cleanup релизов в trap EXIT — работает на любом исходе update.sh.
-stage cleanup "Чистка старых релизов будет в trap EXIT"
+stage U04-quiesce "gate panel writes and wait for active operations"
+ROLLBACK_ARMED=true
+journal_update quiesce "quiesce requested; rollback boundary armed"
+run_hook "$QUIESCE_HOOK" quiesce --transaction "$TRANSACTION_ID" --candidate "$CANDIDATE_DIR" --database "$DB_FILE" --timeout "$MEOWBOX_QUIESCE_TIMEOUT"
+[[ "$(source_hash_inputs)" == "$SNAPSHOT_SOURCE_HASH" ]] || die "SQLite changed after quiesce; rollback is required"
+[[ "$(source_file_fingerprint)" == "$SNAPSHOT_SOURCE_FILE_HASH" ]] || die "SQLite main/WAL/SHM changed after quiesce; rollback is required"
+[[ "$(managed_runtime_hash "$TX_DIR/managed-runtime-paths.txt")" == "$SNAPSHOT_CONFIG_HASH" ]] || die "managed runtime changed after quiesce; rollback is required"
+
+apply_database
+prepare_apply_runtime
+switch_release
+verify_release
+
+stage U09-commit "mark rollback boundary, re-open writes, write final success sentinel"
+journal_update commit "all final health checks passed; rollback boundary committed" true
+COMMITTED=true
+if ! run_hook "$QUIESCE_HOOK" resume --transaction "$TRANSACTION_ID" --candidate "$CANDIDATE_DIR" --database "$DB_FILE"; then
+  journal_update forward-repair "write gate did not reopen; forward repair required" true
+  die "post-commit write gate resume failed; DB rollback is forbidden, repair forward"
+fi
+if ! forward_repair; then
+  journal_update forward-repair "post-commit cleanup failed; retry forward repair" true
+  die "post-commit cleanup failed; serving new release without DB rollback and retrying forward repair"
+fi
+if ! verify_post_commit_cleanup; then
+  journal_update forward-repair "post-commit health check failed; retry forward repair" true
+  die "post-commit health check failed; DB rollback is forbidden, repair forward"
+fi
+printf '%s\n' "$TARGET" | mb_atomic_write_stdin "$STATE_DIR/.update-success"
+journal_update committed "post-commit cleanup and final health complete" true
+say "✓ update committed: $CURRENT_VERSION → $TARGET"
+write_report pass "release committed after final health; snapshot retained at $SNAPSHOT_DIR" "$(<"$TX_DIR/dry-run-source-db.hash")" "$(<"$TX_DIR/dry-run-managed-runtime.hash")"
+say "report: $REPORT_JSON"

@@ -15,8 +15,8 @@
     "forceConsistentCasingInFileNames": true,
     "baseUrl": ".",
     "paths": {
-      "@prisma/client": ["../api/node_modules/@prisma/client"]
+      "@prisma/client": ["prisma-client-shim.d.ts"]
     }
   },
-  "include": ["runner.ts", "system/**/*.ts"]
+  "include": ["*.ts", "hooks/**/*.ts", "release/**/*.ts", "system/**/*.ts"]
 }

@@ -36,6 +36,31 @@ import { XrayManager } from './vpn/xray.manager';
 import { AmneziaWgManager } from './vpn/amnezia-wg.manager';
 import { VpnInstaller } from './vpn/installer';
 import { PanelAccessManager } from './panel-access/panel-access.manager';
+import type {
+  AgentDeployPayload,
+  AgentDeployRollbackPayload,
+  AgentComposerRegeneratePayload,
+  AgentInstallPayload,
+  AgentModxAdminPasswordPayload,
+  AgentMetricsPayload,
+  AgentModxUpdatePayload,
+  AgentNginxConfigPayload,
+  AgentPhpPoolPayload,
+  AgentPhpPoolPreflightPayload,
+  AgentPhpPoolReference,
+  AgentSiteLogPayload,
+} from './contracts/runtime-events';
+import {
+  normalizeFilesRelPath,
+  resolveSiteDomainRoot,
+  validatePhpVersion,
+  validateRuntimeKey,
+  validateSiteDomainId,
+} from './runtime/site-domain-runtime';
+import {
+  ApplicationSnapshotManager,
+  type ApplicationSnapshotParams,
+} from './runtime/application-snapshot.manager';
 import * as fs from 'fs';
 import * as fsp from 'fs/promises';
 import * as path from 'path';
@@ -45,7 +70,7 @@ import {
   isUnderBackupStorage,
   TIMEOUTS,
 } from './config';
-import { DEFAULT_PHP_VERSION, artifactAnchor } from '@meowbox/shared';
+import { DEFAULT_PHP_VERSION } from '@meowbox/shared';
 
 type Callback = (result: unknown) => void;
 
@@ -114,6 +139,7 @@ export class AgentService {
   private amneziaMgr: AmneziaWgManager;
   private vpnInstaller: VpnInstaller;
   private panelAccess: PanelAccessManager;
+  private applicationSnapshots: ApplicationSnapshotManager;
   private metricsInterval: ReturnType<typeof setInterval> | null = null;
   /**
    * Single-flight для hostpanel-миграции (см. spec §17.5: 1 одновременная
@@ -162,6 +188,7 @@ export class AgentService {
     this.amneziaMgr = new AmneziaWgManager(this.cmdExec);
     this.vpnInstaller = new VpnInstaller(this.cmdExec);
     this.panelAccess = new PanelAccessManager();
+    this.applicationSnapshots = new ApplicationSnapshotManager();
   }
 
   start() {
@@ -268,28 +295,7 @@ export class AgentService {
      * server-блок, SSL-серт и набор layered-чанков. См. agent/src/nginx/templates.ts.
      */
     this.safeOn(s, 'nginx:create-config', async (
-      params: {
-        siteName: string;
-        rootPath: string;
-        phpEnabled: boolean;
-        phpVersion?: string;
-        systemUser?: string;
-        domains: Array<{
-          domainId: string;
-          domain: string;
-          aliases: Array<{ domain: string; redirect: boolean }>;
-          filesRelPath: string;
-          appPort?: number | null;
-          sslEnabled: boolean;
-          certPath?: string | null;
-          keyPath?: string | null;
-          httpsRedirect: boolean;
-          zoneName: string;
-          settings: import('@meowbox/shared').SiteNginxOverrides;
-          customConfig?: string | null;
-          forceWriteCustom?: boolean;
-        }>;
-      },
+      params: AgentNginxConfigPayload,
       cb: Callback,
     ) => {
       // Ensure shared site root directory exists before creating config.
@@ -297,7 +303,8 @@ export class AgentService {
       await this.cmdExec.execute('mkdir', ['-p', params.rootPath]);
       await this.cmdExec.execute('chown', [owner, params.rootPath]);
       await this.cmdExec.execute('chmod', ['750', params.rootPath]);
-      cb(await this.nginx.createSiteConfig(params));
+      const result = await this.nginx.createSiteConfig(params);
+      cb({ ...result, operationId: params.operationId });
     });
 
     /**
@@ -305,35 +312,15 @@ export class AgentService {
      * отвечают 503, при этом layered-чанки и 95-custom.conf не трогаются.
      */
     this.safeOn(s, 'nginx:create-stopped-config', async (
-      params: {
-        siteName: string;
-        rootPath: string;
-        phpEnabled: boolean;
-        phpVersion?: string;
-        systemUser?: string;
-        domains: Array<{
-          domainId: string;
-          domain: string;
-          aliases: Array<{ domain: string; redirect: boolean }>;
-          filesRelPath: string;
-          appPort?: number | null;
-          sslEnabled: boolean;
-          certPath?: string | null;
-          keyPath?: string | null;
-          httpsRedirect: boolean;
-          zoneName: string;
-          settings: import('@meowbox/shared').SiteNginxOverrides;
-          customConfig?: string | null;
-          forceWriteCustom?: boolean;
-        }>;
-      },
+      params: AgentNginxConfigPayload,
       cb: Callback,
     ) => {
       const owner = params.systemUser ? `${params.systemUser}:${params.systemUser}` : 'www-data:www-data';
       await this.cmdExec.execute('mkdir', ['-p', params.rootPath]);
       await this.cmdExec.execute('chown', [owner, params.rootPath]);
       await this.cmdExec.execute('chmod', ['750', params.rootPath]);
-      cb(await this.nginx.createStoppedSiteConfig(params));
+      const result = await this.nginx.createStoppedSiteConfig(params);
+      cb({ ...result, operationId: params.operationId });
     });
 
     /**
@@ -420,24 +407,49 @@ export class AgentService {
     });
 
     // -- PHP-FPM --
-    this.safeOn(s, 'php:create-pool', async (params: { siteName?: string; domain: string; phpVersion: string; user?: string; rootPath?: string; sslEnabled?: boolean; customConfig?: string | null }, cb: Callback) => {
-      cb(await this.php.createPool(params));
+    this.safeOn(s, 'php:create-pool', async (params: AgentPhpPoolPayload, cb: Callback) => {
+      const siteDomainId = validateSiteDomainId(params.siteDomainId);
+      const result = await this.php.createPool({
+        ...params,
+        domainId: siteDomainId,
+        runtimeKey: validateRuntimeKey(params.runtimeKey),
+      });
+      cb({ ...result, siteDomainId, operationId: params.operationId });
     });
 
-    this.safeOn(s, 'php:remove-pool', async (params: { siteName?: string; domain?: string; phpVersion: string }, cb: Callback) => {
-      const anchor = artifactAnchor({ siteName: params.siteName, domain: params.domain });
+    this.safeOn(s, 'php:preflight-pools', async (
+      params: AgentPhpPoolPreflightPayload,
+      cb: Callback,
+    ) => {
+      const pools = Array.isArray(params?.pools) ? params.pools : [];
+      cb(await this.php.preflightPools(pools.map((pool) => ({
+        ...pool,
+        domainId: validateSiteDomainId(pool.siteDomainId),
+        runtimeKey: validateRuntimeKey(pool.runtimeKey),
+      }))));
+    });
+
+    this.safeOn(s, 'php:remove-pool', async (params: AgentPhpPoolReference, cb: Callback) => {
+      const siteDomainId = validateSiteDomainId(params.siteDomainId);
+      const anchor = validateRuntimeKey(params.runtimeKey);
       await this.php.removePool(anchor, params.phpVersion);
-      // Legacy: если siteName задан и отличается от domain — чистим и старый pool
-      if (params.siteName && params.domain && params.domain !== anchor) {
-        await this.php.removePool(params.domain, params.phpVersion);
-      }
-      cb({ success: true });
+      cb({
+        success: true,
+        siteDomainId,
+        operationId: params.operationId,
+      });
     });
 
-    this.safeOn(s, 'php:read-pool', async (params: { siteName?: string; domain?: string; phpVersion: string }, cb: Callback) => {
-      const anchor = artifactAnchor({ siteName: params.siteName, domain: params.domain });
+    this.safeOn(s, 'php:read-pool', async (params: AgentPhpPoolReference, cb: Callback) => {
+      const siteDomainId = validateSiteDomainId(params.siteDomainId);
+      const anchor = validateRuntimeKey(params.runtimeKey);
       const content = await this.php.readPool(anchor, params.phpVersion);
-      cb({ success: true, data: content });
+      cb({
+        success: true,
+        data: content,
+        siteDomainId,
+        operationId: params.operationId,
+      });
     });
 
     this.safeOn(s, 'php:status', async (params: { phpVersion: string }, cb: Callback) => {
@@ -451,18 +463,16 @@ export class AgentService {
     // Регенерация composer autoload под новую версию PHP (после смены phpVersion
     // для сайта). Чинит vendor/composer/platform_check.php — без этого сайты с
     // composer.json фатально падают при даунгрейде/апгрейде PHP.
-    this.safeOn(s, 'site:php-regenerate-composer', async (params: {
-      siteId?: string;
-      domain?: string;
-      rootPath: string;
-      filesRelPath?: string;
-      phpVersion: string;
-    }, cb: Callback) => {
+    this.safeOn(s, 'site:php-regenerate-composer', async (params: AgentComposerRegeneratePayload, cb: Callback) => {
       try {
+        const siteDomainId = validateSiteDomainId(params.siteDomainId);
+        validateRuntimeKey(params.runtimeKey);
         const onLog = (line: string) => {
           if (s.connected) {
             s.emit('site:install:log', {
               siteId: params.siteId,
+              siteDomainId,
+              operationId: params.operationId,
               domain: params.domain,
               line,
             });
@@ -474,7 +484,7 @@ export class AgentService {
           params.phpVersion,
           onLog,
         );
-        cb(result);
+        cb({ ...result, siteDomainId, operationId: params.operationId });
       } catch (err) {
         cb({ success: false, error: (err as Error).message });
       }
@@ -482,7 +492,8 @@ export class AgentService {
 
     this.safeOn(s, 'php:restart', async (params: { phpVersion: string }, cb: Callback) => {
       try {
-        const result = await this.cmdExec.execute('systemctl', ['restart', `php${params.phpVersion}-fpm`], { allowFailure: true });
+        const version = validatePhpVersion(params.phpVersion);
+        const result = await this.cmdExec.execute('systemctl', ['restart', `php${version}-fpm`], { allowFailure: true });
         cb({ success: result.exitCode === 0, error: result.exitCode !== 0 ? result.stderr : undefined });
       } catch (err) {
         cb({ success: false, error: (err as Error).message });
@@ -628,22 +639,22 @@ export class AgentService {
     }, 630_000);
 
     // -- Deploy --
-    this.safeOn(s, 'deploy:execute', async (params: {
-      deployId: string;
-      siteType: string;
-      rootPath: string;
-      gitRepository: string;
-      branch: string;
-      phpVersion?: string;
-      appPort?: number;
-      domain: string;
-      envVars?: Record<string, string>;
-    }, cb: Callback) => {
-      const { deployId, ...deployParams } = params;
+    this.safeOn(s, 'deploy:execute', async (params: AgentDeployPayload, cb: Callback) => {
+      const siteDomainId = validateSiteDomainId(params.siteDomainId);
+      const { deployId, preset, operationId, ...deployParams } = params;
+      const normalizedDeployParams = {
+        ...deployParams,
+        siteType: preset,
+      };
 
-      const result = await this.deployer.deploy(deployParams, (line) => {
+      const result = await this.deployer.deploy(normalizedDeployParams, (line) => {
         if (s.connected) {
-          s.emit('deploy:log', { deployId, line });
+          s.emit('deploy:log', {
+            deployId,
+            line,
+            siteDomainId,
+            operationId,
+          });
         }
       });
 
@@ -652,24 +663,29 @@ export class AgentService {
         success: result.success,
         commitSha: result.commitSha,
         commitMessage: result.commitMessage,
+        siteDomainId,
+        operationId,
       });
 
       cb({ success: true, data: result });
     });
 
-    this.safeOn(s, 'deploy:rollback', async (params: {
-      deployId: string;
-      rootPath: string;
-      commitSha: string;
-      siteType: string;
-      domain: string;
-      phpVersion?: string;
-    }, cb: Callback) => {
-      const { deployId, ...rollbackParams } = params;
+    this.safeOn(s, 'deploy:rollback', async (params: AgentDeployRollbackPayload, cb: Callback) => {
+      const siteDomainId = validateSiteDomainId(params.siteDomainId);
+      const { deployId, preset, operationId, ...rollbackParams } = params;
+      const normalizedRollbackParams = {
+        ...rollbackParams,
+        siteType: preset,
+      };
 
-      const result = await this.deployer.rollback(rollbackParams, (line) => {
+      const result = await this.deployer.rollback(normalizedRollbackParams, (line) => {
         if (s.connected) {
-          s.emit('deploy:log', { deployId, line });
+          s.emit('deploy:log', {
+            deployId,
+            line,
+            siteDomainId,
+            operationId,
+          });
         }
       });
 
@@ -678,6 +694,8 @@ export class AgentService {
         success: result.success,
         commitSha: result.commitSha,
         commitMessage: result.commitMessage,
+        siteDomainId,
+        operationId,
       });
 
       cb({ success: true, data: result });
@@ -879,6 +897,7 @@ export class AgentService {
       baseTimestamp?: string;
       excludeTableData?: string[];
       keepLocalCopy?: boolean;
+      manifest?: string;
     }, cb: Callback) => {
       const result = await this.backup.execute(params, (percent) => {
         if (s.connected) {
@@ -899,6 +918,7 @@ export class AgentService {
 
     this.safeOn(s, 'backup:restore', async (params: {
       backupId: string;
+      restoreId: string;
       siteId: string;
       siteName: string;
       rootPath: string;
@@ -915,12 +935,17 @@ export class AgentService {
     }, cb: Callback) => {
       const result = await this.backup.restore(params, (percent) => {
         if (s.connected) {
-          s.emit('backup:restore:progress', { backupId: params.backupId, progress: percent });
+          s.emit('backup:restore:progress', {
+            backupId: params.backupId,
+            restoreId: params.restoreId,
+            progress: percent,
+          });
         }
       });
 
       this.emitOrQueue('backup:restore:complete', {
         backupId: params.backupId,
+        restoreId: params.restoreId,
         success: result.success,
         error: result.error,
       });
@@ -936,9 +961,10 @@ export class AgentService {
       rootPath: string;
       type: 'FULL' | 'FILES_ONLY' | 'DB_ONLY';
       excludePaths: string[];
-      databases?: Array<{ name: string; type: string }>;
+      databases?: Array<{ name: string; sourceName?: string; type: string }>;
       excludeTableData?: string[];
       storage: ResticStorage;
+      manifest?: string;
     }, cb: Callback) => {
       const result = await this.restic.backup(params, (percent) => {
         if (s.connected) {
@@ -1031,23 +1057,29 @@ export class AgentService {
 
     this.safeOn(s, 'restic:restore', async (params: {
       backupId: string;
+      restoreId: string;
       siteName: string;
       snapshotId: string;
       rootPath: string;
       cleanup?: boolean;
-      databases?: Array<{ name: string; type: string }>;
+      databases?: Array<{ name: string; sourceName?: string; type: string }>;
       storage: ResticStorage;
       scope?: 'FILES_AND_DB' | 'FILES_ONLY' | 'DB_ONLY';
       includePaths?: string[];
     }, cb: Callback) => {
       const result = await this.restic.restore(params, (percent) => {
         if (s.connected) {
-          s.emit('backup:restore:progress', { backupId: params.backupId, progress: percent });
+          s.emit('backup:restore:progress', {
+            backupId: params.backupId,
+            restoreId: params.restoreId,
+            progress: percent,
+          });
         }
       });
 
       this.emitOrQueue('backup:restore:complete', {
         backupId: params.backupId,
+        restoreId: params.restoreId,
         success: result.success,
         error: result.error,
       });
@@ -1399,22 +1431,57 @@ export class AgentService {
     // Смена / создание пароля админа MODX (Revo + 3) через bootstrap MODX_API_MODE.
     // Под капотом: пишем .php-скрипт в /tmp, запускаем его под per-site юзером
     // через `sudo -u <systemUser>` (чтобы кэш MODX не остался под root).
-    this.safeOn(s, 'modx:change-admin-password', async (params: {
-      rootPath: string;
-      filesRelPath?: string;
-      phpVersion?: string;
-      systemUser?: string;
-      username: string;
-      password: string;
-      createIfMissing?: boolean;
-    }, cb: Callback) => {
+    this.safeOn(s, 'modx:change-admin-password', async (params: AgentModxAdminPasswordPayload, cb: Callback) => {
       try {
-        const result = await this.modxPassChanger.run(params);
-        cb(result);
+        const siteDomainId = validateSiteDomainId(params.siteDomainId);
+        const phpVersion = validatePhpVersion(params.phpVersion);
+        validateRuntimeKey(params.runtimeKey);
+        const result = await this.modxPassChanger.run({
+          ...params,
+          filesRelPath: params.filesRelPath,
+          phpVersion,
+        });
+        cb({ ...result, siteDomainId, operationId: params.operationId });
       } catch (err) {
         cb({ success: false, error: (err as Error).message });
       }
     }, 90_000);
+
+    this.safeOn(s, 'modx:rewrite-database-config', async (params: {
+      rootPath: string;
+      filesRelPath: string;
+      dbName: string;
+      dbUser: string;
+      dbPassword: string;
+      dbType: 'MARIADB' | 'MYSQL';
+      tablePrefix: string;
+      managerPath?: string;
+      connectorsPath?: string;
+    }, cb: Callback) => {
+      try {
+        if (params.dbType !== 'MARIADB' && params.dbType !== 'MYSQL') {
+          throw new Error('MODX database type must be MARIADB or MYSQL');
+        }
+        for (const value of [
+          params.dbName,
+          params.dbUser,
+          params.dbPassword,
+          params.tablePrefix,
+        ]) {
+          if (
+            typeof value !== 'string'
+            || value.length === 0
+            || value.length > 256
+            || /[\x00\r\n]/.test(value)
+          ) {
+            throw new Error('Invalid MODX database configuration value');
+          }
+        }
+        cb(await this.installer.rewriteModxDatabaseConfig(params));
+      } catch (error) {
+        cb({ success: false, error: (error as Error).message });
+      }
+    }, 30_000);
 
     this.safeOn(s, 'system:user-exists', async (params: { username: string }, cb: Callback) => {
       try {
@@ -1791,32 +1858,91 @@ export class AgentService {
       srcRoot: string;
       dstRoot: string;
       dstUser: string;
-      relPath?: string; // подкаталог внутри root (default 'www')
+      /** Legacy compatibility: used for both roots when explicit paths are absent. */
+      relPath?: string;
+      srcRelPath?: string;
+      dstRelPath?: string;
     }, cb: Callback) => {
       try {
-        const rel = (params.relPath || 'www').replace(/^\/+/, '').replace(/\.\.+/g, '').replace(/\/+$/, '') || 'www';
-        const srcAbs = path.resolve(`${params.srcRoot}/${rel}`);
-        const dstAbs = path.resolve(`${params.dstRoot}/${rel}`);
+        if (!/^[a-z_][a-z0-9_-]{0,31}$/.test(params.dstUser)) {
+          throw new Error('Invalid destination system user');
+        }
+        const srcRelPath = normalizeFilesRelPath(
+          params.srcRelPath ?? params.relPath,
+        );
+        const dstRelPath = normalizeFilesRelPath(
+          params.dstRelPath ?? params.relPath,
+        );
+        const srcRoot = path.resolve(params.srcRoot);
+        const dstRoot = path.resolve(params.dstRoot);
+        const srcAbs = resolveSiteDomainRoot(srcRoot, srcRelPath);
+        const dstAbs = resolveSiteDomainRoot(dstRoot, dstRelPath);
 
-        if (!isUnderAllowedSiteRoot(srcAbs) || !isUnderAllowedSiteRoot(dstAbs)) {
+        if (
+          !isUnderAllowedSiteRoot(srcRoot)
+          || !isUnderAllowedSiteRoot(dstRoot)
+          || !isUnderAllowedSiteRoot(srcAbs)
+          || !isUnderAllowedSiteRoot(dstAbs)
+        ) {
           cb({ success: false, error: 'Paths must lie under sites base path' });
           return;
         }
 
-        // Проверяем реальные пути (защита от symlink escape).
+        // Resolve both container roots before creating anything. This rejects a
+        // symlinked Site root and prevents a destination-parent escape.
         try {
-          const realSrc = await fsp.realpath(srcAbs);
-          if (!isUnderAllowedSiteRoot(realSrc)) {
-            cb({ success: false, error: 'Source path escapes sites base (symlink)' });
-            return;
+          const [srcRootStat, dstRootStat] = await Promise.all([
+            fsp.lstat(srcRoot),
+            fsp.lstat(dstRoot),
+          ]);
+          if (
+            srcRootStat.isSymbolicLink()
+            || dstRootStat.isSymbolicLink()
+            || !srcRootStat.isDirectory()
+            || !dstRootStat.isDirectory()
+          ) {
+            throw new Error('Site roots must be real directories');
           }
-        } catch {
-          cb({ success: false, error: `Source directory not found: ${srcAbs}` });
+          const [realSrcRoot, realDstRoot] = await Promise.all([
+            fsp.realpath(srcRoot),
+            fsp.realpath(dstRoot),
+          ]);
+          if (
+            realSrcRoot !== srcRoot
+            || realDstRoot !== dstRoot
+            || !isUnderAllowedSiteRoot(realSrcRoot)
+            || !isUnderAllowedSiteRoot(realDstRoot)
+          ) {
+            throw new Error('Site root escapes sites base (symlink)');
+          }
+          const realSrc = await fsp.realpath(srcAbs);
+          const srcStat = await fsp.stat(realSrc);
+          if (
+            !srcStat.isDirectory()
+            || !isUnderAllowedSiteRoot(realSrc)
+            || (realSrc !== realSrcRoot && !realSrc.startsWith(`${realSrcRoot}${path.sep}`))
+          ) {
+            throw new Error('Source path escapes Site root or is not a directory');
+          }
+        } catch (error) {
+          cb({
+            success: false,
+            error: (error as Error).message || `Source directory not found: ${srcAbs}`,
+          });
           return;
         }
 
-        // Убедимся, что таргетная директория существует.
         await this.cmdExec.execute('mkdir', ['-p', dstAbs]);
+        const realDst = await fsp.realpath(dstAbs);
+        if (
+          !isUnderAllowedSiteRoot(realDst)
+          || (realDst !== dstRoot && !realDst.startsWith(`${dstRoot}${path.sep}`))
+        ) {
+          throw new Error('Destination path escapes Site root (symlink)');
+        }
+        if ((await fsp.realpath(srcAbs)) === realDst) {
+          throw new Error('Source and destination paths must be different');
+        }
 
         // rsync: `-a` архив (рекурсия, права, симлинки), `--delete` чтобы
         // гарантировать побайтово такую же картину (таргет создан только что,
@@ -1940,64 +2066,134 @@ export class AgentService {
       }
     });
 
-    // -- Site File Cleanup --
-    this.safeOn(s, 'site:remove-files', async (params: { rootPath: string }, cb: Callback) => {
-      try {
-        // Safety: only allow removal under configured site-root prefixes.
-        // Резолвим realpath чтобы симлинк `rootPath → /etc` не обошёл проверку.
-        const requested = path.resolve(params.rootPath || '');
-        if (!isUnderAllowedSiteRoot(requested)) {
-          cb({ success: false, error: 'Invalid root path for removal' });
-          return;
-        }
-        let real: string;
-        try {
-          real = await fsp.realpath(requested);
-        } catch {
-          // Директория уже отсутствует — считаем удалённой.
-          cb({ success: true });
-          return;
-        }
-        if (!isUnderAllowedSiteRoot(real)) {
-          cb({ success: false, error: 'Invalid root path (symlink escape)' });
-          return;
-        }
-        await this.cmdExec.execute('rm', ['-rf', real]);
-        cb({ success: true });
-      } catch (err) {
-        cb({ success: false, error: (err as Error).message });
-      }
-    });
+    this.safeOn(
+      s,
+      'application:preflight-create-root',
+      async (
+        params: { rootPath: string; filesRelPath: string },
+        cb: Callback,
+      ) => {
+        const result =
+          await this.applicationSnapshots.preflightCreateRoot(params);
+        cb({
+          success: result.success,
+          error: result.error,
+          data: result.success
+            ? {
+                applicationRoot: result.applicationRoot,
+                exists: result.exists,
+              }
+            : undefined,
+        });
+      },
+    );
+
+    this.safeOn(
+      s,
+      'application:snapshot',
+      async (params: ApplicationSnapshotParams, cb: Callback) => {
+        const result = await this.applicationSnapshots.snapshot(params);
+        cb({
+          success: result.success,
+          error: result.error,
+          data: result.snapshotPath
+            ? { snapshotPath: result.snapshotPath }
+            : undefined,
+          operationId: params.operationId,
+          siteDomainId: params.siteDomainId,
+        });
+      },
+    );
+
+    this.safeOn(
+      s,
+      'application:restore-snapshot',
+      async (
+        params: {
+          operationId: string;
+          siteDomainId: string;
+          snapshotPath: string;
+        },
+        cb: Callback,
+      ) => {
+        const result = await this.applicationSnapshots.restore(
+          params.snapshotPath,
+        );
+        cb({
+          ...result,
+          operationId: params.operationId,
+          siteDomainId: params.siteDomainId,
+        });
+      },
+    );
+
+    this.safeOn(
+      s,
+      'application:delete-files',
+      async (
+        params: {
+          operationId: string;
+          siteDomainId: string;
+          runtimeKey: string;
+          rootPath: string;
+          filesRelPath: string;
+        },
+        cb: Callback,
+      ) => {
+        const result = await this.applicationSnapshots.trashApplication(params);
+        cb({
+          success: result.success,
+          error: result.error,
+          data: result.trashPath ? { trashPath: result.trashPath } : undefined,
+          operationId: params.operationId,
+          siteDomainId: params.siteDomainId,
+        });
+      },
+    );
+
+    // Whole-Site cleanup is recoverable: move the home/root to a sibling
+    // quarantine directory after the API has produced application snapshots.
+    this.safeOn(
+      s,
+      'site:remove-files',
+      async (
+        params: { operationId: string; rootPath: string },
+        cb: Callback,
+      ) => {
+        const result = await this.applicationSnapshots.trashSiteRoot(params);
+        cb({
+          success: result.success,
+          error: result.error,
+          data: result.trashPath ? { trashPath: result.trashPath } : undefined,
+          operationId: params.operationId,
+        });
+      },
+    );
 
     // -- Site Install --
-    this.safeOn(s, 'site:install', async (params: {
-      siteId?: string;
-      siteType: string;
-      rootPath: string;
-      filesRelPath?: string;
-      domain: string;
-      phpVersion?: string;
-      modxVersion?: string;
-      appPort?: number;
-      dbName?: string;
-      dbUser?: string;
-      dbPassword?: string;
-      dbType?: 'MARIADB' | 'MYSQL' | 'POSTGRESQL';
-      adminUser?: string;
-      adminPassword?: string;
-      adminEmail?: string;
-      systemUser?: string;
-      managerPath?: string;
-      connectorsPath?: string;
-      tablePrefix?: string;
-    }, cb: Callback) => {
+    this.safeOn(s, 'site:install', async (params: AgentInstallPayload, cb: Callback) => {
+      let rootMutationStarted = false;
       try {
         let result: { success: boolean; error?: string; version?: string };
+        const siteDomainId = validateSiteDomainId(params.siteDomainId);
+        const siteType = params.preset;
+        validateRuntimeKey(params.runtimeKey);
+        if (
+          (siteType === 'MODX_REVO' || siteType === 'MODX_3') &&
+          !params.phpVersion
+        ) {
+          throw new Error('phpVersion is required for MODX applications');
+        }
+        const phpVersion = params.phpVersion
+          ? validatePhpVersion(params.phpVersion)
+          : DEFAULT_PHP_VERSION;
 
         const onLog = (line: string) => {
           if (s.connected) {
             s.emit('site:install:log', {
               siteId: params.siteId,
+              siteDomainId,
+              operationId: params.operationId,
               domain: params.domain,
               line,
             });
@@ -2008,7 +2204,7 @@ export class AgentService {
           rootPath: params.rootPath,
           filesRelPath: params.filesRelPath,
           domain: params.domain,
-          phpVersion: params.phpVersion || DEFAULT_PHP_VERSION,
+          phpVersion,
           modxVersion: params.modxVersion,
           dbName: params.dbName || '',
           dbUser: params.dbUser || '',
@@ -2023,7 +2219,20 @@ export class AgentService {
           tablePrefix: params.tablePrefix,
         };
 
-        switch (params.siteType) {
+        const preflight = await this.applicationSnapshots.preflightCreateRoot({
+          rootPath: params.rootPath,
+          filesRelPath: params.filesRelPath,
+        });
+        if (!preflight.success) {
+          throw new Error(
+            `Application root preflight failed: ${
+              preflight.error || 'root is unavailable'
+            }`,
+          );
+        }
+
+        rootMutationStarted = true;
+        switch (siteType) {
           case 'MODX_REVO':
             // MODX Revolution 2.x — только ZIP + CLI setup (composer-пакета нет)
             result = await this.installer.installModxRevo(modxParams, onLog);
@@ -2051,31 +2260,35 @@ export class AgentService {
         cb({
           success: result.success,
           error: result.error,
-          data: result.version ? { version: result.version } : undefined,
+          data: {
+            ...(result.version ? { version: result.version } : {}),
+            mutationStarted: rootMutationStarted,
+          },
+          siteDomainId,
+          operationId: params.operationId,
         });
       } catch (err) {
-        cb({ success: false, error: (err as Error).message });
+        cb({
+          success: false,
+          error: (err as Error).message,
+          data: { mutationStarted: rootMutationStarted },
+        });
       }
     });
 
     // -- Site Update (MODX upgrade) --
-    this.safeOn(s, 'site:update-modx', async (params: {
-      siteId?: string;
-      siteType: 'MODX_REVO' | 'MODX_3';
-      rootPath: string;
-      filesRelPath?: string;
-      phpVersion?: string;
-      targetVersion: string;
-      domain: string;
-      systemUser?: string;
-      managerPath?: string;
-      connectorsPath?: string;
-    }, cb: Callback) => {
+    this.safeOn(s, 'site:update-modx', async (params: AgentModxUpdatePayload, cb: Callback) => {
       try {
+        const siteDomainId = validateSiteDomainId(params.siteDomainId);
+        const siteType = params.preset;
+        const phpVersion = validatePhpVersion(params.phpVersion);
+        validateRuntimeKey(params.runtimeKey);
         const onLog = (line: string) => {
           if (s.connected) {
             s.emit('site:install:log', {
               siteId: params.siteId,
+              siteDomainId,
+              operationId: params.operationId,
               domain: params.domain,
               line,
             });
@@ -2085,7 +2298,7 @@ export class AgentService {
         const updateParams = {
           rootPath: params.rootPath,
           filesRelPath: params.filesRelPath,
-          phpVersion: params.phpVersion || DEFAULT_PHP_VERSION,
+          phpVersion,
           targetVersion: params.targetVersion,
           systemUser: params.systemUser,
           managerPath: params.managerPath,
@@ -2093,7 +2306,7 @@ export class AgentService {
         };
 
         let result;
-        if (params.siteType === 'MODX_3') {
+        if (siteType === 'MODX_3') {
           result = await this.installer.updateModx3(updateParams, onLog);
         } else {
           result = await this.installer.updateModxRevo(updateParams, onLog);
@@ -2102,6 +2315,8 @@ export class AgentService {
           success: result.success,
           error: result.error,
           data: result.version ? { version: result.version } : undefined,
+          siteDomainId,
+          operationId: params.operationId,
         });
       } catch (err) {
         cb({ success: false, error: (err as Error).message });
@@ -2309,7 +2524,8 @@ export class AgentService {
     });
 
     // -- Site Metrics --
-    this.safeOn(s, 'site:metrics', async (params: { systemUser: string; rootPath: string; siteType: string; phpVersion?: string; appPort?: number; domain: string }, cb: Callback) => {
+    this.safeOn(s, 'site:metrics', async (params: AgentMetricsPayload, cb: Callback) => {
+      validateSiteDomainId(params.siteDomainId);
       cb(await this.siteMetrics.collect(params));
     });
 
@@ -2327,11 +2543,13 @@ export class AgentService {
     });
 
     // -- Site Logs --
-    this.safeOn(s, 'site:logs', async (params: { systemUser: string; domain: string; type: 'access' | 'error' | 'php' | 'app'; siteName?: string; lines?: number }, cb: Callback) => {
+    this.safeOn(s, 'site:logs', async (params: AgentSiteLogPayload, cb: Callback) => {
+      validateSiteDomainId(params.siteDomainId);
       cb(await this.logReader.read(params));
     });
 
-    this.safeOn(s, 'site:logs:available', async (params: { systemUser: string; domain: string; siteName?: string }, cb: Callback) => {
+    this.safeOn(s, 'site:logs:available', async (params: Omit<AgentSiteLogPayload, 'type'>, cb: Callback) => {
+      validateSiteDomainId(params.siteDomainId);
       cb(await this.logReader.listAvailable(params));
     });
 

@@ -33,6 +33,13 @@
 
 import { resolveNginxSettings, siteDomainLogBase, type SiteNginxOverrides } from '@meowbox/shared';
 import { ACME_WEBROOT, DEFAULT_PHP_VERSION } from '../config';
+import {
+  buildPhpSocketPath,
+  resolveDomainPhpRuntime,
+  validateSiteDomainId,
+  validateRuntimeKey,
+  type ResolvedDomainPhpRuntime,
+} from '../runtime/site-domain-runtime';
 import { sanitizeCustomNginxConfig } from './sanitize-custom';
 
 // =============================================================================
@@ -53,6 +60,18 @@ export interface NginxDomainParams {
   aliases: NginxDomainAlias[];
   /** Web-root относительно `Site.rootPath`. Уже разрешён API, не бывает null. */
   filesRelPath: string;
+  /** Application preset owned by this domain. */
+  preset: string;
+  /** Per-domain PHP version. `null` explicitly disables managed PHP. */
+  phpVersion: string | null;
+  /** Immutable per-domain pool/socket/log identity. */
+  runtimeKey: string;
+  /** Optional server-derived socket; it must match phpVersion/runtimeKey. */
+  socketPath?: string | null;
+  /** Transitional alias for socketPath. */
+  socket?: string | null;
+  /** Explicit primary marker used by config consumers and diagnostics. */
+  isPrimary: boolean;
   /** Если задан — добавляем reverse-proxy `location /` на 127.0.0.1:{appPort}. */
   appPort?: number | null;
   sslEnabled: boolean;
@@ -76,8 +95,6 @@ export interface NginxSiteParams {
   siteName: string;
   /** Общий корень сайта; web-root домена = rootPath + '/' + filesRelPath. */
   rootPath: string;
-  phpEnabled: boolean;
-  phpVersion?: string;
   systemUser?: string;
   domains: NginxDomainParams[];
 }
@@ -125,17 +142,8 @@ function splitAliases(aliases: NginxDomainAlias[] | undefined): {
   return { serverAliases, redirectAliases };
 }
 
-function resolveWebRoot(rootPath: string, filesRelPath: string): string {
-  const rel = (filesRelPath || 'www').replace(/^\/+/, '').replace(/\.\.+/g, '').replace(/\/+$/, '');
-  return `${rootPath}/${rel || 'www'}`;
-}
-
 function serverNames(domain: string, aliases: string[]): string {
   return [domain, ...aliases].join(' ');
-}
-
-function phpSocketPath(phpVersion: string, anchor: string): string {
-  return `/var/run/php/php${phpVersion}-fpm-${anchor}.sock`;
 }
 
 const MEOWBOX_INCLUDE_DIR = '/etc/nginx/meowbox';
@@ -155,9 +163,9 @@ function chunk00Server(
   d: NginxDomainParams,
   webRoot: string,
   settings: ReturnType<typeof resolveNginxSettings>,
+  runtime: ResolvedDomainPhpRuntime,
 ): string {
-  const phpEnabled = !!site.phpEnabled;
-  const indexDirective = phpEnabled ? 'index.php index.html' : 'index.html index.htm';
+  const indexDirective = runtime.phpEnabled ? 'index.php index.html' : 'index.html index.htm';
   // Лог-файл включает домен → у каждого домена сайта свои логи.
   const logBase = siteDomainLogBase({ siteName: site.siteName, domain: d.domain });
   return `# === 00-server.conf — базовые директивы (управляется Meowbox) ===
@@ -202,14 +210,13 @@ ${stapling}
 ${settings.hsts ? 'add_header Strict-Transport-Security "max-age=63072000; includeSubDomains; preload" always;\n' : ''}`;
 }
 
-/** 20-php.conf — fastcgi для .php. Только если phpEnabled. Socket per-SITE. */
+/** 20-php.conf — fastcgi для .php. Только если у домена включён PHP. */
 function chunk20Php(
-  site: NginxSiteParams,
+  runtime: ResolvedDomainPhpRuntime,
   settings: ReturnType<typeof resolveNginxSettings>,
 ): string {
-  const phpVersion = site.phpVersion || DEFAULT_PHP_VERSION;
-  // Socket — один на сайт (один php-fpm pool на сайт), имя по siteName.
-  const sock = phpSocketPath(phpVersion, site.siteName);
+  const phpVersion = runtime.phpVersion || DEFAULT_PHP_VERSION;
+  const sock = runtime.socketPath || buildPhpSocketPath(phpVersion, runtime.runtimeKey);
   const bufSizeKb = settings.fastcgiBufferSizeKb;
   const subBufKb = Math.max(4, Math.floor(bufSizeKb / 2));
   return `# === 20-php.conf — PHP-FPM handler (управляется Meowbox) ===
@@ -427,16 +434,17 @@ function renderDomainChunks(
   site: NginxSiteParams,
   d: NginxDomainParams,
   settings: ReturnType<typeof resolveNginxSettings>,
+  runtime: ResolvedDomainPhpRuntime,
 ): RenderedDomain {
-  const webRoot = resolveWebRoot(site.rootPath, d.filesRelPath);
+  const webRoot = runtime.webRoot;
   const sslEnabled = !!d.sslEnabled && !!d.certPath && !!d.keyPath;
 
   const chunks: Record<string, string> = {
-    '00-server.conf': chunk00Server(site, d, webRoot, settings),
+    '00-server.conf': chunk00Server(site, d, webRoot, settings, runtime),
   };
   if (sslEnabled) chunks['10-ssl.conf'] = chunk10Ssl(d, settings);
   // appPort proxy_pass и php могут сосуществовать — php матчится регекспом раньше.
-  if (site.phpEnabled) chunks['20-php.conf'] = chunk20Php(site, settings);
+  if (runtime.phpEnabled) chunks['20-php.conf'] = chunk20Php(runtime, settings);
   chunks['40-static.conf'] = chunk40Static(settings);
   chunks['50-security.conf'] = chunk50Security(d, settings);
 
@@ -461,15 +469,41 @@ function renderDomainChunks(
 export function renderNginxSite(site: NginxSiteParams): RenderedNginxSite {
   const domains: RenderedDomain[] = [];
   const serverBlocks: string[] = [];
+  const seenRuntimeKeys = new Map<string, string>();
+  const seenSockets = new Map<string, string>();
 
   for (const d of site.domains) {
+    validateSiteDomainId(d.domainId);
     const settings = resolveNginxSettings(d.settings || {});
     const { serverAliases, redirectAliases } = splitAliases(d.aliases);
-    const webRoot = resolveWebRoot(site.rootPath, d.filesRelPath);
+    const runtimeKey = validateRuntimeKey(d.runtimeKey);
+    const runtime = resolveDomainPhpRuntime({
+      siteRoot: site.rootPath,
+      filesRelPath: d.filesRelPath,
+      phpVersion: d.phpVersion,
+      runtimeKey,
+      socketPath: d.socketPath ?? d.socket,
+    });
+    const previousDomain = seenRuntimeKeys.get(runtime.runtimeKey);
+    if (previousDomain) {
+      throw new Error(
+        `runtimeKey collision before nginx writes: ${runtime.runtimeKey} is used by ${previousDomain} and ${d.domainId}`,
+      );
+    }
+    seenRuntimeKeys.set(runtime.runtimeKey, d.domainId);
+    if (runtime.socketPath) {
+      const previousSocketDomain = seenSockets.get(runtime.socketPath);
+      if (previousSocketDomain) {
+        throw new Error(
+          `PHP-FPM socket collision before nginx writes: ${runtime.socketPath} is used by ${previousSocketDomain} and ${d.domainId}`,
+        );
+      }
+      seenSockets.set(runtime.socketPath, d.domainId);
+    }
     const sslEnabled = !!d.sslEnabled && !!d.certPath && !!d.keyPath;
     const doHttpRedirect = sslEnabled && d.httpsRedirect !== false;
 
-    domains.push(renderDomainChunks(site, d, settings));
+    domains.push(renderDomainChunks(site, d, settings, runtime));
 
     const blocks: string[] = [`# --- Домен: ${d.domain} (${d.domainId}) ---`];
     if (sslEnabled) {

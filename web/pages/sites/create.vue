@@ -23,12 +23,9 @@
         v-for="s in 2"
         :key="s"
         class="create-site__step-dot"
-        :class="{
-          'create-site__step-dot--active': step === s,
-          'create-site__step-dot--done': step > s,
-        }"
+        :class="{ 'create-site__step-dot--active': step === s, 'create-site__step-dot--done': step > s }"
         :disabled="s > step || provisioning"
-        @click="s < step && !provisioning ? step = s : null"
+        @click="s < step && !provisioning ? (step = s) : null"
       >
         <span v-if="step > s" class="create-site__step-check">
           <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round"><polyline points="20,6 9,17 4,12" /></svg>
@@ -39,31 +36,12 @@
 
     <form v-if="!provisioning && !provisionResult" @submit.prevent="handleSubmit">
       <!-- ============================================================ -->
-      <!-- STEP 1: All fields (type + basics + modules + CMS + extras)   -->
+      <!-- STEP 1: Container + multi-domain application rows             -->
       <!-- ============================================================ -->
       <div v-if="step === 1" class="create-site__section">
-        <!-- Type -->
-        <h2 class="create-site__section-title">Тип сайта</h2>
-        <p class="create-site__section-desc">Выберите тип сайта</p>
+        <h2 class="create-site__section-title">Контейнер</h2>
+        <p class="create-site__section-desc">Имя контейнера — источник Linux-юзера, БД и общего пути сайта.</p>
 
-        <div class="create-site__types">
-          <button
-            v-for="t in siteTypes"
-            :key="t.value"
-            type="button"
-            class="type-card"
-            :class="{ 'type-card--selected': form.type === t.value }"
-            @click="selectType(t.value)"
-          >
-            <SiteTypeIcon :type="t.value" />
-            <div class="type-card__info">
-              <span class="type-card__name">{{ t.label }}</span>
-              <span class="type-card__desc">{{ t.desc }}</span>
-            </div>
-          </button>
-        </div>
-
-        <!-- Base identifiers -->
         <div class="create-site__fields">
           <div class="form-group">
             <label class="form-label">
@@ -80,8 +58,7 @@
               @input="form.name = form.name.toLowerCase()"
             />
             <span class="form-hint">
-              Одновременно — имя Linux-юзера, имя БД и имя БД-юзера.
-              Только lowercase: [a-z0-9_-], начинается с буквы, до 32 символов.
+              Одновременно — имя Linux-юзера, имя БД и имя БД-юзера. Только lowercase, до 32 символов, только [a-z0-9_-], начинается с буквы.
             </span>
           </div>
 
@@ -95,338 +72,66 @@
               maxlength="128"
             />
             <span class="form-hint">
-              Человекочитаемое название для списка сайтов. Если пусто — будет показано имя Linux-юзера.
+              Человекочитаемое название для списков и карточек сайта.
             </span>
           </div>
-
-          <div class="form-group">
-            <label class="form-label">Домен <span class="form-required">*</span></label>
-            <input
-              v-model="form.domain"
-              type="text"
-              class="form-input"
-              placeholder="example.com"
-              maxlength="253"
-              required
-            />
-          </div>
-
-          <div class="form-group">
-            <label class="form-label">Алиасы домена</label>
-            <div class="alias-list">
-              <div v-for="(_alias, idx) in form.aliases" :key="idx" class="alias-item">
-                <input
-                  v-model="form.aliases[idx]"
-                  type="text"
-                  class="form-input"
-                  :placeholder="`www.${form.domain || 'example.com'}`"
-                />
-                <button type="button" class="alias-remove" @click="removeAlias(idx)">
-                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
-                    <line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" />
-                  </svg>
-                </button>
-              </div>
-              <button type="button" class="alias-add" @click="addAlias">
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round">
-                  <line x1="12" y1="5" x2="12" y2="19" /><line x1="5" y1="12" x2="19" y2="12" />
-                </svg>
-                Добавить алиас
-              </button>
-            </div>
-          </div>
         </div>
 
-        <!-- Modules -->
-        <h2 class="create-site__section-title create-site__section-title--spaced">Конфигурация</h2>
-        <p class="create-site__section-desc">Модули для сайта {{ typeLabel }}</p>
+        <div class="create-site__section-title create-site__section-title--spaced">Домены / приложения</div>
+        <p class="create-site__section-desc">Первая строка всегда главный домен (primary). Его нельзя удалить и перенести.
+        </p>
 
-        <div class="create-site__modules">
-          <!-- PHP Module -->
-          <div class="module-card" :class="{ 'module-card--locked': isMODX }">
-            <label class="module-card__header">
-              <input
-                type="checkbox"
-                v-model="form.phpEnabled"
-                class="module-card__checkbox"
-                :disabled="isMODX"
-              />
-              <div class="module-card__title-wrap">
-                <span class="module-card__title">PHP</span>
-                <span class="module-card__desc">
-                  {{ isMODX ? 'Обязательно для MODX' : 'PHP-FPM пул для выполнения .php скриптов' }}
+        <button
+          type="button"
+          class="create-site__add-domain"
+          @click="addDomain"
+        >
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round">
+            <line x1="12" y1="5" x2="12" y2="19" /><line x1="5" y1="12" x2="19" y2="12" />
+          </svg>
+          Добавить приложение
+        </button>
+
+        <div class="create-site__domains">
+          <article
+            v-for="(domain, domainIndex) in form.domains"
+            :key="domain.id"
+            class="create-site__domain-card"
+          >
+            <header class="create-site__domain-header">
+              <div class="create-site__domain-title">
+                <span class="create-site__domain-title-main">Приложение {{ domainIndex + 1 }}
+                  <span v-if="domainIndex === 0" class="create-site__domain-primary">Главный домен</span>
                 </span>
+                <span class="create-site__domain-preset">{{ presetLabel(domain.preset) }}</span>
               </div>
-              <span v-if="isMODX" class="module-card__badge">Всегда</span>
-            </label>
-            <div v-if="form.phpEnabled" class="module-card__body">
-              <div class="form-group">
-                <label class="form-label">Версия PHP</label>
-                <div class="form-select-wrap">
-                  <select v-model="form.phpVersion" class="form-select">
-                    <option v-for="v in phpVersions" :key="v.value" :value="v.value">{{ v.label }}</option>
-                  </select>
-                </div>
-              </div>
-            </div>
-          </div>
-
-          <!-- Database Module -->
-          <div class="module-card" :class="{ 'module-card--locked': isMODX }">
-            <label class="module-card__header">
-              <input
-                type="checkbox"
-                v-model="form.dbEnabled"
-                class="module-card__checkbox"
-                :disabled="isMODX"
-              />
-              <div class="module-card__title-wrap">
-                <span class="module-card__title">База данных</span>
-                <span class="module-card__desc">
-                  {{ isMODX ? 'Обязательно для MODX — создаётся автоматически' : 'Автоматически создаст БД + пользователя' }}
-                </span>
-              </div>
-              <span v-if="isMODX" class="module-card__badge">Всегда</span>
-            </label>
-            <div v-if="form.dbEnabled" class="module-card__body">
-              <div class="form-group">
-                <label class="form-label">Тип БД</label>
-                <div class="form-select-wrap">
-                  <select v-model="form.dbType" class="form-select" :disabled="dbEngineOptions.length === 0">
-                    <option v-if="!isMODX || dbEngineOptions.length > 1" value="">Авто (определить на сервере)</option>
-                    <option v-for="opt in dbEngineOptions" :key="opt.value" :value="opt.value">{{ opt.label }}</option>
-                  </select>
-                </div>
-                <span v-if="dbEngineOptions.length === 0" class="form-hint" style="color: var(--text-warning, var(--primary));">
-                  Ни один движок БД не установлен на сервере. Открой
-                  <NuxtLink to="/services" class="link">/services</NuxtLink>
-                  и установи MariaDB или PostgreSQL.
-                </span>
-                <span v-else-if="isMODX" class="form-hint">MODX для надёжности — только MariaDB / MySQL</span>
-              </div>
-              <div class="form-row">
-                <div class="form-group">
-                  <label class="form-label">Имя БД</label>
-                  <input
-                    v-model="form.dbName"
-                    type="text"
-                    class="form-input form-input--mono"
-                    :placeholder="defaultDbName"
-                    maxlength="64"
-                    pattern="^[a-zA-Z0-9_]+$"
-                  />
-                  <span class="form-hint">Пусто — совпадёт с именем сайта</span>
-                </div>
-                <div class="form-group">
-                  <label class="form-label">Пользователь</label>
-                  <input
-                    v-model="form.dbUser"
-                    type="text"
-                    class="form-input form-input--mono"
-                    :placeholder="defaultDbUser"
-                    maxlength="32"
-                    pattern="^[a-zA-Z0-9_]+$"
-                  />
-                </div>
-              </div>
-              <div class="form-group">
-                <label class="form-label">Пароль БД</label>
-                <div class="form-input-group">
-                  <input
-                    v-model="form.dbPassword"
-                    :type="showDbPassword ? 'text' : 'password'"
-                    class="form-input form-input--mono form-input--with-btn"
-                    placeholder="Сгенерируется автоматически"
-                    maxlength="128"
-                  />
-                  <button type="button" class="form-input-btn" @click="showDbPassword = !showDbPassword">
-                    {{ showDbPassword ? 'Скрыть' : 'Показать' }}
-                  </button>
-                </div>
-              </div>
-            </div>
-          </div>
-
-          <!-- SSL Module -->
-          <div class="module-card">
-            <label class="module-card__header">
-              <input
-                type="checkbox"
-                v-model="form.sslEnabled"
-                class="module-card__checkbox"
-              />
-              <div class="module-card__title-wrap">
-                <span class="module-card__title">SSL (Let's Encrypt)</span>
-                <span class="module-card__desc">Автоматический выпуск бесплатного сертификата</span>
-              </div>
-            </label>
-            <div v-if="form.sslEnabled" class="module-card__body">
-              <label class="module-sub">
-                <input type="checkbox" v-model="form.httpsRedirect" />
-                <span>Редирект HTTP → HTTPS</span>
-              </label>
-            </div>
-          </div>
-        </div>
-
-        <!-- MODX-специфика: версия, админ-креды, префикс таблиц БД, пути manager/connectors -->
-        <div v-if="isMODX" class="create-site__fields create-site__fields--group">
-          <h3 class="create-site__group-title">MODX-специфика</h3>
-
-          <div class="form-group">
-            <label class="form-label">Версия MODX</label>
-            <select v-model="form.modxVersion" class="form-input form-input--mono">
-              <option
-                v-for="v in (form.type === 'MODX_3' ? modx3Versions : modxRevoVersions)"
-                :key="v.value"
-                :value="v.value"
+              <button
+                v-if="domainIndex > 0"
+                type="button"
+                class="create-site__domain-remove"
+                @click="removeDomain(domainIndex)"
+                title="Удалить приложение"
+                aria-label="Удалить приложение"
               >
-                {{ v.label }}
-              </option>
-            </select>
-            <span class="form-hint">Обновить на более свежую версию можно потом на странице сайта</span>
-          </div>
-
-          <div class="form-row">
-            <div class="form-group">
-              <label class="form-label">Admin Логин</label>
-              <input
-                v-model="form.cmsAdminUser"
-                type="text"
-                class="form-input form-input--mono"
-                :placeholder="form.name || 'admin'"
-                maxlength="64"
-              />
-              <span class="form-hint">По умолчанию = имя Linux-юзера</span>
-            </div>
-            <div class="form-group">
-              <label class="form-label">Admin Пароль</label>
-              <div class="form-input-group">
-                <input
-                  v-model="form.cmsAdminPassword"
-                  :type="showCmsPassword ? 'text' : 'password'"
-                  class="form-input form-input--mono form-input--with-btn"
-                  placeholder="Сгенерируется автоматически"
-                  maxlength="128"
-                />
-                <button type="button" class="form-input-btn" @click="showCmsPassword = !showCmsPassword">
-                  {{ showCmsPassword ? 'Скрыть' : 'Показать' }}
-                </button>
-              </div>
-            </div>
-          </div>
-
-          <div class="form-group">
-            <label class="form-label">Префикс таблиц БД</label>
-            <div class="form-input-group">
-              <input
-                v-model="form.cmsTablePrefix"
-                type="text"
-                class="form-input form-input--mono form-input--with-btn"
-                placeholder="modx_"
-                maxlength="32"
-                pattern="^[a-z][a-z0-9_]*_$"
-              />
-              <button type="button" class="form-input-btn" @click="form.cmsTablePrefix = generateTablePrefix()">
-                Сгенерировать
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round">
+                  <line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" />
+                </svg>
+                Удалить
               </button>
-            </div>
-            <span class="form-hint">Формат: <code>[a-z0-9_]+_</code>. Подставится в таблицы MODX (например, <code>modx_site_content</code>). После создания изменить нельзя.</span>
-          </div>
+            </header>
 
-          <div class="form-row">
-            <div class="form-group">
-              <label class="form-label">Путь к Manager</label>
-              <input
-                v-model="form.managerPath"
-                type="text"
-                class="form-input form-input--mono"
-                placeholder="manager"
-                maxlength="64"
-                pattern="^[a-zA-Z0-9_-]+$"
-              />
-            </div>
-            <div class="form-group">
-              <label class="form-label">Путь к Connectors</label>
-              <input
-                v-model="form.connectorsPath"
-                type="text"
-                class="form-input form-input--mono"
-                placeholder="connectors"
-                maxlength="64"
-                pattern="^[a-zA-Z0-9_-]+$"
-              />
-            </div>
-          </div>
-        </div>
-
-        <!-- Кастомные пути сайта (homedir + папка с веб-файлами) -->
-        <div class="create-site__fields create-site__fields--group">
-          <h3 class="create-site__group-title">Расположение файлов</h3>
-          <p class="create-site__group-desc">
-            Дефолты подгружены из <NuxtLink to="/settings" class="link">/settings → дефолты сайтов</NuxtLink>.
-            Можно переопределить под конкретный сайт.
-          </p>
-
-          <div class="form-group">
-            <label class="form-label">Корневая директория сайта (homedir)</label>
-            <input
-              v-model="form.rootPath"
-              type="text"
-              class="form-input form-input--mono"
-              :placeholder="defaultRootPathPreview"
-              maxlength="256"
-              pattern="^/[A-Za-z0-9._/-]+$"
+            <DomainApplicationForm
+              :model-value="domain"
+              :php-versions="phpVersions"
+              :modx-revo-versions="modxRevoVersions"
+              :modx3-versions="modx3Versions"
+              :installed-db-engines="installedDbEngineList"
+              :default-db-name="defaultDbName"
+              :default-db-user="defaultDbUser"
+              :default-files-rel-path="siteDefaults.siteFilesRelativePath"
+              @update:model-value="replaceDomain(domainIndex, $event)"
             />
-            <span class="form-hint">
-              Абсолютный путь. Создаётся как home Linux-юзера сайта. Пусто — будет
-              <code>{{ defaultRootPathPreview }}</code>.
-            </span>
-          </div>
-
-          <div class="form-group">
-            <label class="form-label">Папка с веб файлами (relPath)</label>
-            <input
-              v-model="form.filesRelPath"
-              type="text"
-              class="form-input form-input--mono"
-              :placeholder="siteDefaults.siteFilesRelativePath || 'www'"
-              maxlength="128"
-              pattern="^[A-Za-z0-9._-]+(?:/[A-Za-z0-9._-]+)*$"
-            />
-            <span class="form-hint">
-              Относительный путь внутри homedir. В nginx: <code>root {{ effectiveRootPath }}/{{ form.filesRelPath || siteDefaults.siteFilesRelativePath || 'www' }}</code>.
-              Можно вложенный, например <code>www/public</code> для twig/symfony фронт-контроллера.
-            </span>
-          </div>
-        </div>
-
-        <!-- Git-репозиторий — только для CUSTOM (MODX ставится через composer/zip) -->
-        <div v-if="!isMODX" class="create-site__fields create-site__fields--group">
-          <h3 class="create-site__group-title">Git-деплой (опционально)</h3>
-
-          <div class="form-group">
-            <label class="form-label">Git-репозиторий</label>
-            <input
-              v-model="form.gitRepository"
-              type="text"
-              class="form-input form-input--mono"
-              placeholder="git@github.com:user/repo.git"
-              maxlength="512"
-            />
-            <span class="form-hint">Склонируется сразу после создания; дальше можно деплоить git pull</span>
-          </div>
-
-          <div v-if="form.gitRepository" class="form-group">
-            <label class="form-label">Ветка деплоя</label>
-            <input
-              v-model="form.deployBranch"
-              type="text"
-              class="form-input form-input--mono"
-              placeholder="main"
-              maxlength="128"
-            />
-          </div>
+          </article>
         </div>
       </div>
 
@@ -435,60 +140,62 @@
       <!-- ============================================================ -->
       <div v-if="step === 2" class="create-site__section">
         <h2 class="create-site__section-title">Проверка</h2>
-        <p class="create-site__section-desc">Проверьте конфигурацию перед созданием сайта</p>
+        <p class="create-site__section-desc">Проверьте параметры перед созданием контейнера и приложений.</p>
 
         <div class="review-card">
           <div class="review-card__header">
-            <SiteTypeIcon :type="form.type" />
+            <SiteTypeIcon :type="(primaryDomain?.preset || 'CUSTOM') as string" />
             <div>
               <h3 class="review-card__name">{{ form.displayName || form.name }}</h3>
-              <p class="review-card__domain">{{ form.domain }}</p>
+              <p class="review-card__domain">{{ primaryDomain?.domain || '—' }}</p>
             </div>
           </div>
 
           <div class="review-card__grid">
             <div class="review-item">
-              <span class="review-item__label">Тип</span>
-              <span class="review-item__value">{{ typeLabel }}</span>
+              <span class="review-item__label">Контейнер</span>
+              <span class="review-item__value">{{ form.name }}</span>
             </div>
             <div class="review-item">
-              <span class="review-item__label">Имя Linux-юзера</span>
-              <span class="review-item__value review-item__value--mono">{{ form.name }}</span>
+              <span class="review-item__label">Приложений</span>
+              <span class="review-item__value">{{ form.domains.length }}</span>
             </div>
             <div class="review-item">
-              <span class="review-item__label">PHP</span>
-              <span class="review-item__value">{{ form.phpEnabled ? form.phpVersion : '—' }}</span>
+              <span class="review-item__label">Главный preset</span>
+              <span class="review-item__value">{{ primaryDomain?.preset || 'CUSTOM' }}</span>
             </div>
             <div class="review-item">
-              <span class="review-item__label">База данных</span>
-              <span class="review-item__value">
-                {{ form.dbEnabled ? dbTypeReviewLabel : '—' }}
-                <span v-if="form.dbEnabled" class="review-item__hint">({{ form.dbName || defaultDbName }})</span>
-              </span>
+              <span class="review-item__label">Путь для веб файлов</span>
+              <span class="review-item__value">{{ primaryDomain?.filesRelPath || '' }}</span>
             </div>
-            <div class="review-item">
-              <span class="review-item__label">SSL</span>
-              <span class="review-item__value">{{ form.sslEnabled ? 'Let\'s Encrypt' : '—' }}</span>
-            </div>
-            <div v-if="form.sslEnabled" class="review-item">
-              <span class="review-item__label">HTTPS редирект</span>
-              <span class="review-item__value">{{ form.httpsRedirect ? 'Да' : 'Нет' }}</span>
-            </div>
-            <div v-if="form.gitRepository && !isMODX" class="review-item">
-              <span class="review-item__label">Git-репозиторий</span>
-              <span class="review-item__value review-item__value--mono">{{ form.gitRepository }}</span>
-            </div>
-            <div v-if="form.aliases.filter(a => a).length" class="review-item">
-              <span class="review-item__label">Алиасы</span>
-              <span class="review-item__value review-item__value--mono">{{ form.aliases.filter(a => a).join(', ') }}</span>
-            </div>
-            <div v-if="isMODX" class="review-item">
-              <span class="review-item__label">Версия MODX</span>
-              <span class="review-item__value review-item__value--mono">{{ form.modxVersion }}</span>
-            </div>
-            <div v-if="isMODX" class="review-item">
-              <span class="review-item__label">CMS Логин</span>
-              <span class="review-item__value review-item__value--mono">{{ form.cmsAdminUser || form.name }}</span>
+          </div>
+
+          <div class="review-card__apps">
+            <div
+              v-for="(domain, domainIndex) in form.domains"
+              :key="domain.id"
+              class="review-card__app"
+            >
+              <div class="review-card__app-head">
+                <span class="review-card__app-title">
+                  Приложение {{ domainIndex + 1 }}
+                  <span v-if="domainIndex === 0" class="review-card__app-badge">primary</span>
+                </span>
+                <span class="review-card__app-preset">{{ presetLabel(domain.preset) }}</span>
+              </div>
+              <div class="review-card__app-meta">
+                <span>{{ domain.domain || '—' }}</span>
+                <span v-if="domain.aliases.filter((a) => a).length">aliases: {{ domain.aliases.filter((a) => a).join(', ') }}</span>
+                <span>files: {{ domain.filesRelPath }}</span>
+                <span>PHP: {{ domain.phpEnabled ? domain.phpVersion : 'OFF' }}</span>
+                <span>
+                  DB: {{ domain.dbEnabled || isModxDomain(domain) ? (dbTypeLabel(domain) || 'AUTO') : 'OFF' }}
+                </span>
+                <span>SSL: {{ domain.sslEnabled ? 'ON' : 'OFF' }}{{ domain.sslEnabled ? ` (https → ${domain.httpsRedirect ? 'on' : 'off'})` : '' }}</span>
+                <span v-if="domain.gitRepository && !isModxDomain(domain)">GIT: {{ domain.gitRepository }}</span>
+                <span v-if="domain.envVars.some((e) => e.key || e.value)">env-vars: {{ domain.envVars.filter((e) => e.key || e.value).length }}</span>
+                <span v-if="isModxDomain(domain) && domain.modxVersion">MODX {{ domain.modxVersion }}</span>
+              </div>
             </div>
           </div>
         </div>
@@ -502,7 +209,6 @@
         {{ error }}
       </div>
 
-      <!-- Actions -->
       <div class="create-site__actions">
         <button
           v-if="step > 1"
@@ -565,7 +271,7 @@
       <div v-if="provisionResult" class="create-site__actions">
         <NuxtLink
           v-if="provisionResult === 'RUNNING' && createdSiteId"
-          :to="`/sites/${createdSiteId}`"
+          :to="`/sites/${createdSiteId}${getCreatedPrimaryDomainId ? `?domain=${getCreatedPrimaryDomainId}` : ''}`"
           class="create-site__btn create-site__btn--primary"
         >
           Открыть сайт
@@ -575,7 +281,7 @@
           :to="`/sites/${createdSiteId}`"
           class="create-site__btn create-site__btn--secondary"
         >
-          Открыть сайт (в статусе ошибки)
+          Открыть сайт (статус ошибки)
         </NuxtLink>
         <NuxtLink
           v-else
@@ -590,7 +296,32 @@
 </template>
 
 <script setup lang="ts">
+import {
+  DEFAULT_MODX_3_VERSIONS,
+  DEFAULT_MODX_REVO_VERSIONS,
+  DEFAULT_PHP_VERSIONS,
+  buildDomainApplicationPayload,
+  createDomainApplicationDraft,
+  dbEngineOptionsForApplication,
+  dbTypeLabel as getDbTypeLabel,
+  isDomainValid,
+  isModxApplication,
+  presetLabel,
+  validateDomainApplication,
+  type DomainApplicationDraft,
+  type DomainApplicationPayload,
+} from '~/utils/domain-application';
+
 definePageMeta({ middleware: 'auth' });
+
+type DomainApplication = DomainApplicationDraft;
+type DomainPayload = DomainApplicationPayload;
+
+interface SiteRequestPayload {
+  name: string;
+  displayName?: string;
+  domains: DomainPayload[];
+}
 
 const api = useApi();
 const { onSiteProvisionLog, onSiteProvisionDone } = useSocket();
@@ -599,100 +330,82 @@ const step = ref(1);
 const submitting = ref(false);
 const error = ref('');
 
-const showCmsPassword = ref(false);
-const showDbPassword = ref(false);
-
 const createdSiteId = ref<string>('');
+const createdDomainId = ref<string>('');
 const provisioning = ref(false);
 const provisionResult = ref<'RUNNING' | 'ERROR' | ''>('');
 const provisionLog = ref<Array<{ level: 'info' | 'warn' | 'error'; line: string; timestamp: string }>>([]);
 const logContainer = ref<HTMLElement | null>(null);
 
-const form = reactive({
-  name: '',
-  displayName: '',
-  domain: '',
-  type: 'CUSTOM' as 'MODX_REVO' | 'MODX_3' | 'CUSTOM',
-  // Модули
-  phpEnabled: false,
-  phpVersion: '8.2',
-  dbEnabled: false,
-  dbType: '' as '' | 'MARIADB' | 'POSTGRESQL',
-  dbName: '',
-  dbUser: '',
-  dbPassword: '',
-  sslEnabled: false,
-  httpsRedirect: true,
-  // Общие
-  gitRepository: '',
-  deployBranch: 'main',
-  aliases: [] as string[],
-  // CMS (MODX only)
-  cmsAdminUser: '',
-  cmsAdminPassword: '',
-  cmsTablePrefix: '',
-  managerPath: '',
-  connectorsPath: '',
-  modxVersion: '3.1.2-pl',
-  // Расположение файлов (override дефолтов из /settings)
-  rootPath: '',
-  filesRelPath: '',
-});
-
-// Дефолты путей хранения файлов из /panel-settings/site-defaults.
-// Подгружаются в onMounted; используются как placeholder и для preview-строки
-// nginx-root в подсказке поля «Папка с веб файлами».
 const siteDefaults = reactive({
-  sitesBasePath: '/var/www',
   siteFilesRelativePath: 'www',
 });
 
+const form = reactive({
+  name: '',
+  displayName: '',
+  domains: [] as DomainApplication[],
+});
+
+const DEFAULT_DB_USER = 32;
+
+const phpVersions = ref(DEFAULT_PHP_VERSIONS.map((version) => ({ ...version })));
+const modxRevoVersions = ref(DEFAULT_MODX_REVO_VERSIONS.map((version) => ({ ...version })));
+const modx3Versions = ref(DEFAULT_MODX_3_VERSIONS.map((version) => ({ ...version })));
+
+const installedDbEngines = ref<Set<string>>(new Set());
+const installedDbEngineList = computed(() => [...installedDbEngines.value]);
+
+const domainSeq = ref(1);
+
 async function loadSiteDefaults() {
   try {
-    const data = await api.get<{ sitesBasePath?: string; siteFilesRelativePath?: string }>(
-      '/panel-settings/site-defaults',
-    );
-    if (data?.sitesBasePath) siteDefaults.sitesBasePath = data.sitesBasePath;
-    if (data?.siteFilesRelativePath) siteDefaults.siteFilesRelativePath = data.siteFilesRelativePath;
+    const data = await api.get<{ siteFilesRelativePath?: string }>('/panel-settings/site-defaults');
+    if (data?.siteFilesRelativePath) {
+      siteDefaults.siteFilesRelativePath = data.siteFilesRelativePath;
+    }
   } catch {
     /* keep fallback */
   }
+  ensureDomainFilesRelPath();
 }
 
-// Превью homedir: пользователь видит, какой путь получится без override.
-const defaultRootPathPreview = computed(() =>
-  `${siteDefaults.sitesBasePath.replace(/\/+$/, '')}/${form.name || 'sitename'}`,
-);
+function isModxDomain(domain: DomainApplication): boolean {
+  return isModxApplication(domain);
+}
 
-// Если override homedir не задан — используем дефолт; нужно для preview
-// строки nginx root в подсказке поля «Папка с веб файлами».
-const effectiveRootPath = computed(() =>
-  (form.rootPath.trim() || defaultRootPathPreview.value).replace(/\/+$/, ''),
-);
+function makeDomainRow(preset: DomainApplication['preset'] = 'CUSTOM'): DomainApplication {
+  return createDomainApplicationDraft({
+    id: domainSeq.value++,
+    preset,
+    filesRelPath: siteDefaults.siteFilesRelativePath || 'www',
+    phpVersion: phpVersions.value[0]?.value || '8.2',
+    modxRevoVersion: modxRevoVersions.value[0]?.value,
+    modx3Version: modx3Versions.value[0]?.value,
+  });
+}
 
-const siteTypes = [
-  { value: 'MODX_REVO', label: 'MODX Revolution', desc: 'Классический MODX 2.x на PHP + MySQL' },
-  { value: 'MODX_3', label: 'MODX 3', desc: 'Современный MODX 3.x' },
-  { value: 'CUSTOM', label: 'Пустой', desc: 'Чистый скелет, модули подключай сам' },
-];
+form.domains = [makeDomainRow()];
 
-// Список PHP-версий — динамический, тянем установленные с агента (тот же
-// /php/versions, что и страница /php). Хардкод показывал в селекте версии,
-// которых физически нет на машине, и юзер мог создать сайт со ссылкой на
-// не существующий php-fpm pool. Фолбэк = SUPPORTED_PHP_VERSIONS до загрузки
-// (синхронизирован с agent/src/config.ts:SUPPORTED_PHP_VERSIONS).
-const phpVersions = ref<Array<{ value: string; label: string }>>([
-  { value: '8.4', label: 'PHP 8.4' },
-  { value: '8.3', label: 'PHP 8.3' },
-  { value: '8.2', label: 'PHP 8.2' },
-  { value: '8.1', label: 'PHP 8.1' },
-  { value: '8.0', label: 'PHP 8.0' },
-  { value: '7.4', label: 'PHP 7.4 (EOL)' },
-  { value: '7.3', label: 'PHP 7.3 (EOL)' },
-  { value: '7.2', label: 'PHP 7.2 (EOL)' },
-  { value: '7.1', label: 'PHP 7.1 (EOL)' },
-  { value: '7.0', label: 'PHP 7.0 (EOL)' },
-]);
+function ensureDomainFilesRelPath() {
+  const fallback = siteDefaults.siteFilesRelativePath || 'www';
+  for (const domain of form.domains) {
+    if (!domain.filesRelPath.trim()) domain.filesRelPath = fallback;
+  }
+}
+
+function addDomain() {
+  form.domains.push(makeDomainRow());
+}
+
+function removeDomain(index: number) {
+  if (index === 0) return;
+  form.domains.splice(index, 1);
+}
+
+function replaceDomain(index: number, domain: DomainApplication): void {
+  form.domains[index] = domain;
+}
 
 async function loadInstalledPhpVersions() {
   try {
@@ -704,103 +417,15 @@ async function loadInstalledPhpVersions() {
           value: v,
           label: /^7\./.test(v) ? `PHP ${v} (EOL)` : `PHP ${v}`,
         }));
-      // Если дефолт ('8.2') не среди установленных — берём первый из списка.
-      const first = phpVersions.value[0];
-      if (first && !phpVersions.value.some((p) => p.value === form.phpVersion)) {
-        form.phpVersion = first.value;
+
+      for (const domain of form.domains) {
+        if (domain.phpVersion && !phpVersions.value.some((p) => p.value === domain.phpVersion)) {
+          domain.phpVersion = phpVersions.value[0]?.value ?? '';
+        }
       }
     }
   } catch {
     /* keep fallback */
-  }
-}
-
-// Версии MODX тянем с бэка (ModxVersionsService → GitHub releases, кеш 1ч).
-// Стартовый фолбэк — latest-дефолты из shared/constants.ts, чтобы select не был
-// пустой до того, как ответит API.
-const modxRevoVersions = ref<Array<{ value: string; label: string }>>([
-  { value: '2.8.8-pl', label: 'MODX Revolution 2.8.8 (latest)' },
-]);
-const modx3Versions = ref<Array<{ value: string; label: string }>>([
-  { value: '3.1.2-pl', label: 'MODX 3.1.2 (latest)' },
-]);
-
-// Множество установленных DB-движков ('mariadb', 'postgresql').
-// Загружается одним вызовом /services при mount; используется для
-// фильтрации опций селекта «Тип БД» — нельзя выбрать движок, которого нет.
-// Для MODX дополнительно: PostgreSQL не предлагается (CMS поддерживает только MySQL).
-const installedDbEngines = ref<Set<string>>(new Set());
-
-interface DbEngineOption { value: 'MARIADB' | 'POSTGRESQL'; label: string; engineKey: 'mariadb' | 'postgresql' }
-const ALL_DB_ENGINES: DbEngineOption[] = [
-  { value: 'MARIADB', label: 'MySQL / MariaDB', engineKey: 'mariadb' },
-  { value: 'POSTGRESQL', label: 'PostgreSQL', engineKey: 'postgresql' },
-];
-
-const dbEngineOptions = computed<DbEngineOption[]>(() => {
-  const installed = ALL_DB_ENGINES.filter((opt) => installedDbEngines.value.has(opt.engineKey));
-  // MODX исторически работает только на MySQL/MariaDB. PostgreSQL для MODX
-  // отрезаем, чтобы не получить полу-рабочий сайт после провижининга.
-  if (form.type === 'MODX_REVO' || form.type === 'MODX_3') {
-    return installed.filter((opt) => opt.engineKey === 'mariadb');
-  }
-  return installed;
-});
-
-// Авто-выбор первого доступного движка, когда:
-//   а) пользователь включает галочку «база данных»;
-//   б) список движков обновился (загрузились /services или сменился form.type).
-// Юзеру было неудобно: галочка стоит, а селект «не выбран» — приходится
-// вручную тыкать единственный пункт. Если выбранный движок исчез из
-// доступных — тоже сбрасываем на первый из списка.
-watch(
-  () => [form.dbEnabled, dbEngineOptions.value] as const,
-  ([enabled, opts]) => {
-    if (!enabled) return;
-    if (opts.length === 0) return;
-    const validValues = opts.map((o) => o.value);
-    if (!form.dbType || !validValues.includes(form.dbType as 'MARIADB' | 'POSTGRESQL')) {
-      form.dbType = opts[0].value;
-    }
-  },
-  { immediate: true, deep: false },
-);
-
-/**
- * Можно ли отправить форму. Бэкенд тоже валидирует, но лучше дать
- * пользователю понятный заранее блок, чтобы не создавать сайт-инвалид.
- */
-const submitBlockReason = computed<string>(() => {
-  if (form.dbEnabled && dbEngineOptions.value.length === 0) {
-    if (form.type === 'MODX_REVO' || form.type === 'MODX_3') {
-      return 'Для MODX нужен MariaDB / MySQL. Установи его на /services перед созданием сайта.';
-    }
-    return 'Включена БД, но ни одного движка не установлено. Установи на /services или сними галочку «База данных».';
-  }
-  return '';
-});
-const canSubmit = computed(() => !submitBlockReason.value);
-
-// Лейбл «Тип БД» для preview-шага.
-const dbTypeReviewLabel = computed<string>(() => {
-  if (!form.dbType) return 'Авто';
-  const opt = ALL_DB_ENGINES.find((o) => o.value === form.dbType);
-  return opt ? opt.label : form.dbType;
-});
-
-async function loadInstalledDbEngines() {
-  try {
-    const list = await api.get<Array<{ key: string; installed: boolean }>>('/services');
-    installedDbEngines.value = new Set(
-      list.filter((s) => s.installed).map((s) => s.key),
-    );
-    // Если выбранный dbType больше не в списке — сбрасываем на 'auto'.
-    if (form.dbType && !dbEngineOptions.value.some((o) => o.value === form.dbType)) {
-      form.dbType = '';
-    }
-  } catch {
-    // если /services недоступен — оставляем оба движка (бэкенд сам валидирует)
-    installedDbEngines.value = new Set(['mariadb', 'postgresql']);
   }
 }
 
@@ -810,118 +435,123 @@ async function loadModxVersions() {
       revo: Array<{ value: string; label: string; isLatest: boolean }>;
       modx3: Array<{ value: string; label: string; isLatest: boolean }>;
     }>('/sites/modx-versions');
+
     if (res?.revo?.length) modxRevoVersions.value = res.revo.map((v) => ({ value: v.value, label: v.label }));
     if (res?.modx3?.length) modx3Versions.value = res.modx3.map((v) => ({ value: v.value, label: v.label }));
-    // Если пользователь ещё не трогал select — подставляем актуальный latest
-    // соответствующего мажора, чтобы не отправить в API устаревшую версию.
-    if (form.type === 'MODX_3' && modx3Versions.value[0]) {
-      form.modxVersion = modx3Versions.value[0].value;
-    } else if (form.type === 'MODX_REVO' && modxRevoVersions.value[0]) {
-      form.modxVersion = modxRevoVersions.value[0].value;
+  } catch { /* keep fallback */ }
+
+  for (const domain of form.domains) {
+    if (isModxDomain(domain)) {
+      const list = domain.preset === 'MODX_3' ? modx3Versions : modxRevoVersions;
+      if (list.value[0]) domain.modxVersion = list.value[0].value;
     }
-  } catch { /* фолбэк ок */ }
+  }
 }
 
-onMounted(() => {
-  loadModxVersions();
-  loadInstalledDbEngines();
-  loadInstalledPhpVersions();
-  loadSiteDefaults();
-});
-
-const isMODX = computed(() => form.type === 'MODX_REVO' || form.type === 'MODX_3');
-
-// Генерируем случайный префикс таблиц вида `[a-z]{7}_`. Используется как
-// дефолт при первом раскрытии MODX-блока и при клике «Сгенерировать».
-function generateTablePrefix(): string {
-  const a = 'abcdefghijklmnopqrstuvwxyz';
-  let s = '';
-  // crypto.getRandomValues — браузерный CSPRNG; на SSR Nuxt не выполнится этот код,
-  // потому что watch ниже стреляет только в клиенте.
-  const buf = new Uint32Array(7);
-  if (typeof window !== 'undefined' && window.crypto && window.crypto.getRandomValues) {
-    window.crypto.getRandomValues(buf);
-    for (let i = 0; i < 7; i++) s += a[buf[i] % 26];
-  } else {
-    for (let i = 0; i < 7; i++) s += a[Math.floor(Math.random() * 26)];
+async function loadInstalledDbEngines() {
+  try {
+    const list = await api.get<Array<{ key: string; installed: boolean }>>('/services');
+    const values = list.filter((s) => s.installed).map((s) => s.key);
+    installedDbEngines.value = new Set(values);
+  } catch {
+    installedDbEngines.value = new Set(['mariadb', 'postgresql']);
   }
-  return `${s}_`;
+
+  for (const domain of form.domains) {
+    const options = dbEngineOptionsForDomain(domain);
+    if (domain.dbEnabled && options.length === 0) {
+      domain.dbEnabled = false;
+    }
+    if (domain.dbEnabled && !domain.dbType) {
+      const first = options[0];
+      if (first) domain.dbType = first.value;
+    }
+  }
 }
 
-// Когда юзер впервые выбирает MODX-тип — заполняем дефолтным префиксом.
-// Если он потом стирает поле или меняет — сохраняем введённое значение.
-watch(isMODX, (now) => {
-  if (now && !form.cmsTablePrefix) {
-    form.cmsTablePrefix = generateTablePrefix();
-  }
-}, { immediate: true });
+function dbEngineOptionsForDomain(domain: DomainApplication) {
+  return dbEngineOptionsForApplication(domain, installedDbEngines.value);
+}
 
-const typeLabel = computed(() => {
-  return siteTypes.find((t) => t.value === form.type)?.label || form.type;
-});
+function dbTypeLabel(domain: DomainApplication): string {
+  return getDbTypeLabel(domain);
+}
 
-// Без префиксов: имя БД = имя Linux-юзера = имя сайта. Дефисы → подчёркивания для имён БД.
+const primaryDomain = computed(() => form.domains[0]);
+
 const defaultDbName = computed(() => {
-  return form.name.replace(/-/g, '_') || 'site';
+  return (form.name || 'site').replace(/-/g, '_').substring(0, 64);
 });
 
 const defaultDbUser = computed(() => {
-  return (form.name.replace(/-/g, '_') || 'site').substring(0, 32);
+  return (form.name || 'site').replace(/-/g, '_').substring(0, DEFAULT_DB_USER);
 });
 
 const canProceed = computed(() => {
-  if (step.value === 1) {
-    return form.type && /^[a-z][a-z0-9_-]{0,31}$/.test(form.name) && form.domain.trim();
+  if (!/^[a-z][a-z0-9_-]{0,31}$/.test(form.name)) return false;
+  if (!form.domains.length) return false;
+
+  const seen = new Set<string>();
+  for (const domain of form.domains) {
+    if (validateDomainApplication(domain, installedDbEngines.value)) return false;
+    const primary = domain.domain.trim().toLowerCase();
+    if (seen.has(primary)) return false;
+    seen.add(primary);
+
+    for (const rawAlias of domain.aliases) {
+      const alias = rawAlias.trim().toLowerCase();
+      if (!alias) continue;
+      if (!isDomainValid(alias)) return false;
+      if (seen.has(alias)) return false;
+      seen.add(alias);
+    }
   }
+
   return true;
 });
 
-function selectType(type: 'MODX_REVO' | 'MODX_3' | 'CUSTOM') {
-  form.type = type;
-  if (type === 'MODX_REVO' || type === 'MODX_3') {
-    // MODX — PHP и БД обязательны
-    form.phpEnabled = true;
-    form.dbEnabled = true;
-    if (!form.phpVersion) form.phpVersion = '8.2';
-    // Авто-подставляем latest версию MODX соответствующего мажора.
-    const isMajor3 = form.modxVersion.startsWith('3.');
-    if (type === 'MODX_3' && !isMajor3 && modx3Versions.value[0]) {
-      form.modxVersion = modx3Versions.value[0].value;
-    } else if (type === 'MODX_REVO' && isMajor3 && modxRevoVersions.value[0]) {
-      form.modxVersion = modxRevoVersions.value[0].value;
+const submitBlockReason = computed(() => {
+  for (const domain of form.domains) {
+    const options = dbEngineOptionsForDomain(domain);
+    if (isModxDomain(domain) && options.length === 0) {
+      return 'Для MODX нужен MySQL/MariaDB. Установите MariaDB в /services перед созданием.';
+    }
+    if ((domain.dbEnabled || isModxDomain(domain)) && options.length === 0) {
+      return 'Не найден совместимый движок БД на сервере. Проверьте /services.';
     }
   }
-}
+  return '';
+});
 
-function addAlias() {
-  form.aliases.push('');
-}
-
-function removeAlias(idx: number) {
-  form.aliases.splice(idx, 1);
-}
+const canSubmit = computed(() => canProceed.value && !submitBlockReason.value);
 
 function nextStep() {
   error.value = '';
-  if (step.value === 1) {
-    if (!/^[a-z][a-z0-9_-]{0,31}$/.test(form.name)) {
-      error.value = 'Имя Linux-юзера должно начинаться с буквы и содержать только [a-z0-9_-], до 32 символов';
-      return;
+  if (!canProceed.value) {
+    error.value = 'Проверьте обязательные поля: имя контейнера, каждый домен и путь к веб-файлам.';
+    if (submitBlockReason.value) {
+      error.value = submitBlockReason.value;
     }
-    if (!/^([a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)+[a-zA-Z]{2,}$/.test(form.domain)) {
-      error.value = 'Некорректный формат домена';
-      return;
-    }
+    return;
+  }
+  if (submitBlockReason.value) {
+    error.value = submitBlockReason.value;
+    return;
   }
   step.value++;
+}
+
+function buildDomainPayload(domain: DomainApplication): DomainPayload {
+  return buildDomainApplicationPayload(
+    domain,
+    phpVersions.value[0]?.value || '8.2',
+  );
 }
 
 const MAX_LOG_LINES = 2000;
 
 function appendLog(entry: { level: 'info' | 'warn' | 'error'; line: string; timestamp: string }) {
   provisionLog.value.push(entry);
-  // Кэпим историю — composer/cli-install могут выдать сотни-тысячи строк,
-  // держать все в реактивном массиве бессмысленно.
   if (provisionLog.value.length > MAX_LOG_LINES) {
     provisionLog.value.splice(0, provisionLog.value.length - MAX_LOG_LINES);
   }
@@ -934,87 +564,61 @@ function appendLog(entry: { level: 'info' | 'warn' | 'error'; line: string; time
 
 function formatTime(ts: string): string {
   try {
-    const d = new Date(ts);
-    return d.toLocaleTimeString('ru-RU', { hour12: false });
+    const date = new Date(ts);
+    return date.toLocaleTimeString('ru-RU', { hour12: false });
   } catch {
     return '';
   }
 }
 
 async function handleSubmit() {
-  if (submitting.value) return;
+  if (submitting.value || !canSubmit.value) return;
+
   error.value = '';
   submitting.value = true;
 
   try {
-    const payload: Record<string, unknown> = {
+    const payload: SiteRequestPayload = {
       name: form.name.trim().toLowerCase(),
-      domain: form.domain.trim().toLowerCase(),
-      type: form.type,
+      domains: form.domains.map(buildDomainPayload),
     };
 
-    if (form.displayName.trim()) payload.displayName = form.displayName.trim();
-
-    // Модули
-    payload.phpEnabled = form.phpEnabled;
-    if (form.phpEnabled) payload.phpVersion = form.phpVersion;
-    payload.dbEnabled = form.dbEnabled;
-    if (form.dbEnabled && form.dbType) payload.dbType = form.dbType;
-    if (form.dbEnabled && form.dbName.trim()) payload.dbName = form.dbName.trim();
-    if (form.dbEnabled && form.dbUser.trim()) payload.dbUser = form.dbUser.trim();
-    if (form.dbEnabled && form.dbPassword.trim()) payload.dbPassword = form.dbPassword.trim();
-    payload.sslEnabled = form.sslEnabled;
-    payload.httpsRedirect = form.httpsRedirect;
-
-    // Git-репо — только для CUSTOM
-    if (!isMODX.value && form.gitRepository.trim()) {
-      payload.gitRepository = form.gitRepository.trim();
-      if (form.deployBranch && form.deployBranch !== 'main') payload.deployBranch = form.deployBranch;
+    if (form.displayName.trim()) {
+      payload.displayName = form.displayName.trim();
     }
 
-    const filteredAliases = form.aliases.filter((a) => a.trim());
-    if (filteredAliases.length) payload.aliases = filteredAliases;
-
-    // Override путей. Шлём только если пользователь явно ввёл — иначе бэк
-    // возьмёт дефолты из /panel-settings/site-defaults.
-    if (form.rootPath.trim()) payload.rootPath = form.rootPath.trim();
-    if (form.filesRelPath.trim()) payload.filesRelPath = form.filesRelPath.trim();
-
-    if (isMODX.value) {
-      if (form.cmsAdminUser.trim()) payload.cmsAdminUser = form.cmsAdminUser.trim();
-      if (form.cmsAdminPassword.trim()) payload.cmsAdminPassword = form.cmsAdminPassword.trim();
-      if (form.cmsTablePrefix.trim()) payload.cmsTablePrefix = form.cmsTablePrefix.trim();
-      if (form.managerPath.trim()) payload.managerPath = form.managerPath.trim();
-      if (form.connectorsPath.trim()) payload.connectorsPath = form.connectorsPath.trim();
-      if (form.modxVersion) payload.modxVersion = form.modxVersion;
-    }
-
-    // API возвращает сайт сразу (провижининг идёт в фоне).
-    const site = await api.post<{ id: string }>('/sites', payload);
+    const site = await api.post<{ id: string; primaryDomain?: { id: string } }>(
+      '/sites',
+      payload,
+    );
     createdSiteId.value = site.id;
-
-    // Переключаемся на режим live-лога.
+    createdDomainId.value = site.primaryDomain?.id || '';
     provisioning.value = true;
     provisionLog.value = [];
     provisionResult.value = '';
   } catch (e: unknown) {
-    const err = e as { data?: { message?: string | string[] } };
-    const msg = err.data?.message;
+    const errorWithMessage = e as { data?: { message?: string | string[] } };
+    const msg = errorWithMessage.data?.message;
     error.value = Array.isArray(msg) ? msg.join('; ') : (msg || 'Ошибка создания сайта');
   } finally {
     submitting.value = false;
   }
 }
 
-// Подписка на WS-события провижининга. Фильтруем по createdSiteId.
 let unsubLog: (() => void) | null = null;
 let unsubDone: (() => void) | null = null;
 
 onMounted(() => {
+  loadModxVersions();
+  loadInstalledDbEngines();
+  loadInstalledPhpVersions();
+  loadSiteDefaults();
+
   unsubLog = onSiteProvisionLog((payload) => {
     if (!createdSiteId.value || payload.siteId !== createdSiteId.value) return;
     appendLog({ level: payload.level, line: payload.line, timestamp: payload.timestamp });
   });
+
   unsubDone = onSiteProvisionDone((payload) => {
     if (!createdSiteId.value || payload.siteId !== createdSiteId.value) return;
     provisioning.value = false;
@@ -1029,6 +633,8 @@ onBeforeUnmount(() => {
   unsubLog?.();
   unsubDone?.();
 });
+
+const getCreatedPrimaryDomainId = computed(() => createdDomainId.value);
 </script>
 
 <style scoped>
@@ -1134,53 +740,91 @@ onBeforeUnmount(() => {
   margin: 0 0 1.25rem;
 }
 
-.create-site__types {
-  display: grid;
-  grid-template-columns: 1fr;
-  gap: 0.6rem;
-  margin-bottom: 1.5rem;
-}
+.create-site__domains { display: flex; flex-direction: column; gap: 1rem; }
 
-.type-card {
-  display: flex;
+.create-site__add-domain {
+  display: inline-flex;
   align-items: center;
-  gap: 0.75rem;
-  padding: 0.85rem;
-  border-radius: 12px;
-  border: 1px solid var(--border-secondary);
-  background: var(--bg-surface);
+  gap: 0.4rem;
+  border: 1px dashed var(--border-strong);
+  background: none;
+  color: var(--text-muted);
+  border-radius: 10px;
+  padding: 0.55rem 0.95rem;
+  font-size: 0.75rem;
+  margin-bottom: 1rem;
   cursor: pointer;
-  text-align: left;
   transition: all 0.2s;
 }
 
-.type-card:hover {
-  background: var(--bg-input);
+.create-site__add-domain:hover {
+  color: var(--text-tertiary);
   border-color: var(--border-strong);
 }
 
-.type-card--selected {
-  background: var(--primary-bg);
-  border-color: var(--primary-border);
-  box-shadow: 0 0 0 1px var(--primary-bg);
+.create-site__domain-card {
+  border: 1px solid var(--border-secondary);
+  border-radius: 14px;
+  background: var(--bg-surface);
+  padding: 0.95rem;
 }
 
-.type-card__info {
+.create-site__domain-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.8rem;
+}
+
+.create-site__domain-title {
   display: flex;
   flex-direction: column;
-  min-width: 0;
+  gap: 0.25rem;
 }
 
-.type-card__name {
-  font-size: 0.85rem;
-  font-weight: 600;
+.create-site__domain-title-main {
+  font-size: 0.82rem;
   color: var(--text-secondary);
+  font-weight: 600;
 }
 
-.type-card__desc {
-  font-size: 0.7rem;
-  color: var(--text-muted);
-  margin-top: 0.1rem;
+.create-site__domain-primary {
+  margin-left: 0.4rem;
+  padding: 0.05rem 0.4rem;
+  border-radius: 999px;
+  background: var(--primary-bg);
+  color: var(--primary-text);
+  font-size: 0.62rem;
+  font-weight: 600;
+  text-transform: uppercase;
+}
+
+.create-site__domain-preset {
+  display: inline-flex;
+  align-items: center;
+  font-size: 0.68rem;
+  color: var(--text-faint);
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.create-site__domain-remove {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  border-radius: 8px;
+  border: 1px solid var(--border-strong);
+  background: none;
+  color: var(--text-faint);
+  padding: 0.35rem 0.6rem;
+  font-size: 0.72rem;
+  cursor: pointer;
+}
+
+.create-site__domain-remove:hover {
+  color: var(--danger-light);
+  border-color: var(--danger-border);
 }
 
 /* Modules */
@@ -1207,9 +851,7 @@ onBeforeUnmount(() => {
   user-select: none;
 }
 
-.module-card--locked .module-card__header {
-  cursor: default;
-}
+.module-card--locked .module-card__header { cursor: default; }
 
 .module-card__checkbox {
   width: 18px;
@@ -1268,19 +910,6 @@ onBeforeUnmount(() => {
 
 .module-sub input { accent-color: var(--primary); }
 
-/* Form fields */
-.create-site__fields {
-  display: flex;
-  flex-direction: column;
-  gap: 1.1rem;
-}
-
-.create-site__fields--group {
-  margin-top: 1rem;
-  padding-top: 1rem;
-  border-top: 1px solid var(--bar-bg);
-}
-
 .create-site__group-title {
   font-size: 0.8rem;
   font-weight: 600;
@@ -1305,6 +934,15 @@ onBeforeUnmount(() => {
 .create-site__group-desc .link:hover {
   text-decoration: underline;
 }
+
+/* Form fields */
+.create-site__fields {
+  display: flex;
+  flex-direction: column;
+  gap: 1.1rem;
+}
+
+.create-site__fields--group { margin-top: 1rem; padding-top: 1rem; border-top: 1px solid var(--bar-bg); }
 
 .form-row {
   display: grid;
@@ -1344,12 +982,12 @@ onBeforeUnmount(() => {
   box-shadow: var(--focus-ring);
 }
 
-.form-input::placeholder { color: var(--text-placeholder); }
-
 .form-input--mono {
   font-family: 'JetBrains Mono', monospace;
   font-size: 0.8rem;
 }
+
+.form-input--error { border-color: var(--danger-border); }
 
 .form-select-wrap { position: relative; }
 
@@ -1373,11 +1011,6 @@ onBeforeUnmount(() => {
   background: var(--bg-input);
 }
 
-.form-select option {
-  background: var(--select-bg);
-  color: var(--text-primary);
-}
-
 .form-select-wrap::after {
   content: '';
   position: absolute;
@@ -1392,10 +1025,7 @@ onBeforeUnmount(() => {
   pointer-events: none;
 }
 
-.form-input-group {
-  display: flex;
-  gap: 0;
-}
+.form-input-group { display: flex; gap: 0; }
 
 .form-input--with-btn {
   border-top-right-radius: 0;
@@ -1427,7 +1057,6 @@ onBeforeUnmount(() => {
   color: var(--text-faint);
 }
 
-/* Aliases */
 .alias-list {
   display: flex;
   flex-direction: column;
@@ -1481,7 +1110,37 @@ onBeforeUnmount(() => {
   border-color: var(--border-strong);
 }
 
-/* Review card */
+.create-site__env-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.create-site__env-item {
+  display: flex;
+  gap: 0.45rem;
+}
+
+.create-site__env-item .form-input {
+  flex: 1;
+}
+
+.create-site__env-remove {
+  width: 36px;
+  border-radius: 10px;
+  border: 1px solid var(--border-secondary);
+  background: var(--bg-surface);
+  color: var(--text-faint);
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.create-site__env-remove:hover {
+  color: var(--danger-light);
+  background: var(--danger-bg);
+  border-color: var(--danger-border);
+}
+
 .review-card {
   background: var(--bg-surface);
   border: 1px solid var(--border-secondary);
@@ -1516,6 +1175,7 @@ onBeforeUnmount(() => {
   display: grid;
   grid-template-columns: 1fr 1fr;
   gap: 0.85rem;
+  margin-bottom: 1rem;
 }
 
 .review-item {
@@ -1537,17 +1197,69 @@ onBeforeUnmount(() => {
   color: var(--text-secondary);
 }
 
-.review-item__value--mono {
-  font-family: 'JetBrains Mono', monospace;
-  font-size: 0.75rem;
-  word-break: break-all;
+.review-card__apps {
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
 }
 
-.review-item__hint {
-  font-size: 0.7rem;
+.review-card__app {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  padding: 0.7rem;
+  border: 1px solid var(--bar-bg);
+  border-radius: 10px;
+  background: var(--bg-surface);
+}
+
+.review-card__app-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.review-card__app-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  font-size: 0.78rem;
+  color: var(--text-secondary);
+  font-weight: 600;
+}
+
+.review-card__app-badge {
+  font-size: 0.62rem;
+  border-radius: 999px;
+  padding: 0.06rem 0.4rem;
+  background: var(--primary-bg);
+  color: var(--primary-text);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.review-card__app-preset {
+  display: inline-flex;
+  font-size: 0.64rem;
+  color: var(--text-faint);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.review-card__app-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.42rem;
+  font-size: 0.72rem;
   color: var(--text-muted);
-  margin-left: 0.25rem;
-  font-family: 'JetBrains Mono', monospace;
+}
+
+.review-card__app-meta span {
+  padding: 0.12rem 0.38rem;
+  border-radius: 6px;
+  background: var(--bg-surface);
+  border: 1px solid var(--bar-bg);
 }
 
 .create-site__error {
@@ -1629,7 +1341,6 @@ onBeforeUnmount(() => {
   to { transform: rotate(360deg); }
 }
 
-/* Live provisioning log */
 .create-site__provision {
   background: var(--bg-surface);
   border: 1px solid var(--border-secondary);

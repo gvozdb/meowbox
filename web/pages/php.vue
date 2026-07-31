@@ -52,7 +52,7 @@
     </div>
 
     <div v-else class="php__grid">
-      <div v-for="ver in statuses" :key="ver.version" class="version-card">
+      <div v-for="ver in statuses" :key="ver.version || 'unknown'" class="version-card">
         <div class="version-card__header">
           <div class="version-card__info">
             <span class="version-card__name">PHP {{ ver.version }}</span>

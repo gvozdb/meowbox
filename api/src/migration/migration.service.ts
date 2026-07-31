@@ -4,7 +4,7 @@ import {
   NotFoundException,
   Logger,
 } from '@nestjs/common';
-import { randomUUID } from 'crypto';
+import { createHash, randomUUID } from 'crypto';
 import * as dns from 'dns/promises';
 import * as fs from 'fs';
 import * as net from 'net';
@@ -13,7 +13,18 @@ import { Readable } from 'stream';
 import { pipeline } from 'stream/promises';
 import { Agent as UndiciAgent, type Dispatcher } from 'undici';
 import { Prisma } from '@prisma/client';
-import { BackupEngine, BackupStatus, BackupStorageType, CronJobStatus, DatabaseType, SslStatus, UserRole } from '../common/enums';
+import {
+  BackupEngine,
+  BackupStatus,
+  BackupStorageType,
+  CronJobStatus,
+  DatabasePurpose,
+  DatabaseType,
+  DomainApplicationStatus,
+  SiteType,
+  SslStatus,
+  UserRole,
+} from '../common/enums';
 import { PrismaService } from '../common/prisma.service';
 import { ProxyService } from '../proxy/proxy.service';
 import { AgentRelayService } from '../gateway/agent-relay.service';
@@ -23,8 +34,17 @@ import { SiteNodeService } from '../site-node/site-node.service';
 import { assertSafeFilePath } from '../common/validators/safe-path';
 import { decryptJson, encryptJson } from '../common/crypto/credentials-cipher';
 import { hashPassword } from '../common/crypto/argon2.helper';
-import { parseSiteAliases, parseStringArray, stringifyStringArray } from '../common/json-array';
-import type { NodeProcessesResult } from '@meowbox/shared';
+import {
+  parseSiteAliases,
+  parseStringArray,
+  stringifySiteAliases,
+  stringifyStringArray,
+} from '../common/json-array';
+import { safeErrorMessage, type NodeProcessesResult } from '@meowbox/shared';
+import {
+  replaceHostnameClaims,
+  rethrowHostnameClaimConflict,
+} from '../sites/hostname-registry';
 
 // ─── Interfaces ───
 
@@ -72,19 +92,41 @@ export interface PullState {
 }
 
 export interface DatabaseSnapshot {
+  sourceId?: string;
+  sourceSiteDomainId?: string;
+  sourceDomain?: string;
   name: string;
   sourceName?: string;
   type: string;
   dbUser: string;
-  dbPassword: string;
+  purpose: string;
+  dbPasswordEnc?: string;
+  /** Legacy v1 compatibility only. New snapshots never transport plaintext. */
+  dbPassword?: string;
 }
 
 export interface SiteDomainSnapshot {
+  sourceId?: string;
   domain: string;
   isPrimary: boolean;
   position: number;
   aliases: string;
-  filesRelPath: string | null;
+  filesRelPath: string;
+  preset: string;
+  appStatus: string;
+  appErrorMessage: string | null;
+  phpVersion: string | null;
+  phpPoolCustom: string | null;
+  runtimeKey: string;
+  gitRepository: string | null;
+  deployBranch: string | null;
+  envVars: string;
+  cmsAdminUser: string | null;
+  cmsAdminPasswordEnc: string | null;
+  managerPath: string | null;
+  connectorsPath: string | null;
+  cmsTablePrefix: string | null;
+  modxVersion: string | null;
   appPort: number | null;
   httpsRedirect: boolean;
   nginxClientMaxBodySize: string | null;
@@ -100,6 +142,7 @@ export interface SiteDomainSnapshot {
   nginxRateLimitRps: number | null;
   nginxRateLimitBurst: number | null;
   nginxCustomConfig: string | null;
+  node: NodeRuntimeSnapshot;
 }
 
 export interface BackupConfigSnapshot {
@@ -158,6 +201,9 @@ export interface NodeRuntimeSnapshot {
 }
 
 export interface SiteSnapshot {
+  manifestVersion: 2;
+  schemaVersion: 'domain-applications-v2';
+  checksum: string;
   site: Record<string, unknown>;
   domains: SiteDomainSnapshot[];
   databases: DatabaseSnapshot[];
@@ -165,6 +211,7 @@ export interface SiteSnapshot {
   services: SiteServiceSnapshot[];
   dnsZones: DnsZoneSnapshot[];
   sslCertificates: SslCertificateSnapshot[];
+  /** Legacy v1 runtime. normalizeSnapshot maps it to the primary domain. */
   node: NodeRuntimeSnapshot;
   cronJobs: Array<{ name: string; schedule: string; command: string; status: string }>;
   quickCommands: Array<{
@@ -502,45 +549,9 @@ export class MigrationService {
       // ══════════ Step 5: Create site on target (skipInstall) ══════════
       this.updateState(migrationId, 'create_site');
 
-      // siteMeta может прийти из локальной БД (SQLite строки) или через proxy API (уже parsed).
-      // Нормализуем чтобы sites.create получил нативные типы.
-      const rawAliases = siteMeta.aliases;
-      const aliases = Array.isArray(rawAliases)
-        ? rawAliases
-        : typeof rawAliases === 'string'
-        ? (() => { try { const v = JSON.parse(rawAliases); return Array.isArray(v) ? v : []; } catch { return []; } })()
-        : [];
-      const rawEnv = siteMeta.envVars;
-      const envVars =
-        rawEnv && typeof rawEnv === 'object'
-          ? rawEnv
-          : typeof rawEnv === 'string'
-          ? (() => { try { return JSON.parse(rawEnv); } catch { return {}; } })()
-          : {};
-
       const createBody = {
         name: siteMeta.name,
         displayName: siteMeta.displayName || undefined,
-        domain: siteMeta.domain,
-        aliases,
-        type: siteMeta.type,
-        phpEnabled: !!siteMeta.phpVersion,
-        phpVersion: siteMeta.phpVersion || undefined,
-        dbEnabled: siteSnapshot.databases.length > 0 || siteMeta.dbEnabled === true,
-        dbType: siteSnapshot.databases[0]?.type,
-        dbName: siteSnapshot.databases[0]?.name,
-        dbUser: siteSnapshot.databases[0]?.dbUser,
-        dbPassword: siteSnapshot.databases[0]?.dbPassword,
-        httpsRedirect: siteMeta.httpsRedirect !== false,
-        gitRepository: siteMeta.gitRepository || undefined,
-        deployBranch: siteMeta.deployBranch || undefined,
-        appPort: siteMeta.appPort || undefined,
-        envVars,
-        filesRelPath: siteMeta.filesRelPath || undefined,
-        modxVersion: siteMeta.modxVersion || undefined,
-        cmsTablePrefix: siteMeta.cmsTablePrefix || undefined,
-        managerPath: siteMeta.managerPath || undefined,
-        connectorsPath: siteMeta.connectorsPath || undefined,
         metadata: {
           migrationId,
           importedFrom: 'meowbox',
@@ -548,7 +559,26 @@ export class MigrationService {
           sourceSiteId: siteId,
           createdAt: new Date().toISOString(),
         },
-        skipInstall: true,
+        domains: [...siteSnapshot.domains]
+          .sort((a, b) => a.position - b.position)
+          .map((domain) => ({
+            domain: domain.domain,
+            aliases: parseSiteAliases(domain.aliases),
+            preset: domain.preset,
+            filesRelPath: domain.filesRelPath,
+            phpVersion: domain.phpVersion || undefined,
+            phpPoolCustom: domain.phpPoolCustom || undefined,
+            httpsRedirect: domain.httpsRedirect,
+            gitRepository: domain.gitRepository || undefined,
+            deployBranch: domain.deployBranch || undefined,
+            envVars: stringRecordFromJson(domain.envVars),
+            skipInstall: true,
+            modxVersion: domain.modxVersion || undefined,
+            cmsAdminUser: domain.cmsAdminUser || undefined,
+            cmsTablePrefix: domain.cmsTablePrefix || undefined,
+            managerPath: domain.managerPath || undefined,
+            connectorsPath: domain.connectorsPath || undefined,
+          })),
       };
 
       let targetSiteId: string;
@@ -664,28 +694,6 @@ export class MigrationService {
       include: {
         domains: {
           orderBy: { position: 'asc' },
-          select: {
-            domain: true,
-            isPrimary: true,
-            position: true,
-            aliases: true,
-            filesRelPath: true,
-            appPort: true,
-            httpsRedirect: true,
-            nginxClientMaxBodySize: true,
-            nginxFastcgiReadTimeout: true,
-            nginxFastcgiSendTimeout: true,
-            nginxFastcgiConnectTimeout: true,
-            nginxFastcgiBufferSizeKb: true,
-            nginxFastcgiBufferCount: true,
-            nginxHttp2: true,
-            nginxHsts: true,
-            nginxGzip: true,
-            nginxRateLimitEnabled: true,
-            nginxRateLimitRps: true,
-            nginxRateLimitBurst: true,
-            nginxCustomConfig: true,
-          },
         },
         databases: true,
         backupConfigs: {
@@ -733,8 +741,6 @@ export class MigrationService {
     if (!site) throw new NotFoundException('Сайт не найден');
 
     const {
-      sshPasswordEnc: _ssh,
-      cmsAdminPasswordEnc: _cms,
       domains,
       databases,
       backupConfigs,
@@ -743,9 +749,7 @@ export class MigrationService {
       sslCertificates,
       cronJobs,
       quickCommands,
-      ...safeSite
     } = site;
-    void _ssh; void _cms;
 
     const sslSnapshot = await Promise.all(sslCertificates.map(async (cert) => {
       const pem = await this.readSslPemBundle(cert.status, cert.certPath, cert.keyPath);
@@ -764,14 +768,85 @@ export class MigrationService {
       };
     }));
 
-    return {
-      site: safeSite as unknown as Record<string, unknown>,
-      domains,
+    const domainSnapshots: SiteDomainSnapshot[] = await Promise.all(
+      domains.map(async (domain) => ({
+        sourceId: domain.id,
+        domain: domain.domain,
+        isPrimary: domain.isPrimary,
+        position: domain.position,
+        aliases: domain.aliases,
+        filesRelPath: domain.filesRelPath,
+        preset: domain.preset,
+        appStatus: domain.appStatus,
+        appErrorMessage: domain.appErrorMessage,
+        phpVersion: domain.phpVersion,
+        phpPoolCustom: domain.phpPoolCustom,
+        runtimeKey: domain.runtimeKey,
+        gitRepository: domain.gitRepository,
+        deployBranch: domain.deployBranch,
+        envVars: domain.envVars,
+        cmsAdminUser: domain.cmsAdminUser,
+        cmsAdminPasswordEnc: domain.cmsAdminPasswordEnc,
+        managerPath: domain.managerPath,
+        connectorsPath: domain.connectorsPath,
+        cmsTablePrefix: domain.cmsTablePrefix,
+        modxVersion: domain.modxVersion,
+        appPort: domain.appPort,
+        httpsRedirect: domain.httpsRedirect,
+        nginxClientMaxBodySize: domain.nginxClientMaxBodySize,
+        nginxFastcgiReadTimeout: domain.nginxFastcgiReadTimeout,
+        nginxFastcgiSendTimeout: domain.nginxFastcgiSendTimeout,
+        nginxFastcgiConnectTimeout: domain.nginxFastcgiConnectTimeout,
+        nginxFastcgiBufferSizeKb: domain.nginxFastcgiBufferSizeKb,
+        nginxFastcgiBufferCount: domain.nginxFastcgiBufferCount,
+        nginxHttp2: domain.nginxHttp2,
+        nginxHsts: domain.nginxHsts,
+        nginxGzip: domain.nginxGzip,
+        nginxRateLimitEnabled: domain.nginxRateLimitEnabled,
+        nginxRateLimitRps: domain.nginxRateLimitRps,
+        nginxRateLimitBurst: domain.nginxRateLimitBurst,
+        nginxCustomConfig: domain.nginxCustomConfig,
+        node:
+          domain.preset === SiteType.CUSTOM
+            ? await this.getNodeRuntimeSnapshot(
+                site.id,
+                domain.id,
+                domain.filesRelPath,
+              )
+            : emptyNodeRuntime(),
+      })),
+    );
+    const domainById = new Map(
+      domainSnapshots
+        .filter((domain) => domain.sourceId)
+        .map((domain) => [domain.sourceId as string, domain.domain]),
+    );
+    const snapshotWithoutChecksum = {
+      manifestVersion: 2 as const,
+      schemaVersion: 'domain-applications-v2' as const,
+      site: {
+        name: site.name,
+        displayName: site.displayName,
+        status: site.status,
+        errorMessage: site.errorMessage,
+        rootPath: site.rootPath,
+        nginxConfigPath: site.nginxConfigPath,
+        systemUser: site.systemUser,
+        sshPasswordEnc: site.sshPasswordEnc,
+        backupExcludes: site.backupExcludes,
+        backupExcludeTables: site.backupExcludeTables,
+        metadata: site.metadata,
+      },
+      domains: domainSnapshots,
       databases: databases.map((db) => ({
+        sourceId: db.id,
+        sourceSiteDomainId: db.siteDomainId,
+        sourceDomain: domainById.get(db.siteDomainId),
         name: db.name,
         type: db.type,
         dbUser: db.dbUser,
-        dbPassword: this.decryptDbPassword(db),
+        purpose: db.purpose,
+        dbPasswordEnc: db.dbPasswordEnc || undefined,
       })),
       backupConfigs: backupConfigs.map((config) => {
         const locationById = new Map(
@@ -800,9 +875,13 @@ export class MigrationService {
       services,
       dnsZones,
       sslCertificates: sslSnapshot,
-      node: await this.getNodeRuntimeSnapshot(site.id, safeSite.filesRelPath),
+      node: emptyNodeRuntime(),
       cronJobs,
       quickCommands,
+    };
+    return {
+      ...snapshotWithoutChecksum,
+      checksum: snapshotChecksum(snapshotWithoutChecksum),
     };
   }
 
@@ -867,6 +946,7 @@ export class MigrationService {
 
   private async getNodeRuntimeSnapshot(
     siteId: string,
+    domainId: string,
     filesRelPath: string,
   ): Promise<NodeRuntimeSnapshot> {
     const snapshot: NodeRuntimeSnapshot = {
@@ -878,7 +958,7 @@ export class MigrationService {
 
     let processes: NodeProcessesResult;
     try {
-      processes = await this.siteNode.getProcesses(siteId);
+      processes = await this.siteNode.getProcesses(siteId, domainId);
       snapshot.autostartEnabled = processes.autostartEnabled === true;
     } catch (err) {
       throw new BadRequestException(
@@ -939,48 +1019,442 @@ export class MigrationService {
 
   private normalizeSnapshot(input: SiteSnapshot): SiteSnapshot {
     const raw = (input || {}) as unknown as Record<string, unknown>;
-    const site = isObjectRecord(raw.site) ? raw.site : {};
+    const rawSite = isObjectRecord(raw.site) ? raw.site : {};
+    const manifestVersion = numberValue(raw.manifestVersion, 1);
+    if (manifestVersion !== 1 && manifestVersion !== 2) {
+      throw new BadRequestException(
+        `Unsupported migration manifest version: ${manifestVersion}`,
+      );
+    }
+    if (manifestVersion === 2) {
+      const suppliedChecksum = String(raw.checksum || '');
+      const payload = { ...raw };
+      delete payload.checksum;
+      if (
+        !/^[a-f0-9]{64}$/.test(suppliedChecksum) ||
+        snapshotChecksum(payload) !== suppliedChecksum
+      ) {
+        throw new BadRequestException('Migration manifest checksum mismatch');
+      }
+      if (raw.schemaVersion !== 'domain-applications-v2') {
+        throw new BadRequestException('Unsupported migration schema version');
+      }
+    }
 
-    const domains = Array.isArray(raw.domains)
-      ? raw.domains
-          .filter(isObjectRecord)
-          .map((d, idx) => ({
-            domain: String(d.domain || '').trim().toLowerCase(),
-            isPrimary: d.isPrimary === true,
-            position: numberValue(d.position, idx),
-            aliases: typeof d.aliases === 'string' ? d.aliases : '[]',
-            filesRelPath: nullableString(d.filesRelPath),
-            appPort: nullableNumber(d.appPort),
-            httpsRedirect: boolValue(d.httpsRedirect, true),
-            nginxClientMaxBodySize: nullableString(d.nginxClientMaxBodySize),
-            nginxFastcgiReadTimeout: nullableNumber(d.nginxFastcgiReadTimeout),
-            nginxFastcgiSendTimeout: nullableNumber(d.nginxFastcgiSendTimeout),
-            nginxFastcgiConnectTimeout: nullableNumber(d.nginxFastcgiConnectTimeout),
-            nginxFastcgiBufferSizeKb: nullableNumber(d.nginxFastcgiBufferSizeKb),
-            nginxFastcgiBufferCount: nullableNumber(d.nginxFastcgiBufferCount),
-            nginxHttp2: boolValue(d.nginxHttp2, true),
-            nginxHsts: boolValue(d.nginxHsts, false),
-            nginxGzip: boolValue(d.nginxGzip, true),
-            nginxRateLimitEnabled: boolValue(d.nginxRateLimitEnabled, true),
-            nginxRateLimitRps: nullableNumber(d.nginxRateLimitRps),
-            nginxRateLimitBurst: nullableNumber(d.nginxRateLimitBurst),
-            nginxCustomConfig: nullableString(d.nginxCustomConfig),
-          }))
-          .filter((d) => d.domain)
+    const site: Record<string, unknown> = {
+      name: String(rawSite.name || '').trim(),
+      displayName: nullableString(rawSite.displayName),
+      status: String(rawSite.status || 'RUNNING'),
+      errorMessage: nullableString(rawSite.errorMessage),
+      rootPath: String(rawSite.rootPath || ''),
+      nginxConfigPath: String(rawSite.nginxConfigPath || ''),
+      systemUser: nullableString(rawSite.systemUser),
+      sshPasswordEnc: nullableString(rawSite.sshPasswordEnc),
+      backupExcludes: nullableString(rawSite.backupExcludes),
+      backupExcludeTables: nullableString(rawSite.backupExcludeTables),
+      metadata: nullableString(rawSite.metadata),
+    };
+    if (!RE_SITE_NAME.test(String(site.name))) {
+      throw new BadRequestException('Migration manifest has invalid Site name');
+    }
+
+    const legacyNode = normalizeNodeRuntime(raw.node);
+    const legacyFilesRelPath =
+      safeRelativePath(nullableString(rawSite.filesRelPath)) || 'www';
+    const legacyPreset = normalizePreset(rawSite.type);
+    const rawDomains = Array.isArray(raw.domains)
+      ? raw.domains.filter(isObjectRecord)
       : [];
+    if (rawDomains.length === 0 && typeof rawSite.domain === 'string') {
+      rawDomains.push({
+        domain: rawSite.domain,
+        aliases: rawSite.aliases,
+        isPrimary: true,
+        position: 0,
+      });
+    }
+    if (rawDomains.length === 0) {
+      throw new BadRequestException('Migration manifest has no domains');
+    }
 
+    const explicitPrimaryIndex = rawDomains.findIndex(
+      (domain) => domain.isPrimary === true,
+    );
+    const primaryIndex = explicitPrimaryIndex >= 0 ? explicitPrimaryIndex : 0;
+    const domains = rawDomains
+      .map((domain, index): SiteDomainSnapshot => {
+        const isPrimary = index === primaryIndex;
+        const hostname = String(domain.domain || '').trim().toLowerCase();
+        const legacy = manifestVersion === 1;
+        const preset = legacy
+          ? isPrimary
+            ? legacyPreset
+            : SiteType.CUSTOM
+          : normalizePreset(domain.preset, true);
+        const filesRelPath =
+          safeRelativePath(nullableString(domain.filesRelPath)) ||
+          legacyFilesRelPath;
+        const inherited = <T>(domainValue: unknown, siteValue: unknown): T =>
+          (domainValue !== undefined && domainValue !== null
+            ? domainValue
+            : siteValue) as T;
+        const runtimeKey =
+          nullableString(domain.runtimeKey) ||
+          (isPrimary
+            ? String(site.name)
+            : legacyRuntimeKey(hostname, index));
+        const appStatus = normalizeAppStatus(
+          legacy ? rawSite.status : domain.appStatus,
+        );
+
+        return {
+          sourceId:
+            nullableString(domain.sourceId) || nullableString(domain.id) || undefined,
+          domain: hostname,
+          isPrimary,
+          position: isPrimary ? 0 : numberValue(domain.position, index),
+          aliases:
+            normalizeAliasesJson(domain.aliases),
+          filesRelPath,
+          preset,
+          appStatus,
+          appErrorMessage: nullableString(
+            legacy
+              ? inherited(domain.appErrorMessage, rawSite.errorMessage)
+              : domain.appErrorMessage,
+          ),
+          phpVersion: nullableString(
+            legacy
+              ? inherited(domain.phpVersion, rawSite.phpVersion)
+              : domain.phpVersion,
+          ),
+          phpPoolCustom: nullableString(
+            legacy
+              ? inherited(domain.phpPoolCustom, rawSite.phpPoolCustom)
+              : domain.phpPoolCustom,
+          ),
+          runtimeKey,
+          gitRepository: nullableString(
+            legacy && isPrimary
+              ? inherited(domain.gitRepository, rawSite.gitRepository)
+              : domain.gitRepository,
+          ),
+          deployBranch: nullableString(
+            legacy && isPrimary
+              ? inherited(domain.deployBranch, rawSite.deployBranch)
+              : domain.deployBranch,
+          ),
+          envVars: jsonObjectStringValue(
+            legacy && isPrimary
+              ? inherited(domain.envVars, rawSite.envVars)
+              : domain.envVars,
+          ),
+          cmsAdminUser: nullableString(
+            legacy && isPrimary
+              ? inherited(domain.cmsAdminUser, rawSite.cmsAdminUser)
+              : domain.cmsAdminUser,
+          ),
+          cmsAdminPasswordEnc: nullableString(
+            legacy && isPrimary
+              ? inherited(
+                  domain.cmsAdminPasswordEnc,
+                  rawSite.cmsAdminPasswordEnc,
+                )
+              : domain.cmsAdminPasswordEnc,
+          ),
+          managerPath: nullableString(
+            legacy && isPrimary
+              ? inherited(domain.managerPath, rawSite.managerPath)
+              : domain.managerPath,
+          ),
+          connectorsPath: nullableString(
+            legacy && isPrimary
+              ? inherited(domain.connectorsPath, rawSite.connectorsPath)
+              : domain.connectorsPath,
+          ),
+          cmsTablePrefix: nullableString(
+            legacy && isPrimary
+              ? inherited(domain.cmsTablePrefix, rawSite.cmsTablePrefix)
+              : domain.cmsTablePrefix,
+          ),
+          modxVersion: nullableString(
+            legacy && isPrimary
+              ? inherited(domain.modxVersion, rawSite.modxVersion)
+              : domain.modxVersion,
+          ),
+          appPort: nullableNumber(
+            legacy
+              ? inherited(domain.appPort, rawSite.appPort)
+              : domain.appPort,
+          ),
+          httpsRedirect: boolValue(
+            legacy
+              ? inherited(domain.httpsRedirect, rawSite.httpsRedirect)
+              : domain.httpsRedirect,
+            true,
+          ),
+          nginxClientMaxBodySize: nullableString(
+            legacy
+              ? inherited(
+                  domain.nginxClientMaxBodySize,
+                  rawSite.nginxClientMaxBodySize,
+                )
+              : domain.nginxClientMaxBodySize,
+          ),
+          nginxFastcgiReadTimeout: nullableNumber(
+            legacy
+              ? inherited(
+                  domain.nginxFastcgiReadTimeout,
+                  rawSite.nginxFastcgiReadTimeout,
+                )
+              : domain.nginxFastcgiReadTimeout,
+          ),
+          nginxFastcgiSendTimeout: nullableNumber(
+            legacy
+              ? inherited(
+                  domain.nginxFastcgiSendTimeout,
+                  rawSite.nginxFastcgiSendTimeout,
+                )
+              : domain.nginxFastcgiSendTimeout,
+          ),
+          nginxFastcgiConnectTimeout: nullableNumber(
+            legacy
+              ? inherited(
+                  domain.nginxFastcgiConnectTimeout,
+                  rawSite.nginxFastcgiConnectTimeout,
+                )
+              : domain.nginxFastcgiConnectTimeout,
+          ),
+          nginxFastcgiBufferSizeKb: nullableNumber(
+            legacy
+              ? inherited(
+                  domain.nginxFastcgiBufferSizeKb,
+                  rawSite.nginxFastcgiBufferSizeKb,
+                )
+              : domain.nginxFastcgiBufferSizeKb,
+          ),
+          nginxFastcgiBufferCount: nullableNumber(
+            legacy
+              ? inherited(
+                  domain.nginxFastcgiBufferCount,
+                  rawSite.nginxFastcgiBufferCount,
+                )
+              : domain.nginxFastcgiBufferCount,
+          ),
+          nginxHttp2: boolValue(
+            legacy
+              ? inherited(domain.nginxHttp2, rawSite.nginxHttp2)
+              : domain.nginxHttp2,
+            true,
+          ),
+          nginxHsts: boolValue(
+            legacy
+              ? inherited(domain.nginxHsts, rawSite.nginxHsts)
+              : domain.nginxHsts,
+            false,
+          ),
+          nginxGzip: boolValue(
+            legacy
+              ? inherited(domain.nginxGzip, rawSite.nginxGzip)
+              : domain.nginxGzip,
+            true,
+          ),
+          nginxRateLimitEnabled: boolValue(
+            legacy
+              ? inherited(
+                  domain.nginxRateLimitEnabled,
+                  rawSite.nginxRateLimitEnabled,
+                )
+              : domain.nginxRateLimitEnabled,
+            true,
+          ),
+          nginxRateLimitRps: nullableNumber(
+            legacy
+              ? inherited(domain.nginxRateLimitRps, rawSite.nginxRateLimitRps)
+              : domain.nginxRateLimitRps,
+          ),
+          nginxRateLimitBurst: nullableNumber(
+            legacy
+              ? inherited(
+                  domain.nginxRateLimitBurst,
+                  rawSite.nginxRateLimitBurst,
+                )
+              : domain.nginxRateLimitBurst,
+          ),
+          nginxCustomConfig: nullableString(
+            legacy
+              ? inherited(domain.nginxCustomConfig, rawSite.nginxCustomConfig)
+              : domain.nginxCustomConfig,
+          ),
+          node:
+            legacy && isPrimary
+              ? legacyNode
+              : normalizeNodeRuntime(domain.node),
+        };
+      })
+      .sort((a, b) => {
+        if (a.isPrimary !== b.isPrimary) return a.isPrimary ? -1 : 1;
+        return a.position - b.position;
+      })
+      .map((domain, position) => ({
+        ...domain,
+        isPrimary: position === 0,
+        position,
+      }));
+
+    const hostnames = new Set<string>();
+    const runtimeKeys = new Set<string>();
+    for (const domain of domains) {
+      if (!RE_DOMAIN.test(domain.domain)) {
+        throw new BadRequestException(
+          `Migration manifest has invalid domain "${domain.domain}"`,
+        );
+      }
+      if (!safeRelativePath(domain.filesRelPath)) {
+        throw new BadRequestException(
+          `Migration manifest has unsafe filesRelPath for "${domain.domain}"`,
+        );
+      }
+      if (!/^[a-z][a-z0-9._-]{0,63}$/.test(domain.runtimeKey)) {
+        throw new BadRequestException(
+          `Migration manifest has invalid runtimeKey for "${domain.domain}"`,
+        );
+      }
+      if (runtimeKeys.has(domain.runtimeKey)) {
+        throw new BadRequestException(
+          `Migration manifest has duplicate runtimeKey "${domain.runtimeKey}"`,
+        );
+      }
+      runtimeKeys.add(domain.runtimeKey);
+      for (const hostname of [
+        domain.domain,
+        ...parseSiteAliases(domain.aliases).map((alias) =>
+          alias.domain.trim().toLowerCase(),
+        ),
+      ]) {
+        if (!RE_DOMAIN.test(hostname) || hostnames.has(hostname)) {
+          throw new BadRequestException(
+            `Migration manifest has invalid or duplicate hostname "${hostname}"`,
+          );
+        }
+        hostnames.add(hostname);
+      }
+      if (
+        (domain.preset === SiteType.MODX_REVO ||
+          domain.preset === SiteType.MODX_3) &&
+        !domain.phpVersion
+      ) {
+        throw new BadRequestException(
+          `MODX application "${domain.domain}" has no PHP version`,
+        );
+      }
+      if (
+        domain.appPort !== null &&
+        (!Number.isInteger(domain.appPort) ||
+          domain.appPort < 1024 ||
+          domain.appPort > 65535)
+      ) {
+        throw new BadRequestException(
+          `Application "${domain.domain}" has invalid appPort`,
+        );
+      }
+    }
+
+    const domainBySourceId = new Map(
+      domains
+        .filter((domain) => domain.sourceId)
+        .map((domain) => [domain.sourceId as string, domain.domain]),
+    );
+    const primaryDomain = domains[0];
     const databases = Array.isArray(raw.databases)
       ? raw.databases
           .filter(isObjectRecord)
-          .map((db) => ({
-            name: String(db.name || ''),
-            sourceName: typeof db.sourceName === 'string' && db.sourceName ? db.sourceName : undefined,
-            type: String(db.type || ''),
-            dbUser: String(db.dbUser || ''),
-            dbPassword: String(db.dbPassword || ''),
-          }))
-          .filter((db) => db.name && db.type)
+          .map((database, index): DatabaseSnapshot => {
+            const sourceSiteDomainId =
+              nullableString(database.sourceSiteDomainId) ||
+              nullableString(database.siteDomainId) ||
+              undefined;
+            const sourceDomain =
+              nullableString(database.sourceDomain)?.toLowerCase() ||
+              (sourceSiteDomainId
+                ? domainBySourceId.get(sourceSiteDomainId)
+                : undefined) ||
+              (manifestVersion === 1 ? primaryDomain.domain : undefined);
+            const purpose =
+              manifestVersion === 1
+                ? index === 0
+                  ? DatabasePurpose.APP_PRIMARY
+                  : DatabasePurpose.AUXILIARY
+                : normalizeDatabasePurpose(database.purpose);
+            return {
+              sourceId:
+                nullableString(database.sourceId) ||
+                nullableString(database.id) ||
+                undefined,
+              sourceSiteDomainId,
+              sourceDomain,
+              name: String(database.name || '').trim(),
+              sourceName:
+                nullableString(database.sourceName) || undefined,
+              type: String(database.type || '').trim(),
+              dbUser: String(database.dbUser || '').trim(),
+              purpose,
+              dbPasswordEnc:
+                nullableString(database.dbPasswordEnc) || undefined,
+              dbPassword:
+                manifestVersion === 1
+                  ? nullableString(database.dbPassword) || undefined
+                  : undefined,
+            };
+          })
+          .filter((database) => database.name && database.type)
       : [];
+    for (const database of databases) {
+      if (
+        database.type !== DatabaseType.MARIADB &&
+        database.type !== DatabaseType.MYSQL &&
+        database.type !== DatabaseType.POSTGRESQL
+      ) {
+        throw new BadRequestException(
+          `Database "${database.name}" has invalid type "${database.type}"`,
+        );
+      }
+      if (
+        !database.sourceDomain ||
+        !domains.some((domain) => domain.domain === database.sourceDomain)
+      ) {
+        throw new BadRequestException(
+          `Database "${database.name}" has no valid domain owner`,
+        );
+      }
+      if (!database.dbPasswordEnc && !database.dbPassword) {
+        throw new BadRequestException(
+          `Database "${database.name}" has no transferable credential`,
+        );
+      }
+    }
+    for (const domain of domains) {
+      const owned = databases.filter(
+        (database) => database.sourceDomain === domain.domain,
+      );
+      const primaryDatabases = owned.filter(
+        (database) => database.purpose === DatabasePurpose.APP_PRIMARY,
+      );
+      if (primaryDatabases.length > 1) {
+        throw new BadRequestException(
+          `Application "${domain.domain}" has multiple APP_PRIMARY databases`,
+        );
+      }
+      if (
+        (domain.preset === SiteType.MODX_REVO ||
+          domain.preset === SiteType.MODX_3) &&
+        primaryDatabases.length !== 1
+      ) {
+        throw new BadRequestException(
+          `MODX application "${domain.domain}" must have one APP_PRIMARY database`,
+        );
+      }
+    }
 
     const backupConfigs = Array.isArray(raw.backupConfigs)
       ? raw.backupConfigs
@@ -1045,21 +1519,7 @@ export class MigrationService {
           .filter((cert) => cert.status !== SslStatus.NONE)
       : [];
 
-    const nodeRaw = isObjectRecord(raw.node) ? raw.node : {};
-    const node: NodeRuntimeSnapshot = {
-      autostartEnabled: boolValue(nodeRaw.autostartEnabled, false),
-      ecosystems: Array.isArray(nodeRaw.ecosystems)
-        ? nodeRaw.ecosystems
-            .filter(isObjectRecord)
-            .map((eco) => ({
-              file: String(eco.file || ''),
-              only: typeof eco.only === 'string' && eco.only ? eco.only : undefined,
-            }))
-            .filter((eco) => eco.file)
-        : [],
-      processesToStop: stringArrayValue(nodeRaw.processesToStop),
-      orphanProcesses: stringArrayValue(nodeRaw.orphanProcesses),
-    };
+    const node = legacyNode;
 
     const cronJobs = Array.isArray(raw.cronJobs)
       ? raw.cronJobs
@@ -1086,7 +1546,9 @@ export class MigrationService {
           .filter((cmd) => cmd.label && cmd.target && cmd.cwd)
       : [];
 
-    return {
+    const normalized = {
+      manifestVersion: 2 as const,
+      schemaVersion: 'domain-applications-v2' as const,
       site,
       domains,
       databases,
@@ -1098,12 +1560,14 @@ export class MigrationService {
       cronJobs,
       quickCommands,
     };
+    return {
+      ...normalized,
+      checksum: snapshotChecksum(normalized),
+    };
   }
 
   private snapshotDomainNames(snapshot: SiteSnapshot): string[] {
     const names = new Set<string>();
-    const primaryDomain = String(snapshot.site.domain || '').trim().toLowerCase();
-    if (primaryDomain) names.add(primaryDomain);
     for (const domain of snapshot.domains) {
       if (domain.domain) names.add(domain.domain);
       for (const alias of parseSiteAliases(domain.aliases)) {
@@ -1145,14 +1609,108 @@ export class MigrationService {
       select: { name: true },
     });
     if (siteByName) errors.push(`на целевом сервере уже есть сайт с именем "${siteName}"`);
+    const targetRootPath = String(snapshot.site.rootPath || '');
+    if (targetRootPath) {
+      const siteByRoot = await this.prisma.site.findFirst({
+        where: { rootPath: targetRootPath },
+        select: { name: true },
+      });
+      if (siteByRoot) {
+        errors.push(
+          `путь "${targetRootPath}" уже принадлежит сайту "${siteByRoot.name}"`,
+        );
+      }
+    }
 
     for (const domain of domainNames) {
-      const [siteByDomain, siteDomain] = await Promise.all([
-        this.prisma.site.findFirst({ where: { domain }, select: { name: true } }),
-        this.prisma.siteDomain.findFirst({ where: { domain }, select: { domain: true } }),
+      const [siteDomain, aliasCandidates] = await Promise.all([
+        this.prisma.siteDomain.findFirst({
+          where: { domain },
+          select: { domain: true },
+        }),
+        this.prisma.siteDomain.findMany({
+          where: { aliases: { contains: `"${domain}"` } },
+          select: { aliases: true },
+          take: 10,
+        }),
       ]);
-      if (siteByDomain) errors.push(`на целевом сервере уже занят домен "${domain}"`);
       if (siteDomain) errors.push(`на целевом сервере уже есть основной домен "${domain}"`);
+      if (
+        aliasCandidates.some((candidate) =>
+          parseSiteAliases(candidate.aliases).some(
+            (alias) => alias.domain.trim().toLowerCase() === domain,
+          ),
+        )
+      ) {
+        errors.push(`на целевом сервере уже занят алиас "${domain}"`);
+      }
+    }
+
+    for (const domain of snapshot.domains) {
+      const runtime = await this.prisma.siteDomain.findFirst({
+        where: { runtimeKey: domain.runtimeKey },
+        select: { domain: true },
+      });
+      if (runtime) {
+        errors.push(
+          `runtimeKey "${domain.runtimeKey}" уже принадлежит домену "${runtime.domain}"`,
+        );
+      }
+      if (domain.appPort) {
+        const portOwner = await this.prisma.siteDomain.findFirst({
+          where: { appPort: domain.appPort },
+          select: { domain: true },
+        });
+        if (portOwner) {
+          errors.push(
+            `порт ${domain.appPort} уже используется доменом "${portOwner.domain}"`,
+          );
+        }
+      }
+    }
+
+    const phpDomains = snapshot.domains.filter((domain) => !!domain.phpVersion);
+    if (phpDomains.length > 0) {
+      try {
+        const runtimePreflight = await this.agentRelay.emitToAgent<{
+          phpVersions: string[];
+          poolCount: number;
+        }>(
+          'php:preflight-pools',
+          {
+            pools: phpDomains.map((domain) => ({
+              siteDomainId: domain.sourceId || domain.runtimeKey,
+              siteName,
+              domain: domain.domain,
+              phpVersion: domain.phpVersion!,
+              runtimeKey: domain.runtimeKey,
+              user: String(snapshot.site.systemUser || siteName),
+              rootPath: targetRootPath,
+              filesRelPath: domain.filesRelPath,
+              sslEnabled: false,
+              customConfig: domain.phpPoolCustom,
+            })),
+          },
+          30_000,
+        );
+        if (!runtimePreflight.success) {
+          errors.push(
+            `PHP runtime preflight failed: ${safeErrorMessage(
+              runtimePreflight.error,
+              'unknown agent error',
+              2000,
+            )}`,
+          );
+        }
+      } catch (err) {
+        errors.push(
+          `PHP runtime preflight unavailable: ${safeErrorMessage(
+            err,
+            'agent unavailable',
+            1000,
+          )}`,
+        );
+      }
     }
 
     for (const db of snapshot.databases) {
@@ -1197,9 +1755,12 @@ export class MigrationService {
       );
     }
 
-    if (snapshot.node.orphanProcesses.length > 0) {
+    const orphanProcesses = uniqueStrings(
+      snapshot.domains.flatMap((domain) => domain.node.orphanProcesses),
+    );
+    if (orphanProcesses.length > 0) {
       errors.push(
-        `у сайта есть PM2-процессы без ecosystem-файла (${snapshot.node.orphanProcesses.join(', ')}); опиши их в ecosystem.config.js перед миграцией`,
+        `у сайта есть PM2-процессы без ecosystem-файла (${orphanProcesses.join(', ')}); опиши их в ecosystem.config.js перед миграцией`,
       );
     }
 
@@ -1220,7 +1781,7 @@ export class MigrationService {
 
     const site = await this.prisma.site.findUnique({
       where: { id: siteId },
-      select: { id: true, name: true, systemUser: true, userId: true, metadata: true },
+      select: { id: true, name: true, systemUser: true, metadata: true },
     });
     if (!site) throw new BadRequestException('Целевой сайт не найден');
     const systemUser = site.systemUser || site.name;
@@ -1234,12 +1795,7 @@ export class MigrationService {
       where: { id: siteId },
       data: siteUpdate,
     });
-    await this.applySiteDomains(
-      siteId,
-      site.userId,
-      snapshot.domains,
-      safeRelativePath(nullableString(snapshot.site.filesRelPath)) || 'www',
-    );
+    await this.applySiteDomains(siteId, snapshot.domains);
     await this.normalizeTargetSitePermissions(siteId);
     const sslCertificates = await this.applySslCertificates(siteId, snapshot.sslCertificates);
     const backupConfigs = await this.applyBackupConfigs(siteId, snapshot.backupConfigs);
@@ -1293,7 +1849,12 @@ export class MigrationService {
       cronCount += 1;
     }
 
-    const nodeApps = await this.applyNodeRuntime(siteId, snapshot.node);
+    const nodeApps = await this.applyNodeRuntime(siteId, snapshot.domains);
+    await this.verifyTargetApplications(siteId);
+    await this.prisma.site.update({
+      where: { id: siteId },
+      data: { status: 'RUNNING', errorMessage: null },
+    });
 
     return {
       cronJobs: cronCount,
@@ -1488,90 +2049,168 @@ export class MigrationService {
 
   private async applyNodeRuntime(
     siteId: string,
-    node: NodeRuntimeSnapshot,
+    sourceDomains: SiteDomainSnapshot[],
   ): Promise<number> {
+    const targetDomains = await this.prisma.siteDomain.findMany({
+      where: { siteId },
+      select: { id: true, domain: true, preset: true },
+    });
+    const targetByDomain = new Map(
+      targetDomains.map((domain) => [domain.domain.toLowerCase(), domain]),
+    );
     let count = 0;
-    for (const ecosystem of node.ecosystems) {
-      await this.siteNode.startEcosystem(siteId, ecosystem.file, ecosystem.only);
-      count += 1;
+    let autostartDomainId: string | null = null;
+    for (const sourceDomain of sourceDomains) {
+      const target = targetByDomain.get(sourceDomain.domain.toLowerCase());
+      if (!target) {
+        throw new Error(
+          `Target domain "${sourceDomain.domain}" is missing for Node runtime`,
+        );
+      }
+      if (
+        sourceDomain.node.ecosystems.length > 0 &&
+        target.preset !== SiteType.CUSTOM
+      ) {
+        throw new Error(
+          `Node runtime cannot be restored into ${target.preset} domain "${target.domain}"`,
+        );
+      }
+      for (const ecosystem of sourceDomain.node.ecosystems) {
+        await this.siteNode.startEcosystem(
+          siteId,
+          target.id,
+          ecosystem.file,
+          ecosystem.only,
+        );
+        count += 1;
+      }
+      for (const name of sourceDomain.node.processesToStop) {
+        await this.siteNode.controlProcess(siteId, target.id, 'stop', name);
+      }
+      if (sourceDomain.node.autostartEnabled) {
+        autostartDomainId = target.id;
+      }
     }
-    for (const name of node.processesToStop) {
-      await this.siteNode.controlProcess(siteId, 'stop', name);
-    }
-    if (node.autostartEnabled) {
-      await this.siteNode.setAutostart(siteId, true);
+    if (autostartDomainId) {
+      await this.siteNode.setAutostart(siteId, autostartDomainId, true);
     }
     return count;
   }
 
   private async applySiteDomains(
     siteId: string,
-    userId: string,
     sourceDomains: SiteDomainSnapshot[],
-    siteFilesRelPath: string,
   ): Promise<void> {
-    if (sourceDomains.length === 0) {
-      await this.siteDomains.regenerateGlobalZones();
-      await this.siteDomains.regenerateNginx(siteId);
-      return;
+    const ordered = [...sourceDomains].sort((a, b) => a.position - b.position);
+    if (ordered.length === 0) {
+      throw new Error('Migration snapshot has no domain applications');
+    }
+    const site = await this.prisma.site.findUnique({
+      where: { id: siteId },
+      select: {
+        id: true,
+        name: true,
+        rootPath: true,
+        systemUser: true,
+        domains: {
+          select: { id: true, domain: true },
+        },
+      },
+    });
+    if (!site) throw new Error('Target Site not found while applying domains');
+    if (site.domains.length !== ordered.length) {
+      throw new Error(
+        `Target domain count mismatch: expected ${ordered.length}, got ${site.domains.length}`,
+      );
+    }
+    const targetByDomain = new Map(
+      site.domains.map((domain) => [domain.domain.toLowerCase(), domain]),
+    );
+    for (const sourceDomain of ordered) {
+      if (!targetByDomain.has(sourceDomain.domain.toLowerCase())) {
+        throw new Error(`Target domain "${sourceDomain.domain}" is missing`);
+      }
     }
 
-    const ordered = [...sourceDomains].sort((a, b) => a.position - b.position);
-    const primarySource = ordered.find((d) => d.isPrimary) || ordered[0];
-
-    for (const sourceDomain of ordered) {
-      let targetDomain = await this.findTargetDomain(siteId, sourceDomain, primarySource);
-
-      if (!targetDomain) {
-        await this.siteDomains.createDomain(
-          siteId,
-          { domain: sourceDomain.domain },
-          userId,
-          UserRole.ADMIN,
-        );
-        targetDomain = await this.prisma.siteDomain.findFirst({
-          where: { siteId, domain: sourceDomain.domain },
-          select: { id: true, domain: true, isPrimary: true },
+    await this.prisma.$transaction(async (tx) => {
+      for (const [index, sourceDomain] of ordered.entries()) {
+        const target = targetByDomain.get(sourceDomain.domain.toLowerCase())!;
+        await tx.siteDomain.update({
+          where: { id: target.id },
+          data: {
+            runtimeKey: `import-${target.id.replace(/-/g, '').slice(0, 24)}`,
+            position: -(index + 1),
+          },
         });
       }
-      if (!targetDomain) {
-        throw new Error(`Не удалось создать домен "${sourceDomain.domain}"`);
+      for (const [index, sourceDomain] of ordered.entries()) {
+        const target = targetByDomain.get(sourceDomain.domain.toLowerCase())!;
+        const aliases = parseSiteAliases(sourceDomain.aliases);
+        await tx.siteDomain.update({
+          where: { id: target.id },
+          data: {
+            ...this.buildDomainConfigUpdate(sourceDomain),
+            isPrimary: index === 0,
+            position: index,
+            aliases: stringifySiteAliases(aliases),
+            appStatus: DomainApplicationStatus.PROVISIONING,
+            appErrorMessage: null,
+          },
+        });
+        await replaceHostnameClaims(tx, {
+          siteDomainId: target.id,
+          domain: target.domain,
+          aliases: stringifySiteAliases(aliases),
+        });
+        await tx.sslCertificate.updateMany({
+          where: { siteId, domainId: target.id },
+          data: {
+            domains: stringifyStringArray([
+              sourceDomain.domain,
+              ...aliases.map((alias) => alias.domain),
+            ]),
+          },
+        });
       }
+    }).catch(rethrowHostnameClaimConflict);
 
-      await this.siteDomains.updateDomain(
-        siteId,
-        targetDomain.id,
-        {
-          domain: sourceDomain.domain,
-          filesRelPath: targetDomain.isPrimary ? siteFilesRelPath : sourceDomain.filesRelPath,
-          appPort: sourceDomain.appPort,
-          httpsRedirect: sourceDomain.httpsRedirect,
-        },
-        userId,
-        UserRole.ADMIN,
-      );
-
-      const refreshed = await this.prisma.siteDomain.findFirst({
-        where: { siteId, domain: sourceDomain.domain },
-        select: { id: true },
+    const configuredDomains = await this.prisma.siteDomain.findMany({
+      where: { siteId },
+      orderBy: { position: 'asc' },
+    });
+    for (const domain of configuredDomains) {
+      if (!domain.phpVersion) continue;
+      const pool = await this.agentRelay.emitToAgent('php:create-pool', {
+        siteDomainId: domain.id,
+        runtimeKey: domain.runtimeKey,
+        siteName: site.name,
+        domain: domain.domain,
+        phpVersion: domain.phpVersion,
+        user: site.systemUser || site.name,
+        rootPath: site.rootPath,
+        filesRelPath: domain.filesRelPath,
+        sslEnabled: false,
+        customConfig: domain.phpPoolCustom,
       });
-      if (!refreshed) throw new Error(`Домен "${sourceDomain.domain}" не найден после update`);
-
-      await this.siteDomains.updateAliases(
-        siteId,
-        refreshed.id,
-        { aliases: parseSiteAliases(sourceDomain.aliases) },
-        userId,
-        UserRole.ADMIN,
-      );
-
-      await this.prisma.siteDomain.update({
-        where: { id: refreshed.id },
-        data: this.buildDomainConfigUpdate(sourceDomain),
-      });
+      if (!pool.success) {
+        await this.prisma.siteDomain.update({
+          where: { id: domain.id },
+          data: {
+            appStatus: DomainApplicationStatus.ERROR,
+            appErrorMessage: (
+              pool.error || 'PHP pool creation failed during migration'
+            ).substring(0, 2000),
+          },
+        });
+        throw new Error(
+          `PHP pool creation failed for "${domain.domain}": ${
+            pool.error || 'unknown agent error'
+          }`,
+        );
+      }
     }
 
-    await this.siteDomains.syncPrimaryMirror(siteId);
+    await this.siteDomains.syncPrimaryPhpCliShim(siteId);
     await this.siteDomains.regenerateGlobalZones();
     await this.siteDomains.regenerateNginx(siteId);
   }
@@ -1581,76 +2220,130 @@ export class MigrationService {
       where: { id: siteId },
       select: {
         name: true,
-        type: true,
         rootPath: true,
-        filesRelPath: true,
         systemUser: true,
+        domains: {
+          orderBy: { position: 'asc' },
+          select: {
+            id: true,
+            domain: true,
+            preset: true,
+            filesRelPath: true,
+          },
+        },
       },
     });
     if (!site) throw new Error('Целевой сайт не найден для нормализации прав');
 
-    const result = await this.agentRelay.emitToAgent<{
-      steps: Array<{ cmd: string; ok: boolean; error?: string }>;
-      modxCorePath?: string;
-    }>(
-      'site:normalize-permissions',
-      {
-        rootPath: site.rootPath,
-        filesRelPath: site.filesRelPath,
-        systemUser: site.systemUser || site.name,
-        siteType: site.type,
-      },
-      120_000,
-    );
-
-    if (!result.success) {
-      throw new Error(`Нормализация прав после миграции не удалась: ${result.error || 'unknown error'}`);
+    for (const domain of site.domains) {
+      const result = await this.agentRelay.emitToAgent<{
+        steps: Array<{ cmd: string; ok: boolean; error?: string }>;
+        modxCorePath?: string;
+      }>(
+        'site:normalize-permissions',
+        {
+          siteDomainId: domain.id,
+          rootPath: site.rootPath,
+          filesRelPath: domain.filesRelPath,
+          systemUser: site.systemUser || site.name,
+          siteType: domain.preset,
+        },
+        120_000,
+      );
+      if (!result.success) {
+        throw new Error(
+          `Нормализация прав "${domain.domain}" не удалась: ${
+            result.error || 'unknown error'
+          }`,
+        );
+      }
     }
   }
 
-  private async findTargetDomain(
-    siteId: string,
-    sourceDomain: SiteDomainSnapshot,
-    primarySource: SiteDomainSnapshot,
-  ): Promise<{ id: string; domain: string; isPrimary: boolean } | null> {
-    if (sourceDomain.isPrimary || sourceDomain.domain === primarySource.domain) {
-      return this.prisma.siteDomain.findFirst({
-        where: { siteId, isPrimary: true },
-        select: { id: true, domain: true, isPrimary: true },
-      });
-    }
-    return this.prisma.siteDomain.findFirst({
-      where: { siteId, domain: sourceDomain.domain },
-      select: { id: true, domain: true, isPrimary: true },
+  private async verifyTargetApplications(siteId: string): Promise<void> {
+    const domains = await this.prisma.siteDomain.findMany({
+      where: { siteId },
+      orderBy: { position: 'asc' },
+      select: { id: true, domain: true },
     });
+    const failures: string[] = [];
+    for (const domain of domains) {
+      const health = await this.agentRelay.emitToAgent<{
+        reachable: boolean;
+        statusCode: number | null;
+      }>('site:health-check', { domain: domain.domain, port: null }, 15_000);
+      const statusCode = health.data?.statusCode ?? 0;
+      const healthy =
+        health.success &&
+        health.data?.reachable === true &&
+        statusCode > 0 &&
+        statusCode < 500;
+      await this.prisma.siteDomain.update({
+        where: { id: domain.id },
+        data: healthy
+          ? {
+              appStatus: DomainApplicationStatus.RUNNING,
+              appErrorMessage: null,
+            }
+          : {
+              appStatus: DomainApplicationStatus.ERROR,
+              appErrorMessage: `Post-migration health check failed${
+                statusCode ? ` (HTTP ${statusCode})` : ''
+              }`,
+            },
+      });
+      if (!healthy) {
+        failures.push(
+          `${domain.domain}${statusCode ? `: HTTP ${statusCode}` : ''}`,
+        );
+      }
+    }
+    if (failures.length > 0) {
+      await this.prisma.site.update({
+        where: { id: siteId },
+        data: {
+          status: 'ERROR',
+          errorMessage: `Post-migration health check failed: ${failures.join(', ')}`.substring(
+            0,
+            2000,
+          ),
+        },
+      });
+      throw new Error(
+        `Post-migration health check failed: ${failures.join(', ')}`,
+      );
+    }
   }
 
   private buildSiteConfigUpdate(site: Record<string, unknown>): Prisma.SiteUpdateInput {
     const data: Prisma.SiteUpdateInput = {};
 
-    if ('phpPoolCustom' in site) data.phpPoolCustom = nullableString(site.phpPoolCustom);
-    if ('nginxClientMaxBodySize' in site) data.nginxClientMaxBodySize = nullableString(site.nginxClientMaxBodySize);
-    if ('nginxFastcgiReadTimeout' in site) data.nginxFastcgiReadTimeout = nullableNumber(site.nginxFastcgiReadTimeout);
-    if ('nginxFastcgiSendTimeout' in site) data.nginxFastcgiSendTimeout = nullableNumber(site.nginxFastcgiSendTimeout);
-    if ('nginxFastcgiConnectTimeout' in site) data.nginxFastcgiConnectTimeout = nullableNumber(site.nginxFastcgiConnectTimeout);
-    if ('nginxFastcgiBufferSizeKb' in site) data.nginxFastcgiBufferSizeKb = nullableNumber(site.nginxFastcgiBufferSizeKb);
-    if ('nginxFastcgiBufferCount' in site) data.nginxFastcgiBufferCount = nullableNumber(site.nginxFastcgiBufferCount);
-    if ('nginxHttp2' in site) data.nginxHttp2 = boolValue(site.nginxHttp2, true);
-    if ('nginxHsts' in site) data.nginxHsts = boolValue(site.nginxHsts, false);
-    if ('nginxGzip' in site) data.nginxGzip = boolValue(site.nginxGzip, true);
-    if ('nginxRateLimitEnabled' in site) data.nginxRateLimitEnabled = boolValue(site.nginxRateLimitEnabled, true);
-    if ('nginxRateLimitRps' in site) data.nginxRateLimitRps = nullableNumber(site.nginxRateLimitRps);
-    if ('nginxRateLimitBurst' in site) data.nginxRateLimitBurst = nullableNumber(site.nginxRateLimitBurst);
-    if ('nginxCustomConfig' in site) data.nginxCustomConfig = nullableString(site.nginxCustomConfig);
     if ('backupExcludes' in site) data.backupExcludes = nullableString(site.backupExcludes);
     if ('backupExcludeTables' in site) data.backupExcludeTables = nullableString(site.backupExcludeTables);
-    if ('filesRelPath' in site) data.filesRelPath = safeRelativePath(nullableString(site.filesRelPath)) || 'www';
 
     return data;
   }
 
   private buildDomainConfigUpdate(domain: SiteDomainSnapshot): Prisma.SiteDomainUpdateInput {
     return {
+      preset: domain.preset,
+      appStatus: DomainApplicationStatus.PROVISIONING,
+      appErrorMessage: null,
+      filesRelPath: domain.filesRelPath,
+      phpVersion: domain.phpVersion,
+      phpPoolCustom: domain.phpPoolCustom,
+      runtimeKey: domain.runtimeKey,
+      gitRepository: domain.gitRepository,
+      deployBranch: domain.deployBranch,
+      envVars: domain.envVars,
+      cmsAdminUser: domain.cmsAdminUser,
+      cmsAdminPasswordEnc: domain.cmsAdminPasswordEnc,
+      managerPath: domain.managerPath,
+      connectorsPath: domain.connectorsPath,
+      cmsTablePrefix: domain.cmsTablePrefix,
+      modxVersion: domain.modxVersion,
+      appPort: domain.appPort,
+      httpsRedirect: domain.httpsRedirect,
       position: domain.position,
       nginxClientMaxBodySize: domain.nginxClientMaxBodySize,
       nginxFastcgiReadTimeout: domain.nginxFastcgiReadTimeout,
@@ -1876,7 +2569,11 @@ export class MigrationService {
       filePath: localPath,
       storageType: 'LOCAL',
       storageConfig: {},
-      databases,
+      databases: databases.map((database) => ({
+        name: database.name,
+        sourceName: database.sourceName || database.name,
+        type: database.type,
+      })),
     }, RESTORE_TIMEOUT_MS);
 
     if (!restoreResult.success || restoreResult.data?.success === false) {
@@ -1891,25 +2588,59 @@ export class MigrationService {
   }
 
   private async ensureTargetDatabases(siteId: string, databases: DatabaseSnapshot[]): Promise<void> {
+    const domains = await this.prisma.siteDomain.findMany({
+      where: { siteId },
+      select: { id: true, domain: true, preset: true },
+    });
+    const domainByName = new Map(
+      domains.map((domain) => [domain.domain.toLowerCase(), domain]),
+    );
     for (const db of databases) {
-      if (!db.name || !db.type || !db.dbUser || !db.dbPassword) {
+      if (!db.name || !db.type || !db.dbUser || !db.sourceDomain) {
         throw new Error(`Неполный snapshot БД "${db.name || 'unknown'}"`);
+      }
+      const owner = domainByName.get(db.sourceDomain.toLowerCase());
+      if (!owner) {
+        throw new Error(
+          `Владелец БД "${db.name}" (${db.sourceDomain}) не найден`,
+        );
+      }
+      const password = db.dbPassword || decryptTransferPassword(db);
+      const purpose = normalizeDatabasePurpose(db.purpose);
+      if (
+        purpose === DatabasePurpose.APP_PRIMARY &&
+        (owner.preset === SiteType.MODX_REVO ||
+          owner.preset === SiteType.MODX_3) &&
+        db.type !== DatabaseType.MARIADB &&
+        db.type !== DatabaseType.MYSQL
+      ) {
+        throw new Error(`MODX database "${db.name}" must be MariaDB or MySQL`);
       }
 
       const existing = await this.prisma.database.findFirst({
         where: { name: db.name, type: db.type },
-        select: { id: true, siteId: true },
+        select: {
+          id: true,
+          siteId: true,
+          siteDomainId: true,
+          purpose: true,
+        },
       });
 
       if (existing) {
-        if (existing.siteId !== siteId) {
+        if (
+          existing.siteId !== siteId ||
+          existing.siteDomainId !== owner.id ||
+          existing.purpose !== purpose
+        ) {
           throw new Error(`БД "${db.name}" (${db.type}) уже привязана к другому сайту`);
         }
         continue;
       }
 
-      const passwordHash = await hashPassword(db.dbPassword);
-      const passwordEnc = encryptJson({ password: db.dbPassword });
+      const passwordHash = await hashPassword(password);
+      const passwordEnc =
+        db.dbPasswordEnc || encryptJson({ password });
       const record = await this.prisma.database.create({
         data: {
           name: db.name,
@@ -1918,6 +2649,8 @@ export class MigrationService {
           dbPasswordHash: passwordHash,
           dbPasswordEnc: passwordEnc,
           siteId,
+          siteDomainId: owner.id,
+          purpose,
         },
       });
 
@@ -1925,7 +2658,7 @@ export class MigrationService {
         name: db.name,
         type: db.type,
         dbUser: db.dbUser,
-        password: db.dbPassword,
+        password,
       });
       if (!result.success) {
         await this.prisma.database.delete({ where: { id: record.id } }).catch(() => {});
@@ -1994,11 +2727,25 @@ export class MigrationService {
     const targetDomain = params.targetDomain?.trim().toLowerCase();
     if (!targetName && !targetDomain) return snapshot;
 
-    const oldPrimaryDomain = typeof snapshot.site.domain === 'string' ? snapshot.site.domain : '';
-    const next: SiteSnapshot = {
-      ...snapshot,
+    const oldPrimaryDomain =
+      snapshot.domains.find((domain) => domain.isPrimary)?.domain ||
+      snapshot.domains[0]?.domain ||
+      '';
+    const next = {
+      manifestVersion: 2 as const,
+      schemaVersion: 'domain-applications-v2' as const,
       site: { ...snapshot.site },
-      domains: snapshot.domains.map((domain) => ({ ...domain })),
+      domains: snapshot.domains.map((domain) => ({
+        ...domain,
+        node: {
+          ...domain.node,
+          ecosystems: domain.node.ecosystems.map((ecosystem) => ({
+            ...ecosystem,
+          })),
+          processesToStop: [...domain.node.processesToStop],
+          orphanProcesses: [...domain.node.orphanProcesses],
+        },
+      })),
       databases: snapshot.databases.map((db) => ({ ...db })),
       backupConfigs: snapshot.backupConfigs.map((cfg) => ({ ...cfg })),
       services: snapshot.services.map((service) => ({ ...service })),
@@ -2017,7 +2764,10 @@ export class MigrationService {
     if (targetName) {
       next.site.name = targetName;
       next.site.rootPath = `/var/www/${targetName}`;
+      next.site.nginxConfigPath = `/etc/nginx/sites-available/${targetName}.conf`;
       next.site.systemUser = targetName;
+      const primary = next.domains.find((domain) => domain.isPrimary);
+      if (primary) primary.runtimeKey = targetName;
       next.databases = next.databases.map((db, index) => {
         const mappedName = this.targetDatabaseName(targetName, index);
         const mappedUser = this.targetDatabaseUserName(targetName, index);
@@ -2031,12 +2781,42 @@ export class MigrationService {
     }
 
     if (targetDomain) {
-      next.site.domain = targetDomain;
-      next.domains = this.replacePrimaryDomain(next.domains, targetDomain);
-      next.site.aliases = this.filterAliases(next.site.aliases, [oldPrimaryDomain, targetDomain]);
+      const primary = next.domains.find((domain) => domain.isPrimary);
+      if (!primary) {
+        throw new BadRequestException('Migration snapshot has no primary domain');
+      }
+      const aliases = parseSiteAliases(primary.aliases).filter(
+        (alias) =>
+          alias.domain.toLowerCase() !== oldPrimaryDomain.toLowerCase() &&
+          alias.domain.toLowerCase() !== targetDomain,
+      );
+      primary.domain = targetDomain;
+      primary.aliases = stringifySiteAliases(aliases);
+      next.databases = next.databases.map((database) => ({
+        ...database,
+        sourceDomain:
+          database.sourceDomain?.toLowerCase() ===
+          oldPrimaryDomain.toLowerCase()
+            ? targetDomain
+            : database.sourceDomain,
+      }));
+      // Existing certificate material never matches an overridden hostname.
+      next.sslCertificates = [];
     }
 
-    return next;
+    const runtimeKeys = new Set<string>();
+    for (const domain of next.domains) {
+      if (runtimeKeys.has(domain.runtimeKey)) {
+        throw new BadRequestException(
+          `targetName creates duplicate runtimeKey "${domain.runtimeKey}"`,
+        );
+      }
+      runtimeKeys.add(domain.runtimeKey);
+    }
+    return {
+      ...next,
+      checksum: snapshotChecksum(next),
+    };
   }
 
   private targetDatabaseName(targetName: string, index: number): string {
@@ -2055,63 +2835,6 @@ export class MigrationService {
 
   private targetDatabaseBaseName(targetName: string): string {
     return targetName.replace(/-/g, '_');
-  }
-
-  private replacePrimaryDomain(domains: SiteDomainSnapshot[], targetDomain: string): SiteDomainSnapshot[] {
-    if (domains.length === 0) {
-      return [{
-        domain: targetDomain,
-        isPrimary: true,
-        position: 0,
-        aliases: '[]',
-        filesRelPath: null,
-        appPort: null,
-        httpsRedirect: true,
-        nginxClientMaxBodySize: null,
-        nginxFastcgiReadTimeout: null,
-        nginxFastcgiSendTimeout: null,
-        nginxFastcgiConnectTimeout: null,
-        nginxFastcgiBufferSizeKb: null,
-        nginxFastcgiBufferCount: null,
-        nginxHttp2: false,
-        nginxHsts: false,
-        nginxGzip: true,
-        nginxRateLimitEnabled: false,
-        nginxRateLimitRps: null,
-        nginxRateLimitBurst: null,
-        nginxCustomConfig: null,
-      }];
-    }
-
-    const primaryIndex = domains.findIndex((domain) => domain.isPrimary);
-    const effectivePrimaryIndex = primaryIndex >= 0 ? primaryIndex : 0;
-    return domains
-      .map((domain, index) => index === effectivePrimaryIndex
-        ? { ...domain, domain: targetDomain, isPrimary: true, position: 0 }
-        : { ...domain, isPrimary: false },
-      )
-      .filter((domain, index) => index === effectivePrimaryIndex || domain.domain.toLowerCase() !== targetDomain)
-      .map((domain, index) => ({ ...domain, position: index }));
-  }
-
-  private filterAliases(rawAliases: unknown, domainsToDrop: string[]): unknown {
-    const drop = new Set(domainsToDrop.filter(Boolean).map((domain) => domain.toLowerCase()));
-    const aliases = Array.isArray(rawAliases)
-      ? rawAliases
-      : typeof rawAliases === 'string'
-      ? (() => {
-          try {
-            const parsed = JSON.parse(rawAliases);
-            return Array.isArray(parsed) ? parsed : [];
-          } catch {
-            return [];
-          }
-        })()
-      : [];
-    const filtered = aliases
-      .filter((alias): alias is string => typeof alias === 'string')
-      .filter((alias) => !drop.has(alias.toLowerCase()));
-    return typeof rawAliases === 'string' ? JSON.stringify(filtered) : filtered;
   }
 
   private async assertServerVersions(params: MigrateParams): Promise<void> {
@@ -2522,6 +3245,167 @@ function isObjectRecord(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === 'object' && !Array.isArray(value);
 }
 
+function stableJson(value: unknown): string {
+  if (value === undefined) return 'null';
+  if (value instanceof Date) return JSON.stringify(value.toISOString());
+  if (value === null || typeof value !== 'object') {
+    return JSON.stringify(value);
+  }
+  if (Array.isArray(value)) {
+    return `[${value.map(stableJson).join(',')}]`;
+  }
+  const record = value as Record<string, unknown>;
+  return `{${Object.keys(record)
+    .filter((key) => record[key] !== undefined)
+    .sort()
+    .map((key) => `${JSON.stringify(key)}:${stableJson(record[key])}`)
+    .join(',')}}`;
+}
+
+function snapshotChecksum(value: unknown): string {
+  return createHash('sha256').update(stableJson(value)).digest('hex');
+}
+
+function emptyNodeRuntime(): NodeRuntimeSnapshot {
+  return {
+    autostartEnabled: false,
+    ecosystems: [],
+    processesToStop: [],
+    orphanProcesses: [],
+  };
+}
+
+function normalizeNodeRuntime(value: unknown): NodeRuntimeSnapshot {
+  const raw = isObjectRecord(value) ? value : {};
+  return {
+    autostartEnabled: boolValue(raw.autostartEnabled, false),
+    ecosystems: Array.isArray(raw.ecosystems)
+      ? raw.ecosystems
+          .filter(isObjectRecord)
+          .map((ecosystem) => ({
+            file: String(ecosystem.file || ''),
+            only:
+              typeof ecosystem.only === 'string' && ecosystem.only
+                ? ecosystem.only
+                : undefined,
+          }))
+          .filter((ecosystem) => !!safeRelativePath(ecosystem.file))
+      : [],
+    processesToStop: stringArrayValue(raw.processesToStop),
+    orphanProcesses: stringArrayValue(raw.orphanProcesses),
+  };
+}
+
+function normalizePreset(value: unknown, strict = false): SiteType {
+  if (
+    value === SiteType.MODX_REVO ||
+    value === SiteType.MODX_3 ||
+    value === SiteType.CUSTOM
+  ) {
+    return value;
+  }
+  if (strict) {
+    throw new BadRequestException(`Invalid application preset "${String(value)}"`);
+  }
+  return SiteType.CUSTOM;
+}
+
+function normalizeAppStatus(value: unknown): DomainApplicationStatus {
+  if (
+    value === DomainApplicationStatus.PROVISIONING ||
+    value === DomainApplicationStatus.RUNNING ||
+    value === DomainApplicationStatus.DEPLOYING ||
+    value === DomainApplicationStatus.UPDATING ||
+    value === DomainApplicationStatus.ERROR
+  ) {
+    return value;
+  }
+  return value === 'ERROR'
+    ? DomainApplicationStatus.ERROR
+    : DomainApplicationStatus.RUNNING;
+}
+
+function normalizeDatabasePurpose(value: unknown): DatabasePurpose {
+  if (value === DatabasePurpose.APP_PRIMARY) {
+    return DatabasePurpose.APP_PRIMARY;
+  }
+  if (value === DatabasePurpose.AUXILIARY) {
+    return DatabasePurpose.AUXILIARY;
+  }
+  throw new BadRequestException(`Invalid database purpose "${String(value)}"`);
+}
+
+function legacyRuntimeKey(domain: string, position: number): string {
+  return `legacy-${createHash('sha256')
+    .update(`${position}:${domain}`)
+    .digest('hex')
+    .slice(0, 24)}`;
+}
+
+function normalizeAliasesJson(value: unknown): string {
+  if (typeof value === 'string') {
+    return stringifySiteAliases(
+      parseSiteAliases(value).map((alias) => ({
+        domain: alias.domain.trim().toLowerCase(),
+        redirect: alias.redirect,
+      })),
+    );
+  }
+  if (!Array.isArray(value)) return '[]';
+  return stringifySiteAliases(
+    value
+      .map((alias) => {
+        if (typeof alias === 'string') {
+          return { domain: alias.trim().toLowerCase(), redirect: false };
+        }
+        if (!isObjectRecord(alias) || typeof alias.domain !== 'string') {
+          return null;
+        }
+        return {
+          domain: alias.domain.trim().toLowerCase(),
+          redirect: alias.redirect === true,
+        };
+      })
+      .filter(
+        (
+          alias,
+        ): alias is {
+          domain: string;
+          redirect: boolean;
+        } => !!alias?.domain,
+      ),
+  );
+}
+
+function stringRecordFromJson(value: string): Record<string, string> {
+  const record = parseJsonObjectString(value);
+  const result: Record<string, string> = {};
+  for (const [key, nested] of Object.entries(record)) {
+    if (typeof nested !== 'string') {
+      throw new BadRequestException(
+        `Environment variable "${key}" must be a string`,
+      );
+    }
+    result[key] = nested;
+  }
+  return result;
+}
+
+function decryptTransferPassword(database: DatabaseSnapshot): string {
+  if (!database.dbPasswordEnc) {
+    throw new BadRequestException(
+      `Database "${database.name}" has no encrypted password`,
+    );
+  }
+  const decrypted = decryptJson<{ password?: string }>(database.dbPasswordEnc);
+  if (!decrypted?.password) {
+    throw new BadRequestException(
+      `Database "${database.name}" password cannot be decrypted`,
+    );
+  }
+  return decrypted.password;
+}
+
 function nullableString(value: unknown): string | null {
   return typeof value === 'string' ? value : null;
 }
@@ -2699,6 +3583,15 @@ function safeRelativePath(value: string | null | undefined): string | null {
   const trimmed = value.replace(/\\/g, '/').replace(/^\/+|\/+$/g, '');
   if (!trimmed || trimmed === '.') return null;
   const parts = trimmed.split('/').filter(Boolean);
-  if (parts.some((part) => part === '.' || part === '..')) return null;
+  if (
+    parts.some(
+      (part) =>
+        part === '.' ||
+        part === '..' ||
+        !/^[A-Za-z0-9._-]+$/.test(part),
+    )
+  ) {
+    return null;
+  }
   return parts.join('/');
 }

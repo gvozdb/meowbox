@@ -114,8 +114,8 @@
                   </div>
                 </div>
                 <div class="trend-chart__labels">
-                  <span>{{ trend.length > 0 ? formatDateShort(trend[0].date) : '' }}</span>
-                  <span>{{ trend.length > 0 ? formatDateShort(trend[trend.length - 1].date) : '' }}</span>
+                  <span>{{ trend[0] ? formatDateShort(trend[0].date) : '' }}</span>
+                  <span>{{ trend.at(-1) ? formatDateShort(trend.at(-1)!.date) : '' }}</span>
                 </div>
               </div>
               <div v-else class="storage-detail__empty">Нет исторических данных</div>

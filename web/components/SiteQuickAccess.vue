@@ -161,7 +161,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, onMounted } from 'vue';
+import { computed, reactive, ref, watch } from 'vue';
 import type {
   QuickCommand,
   QuickCommandRunResult,
@@ -170,10 +170,13 @@ import type {
   NodeCommandSource,
 } from '@meowbox/shared';
 
-const props = defineProps<{ siteId: string }>();
+const props = defineProps<{ siteId: string; domainId: string }>();
 
 const api = useApi();
 const toast = useMbToast();
+const nodeApi = computed(
+  () => `/sites/${props.siteId}/domains/${props.domainId}/node`,
+);
 
 const commands = ref<QuickCommand[]>([]);
 const loading = ref(true);
@@ -198,12 +201,18 @@ const configModal = reactive({
   groups: [] as DiscoveredCommandGroup[],
 });
 
-onMounted(loadCommands);
+watch(
+  () => props.domainId,
+  (domainId) => {
+    if (domainId) void loadCommands();
+  },
+  { immediate: true },
+);
 
 async function loadCommands() {
   loading.value = true;
   try {
-    commands.value = await api.get<QuickCommand[]>(`/sites/${props.siteId}/node/quick-commands`);
+    commands.value = await api.get<QuickCommand[]>(`${nodeApi.value}/quick-commands`);
   } catch (e: unknown) {
     toast.error((e as Error).message || 'Не удалось загрузить быстрые команды');
     commands.value = [];
@@ -243,7 +252,7 @@ async function runCommand(cmd: QuickCommand) {
   resultModal.durationMs = 0;
   try {
     const res = await api.post<QuickCommandRunResult>(
-      `/sites/${props.siteId}/node/quick-commands/${cmd.id}/run`,
+      `${nodeApi.value}/quick-commands/${cmd.id}/run`,
     );
     resultModal.output = res.output;
     resultModal.exitCode = res.exitCode;
@@ -274,7 +283,7 @@ async function openConfig() {
   selected.clear();
   try {
     const groups = await api.get<DiscoveredCommandGroup[]>(
-      `/sites/${props.siteId}/node/commands/discover`,
+      `${nodeApi.value}/commands/discover`,
     );
     configModal.groups = groups;
     // Предотмечаем уже сохранённые команды (матч по source+target+cwd).
@@ -321,7 +330,7 @@ async function saveConfig() {
   configModal.saving = true;
   try {
     commands.value = await api.put<QuickCommand[]>(
-      `/sites/${props.siteId}/node/quick-commands`,
+      `${nodeApi.value}/quick-commands`,
       { commands: payload },
     );
     toast.success('Быстрые команды сохранены');

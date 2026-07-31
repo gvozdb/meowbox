@@ -27,6 +27,14 @@ import { encryptSshPassword } from '../common/crypto/ssh-cipher';
 import { encryptCmsPassword } from '../common/crypto/cms-cipher';
 import { stringifySiteAliases, stringifyStringArray } from '../common/json-array';
 import {
+  isModxPreset,
+  normalizeHostpanelPreset,
+} from '@meowbox/shared';
+import {
+  createHostnameClaims,
+  rethrowHostnameClaimConflict,
+} from '../sites/hostname-registry';
+import {
   CreateSavedSourceDto,
   MigrationSourceDto,
   StartDiscoveryDto,
@@ -364,6 +372,11 @@ export class MigrationHostpanelService implements OnModuleInit {
             sourcePhpVersion: item.sourcePhpVersion,
             sourceMysqlPrefix: '',
             sourceMysqlDb: item.sourceMysqlDb,
+            preset: normalizeHostpanelPreset(
+              item.preset,
+              item.sourceCms,
+              item.sourceCmsVersion,
+            ),
             sourceName: item.sourceName,
             newName: item.newName,
             newDomain: item.newDomain,
@@ -537,7 +550,7 @@ export class MigrationHostpanelService implements OnModuleInit {
       // Map sourceSiteId → PlanItem (полный) от агента
       const planById = new Map<number, PlanItem>();
       for (const site of discovery.sites) {
-        planById.set(site.sourceSiteId, site);
+        planById.set(site.sourceSiteId, normalizeHostpanelPlan(site));
       }
 
       // Обновляем выбранные items с полным планом. Если агент не вернул
@@ -668,7 +681,7 @@ export class MigrationHostpanelService implements OnModuleInit {
         newSiteId: it.newSiteId,
         startedAt: it.startedAt,
         finishedAt: it.finishedAt,
-        plan: JSON.parse(it.plan) as PlanItem,
+        plan: normalizeHostpanelPlan(JSON.parse(it.plan) as PlanItem),
         log: it.log,
       })),
     };
@@ -712,7 +725,7 @@ export class MigrationHostpanelService implements OnModuleInit {
 
     let parsed: PlanItem;
     try {
-      parsed = JSON.parse(dto.planJson) as PlanItem;
+      parsed = normalizeHostpanelPlan(JSON.parse(dto.planJson) as PlanItem);
     } catch {
       throw new BadRequestException('Plan JSON некорректен');
     }
@@ -1037,25 +1050,29 @@ export class MigrationHostpanelService implements OnModuleInit {
 
   async checkDomain(domain: string, role: string) {
     this.assertAdmin(role);
-    const conflict = await this.prisma.site.findUnique({
-      where: { domain },
-      select: { id: true, name: true },
+    const canonical = domain.trim().toLowerCase();
+    const conflict = await this.prisma.siteDomain.findUnique({
+      where: { domain: canonical },
+      select: { id: true, site: { select: { name: true } } },
     });
     if (conflict) {
       return {
         available: false,
-        reason: `Сайт ${conflict.name} уже использует этот домен`,
+        reason: `Сайт ${conflict.site.name} уже использует этот домен`,
       };
     }
-    // spec §12.1: «Site.domain свободно + SiteAlias свободно».
-    // Site.aliases — JSON-string (SQLite), массив либо строк, либо
+    // SiteDomain.aliases — JSON-string (SQLite), массив либо строк, либо
     // {domain, redirect}-объектов. Простейший способ — substring LIKE по
     // сериализованному JSON. Точная проверка делается потом в JS, чтобы
     // отсеять false-positive (когда искомая строка лежит внутри другого
     // значения).
-    const aliasCandidates = await this.prisma.site.findMany({
-      where: { aliases: { contains: `"${domain}"` } },
-      select: { id: true, name: true, aliases: true },
+    const aliasCandidates = await this.prisma.siteDomain.findMany({
+      where: { aliases: { contains: `"${canonical}"` } },
+      select: {
+        id: true,
+        aliases: true,
+        site: { select: { name: true } },
+      },
       take: 5,
     });
     for (const cand of aliasCandidates) {
@@ -1063,16 +1080,16 @@ export class MigrationHostpanelService implements OnModuleInit {
         const parsed = JSON.parse(cand.aliases || '[]') as unknown;
         if (Array.isArray(parsed)) {
           const hit = parsed.some((a) => {
-            if (typeof a === 'string') return a === domain;
+            if (typeof a === 'string') return a.toLowerCase() === canonical;
             if (a && typeof a === 'object' && 'domain' in a) {
-              return (a as { domain: string }).domain === domain;
+              return (a as { domain: string }).domain.toLowerCase() === canonical;
             }
             return false;
           });
           if (hit) {
             return {
               available: false,
-              reason: `Сайт ${cand.name} использует этот домен как алиас`,
+              reason: `Сайт ${cand.site.name} использует этот домен как алиас`,
             };
           }
         }
@@ -1300,7 +1317,7 @@ export class MigrationHostpanelService implements OnModuleInit {
           where: { id: itemId },
           data: { status: 'RUNNING', startedAt: new Date() },
         });
-        const plan = JSON.parse(item.plan) as PlanItem;
+        const plan = normalizeHostpanelPlan(JSON.parse(item.plan) as PlanItem);
 
         // SSL force-cleanup: если в БД панели нет ни одного Site и ни одного
         // SslCertificate с этим доменом — значит LE-папки на slave остались
@@ -1312,7 +1329,9 @@ export class MigrationHostpanelService implements OnModuleInit {
         // измениться между планированием и запуском.
         if (plan.ssl?.transfer && plan.newDomain) {
           const [siteUsing, sslUsing] = await Promise.all([
-            this.prisma.site.count({ where: { domain: plan.newDomain } }),
+            this.prisma.siteDomain.count({
+              where: { domain: plan.newDomain.trim().toLowerCase() },
+            }),
             this.prisma.sslCertificate.findFirst({
               where: { domains: { contains: `"${plan.newDomain}"` } },
               select: { id: true },
@@ -1528,13 +1547,16 @@ export class MigrationHostpanelService implements OnModuleInit {
     const nginxConfigPath = `/etc/nginx/sites-available/${plan.newName}.conf`;
 
     // 1) Site
-    const siteType =
-      plan.sourceCms === 'modx' ? 'MODX_REVO' : 'CUSTOM';
+    const siteType = normalizeHostpanelPreset(
+      plan.preset,
+      plan.sourceCms,
+      plan.sourceCmsVersion,
+    );
     // MODX-специфичные поля переносим только для MODX-сайтов: пути менеджера/
     // коннекторов из spec §7.2 (см. discover.ts → modxPaths) и версия CMS,
     // парсящаяся из hostpanel.version. Без них UI MODX-вкладка пустая, а
     // layered-template не знает кастомных директорий manager_xxx / connectors_yyy.
-    const isModx = plan.sourceCms === 'modx';
+    const isModx = isModxPreset(siteType);
     const modxManagerPath = isModx ? plan.modxPaths?.managerDir || null : null;
     const modxConnectorsPath = isModx ? plan.modxPaths?.connectorsDir || null : null;
     const modxVersion = isModx ? plan.sourceCmsVersion || null : null;
@@ -1545,80 +1567,70 @@ export class MigrationHostpanelService implements OnModuleInit {
       domain: d,
       redirect: redirectAliases,
     }));
-    const site = await this.prisma.site.create({
-      data: {
-        name: plan.newName,
-        displayName: null,
-        domain: plan.newDomain,
-        aliases: stringifySiteAliases(aliasObjs),
-        type: siteType,
-        status: 'RUNNING',
-        phpVersion: plan.phpVersion || null,
-        rootPath,
-        nginxConfigPath,
-        systemUser: plan.newName,
-        managerPath: modxManagerPath,
-        connectorsPath: modxConnectorsPath,
-        modxVersion,
-        // SSH-пароль = sftp_pass с источника (spec §6.2). Шифруем перед
-        // записью в БД (master-key cipher, см. spec master-key-unification).
-        sshPasswordEnc: extras.creds?.sshPassword
-          ? encryptSshPassword(extras.creds.sshPassword)
-          : null,
-        // CMS admin login/password = manager_user/manager_pass с источника
-        // (`modx_host_hostpanel_sites`). На hostpanel пароль в плейне → шифруем
-        // в Site.cmsAdminPasswordEnc. Без этого блок CMS на странице сайта
-        // показывал бы только «Версия» (условие `v-if=site.cmsAdminUser` в
-        // [id].vue ложное), и оператор не мог бы залогиниться через панель.
-        // Применяется только для MODX-сайтов.
-        cmsAdminUser: isModx ? extras.creds?.cmsAdminUser || null : null,
-        cmsAdminPasswordEnc:
-          isModx && extras.creds?.cmsAdminPassword
-            ? encryptCmsPassword(extras.creds.cmsAdminPassword)
-            : null,
-        dbEnabled: !!plan.dbExcludeDataTables?.length || plan.sourceCms === 'modx',
-        httpsRedirect: !!plan.ssl?.transfer,
-        // filesRelPath = webroot относительно rootPath. Парсится discover.ts из
-        // nginx `root` директивы, fallback на 'www'. Spec §7.2.
-        filesRelPath: plan.filesRelPath || 'www',
-        nginxCustomConfig: plan.nginxCustomConfig || null,
-        // HSTS — отдельный флаг (а не add_header в custom-блоке): иначе при
-        // regen layered-конфигом через UI он бы пропадал. 50-security шаблон
-        // сам вставит add_header Strict-Transport-Security при nginxHsts=true.
-        nginxHsts: plan.nginxHsts === true,
-        // Кастом php-fpm pool (php_admin_value-директивы из source pool.d, кроме
-        // upload/post/memory которые мапятся в стандартные настройки сайта).
-        // Без этого поля при смене PHP-версии в UI custom-блок пропадёт.
-        phpPoolCustom: plan.phpFpm?.custom || null,
-        userId: createdBy,
-        metadata: JSON.stringify({
-          migrationId,
-          itemId,
-          importedFrom: 'hostpanel',
-          sourceUser: plan.sourceUser,
-          sourceDomain: plan.sourceDomain,
-          sourceHostpanelId: plan.sourceSiteId,
-          requiresSslReissue: !!plan.ssl?.transfer,
-          createdAt: new Date().toISOString(),
-        }),
-      },
-    });
-
-    // 1b) Основной домен (мульти-доменная модель). hostpanel-сайт переносится
-    // как один основной домен (главный). Алиасы / HSTS / custom-nginx — на нём.
-    const primaryDomain = await this.prisma.siteDomain.create({
-      data: {
-        siteId: site.id,
-        domain: plan.newDomain,
-        isPrimary: true,
-        position: 0,
-        aliases: stringifySiteAliases(aliasObjs),
-        filesRelPath: null, // null → наследует Site.filesRelPath
-        httpsRedirect: !!plan.ssl?.transfer,
-        nginxHsts: plan.nginxHsts === true,
-        nginxCustomConfig: plan.nginxCustomConfig || null,
-      },
-    });
+    const storedAliases = stringifySiteAliases(aliasObjs);
+    const { site, primaryDomain } = await this.prisma
+      .$transaction(async (tx) => {
+        const createdSite = await tx.site.create({
+          data: {
+            name: plan.newName,
+            displayName: null,
+            status: 'RUNNING',
+            rootPath,
+            nginxConfigPath,
+            systemUser: plan.newName,
+            sshPasswordEnc: extras.creds?.sshPassword
+              ? encryptSshPassword(extras.creds.sshPassword)
+              : null,
+            userId: createdBy,
+            metadata: JSON.stringify({
+              migrationId,
+              itemId,
+              importedFrom: 'hostpanel',
+              sourceUser: plan.sourceUser,
+              sourceDomain: plan.sourceDomain,
+              sourceHostpanelId: plan.sourceSiteId,
+              requiresSslReissue: !!plan.ssl?.transfer,
+              createdAt: new Date().toISOString(),
+            }),
+          },
+        });
+        const createdDomain = await tx.siteDomain.create({
+          data: {
+            siteId: createdSite.id,
+            domain: plan.newDomain,
+            isPrimary: true,
+            position: 0,
+            aliases: storedAliases,
+            filesRelPath: plan.filesRelPath || 'www',
+            preset: siteType,
+            appStatus: 'RUNNING',
+            appErrorMessage: null,
+            phpVersion: plan.phpVersion || (isModx ? '8.2' : null),
+            phpPoolCustom: plan.phpFpm?.custom || null,
+            runtimeKey: plan.newName,
+            envVars: '{}',
+            cmsAdminUser: isModx ? extras.creds?.cmsAdminUser || null : null,
+            cmsAdminPasswordEnc:
+              isModx && extras.creds?.cmsAdminPassword
+                ? encryptCmsPassword(extras.creds.cmsAdminPassword)
+                : null,
+            managerPath: modxManagerPath,
+            connectorsPath: modxConnectorsPath,
+            cmsTablePrefix: isModx ? plan.sourceMysqlPrefix || null : null,
+            modxVersion,
+            httpsRedirect: !!plan.ssl?.transfer,
+            nginxHsts: plan.nginxHsts === true,
+            nginxCustomConfig: plan.nginxCustomConfig || null,
+          },
+        });
+        await createHostnameClaims(tx, {
+          siteDomainId: createdDomain.id,
+          domain: plan.newDomain,
+          aliases: storedAliases,
+        });
+        return { site: createdSite, primaryDomain: createdDomain };
+      })
+      .catch(rethrowHostnameClaimConflict);
 
     // 2) SslCertificate (всегда создаём — иначе UI ssl:* падает)
     const sslDomains = [plan.newDomain, ...plan.newAliases];
@@ -1649,7 +1661,7 @@ export class MigrationHostpanelService implements OnModuleInit {
     });
 
     // 3) Database (если на источнике была БД)
-    if (plan.dbExcludeDataTables?.length || plan.sourceCms === 'modx') {
+    if (plan.dbExcludeDataTables?.length || isModx) {
       // Spec §6.2: «В Database.dbPasswordEnc шифруем тот же пароль» (что
       // ушёл в источник — иначе MODX не подключится после patch-modx и
       // оператор не сможет авторизоваться в Adminer SSO). Агент вернул
@@ -1677,6 +1689,8 @@ export class MigrationHostpanelService implements OnModuleInit {
             dbPasswordHash,
             dbPasswordEnc,
             siteId: site.id,
+            siteDomainId: primaryDomain.id,
+            purpose: 'APP_PRIMARY',
           },
         })
         .catch((e) => {
@@ -1993,4 +2007,15 @@ export class MigrationHostpanelService implements OnModuleInit {
       throw new ForbiddenException('Only admins can manage hostPanel migrations');
     }
   }
+}
+
+function normalizeHostpanelPlan(plan: PlanItem): PlanItem {
+  return {
+    ...plan,
+    preset: normalizeHostpanelPreset(
+      plan.preset,
+      plan.sourceCms,
+      plan.sourceCmsVersion,
+    ),
+  };
 }

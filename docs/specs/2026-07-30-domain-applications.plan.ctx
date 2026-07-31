@@ -1,0 +1,1915 @@
+plan
+meta:
+  id: domain-centric-applications
+  title: Domain-centric applications inside one Site
+  project: meowbox
+  status: approved-for-implementation-planning
+  date: 2026-07-30
+  release_model: one release, one update run, mandatory automatic preflight
+
+goal:
+  summary: >
+    Allow one Site to host multiple independently managed applications by making
+    every main SiteDomain the owner of exactly one preset/application.
+  outcomes:
+    - create one Site with one or several domain/application pairs
+    - add another managed domain/application to an existing Site
+    - manage MODX, PHP, files, databases, logs, deploy and admin login per domain
+    - preserve aliases, SSL and current per-domain Nginx configuration
+    - migrate every supported existing installation in one release
+
+fixed_decisions:
+  D01:
+    rule: SiteDomain is the application boundary
+    detail: >
+      No SiteApplication or ApplicationEndpoint table. A main SiteDomain row
+      contains its domain routing settings and its one application preset.
+  D02:
+    rule: one main domain equals one application
+    detail: Aliases route to that same application and never become applications.
+  D03:
+    rule: UI is domain-centric
+    detail: >
+      Domain selector in Site header selects both domain and application. There
+      is no second application selector.
+  D04:
+    rule: use only existing presets
+    values: [MODX_REVO, MODX_3, CUSTOM]
+  D05:
+    rule: every domain uses its own explicit filesRelPath
+    detail: >
+      No apps/<slug>/www layout and no implicit new directory hierarchy.
+  D06:
+    rule: no manual application discovery or adoption
+  D07:
+    rule: no UNMANAGED preset
+    detail: Existing secondary domains migrate to CUSTOM.
+  D08:
+    rule: no bulk MODX update action
+    detail: MODX update is available only for the selected domain.
+  D09:
+    rule: appPort stays internal
+    detail: >
+      Do not expose appPort in generic Site or Domain creation forms. Preserve
+      existing non-null values and current Node/custom-Nginx behavior.
+  D10:
+    rule: preserve current per-domain Nginx layout
+    detail: >
+      Keep one Site server-block file with existing per-SiteDomain layered
+      chunks. Change only domain payloads and generated PHP upstreams.
+  D11:
+    rule: one PHP-FPM pool and socket per PHP-enabled domain
+    detail: >
+      Do not create a systemd service per domain. One phpX.Y-fpm service hosts
+      every pool that uses that PHP version.
+  D12:
+    rule: migration is one-shot
+    detail: >
+      Schema, data, API, agent, Web UI and system configuration switch in one
+      release and one update run. No user-visible compatibility phase.
+  D13:
+    rule: update must prove migration before mutating production
+    detail: >
+      Automatic preflight runs the real DB migration against a SQLite clone and
+      renders all system configs into a staging tree before maintenance mode.
+  D14:
+    rule: preserve legacy runtime paths where changing them is unnecessary
+    detail: >
+      Existing primary application keeps its filesRelPath, database contents,
+      encrypted credentials, MODX paths, PHP version and compatible pool key.
+
+non_goals:
+  - multiple applications behind one main domain or path-based routing
+  - one application shared by several main SiteDomain rows
+  - automatic recognition of manually installed CMS applications
+  - converting arbitrary existing custom content into a managed MODX preset
+  - container-level isolation between applications inside one Site
+  - bulk update of all MODX applications
+  - a separate application navigation hierarchy
+  - automatic mutation of MODX content when a domain is renamed
+  - exposing reverse-proxy appPort in generic forms
+  - moving existing application files into a new directory layout
+
+domain_model:
+  Site:
+    responsibility:
+      - shared Linux user and home/root directory
+      - SSH access and encrypted SSH credential
+      - aggregate ownership, quota and disk usage
+      - whole-Site start/stop/delete lifecycle
+      - whole-Site backups, schedules, services and host migration
+      - container-level operational status and error
+    retained_fields:
+      - id
+      - name
+      - displayName
+      - rootPath
+      - nginxConfigPath
+      - systemUser
+      - sshPasswordEnc
+      - userId
+      - status
+      - errorMessage
+      - metadata
+      - createdAt
+      - updatedAt
+    removed_application_fields:
+      - domain
+      - aliases
+      - type
+      - phpVersion
+      - phpEnabled
+      - phpPoolCustom
+      - dbEnabled
+      - filesRelPath
+      - appPort
+      - gitRepository
+      - deployBranch
+      - envVars
+      - cmsAdminUser
+      - cmsAdminPasswordEnc
+      - managerPath
+      - connectorsPath
+      - cmsTablePrefix
+      - modxVersion
+
+  SiteDomain:
+    responsibility:
+      - canonical hostname and aliases
+      - exactly one preset/application
+      - application root and runtime settings
+      - application lifecycle status
+      - domain Nginx, SSL and HTTP behavior
+      - selected-domain management context
+    routing_fields:
+      - id
+      - siteId
+      - domain
+      - aliases
+      - isPrimary
+      - position
+      - httpsRedirect
+      - nginxSecurityProfile
+      - nginxRateLimit
+      - nginxCountryRules
+      - nginxCustomConfig
+      - existing layered Nginx settings
+      - appPort
+    application_fields:
+      preset:
+        type: existing SiteType enum
+        required: true
+        values: [MODX_REVO, MODX_3, CUSTOM]
+      appStatus:
+        type: DomainApplicationStatus
+        required: true
+        values: [PROVISIONING, RUNNING, DEPLOYING, UPDATING, ERROR]
+      appErrorMessage:
+        type: nullable string
+      filesRelPath:
+        type: string
+        required: true
+        rule: normalized relative path resolved strictly inside Site.rootPath
+      phpVersion:
+        type: nullable supported PHP version
+      phpPoolCustom:
+        type: nullable text
+      runtimeKey:
+        type: immutable unique short string
+        purpose: stable PHP pool, socket, log and operation artifact key
+      gitRepository:
+        type: nullable string
+      deployBranch:
+        type: nullable string
+      envVars:
+        type: structured JSON
+      cmsAdminUser:
+        type: nullable string
+      cmsAdminPasswordEnc:
+        type: nullable encrypted string
+      managerPath:
+        type: nullable string
+      connectorsPath:
+        type: nullable string
+      cmsTablePrefix:
+        type: nullable string
+      modxVersion:
+        type: nullable string
+    derived_fields:
+      phpEnabled: phpVersion != null
+      canonicalUrl: protocol from SSL state plus domain
+      applicationLabel: domain plus preset
+
+  Database:
+    changes:
+      - add required siteDomainId ownership after migration
+      - retain siteId for efficient whole-Site ownership and deletion checks
+      - add purpose enum APP_PRIMARY or AUXILIARY
+      - add relation and index by siteDomainId
+    invariants:
+      - database.siteId equals database.siteDomain.siteId
+      - MODX domain has exactly one APP_PRIMARY MARIADB-compatible database
+      - CUSTOM domain may have zero or one APP_PRIMARY and any auxiliaries
+      - at most one APP_PRIMARY database per domain
+    database_enforcement:
+      - raw partial unique SQLite index for one APP_PRIMARY per siteDomainId
+      - service transaction validates cross-relation siteId equality
+
+  DeployLog:
+    changes:
+      - add required siteDomainId
+      - move active deployment lock from Site to SiteDomain
+      - keep siteId for aggregate history queries if currently required
+
+  related_models:
+    SslCertificate:
+      decision: already domain-owned; retain siteId plus domainId
+    Backup:
+      decision: remain Site-owned and cover every domain root and Site database
+    BackupConfig:
+      decision: remain Site-owned
+    SiteDiskSnapshot:
+      decision: remain Site-owned
+    CronJob:
+      decision: remain Site-owned in this release
+      rationale: same Linux user and no current app-level ownership contract
+    SiteService:
+      decision: remain Site-owned
+    SiteQuickCommand:
+      decision: remain Site-owned
+    HealthCheckPing:
+      decision: add nullable siteDomainId only where the check targets an app
+    AuditLog:
+      decision: include siteDomainId and operationId in domain operations
+
+database_constraints:
+  C01:
+    invariant: every Site has at least one SiteDomain
+    enforcement: service transaction plus migration verification
+  C02:
+    invariant: exactly one primary SiteDomain per Site
+    enforcement:
+      - partial unique index on SiteDomain(siteId) WHERE isPrimary = true
+      - service blocks deletion of last/primary domain
+      - primary domain has position zero
+      - remaining positions are unique and contiguous after mutations
+  C03:
+    invariant: runtimeKey is globally unique and immutable
+    enforcement: unique index and DTO omission from update APIs
+  C04:
+    invariant: filesRelPath resolves inside Site.rootPath
+    enforcement: shared path validator used by API and agent
+  C05:
+    invariant: new managed applications do not share a root
+    enforcement: service rejects duplicate resolved roots for new domains
+    legacy_exception: >
+      Existing duplicate roots are preserved and reported by migration. File
+      deletion remains blocked while another domain references the same root.
+  C06:
+    invariant: aliases and canonical domains do not conflict globally
+    enforcement: normalized hostname registry check inside one transaction
+  C07:
+    invariant: MODX application has PHP and APP_PRIMARY database
+    enforcement: DTO validation, provisioning preflight and DB constraint checks
+  C08:
+    invariant: CUSTOM has no inferred runtime
+    enforcement: only explicitly supplied existing settings are persisted
+  C09:
+    invariant: hostname comparisons are canonical
+    enforcement:
+      - trim whitespace
+      - lowercase
+      - remove one terminal DNS dot
+      - convert IDN to validated ASCII form
+      - validate label and total hostname lengths
+      - reject unsupported wildcard placement
+
+runtime_key:
+  migrated_primary:
+    value: current immutable Site.name
+    reason: preserve current PHP pool/socket compatibility where possible
+  new_domain:
+    value: deterministic short key derived from full SiteDomain UUID
+    format: d plus 20 lowercase hexadecimal SHA-256 characters
+  validation:
+    - unique in DB
+    - safe character set
+    - resulting Unix socket path stays below platform limit
+    - collision aborts before configuration writes
+  rename_behavior:
+    - domain rename never changes runtimeKey
+    - make-primary never changes runtimeKey
+
+path_policy:
+  input:
+    - store relative path only
+    - reject absolute paths
+    - reject empty path, dot-dot traversal, NUL and control characters
+    - normalize separators and redundant dot segments
+    - resolve symlinks for destructive operations
+  new_site:
+    - primary domain keeps current default directory convention
+    - additional rows require an explicit directory field
+  add_domain:
+    - directory is required in the same form as domain and preset
+    - MODX target must be absent or empty before installation
+    - CUSTOM may use an existing directory without type discovery
+  destructive_actions:
+    - compare canonical real paths against Site.rootPath
+    - refuse removal when another SiteDomain references same canonical path
+    - never remove a pre-existing non-empty directory during failed provisioning
+
+preset_contracts:
+  MODX_REVO:
+    required:
+      - filesRelPath
+      - supported phpVersion
+      - APP_PRIMARY database
+      - normalized managerPath
+      - normalized connectorsPath
+    managed_actions:
+      - install
+      - version check
+      - update
+      - doctor
+      - setup directory cleanup
+      - admin credential management
+      - admin auto-login
+      - permission normalization
+  MODX_3:
+    required: same as MODX_REVO with preset-specific compatibility validation
+    managed_actions: same as MODX_REVO
+  CUSTOM:
+    required:
+      - filesRelPath
+    optional:
+      - phpVersion
+      - PHP pool overrides
+      - databases
+      - git/deploy settings
+      - env vars
+      - Node.js configuration through existing Node.js management
+    forbidden:
+      - inferred CMS type
+      - inferred MODX credentials
+      - generic appPort form control
+
+php_fpm:
+  topology:
+    - one pool per PHP-enabled SiteDomain
+    - one socket per pool
+    - one shared phpX.Y-fpm systemd service per PHP version
+    - no per-domain systemd service
+  generated_pool:
+    identity: runtimeKey
+    user: Site.systemUser
+    group: Site.systemUser
+    root: resolved SiteDomain.filesRelPath
+    socket: stable runtimeKey-based path
+    temp_and_session_defaults: preserve current Site-level paths
+    overrides: SiteDomain.phpPoolCustom after existing sanitizer/validation
+  isolation:
+    provides:
+      - independent PHP version
+      - independent process limits and pool configuration
+      - independent socket and PHP error log
+      - independent failure and reload targeting at config level
+    does_not_provide:
+      - Linux-user isolation
+      - filesystem isolation between applications in one Site
+    security_note: >
+      Applications share one Linux user by design. A customer requiring tenant
+      isolation must use separate Sites.
+  compatibility:
+    - migrated primary keeps compatible pool/runtime key
+    - do not move application files
+    - preserve current open_basedir breadth for migrated applications
+    - keep current shared Site temp/session defaults unless explicitly overridden
+    - every domain receives an independent PHP error log
+    - managed commands always call explicit phpX.Y binary
+    - bare SSH php command follows primary domain PHP or system default
+  resource_envelope:
+    migration:
+      - read effective current Site pool process-manager limits
+      - identify every domain that currently receives managed PHP in Nginx
+      - distribute current aggregate max_children across replacement pools
+      - allocate at least one worker per pool and distribute remainder by position
+      - preserve non-resource custom PHP directives on every replacement pool
+      - abort when safe minimum exceeds current budget and host headroom is insufficient
+    new_domain:
+      - apply current platform default pool budget
+      - check host memory/process/file-descriptor headroom before creation
+    reporting:
+      - show old aggregate worker ceiling
+      - show every new pool ceiling
+      - show projected worst-case memory before apply
+  config_change:
+    phases:
+      - render pool into staging path
+      - validate complete PHP-FPM config
+      - write atomically with mode and owner
+      - reload affected phpX.Y-fpm service
+      - verify socket creation
+      - render and validate Nginx against new socket
+      - remove obsolete pool only after HTTP health check
+    rollback:
+      - restore old pool files
+      - reload affected services
+      - restore Nginx files
+  php_version_change:
+    - create and validate pool under new version first
+    - switch selected domain Nginx only after new socket is live
+    - health-check application
+    - remove old-version pool after success
+    - restore old pool and Nginx on failure
+
+nginx:
+  retained_layout:
+    site_file: /etc/nginx/sites-available/<site>.conf
+    domain_chunks: /etc/nginx/meowbox/<site>/<siteDomainId>/
+    aliases: remain in selected main domain server_name
+  changed_payload:
+    - every rendered domain receives its own filesRelPath
+    - every PHP domain receives its own phpVersion and pool socket
+    - non-PHP domain omits managed 20-php.conf
+    - appPort remains internal and only affects current proxy behavior
+  unchanged:
+    - per-domain SSL
+    - per-domain redirect
+    - per-domain security, rate limits and country rules
+    - exact custom Nginx content unless sanitizer requires rejection
+    - current server-block/chunk filesystem structure
+  generation:
+    - no new Nginx file hierarchy
+    - regenerate only affected Site config during normal domain changes
+    - migration renders every Site once because PHP socket ownership changes
+    - serialize Nginx writes per Site
+  validation:
+    - render complete candidate tree
+    - run nginx -t before replacing active files
+    - atomic file replacement
+    - reload, never restart, when validation passes
+    - restore candidate snapshot on reload or HTTP probe failure
+
+site_lifecycle:
+  Site.status:
+    meaning: global Site/container availability
+    behavior:
+      - whole-Site start/stop remains unchanged
+      - a single domain update never sets Site to DEPLOYING or ERROR
+      - Site ERROR is reserved for shared Linux/Nginx/container failures
+  SiteDomain.appStatus:
+    transitions:
+      - PROVISIONING -> RUNNING
+      - PROVISIONING -> ERROR
+      - ERROR -> PROVISIONING on retry
+      - RUNNING -> UPDATING
+      - UPDATING -> RUNNING
+      - UPDATING -> ERROR
+      - RUNNING -> DEPLOYING
+      - DEPLOYING -> RUNNING
+      - DEPLOYING -> ERROR
+    note: no per-domain start/stop control is added in this release
+  aggregate_display:
+    - global stopped state wins
+    - otherwise show counts of running, provisioning/updating and failed domains
+    - never hide a per-domain ERROR behind aggregate RUNNING
+
+create_site:
+  web_flow:
+    shared_step:
+      - display name
+      - system name
+      - owner
+      - shared Site options
+    domains_step:
+      - repeatable domain/application rows
+      - minimum one row
+      - exactly one primary row
+      - domain and aliases
+      - explicit directory
+      - preset
+      - preset-specific PHP/database/MODX options
+      - SSL request options
+      - no appPort
+    review_step:
+      - show directories, presets, PHP versions and database names per domain
+      - show conflicts before submission
+  api:
+    request: nested Site fields plus domains array
+    transaction:
+      - validate all hostnames and aliases globally
+      - reserve Site and all SiteDomain rows
+      - assign immutable runtime keys
+      - reserve database records and names
+      - create one parent operation with per-domain child steps
+  provisioning_order:
+    - create Linux user and Site root once
+    - create every domain directory safely
+    - provision databases
+    - install each managed application with explicit PHP binary
+    - generate all PHP pools
+    - validate PHP services and sockets
+    - render Nginx once with all domains
+    - request SSL per domain after HTTP routes work
+    - persist credentials and detected versions per domain
+  failure_semantics:
+    fatal_core_failure:
+      - mark operation failed
+      - roll back only artifacts proven to be created by this operation
+      - never delete pre-existing paths
+      - retain diagnostics with secrets redacted
+    ssl_failure:
+      - keep application RUNNING over HTTP
+      - mark domain SSL state failed/pending separately
+
+add_domain:
+  web_flow:
+    - one form combines domain, aliases, directory, preset and preset settings
+    - reuses exact preset form components and validation from create Site
+    - no separate application creation step
+  api:
+    - create SiteDomain plus dependent records transactionally
+    - return operationId and per-step status
+  concurrency:
+    - Site mutation lock serializes Nginx/domain-list changes
+    - SiteDomain operation lock serializes app provisioning/update/delete
+  failure:
+    - preserve existing Site and applications
+    - keep failed SiteDomain in ERROR for retry and diagnostics
+    - clean only newly created DB, pool, certificate request and empty directory
+
+domain_selection_ui:
+  location: Site detail page header
+  behavior:
+    - show selector only when more than one main SiteDomain exists
+    - sort primary first, then position
+    - option displays domain, preset badge and app status
+    - aliases never appear as options
+    - selected domain also selects its application
+  url_state:
+    format: ?domain=<siteDomainId>&tab=<tab>
+    rules:
+      - primary domain is default
+      - invalid, unauthorized or deleted ID falls back to primary
+      - every domain-specific link carries siteDomainId explicitly
+      - selection survives refresh and can be shared
+  tab_change:
+    - preserve current tab when applicable
+    - fall back to Overview when target domain lacks that capability
+  no_hidden_context:
+    - destructive dialogs repeat canonical domain and directory
+    - API never infers selected domain from cookies or primary flag
+
+web_information_architecture:
+  domain_scoped:
+    Overview:
+      - preset, app status, root, runtime, version and domain URL
+      - selected-domain actions only
+    SSL:
+      - selected SiteDomain certificate and aliases
+    Nginx:
+      - selected SiteDomain layered chunks and read-only full Site config link
+    PHP:
+      - visible when selected domain has phpVersion
+      - selected pool/version/config/log only
+    Databases:
+      - list/create/manage databases owned by selected domain
+      - identify APP_PRIMARY without exposing secrets
+    Files:
+      - root is selected SiteDomain.filesRelPath
+      - breadcrumb cannot escape selected root
+    Node.js:
+      - processes and ecosystem files under selected domain root
+      - preserve global PM2 name collision checks for shared Linux user
+    Logs:
+      - selected domain Nginx access/error log
+      - selected domain PHP pool log when applicable
+      - selected domain deploy/application operation logs
+    MODX:
+      - visible for MODX presets only
+      - version/update, doctor, cleanup, credentials and admin login
+    Deploy:
+      - selected domain git/env/deploy state
+  site_scoped:
+    Domains:
+      - all main domains and aliases
+      - add, edit, order and make-primary
+    DNS:
+      - current Site/DNS-zone behavior with explicit domain labels
+    Backups:
+      - whole-Site backup covering all applications and databases
+    Cron:
+      - current shared Linux-user jobs
+    Services:
+      - current Site services
+    SSH:
+      - one shared Linux user
+    Danger:
+      - whole-Site destructive actions
+  site_list:
+    replace:
+      - singular Site type badge
+      - singular application version
+    with:
+      - domain count
+      - preset counts or compact preset badges
+      - aggregate application status
+    filters:
+      - preset filter matches any SiteDomain
+      - error filter matches Site error or any domain app error
+
+domain_management:
+  rename:
+    changes:
+      - canonical hostname
+      - Nginx server_name
+      - SSL request/state
+      - displayed admin URL
+    preserves:
+      - SiteDomain id
+      - runtimeKey
+      - filesRelPath
+      - database ownership
+      - PHP pool
+      - MODX credentials and version
+    restriction: do not silently rewrite CMS content or user configuration
+  make_primary:
+    changes:
+      - atomic primary flag swap
+      - atomic position reorder with replacement at position zero
+      - default domain selection
+      - Site-level canonical display URL
+      - bare SSH php shim if primary PHP differs
+    preserves:
+      - every application and runtime artifact
+      - directories, pools, databases, SSL and runtime keys
+  delete:
+    guards:
+      - cannot delete last SiteDomain
+      - primary must be changed first
+      - reject while provisioning, updating, deploying or backing up
+      - list shared paths and dependent databases before confirmation
+    default:
+      - remove Nginx route, SSL relation and domain PHP pool
+      - preserve files and databases unless separately confirmed
+    optional_destructive_flags:
+      - delete application files
+      - delete owned databases
+    safety:
+      - typed canonical domain confirmation
+      - snapshot before destructive deletion
+      - refuse file deletion for shared canonical path
+
+api_contract:
+  shared_guard:
+    name: requireOwnedSiteDomain
+    behavior:
+      - load Site and SiteDomain in one ownership-scoped query
+      - verify domain.siteId equals route siteId
+      - verify current user/admin authorization
+      - return normalized domain application context
+  domain_routes:
+    - GET /sites/:siteId/domains/:domainId/application
+    - POST /sites/:siteId/domains/:domainId/application/retry
+    - GET /sites/:siteId/domains/:domainId/php-pool-config
+    - PUT /sites/:siteId/domains/:domainId/php-pool-config
+    - POST /sites/:siteId/domains/:domainId/modx/update
+    - GET /sites/:siteId/domains/:domainId/modx/doctor
+    - POST /sites/:siteId/domains/:domainId/modx/cleanup-setup
+    - POST /sites/:siteId/domains/:domainId/modx/admin-password
+    - POST /sites/:siteId/domains/:domainId/modx/admin-login
+    - GET /sites/:siteId/domains/:domainId/files
+    - GET /sites/:siteId/domains/:domainId/logs
+    - POST /sites/:siteId/domains/:domainId/deploy
+    - GET /sites/:siteId/domains/:domainId/deploys
+    - domain-scoped database and Node.js routes
+  site_routes_retained:
+    - whole-Site start/stop/delete
+    - SSH credentials
+    - whole-Site backups
+    - Cron, Services and Site metadata
+  compatibility:
+    - Web UI and API switch together in same release
+    - remove Site-level CMS/PHP/app endpoints after all internal callers migrate
+    - do not silently redirect ambiguous old endpoints to primary domain
+    - return explicit 410 or validation error for stale external clients
+  validation:
+    - DTOs accept IDs and declarative settings, never absolute runtime paths
+    - agent receives server-derived normalized context
+    - reject unsupported PHP/MODX combinations before side effects
+    - cap aliases, env size, custom PHP and Nginx config size
+  idempotency:
+    - mutation accepts operation/idempotency key
+    - repeated request returns same operation
+    - agent steps check artifact state before creation or deletion
+
+operations_and_locks:
+  scopes:
+    global_update_lock: release migration only
+    hostname_registry_lock: canonical domain and alias reservation across Sites
+    site_config_lock: domain list, Nginx and whole-Site operations
+    domain_app_lock: provision, deploy, MODX update, PHP change and delete
+    database_lock: primary DB replacement and destructive DB action
+  ordering:
+    - global
+    - Site
+    - SiteDomain
+    - Database
+  rules:
+    - acquire in fixed order
+    - fail fast with current operation metadata
+    - persist operation status for process restarts
+    - retry only idempotent incomplete steps
+
+modx_management:
+  selected_domain_only:
+    - use SiteDomain preset, root, PHP, database and credentials
+    - construct admin URL from selected canonical domain and managerPath
+    - never fall back to Site primary when domainId is present
+  update:
+    preconditions:
+      - MODX preset
+      - appStatus RUNNING
+      - no deploy/backup/update conflict
+      - valid PHP and APP_PRIMARY DB
+      - writable root and sufficient disk
+    safety:
+      - create domain file snapshot
+      - create APP_PRIMARY database backup
+      - persist restore metadata before mutation
+      - redact DB and CMS credentials from logs
+    execution:
+      - set appStatus UPDATING
+      - run updater with selected explicit PHP binary
+      - run MODX doctor and setup cleanup
+      - probe selected canonical URL
+      - persist version only after successful verification
+    failure:
+      - preserve backup and diagnostics
+      - restore automatically when failure occurs after mutation begins
+      - set appStatus ERROR only if restoration or final health check fails
+      - never affect another domain
+  admin_login:
+    - selected-domain credentials only
+    - ADMIN authorization for secret reveal/change
+    - no password in URL, audit payload or application log
+    - CSRF-protected one-time server-side login handoff
+  version_checks:
+    - query every managed MODX domain independently
+    - show update badge in selector/Overview
+    - no bulk execution action
+
+files:
+  root_resolution:
+    - SiteDomain.filesRelPath is resolved server-side
+    - every operation revalidates containment
+    - symlink traversal outside selected root is rejected
+  upload_and_extract:
+    - preserve existing size and archive safety limits
+    - prevent path traversal and special-device extraction
+  permissions:
+    - normalize only selected domain root
+    - same Site system user remains owner
+
+databases:
+  selected_domain_behavior:
+    - list only Database rows owned by selected SiteDomain
+    - create new DB under selected SiteDomain
+    - app install receives APP_PRIMARY relation explicitly
+  naming:
+    - preserve existing global uniqueness rules
+    - multi-domain creation reserves all names before provisioning
+    - never derive ownership from a database-name prefix after migration
+  credentials:
+    - preserve encryption and current reveal authorization
+    - migration copies relations without decrypting credentials
+  deletion:
+    - block APP_PRIMARY deletion while managed MODX exists
+    - require preset conversion or application deletion first
+
+node_management:
+  scope:
+    - selected CUSTOM domain root
+    - retain existing PM2 process discovery and controls
+  constraints:
+    - one Linux user means one PM2 namespace per Site
+    - process names must be unique across every domain in the Site
+    - port allocation remains internal to Node management
+    - appPort is not added to generic domain forms
+  migration:
+    - preserve existing secondary domain filesRelPath and appPort
+    - classify existing secondary domain as CUSTOM
+
+logs_and_metrics:
+  logs:
+    - Nginx logs already map to SiteDomain and remain unchanged
+    - PHP log changes from Site anchor to runtimeKey anchor
+    - deploy and operation logs gain siteDomainId
+    - log APIs require explicit selected domain
+  metrics:
+    site_level:
+      - disk usage
+      - Linux-user CPU and memory
+      - shared service health
+    domain_level:
+      - HTTP request/error counts
+      - PHP pool process metrics
+      - application checks
+    honesty_rule: do not label aggregate Linux-user CPU as per-domain CPU
+  retention:
+    - update logrotate generation for new PHP pool logs
+    - preserve historical primary PHP log path or expose archived log explicitly
+  scheduler:
+    - iterate every main SiteDomain, never aliases
+    - store siteDomainId with app-targeted health pings
+    - keep one bounded concurrency limit per scheduler run
+    - aggregate failures without suppressing healthy sibling domains
+
+backups_restore_and_transfer:
+  backup_scope:
+    - remain whole-Site
+    - include every explicit domain root once
+    - include every Site-owned database once
+    - record domain-to-root and domain-to-database mapping
+  manifest:
+    version: increment to v2
+    include:
+      - Site shared fields
+      - all SiteDomain application and routing fields
+      - database siteDomainId and purpose
+      - preset versions and runtime keys
+      - checksums and schema version
+    exclude:
+      - live Unix sockets
+      - copied PHP-FPM/Nginx runtime configs
+  restore:
+    - v2 restores exact domain/application mapping
+    - v1 maps old Site application fields to primary domain
+    - v1 secondary domains become CUSTOM
+    - regenerate pools and Nginx on target
+  server_migration:
+    - preflight domain, alias, path, DB, PHP and runtimeKey conflicts
+    - recreate runtime configs after files and DBs restore
+    - verify every selected-domain URL
+
+duplicate:
+  decision: replace ambiguous whole-Site duplicate behavior
+  initial_behavior:
+    - action operates on currently selected domain/application
+    - creates a new Site with that application as its primary domain
+    - requires new canonical domain, Site name, directory and database names
+  excluded:
+    - duplicating every domain of a Site in one click
+  reason: hostnames, aliases, database names and external DNS need explicit mapping
+
+security:
+  authorization:
+    - every domain query is nested under authorized Site ownership
+    - ADMIN-only actions remain ADMIN-only
+    - no route accepts a foreign domainId under an owned siteId
+  secret_handling:
+    - copy encrypted values without plaintext conversion during migration
+    - redact env, DB, SSH and CMS secrets from logs and migration reports
+    - avoid credentials in process argv when supported
+  path_handling:
+    - central canonical path validator shared across API and agent contracts
+    - reject symlink escapes before write/delete/archive operations
+  custom_config:
+    - retain existing Nginx sanitizer
+    - retain PHP pool directive allow/deny validation
+    - limit payload size and reject socket/user/listen overrides
+  network:
+    - generated PHP sockets use restrictive owner/group/mode
+    - Node upstream remains loopback-only under current policy
+  audit:
+    - log actor, Site, SiteDomain, action, result and operationId
+    - never log secret values
+
+performance:
+  queries:
+    - Site list loads aggregate counts with bounded grouped queries
+    - Site detail loads lightweight domain summaries once
+    - selected domain detail is fetched separately
+    - avoid including logs, backups and databases in every Site list row
+  indexes:
+    - SiteDomain(siteId, position)
+    - SiteDomain(siteId, appStatus)
+    - SiteDomain(preset)
+    - SiteDomain(runtimeKey unique)
+    - Database(siteDomainId, purpose)
+    - DeployLog(siteDomainId, createdAt)
+    - HealthCheckPing(siteDomainId, createdAt) where used
+  filesystem:
+    - render one Nginx candidate per Site mutation
+    - batch PHP service reloads by version during migration
+  migration:
+    - stream reports instead of retaining unbounded logs
+    - group config validation/reloads by service/version
+
+prisma_migration:
+  creation:
+    command: npx prisma migrate dev --name domain_centric_applications
+    rule: never use prisma db push
+    implementation:
+      - generate migration with create-only workflow when hand-editing is needed
+      - use explicit SQLite table-copy SQL for dropped/moved columns
+      - preserve IDs, timestamps and encrypted bytes exactly
+  schema_steps:
+    - create idempotent _meowbox_domain_migration_map staging table
+    - add new nullable SiteDomain application columns
+    - add nullable Database.siteDomainId and purpose
+    - add nullable DeployLog.siteDomainId and related target columns
+    - copy primary Site application fields using validated migration-map rows
+    - resolve every SiteDomain.filesRelPath to explicit stored relative path
+    - assign CUSTOM and safe defaults to existing secondary domains
+    - attach existing Site databases using validated migration-map rows
+    - assign APP_PRIMARY database from validated migration-map rows
+    - attach existing deploy logs to primary SiteDomain
+    - verify row counts and invariants
+    - rebuild tables with final non-null constraints
+    - remove legacy application columns from Site
+    - create indexes and partial unique indexes
+    - drop _meowbox_domain_migration_map after successful contract checks
+  migration_map:
+    purpose: >
+      Carry filesystem-assisted legacy facts into deterministic SQL without
+      guessing and without placing mutable application logic inside migration SQL.
+    generation:
+      - candidate release scans supported legacy DB and managed MODX config read-only
+      - resolve primary SiteDomain, effective roots and APP_PRIMARY database
+      - emit one row per Site, SiteDomain and Database with source fingerprints
+      - dry-run inserts rows only into cloned SQLite DB
+      - apply inserts identical rows after snapshot and quiescence
+    validation:
+      - map source DB checksum must equal current snapshotted DB checksum
+      - every referenced ID must exist and belong to expected Site
+      - every supported Site and Database must be covered exactly once
+      - duplicate, missing or stale rows abort before Prisma migration
+    fresh_install:
+      - migration creates an empty staging table
+      - empty database has no legacy rows to map
+      - final schema is produced normally through prisma migrate deploy
+  primary_database_resolution:
+    order:
+      - use exact persisted relation if introduced by an earlier supported schema
+      - use exact managed installer convention when one matching DB exists
+      - parse current managed MODX config in preflight and match DB record
+      - if only one Site database exists, use it
+    failure: abort preflight with Site/domain/database identifiers; never guess
+  legacy_mapping:
+    primary:
+      preset: old Site.type
+      filesRelPath: old Site.filesRelPath
+      phpVersion: old Site.phpVersion when enabled
+      phpPoolCustom: old Site.phpPoolCustom
+      appPort: primary SiteDomain.appPort or old Site.appPort
+      git_and_env: copy unchanged
+      modx_fields: copy unchanged
+      runtimeKey: old Site.name
+      appStatus: >
+        ERROR only for a preserved application/provisioning failure; otherwise
+        RUNNING. Global STOPPED remains on Site and does not make appStatus STOPPED.
+    secondary:
+      preset: CUSTOM
+      filesRelPath: coalesce(old SiteDomain.filesRelPath, old Site.filesRelPath)
+      appPort: preserve old SiteDomain.appPort
+      phpVersion: >
+        copy old Site.phpVersion when the current generated Nginx enables PHP
+        for that secondary domain; otherwise null
+      phpPoolCustom: >
+        preserve effective non-resource Site pool settings; split process limits
+        according to php_fpm.resource_envelope
+      modx_fields: null
+      runtimeKey: deterministic from SiteDomain.id
+      appStatus: RUNNING unless shared Site is in a blocking error state
+      nginx_and_ssl: preserve exactly
+  verification:
+    - Site row count unchanged
+    - SiteDomain row count unchanged
+    - Database row count unchanged
+    - every Site has exactly one primary domain
+    - every SiteDomain has preset, filesRelPath, runtimeKey and appStatus
+    - every Database has valid SiteDomain in same Site
+    - every MODX domain has APP_PRIMARY DB and PHP version
+    - PRAGMA integrity_check returns ok
+    - PRAGMA foreign_key_check returns zero rows
+
+prisma_history_baseline:
+  problem: current updater uses db push on deployments without reliable migration history
+  required_fix:
+    - stop using db push in update.sh
+    - detect supported legacy schema by exact table/column/index fingerprint
+    - reject unknown drift before mutation
+    - baseline only when fingerprint matches an explicitly supported release schema
+    - record historical migrations as applied without executing them
+    - execute new migration through prisma migrate deploy
+  safeguards:
+    - baseline tool is idempotent
+    - existing valid _prisma_migrations is never rewritten
+    - failed/partial Prisma migration state blocks update
+    - baseline decision is included in dry-run report
+
+system_migration:
+  required_because:
+    - PHP-FPM pool templates and ownership change
+    - PHP logrotate paths change
+    - Nginx PHP socket payload changes
+  artifact_changes:
+    - create per-domain pool files for PHP-enabled domains
+    - preserve migrated primary compatibility key
+    - create per-domain temp/session/log directories where required
+    - render each domain 20-php.conf against its own socket
+    - update logrotate config
+    - remove obsolete Site-only pool only after cutover succeeds
+  implementation:
+    - one idempotent system migration
+    - explicit plan/preflight function with zero writes
+    - prepare, validate, commit and cleanup checkpoints
+    - checkpoint state persisted under state/data/migrations
+    - every write uses atomic rename and preserves mode/owner
+  validation:
+    - validate staged PHP-FPM configurations for all affected versions
+    - validate complete staged Nginx config
+    - verify runtime socket path lengths
+    - verify required PHP services and binaries exist
+    - verify no custom config references a disappearing managed artifact
+  regeneration_scope:
+    - every existing Site once during migration
+    - only affected Site during later domain changes
+
+dry_run:
+  automatic: always runs before apply in make update
+  standalone: expose update dry-run command for operators
+  production_mutation: forbidden
+  steps:
+    - download and verify candidate release
+    - run candidate preflight code from staging release
+    - acquire read lock/check no conflicting update
+    - record hashes of live SQLite DB and managed config trees
+    - create consistent SQLite clone using SQLite backup API
+    - fingerprint legacy schema and simulate Prisma baseline on clone
+    - run prisma migrate deploy against clone
+    - execute all data verification against clone
+    - render PHP-FPM, Nginx and logrotate candidates into temp tree
+    - validate candidate PHP-FPM configs
+    - validate candidate Nginx config without replacing live files
+    - calculate exact create/change/delete artifact manifest
+    - check disk, permissions, packages, services and socket path limits
+    - check for active provision/deploy/MODX update/backup operations
+    - compare live hashes to prove dry-run made no production changes
+    - write redacted machine-readable and human-readable report
+  result:
+    pass: update may enter maintenance and apply
+    fail: update exits before stopping services or changing DB/config
+
+release_update_transaction:
+  constraint: true atomicity across SQLite and OS files is impossible
+  user_visible_behavior: one command either completes new release or restores old release
+  phases:
+    U01_stage:
+      - download release and checksum
+      - extract candidate
+      - validate package contains schema, Prisma migration and system migration
+    U02_dry_run:
+      - execute full dry_run contract
+    U03_snapshot:
+      - create consistent SQLite backup
+      - snapshot Nginx managed tree with owners, modes and symlink targets
+      - snapshot PHP-FPM managed pools and logrotate files with metadata
+      - record current release symlink and process state
+    U04_quiesce:
+      - reject new panel mutations
+      - wait bounded time for active operations
+      - acquire one OS flock shared by updater, migration runner and startup repair
+      - stop API schedulers/workers and agent mutation endpoint
+      - disable/gate API startup artifact repair until migration commit
+      - keep hosted sites serving through current Nginx/PHP config
+      - serve panel maintenance response
+    U05_database:
+      - baseline supported legacy DB if required
+      - run prisma migrate deploy
+      - run integrity, foreign-key, count and invariant checks
+    U06_prepare_runtime:
+      - write new pool/config candidates
+      - validate PHP-FPM and Nginx
+      - start/reload new PHP pools and verify sockets
+    U07_switch:
+      - atomically replace managed runtime configs
+      - reload affected PHP-FPM services by version
+      - reload Nginx
+      - atomically switch current release symlink
+      - restart API, Web and agent with new release
+    U08_verify:
+      - API health
+      - Web health and current Nuxt build metadata
+      - agent health
+      - Nginx config
+      - PHP sockets
+      - selected HTTP probes for every SiteDomain
+      - DB integrity and representative API reads
+    U09_commit:
+      - mark rollback boundary after every final verification passes
+      - re-enable API/agent writes
+      - write success sentinel only now
+      - remove obsolete Site-only pool files as idempotent post-commit cleanup
+      - reload affected PHP services and recheck after cleanup
+      - leave snapshot under normal retention policy
+      - publish redacted migration report
+  rollback_trigger:
+    - any failure from quiesce through verification
+  rollback:
+    - stop candidate API/Web/agent
+    - restore previous release symlink
+    - restore SQLite DB backup including WAL-safe state
+    - restore Nginx, PHP-FPM and logrotate snapshots
+    - reload old PHP-FPM services
+    - validate and reload old Nginx
+    - start old API/Web/agent
+    - run old release health checks
+    - preserve candidate logs and failure report
+  after_commit_failure:
+    - never restore the old DB automatically after writes reopen
+    - keep new release serving when core health remains valid
+    - run idempotent forward repair for cleanup/reporting failures
+    - require explicit maintenance and a new snapshot for any later rollback
+  success_sentinel:
+    rule: never write before PM2/systemd health and application probes pass
+  availability:
+    - panel writes are unavailable during maintenance
+    - hosted static traffic should continue through current Nginx
+    - Nginx reload is graceful
+    - PHP-FPM pool transition may cause a brief PHP request interruption
+    - zero downtime is not promised for this schema/runtime cutover
+
+migration_mutation_boundary:
+  panel_database:
+    mutation: schema and ownership data are changed
+    rollback: consistent SQLite snapshot
+  managed_runtime_config:
+    mutation: Nginx, PHP-FPM and logrotate files are changed
+    rollback: metadata-preserving config snapshot
+  application_files:
+    mutation: forbidden during release migration
+    consequence: no application-root restore is needed for release rollback
+  application_databases:
+    mutation: forbidden during release migration
+    consequence: no customer DB restore is needed for release rollback
+  ssl_state:
+    mutation: certificates are not reissued or deleted by this migration
+
+migration_preflight_blockers:
+  - unsupported or drifted SQLite schema fingerprint
+  - failed or partial prior Prisma migration
+  - failed or partial prior system migration
+  - SQLite integrity or foreign-key error
+  - Site without exactly one primary domain
+  - canonical domain/alias collision
+  - invalid or escaping filesRelPath
+  - unresolved managed MODX primary database
+  - missing supported PHP binary or php-fpm service
+  - PHP runtime key or socket collision
+  - socket path over platform limit
+  - invalid existing PHP pool custom directives
+  - invalid current or candidate Nginx config
+  - insufficient free disk for DB/config snapshots and staging
+  - replacement PHP pool worker/memory budget exceeds safe host headroom
+  - active provisioning, deploy, MODX update, restore or destructive backup job
+  - custom config referencing an artifact that migration cannot preserve safely
+
+compatibility_and_edge_cases:
+  E01:
+    case: existing secondary domain inherits primary filesRelPath
+    action: >
+      preserve explicit resolved path, assign CUSTOM, preserve its effective
+      current PHP capability, and report shared root
+  E02:
+    case: existing secondary domain has appPort
+    action: preserve value and existing Nginx behavior; do not expose generic field
+  E03:
+    case: primary MODX Site has several databases
+    action: resolve APP_PRIMARY deterministically or block update
+  E04:
+    case: Site has no database but claims MODX preset
+    action: block migration with exact remediation data
+  E05:
+    case: Site is STOPPED
+    action: migrate data/config but preserve global stopped state
+  E06:
+    case: Site or app is ERROR
+    action: preserve error state and diagnostics; do not invent RUNNING
+  E07:
+    case: duplicate existing domain roots
+    action: preserve; block destructive file deletion; reject new duplicate
+  E08:
+    case: aliases contain another canonical domain
+    action: preflight block because routing is ambiguous
+  E09:
+    case: domain rename after migration
+    action: preserve app artifacts/runtime key; regenerate routing/SSL only
+  E10:
+    case: primary domain changes
+    action: switch primary flags only; no app/data movement
+  E11:
+    case: two domains use different PHP versions
+    action: separate pools, shared service per version, explicit binary per operation
+  E12:
+    case: two domains use same PHP version
+    action: separate pools/sockets under same phpX.Y-fpm service
+  E13:
+    case: custom Nginx domain proxies Node
+    action: preserve config and internal appPort behavior
+  E14:
+    case: old backup or transfer manifest
+    action: v1 compatibility mapper creates primary app and CUSTOM secondaries
+  E15:
+    case: operation process dies mid-provision
+    action: resume from persisted idempotent step state
+  E16:
+    case: migration dies after DB change but before runtime switch
+    action: update rollback restores DB and runtime snapshot, then old release
+  E17:
+    case: SSL issuance fails for one new domain
+    action: keep app HTTP-capable and report SSL failure separately
+  E18:
+    case: selected domain disappears while Web UI is open
+    action: 404 domain API, refresh summaries, fall back to primary
+  E19:
+    case: stale browser calls old Site-level endpoint
+    action: explicit error; never mutate primary implicitly
+  E20:
+    case: manual files exist in new MODX target directory
+    action: reject install before mutation
+  E21:
+    case: one old Site pool served several PHP-enabled domains
+    action: >
+      create one pool per domain while preserving the old aggregate worker
+      ceiling; never multiply worst-case memory silently
+
+execution_task_graph:
+  T001_contract_freeze:
+    depends_on: []
+    work:
+      - approve fixed decisions D01-D14 as implementation contract
+      - enumerate every current Site application field and every reader/writer
+      - enumerate every SiteDomain routing field and preserve its semantics
+      - document supported source release/schema fingerprints
+    done_when:
+      - no unclassified Site application field remains
+      - no route or background job lacks a target ownership decision
+
+  T002_upgrade_fixtures:
+    depends_on: [T001_contract_freeze]
+    work:
+      - produce sanitized SQLite/config fixtures from supported releases
+      - include single-domain MODX 2, MODX 3 and CUSTOM
+      - include multi-domain, appPort, shared-root, multiple-DB and error states
+      - include valid and absent Prisma migration histories
+    done_when:
+      - fixtures contain no secrets or customer content
+      - every legacy_mapping branch has a fixture
+
+  T003_schema_design:
+    depends_on: [T001_contract_freeze]
+    work:
+      - update Prisma models and enums
+      - define raw SQLite partial indexes
+      - define Domain/Database/DeployLog relations and delete policies
+      - generate typed shared API models
+    done_when:
+      - schema expresses all final required fields
+      - no legacy Site application field exists in final model
+      - Prisma validate/generate passes
+
+  T004_legacy_mapper:
+    depends_on: [T002_upgrade_fixtures, T003_schema_design]
+    work:
+      - implement read-only schema fingerprinting
+      - resolve effective roots and runtime keys
+      - resolve APP_PRIMARY database deterministically
+      - emit migration-map rows and blockers
+      - redact report values
+    done_when:
+      - identical input produces byte-identical mapping
+      - ambiguous input fails before mutation
+
+  T005_prisma_baseline:
+    depends_on: [T002_upgrade_fixtures, T003_schema_design]
+    work:
+      - detect trustworthy existing Prisma history
+      - baseline exact supported db-push schemas
+      - reject drift and partial history
+      - remove db push from install/update paths
+    done_when:
+      - migrate deploy works on fresh, baselined and already-tracked fixtures
+      - unknown schema never receives an automatic baseline
+
+  T006_prisma_migration:
+    depends_on: [T004_legacy_mapper, T005_prisma_baseline]
+    work:
+      - generate migration through prisma migrate dev
+      - hand-review SQLite table-copy SQL
+      - consume and validate migration-map staging rows
+      - copy application fields and relations
+      - enforce final non-null/unique constraints
+      - drop legacy fields and staging table
+    done_when:
+      - all fixtures reach one identical final schema
+      - row counts, integrity and foreign keys pass
+      - second migrate deploy is a no-op
+
+  T007_operation_framework:
+    depends_on: [T003_schema_design]
+    work:
+      - persist parent and domain child operations
+      - implement Site and SiteDomain locks
+      - add idempotency keys and resumable step state
+      - add redacted progress/error transport to Web UI
+    done_when:
+      - process restart resumes or safely fails each operation
+      - conflicting mutations cannot run concurrently
+
+  T008_domain_context:
+    depends_on: [T003_schema_design]
+    work:
+      - implement requireOwnedSiteDomain
+      - implement canonical hostname and path validators
+      - implement selected-domain application context mapper
+      - remove implicit primary fallback from reusable app services
+    done_when:
+      - every app service requires explicit SiteDomain context
+      - IDOR and path traversal tests pass
+
+  T009_php_pool_identity:
+    depends_on: [T003_schema_design, T008_domain_context]
+    work:
+      - make pool renderer accept SiteDomain runtime context
+      - preserve migrated primary pool compatibility
+      - generate new-domain pool/socket/log artifacts and validated temp/session paths
+      - validate socket limits and directive restrictions
+      - preserve aggregate legacy worker budget when one pool becomes several
+    done_when:
+      - mixed PHP versions work under shared per-version services
+      - domain rename and make-primary do not change pool identity
+      - migration does not silently multiply worst-case PHP worker memory
+
+  T010_nginx_domain_runtime:
+    depends_on: [T008_domain_context, T009_php_pool_identity]
+    work:
+      - move PHP payload from Site to each rendered SiteDomain
+      - retain current server-block and chunk paths
+      - preserve exact custom chunks and appPort behavior
+      - stage, validate, atomically switch and restore configs
+    done_when:
+      - mixed PHP/static/proxy golden tests pass
+      - failed validation or probe restores active config
+
+  T011_domain_installer:
+    depends_on: [T007_operation_framework, T008_domain_context, T009_php_pool_identity, T010_nginx_domain_runtime]
+    work:
+      - accept explicit domain preset/runtime/DB context
+      - provision multiple application rows for new Site
+      - provision one additional domain for existing Site
+      - track created artifacts for rollback
+      - keep SSL failure separate from application failure
+    done_when:
+      - one Site can provision three mixed applications
+      - failure never removes pre-existing content or another app
+
+  T012_modx_domain_lifecycle:
+    depends_on: [T007_operation_framework, T008_domain_context, T011_domain_installer]
+    work:
+      - scope install, update, doctor, cleanup and permissions to domain
+      - scope credentials and admin login to domain
+      - add file/DB safety snapshot before MODX update
+      - verify and restore selected app only
+    done_when:
+      - two MODX apps update and authenticate independently
+      - forced failure restores selected app and leaves peer unchanged
+
+  T013_database_domain_ownership:
+    depends_on: [T006_prisma_migration, T008_domain_context]
+    work:
+      - filter CRUD by selected domain
+      - enforce APP_PRIMARY rules
+      - update installer, updater and backup consumers
+      - block destructive primary DB deletion
+    done_when:
+      - no app operation discovers DB by Site/name guess
+      - cross-domain DB access is rejected
+
+  T014_domain_crud:
+    depends_on: [T007_operation_framework, T008_domain_context, T010_nginx_domain_runtime, T013_database_domain_ownership]
+    work:
+      - implement nested create/edit/retry/delete/make-primary APIs
+      - enforce last-domain, primary and shared-root guards
+      - preserve app identity during rename/primary switch
+      - make deletion cleanup explicit and auditable
+    done_when:
+      - all domain_management rules pass integration tests
+
+  T015_domain_deploy_node:
+    depends_on: [T007_operation_framework, T008_domain_context]
+    work:
+      - move deploy status/logs/git/env to SiteDomain
+      - scope Node.js process discovery to selected root
+      - enforce PM2 name uniqueness across shared Site user
+      - keep port allocation internal
+    done_when:
+      - deploy/Node actions affect selected CUSTOM domain only
+      - generic APIs and forms never expose appPort
+
+  T016_domain_files_logs_metrics:
+    depends_on: [T008_domain_context, T009_php_pool_identity]
+    work:
+      - scope file root to selected domain
+      - map Nginx and PHP logs to selected domain
+      - add domain IDs to deploy/audit/health records
+      - separate honest domain metrics from aggregate Site metrics
+      - update logrotate
+    done_when:
+      - selection changes files/logs/metrics deterministically
+      - aggregate CPU is never mislabeled as domain CPU
+
+  T017_site_aggregates:
+    depends_on: [T003_schema_design, T013_database_domain_ownership]
+    work:
+      - rewrite Site list/detail projections
+      - derive preset counts and aggregate app status efficiently
+      - keep global Site lifecycle separate from app lifecycle
+      - remove singular Site type/version/port projections
+    done_when:
+      - list queries are bounded and indexed
+      - no N+1 domain/application query remains
+
+  T018_web_domain_context:
+    depends_on: [T008_domain_context, T017_site_aggregates]
+    work:
+      - implement header domain selector
+      - persist explicit domainId in URL
+      - implement primary fallback and conditional tab behavior
+      - propagate domainId through all domain-scoped API calls
+    done_when:
+      - aliases are absent from selector
+      - refresh/deep-link/stale-selection E2E tests pass
+
+  T019_web_creation:
+    depends_on: [T011_domain_installer, T014_domain_crud]
+    work:
+      - build reusable preset form
+      - support repeatable domain rows in create Site wizard
+      - reuse same form for add Domain
+      - provide per-domain review and operation results
+    done_when:
+      - create/add forms share validation and preset logic
+      - no directory hierarchy or appPort is invented
+
+  T020_web_scoped_tabs:
+    depends_on: [T012_modx_domain_lifecycle, T015_domain_deploy_node, T016_domain_files_logs_metrics, T018_web_domain_context]
+    work:
+      - scope Overview, SSL, Nginx, PHP, DB, Files, Node, Logs, MODX, Deploy
+      - preserve Site-scoped Backups, Cron, Services, SSH and Danger
+      - replace duplicate action with selected-app-to-new-Site flow
+      - remove stale Site-level app controls
+    done_when:
+      - every tab clearly follows domain or Site scope
+      - desktop/mobile E2E has no stale context or overlapping controls
+
+  T021_backup_manifest_v2:
+    depends_on: [T006_prisma_migration, T013_database_domain_ownership]
+    work:
+      - serialize full domain app mapping
+      - deduplicate shared roots
+      - implement v1 compatibility mapping
+      - regenerate runtime configs after restore
+    done_when:
+      - v1 and v2 restore tests pass
+      - restored Site preserves app/domain/DB ownership
+
+  T022_transfer_import:
+    depends_on: [T021_backup_manifest_v2, T011_domain_installer]
+    work:
+      - update server transfer snapshot
+      - update hostpanel import output to explicit existing presets
+      - preflight target conflicts for every domain
+      - remove any general adoption/unmanaged path from this feature
+    done_when:
+      - clean VPS transfer rebuilds pools/Nginx and probes every domain
+      - no imported app has implicit or unmanaged type
+
+  T023_system_migration:
+    depends_on: [T006_prisma_migration, T009_php_pool_identity, T010_nginx_domain_runtime, T016_domain_files_logs_metrics]
+    work:
+      - implement idempotent per-domain pool/Nginx/logrotate regeneration
+      - preserve primary compatibility artifacts
+      - snapshot, validate, switch and clean obsolete pools
+      - persist checkpoints and redacted report
+    done_when:
+      - second run is no-op
+      - interruption at each checkpoint resumes or restores safely
+
+  T024_real_dry_run:
+    depends_on: [T004_legacy_mapper, T005_prisma_baseline, T006_prisma_migration, T023_system_migration]
+    work:
+      - clone SQLite consistently
+      - run identical baseline/map/migrate path on clone
+      - render and validate all runtime configs in staging
+      - prove live DB/config hashes unchanged
+      - expose automatic and standalone report
+    done_when:
+      - supported fixtures pass without live changes
+      - every blocker fails before maintenance mode
+
+  T025_update_transaction:
+    depends_on: [T024_real_dry_run]
+    work:
+      - stage release before mutation
+      - snapshot DB/config/current release
+      - quiesce panel mutation processes
+      - apply DB and system migrations
+      - switch/restart/verify
+      - restore all layers on failure
+      - move success sentinel after final health checks
+    done_when:
+      - forced failure at every mutating phase restores healthy old release
+      - successful update leaves no old Site-only source of truth
+
+  T026_stale_contract_removal:
+    depends_on: [T014_domain_crud, T020_web_scoped_tabs, T022_transfer_import]
+    work:
+      - remove old Site-level app routes and DTO fields
+      - remove old shared API projections and Web controls
+      - remove old Site-level agent event payloads
+      - scan source for every removed schema field
+    done_when:
+      - compiler and structural search show no forbidden legacy ownership
+      - stale clients receive explicit failure, never primary fallback
+
+  T027_full_rehearsal:
+    depends_on: [T021_backup_manifest_v2, T022_transfer_import, T025_update_transaction, T026_stale_contract_removal]
+    work:
+      - run unit, integration, agent, Web and migration suites
+      - upgrade all sanitized production fixtures
+      - perform failure injection and rollback matrix
+      - test clean VPS installation
+      - test backup/restore and VPS transfer
+    done_when:
+      - quality_gates and acceptance_criteria all pass
+      - dry-run/apply reports are reviewed
+
+  T028_release:
+    depends_on: [T027_full_rehearsal]
+    work:
+      - run make snapshot before local dangerous rehearsal if applicable
+      - bump VERSION
+      - commit under operator identity
+      - tag and publish release artifact/checksums
+      - verify release workflow and downloadable package
+      - run post-release update rehearsal from published artifact
+    done_when:
+      - published artifact upgrades old VPS and installs clean VPS correctly
+      - no implementation work or migration gap remains
+
+parallelization:
+  after_T003:
+    - T007_operation_framework
+    - T008_domain_context
+    - T005_prisma_baseline
+  after_runtime_contract:
+    - API domain lifecycle work
+    - backup manifest work
+    - Web aggregate/domain-state shell
+  serialized:
+    - final Prisma migration review
+    - system migration
+    - updater transaction
+    - release rehearsal and release
+
+code_impact_map:
+  schema_and_migrations:
+    modify:
+      - api/prisma/schema.prisma
+      - migrations/runner.ts
+      - migrations/system/_types.ts when plan/journal context changes
+    add:
+      - api/prisma/migrations/<domain-centric-id>/migration.sql
+      - migrations/system/<domain-runtime-id>.ts
+      - migration mapper, fingerprint and invariant-check modules
+    never_modify:
+      - already-applied Prisma migration SQL
+      - already-applied system migration files
+  release_tooling:
+    modify:
+      - tools/update.sh
+      - tools/snapshot.sh
+      - tools/rollback.sh
+      - tools/healthcheck.sh
+      - Makefile
+    verify:
+      - release workflow packages Prisma and compiled system migrations
+      - checksums cover every migration artifact
+  shared_contracts:
+    modify:
+      - shared/src/entities.ts
+      - shared/src/api.ts
+      - shared/src/enums.ts
+      - shared/src/site-artifacts.ts
+      - shared/src/node-app.ts where domain ownership is represented
+  api_site_core:
+    modify:
+      - api/src/sites/sites.dto.ts
+      - api/src/sites/sites.service.ts
+      - api/src/sites/sites.controller.ts
+      - api/src/sites/site-domains.dto.ts
+      - api/src/sites/site-domains.helper.ts
+      - api/src/sites/site-domains.service.ts
+      - api/src/sites/site-domains.controller.ts
+      - api/src/sites/sites-nginx.service.ts
+    add:
+      - owned SiteDomain context guard/helper
+      - durable domain operation service
+      - migration map and invariant services
+  api_consumers:
+    inspect_and_migrate:
+      - deploy service and controller
+      - MODX update/doctor/credential routes and services
+      - PHP pool routes and services
+      - files routes and services
+      - database routes and services
+      - logs routes and services
+      - scheduler and health checks
+      - Site Node.js service
+      - metrics collectors and projections
+      - backup, restore and duplicate services
+      - Meowbox migration service
+      - HostPanel migration plan/run services
+      - audit interceptor domain identity extraction
+      - startup artifact-repair hooks
+  agent:
+    modify:
+      - agent/src/nginx/templates.ts
+      - agent/src/nginx/nginx.manager.ts
+      - agent/src/php/phpfpm.manager.ts
+      - agent/src/agent.service.ts
+      - agent/src/system/site-metrics.collector.ts
+      - agent deploy executor
+      - agent Node.js manager
+      - Site installer and permissions modules
+      - MODX installer/updater/doctor modules
+      - HostPanel migration item runner and contracts
+  web:
+    modify:
+      - web/pages/sites/create.vue
+      - web/pages/sites/index.vue
+      - web/pages/sites/[id].vue
+      - web/components/SiteDomainsTab.vue
+      - Site Overview/Nginx/PHP/SSL/Database/Files/Logs/Node/MODX/Deploy tabs
+      - HostPanel migration UI where destination ownership is serialized
+    add:
+      - reusable domain preset form
+      - Site header domain selector
+      - selected-domain URL state/composable
+      - per-domain operation progress component
+  documentation:
+    update:
+      - backup/restore format
+      - server migration format
+      - Site/domain ownership model
+      - PHP-FPM pool topology
+      - operator update/dry-run/rollback runbook
+
+implementation_workstreams:
+  W01_schema:
+    deliverables:
+      - final Prisma schema
+      - generated and reviewed migration SQL
+      - schema fingerprint/baseline tool
+      - migration invariant checker
+  W02_domain_context:
+    deliverables:
+      - shared requireOwnedSiteDomain guard
+      - normalized application context mapper
+      - shared path/runtime validation
+      - operation locks
+  W03_agent_runtime:
+    deliverables:
+      - per-domain PHP pool generation
+      - per-domain logs/temp/session paths
+      - domain-aware installer/updater/deployer
+      - atomic Nginx and PHP config transitions
+  W04_api:
+    deliverables:
+      - nested create Site domains request
+      - add/retry/edit/delete/make-primary flows
+      - domain-scoped MODX/PHP/files/logs/deploy/DB/Node routes
+      - aggregate Site list/detail responses
+  W05_web:
+    deliverables:
+      - repeatable create wizard rows
+      - unified add-domain/preset form
+      - header domain selector and URL state
+      - scoped tabs/actions
+      - aggregate Site list
+  W06_backup_transfer:
+    deliverables:
+      - v2 backup/transfer manifest
+      - v1 compatibility mapper
+      - domain-aware restore and target regeneration
+  W07_release:
+    deliverables:
+      - real clone-based dry-run
+      - maintenance/quiesce phase
+      - reversible config snapshot
+      - corrected success sentinel and rollback
+      - removal of db push
+  W08_observability:
+    deliverables:
+      - per-domain logs and audit IDs
+      - migration report
+      - operation status UI
+
+implementation_order:
+  - W01 schema and migration contract
+  - W02 domain context, invariants and locks
+  - W03 agent runtime and config validation
+  - W04 API migration
+  - W05 Web UI migration
+  - W06 backup/restore/transfer compatibility
+  - W07 updater, dry-run and rollback
+  - W08 observability and final hardening
+  - full rehearsal and one release
+
+test_plan:
+  unit:
+    schema_and_mapping:
+      - primary MODX_REVO mapping
+      - primary MODX_3 mapping
+      - primary CUSTOM mapping
+      - secondary CUSTOM mapping
+      - inherited and explicit filesRelPath
+      - legacy appPort preservation
+      - multiple DB primary resolution
+      - encrypted field byte preservation
+    validation:
+      - hostname and alias normalization/conflicts
+      - relative path containment and symlink escapes
+      - runtime key determinism and socket length
+      - preset/PHP/DB contracts
+      - domain ownership guard
+    state:
+      - application transitions
+      - Site aggregate status
+      - operation lock ordering
+  migration_fixtures:
+    - pristine current schema
+    - current schema with valid Prisma history
+    - current schema without Prisma history
+    - old supported release snapshots
+    - Site with one domain
+    - Site with several secondary domains
+    - secondary domains sharing root
+    - different per-domain Nginx/SSL settings
+    - Site with multiple databases
+    - stopped and error Sites
+    - malformed unsupported drift must fail before mutation
+  agent:
+    - two domains on same PHP version create distinct pools/sockets
+    - two domains on different versions use correct services
+    - legacy one-pool-to-many split preserves aggregate worker ceiling
+    - insufficient FPM headroom blocks before service changes
+    - pool update rollback
+    - PHP version switch rollback
+    - explicit PHP binary for install/update
+    - Nginx per-domain PHP/static/proxy golden renders
+    - custom Nginx bytes preserved
+    - nginx -t failure restores old config
+  api_integration:
+    - create Site with one domain
+    - create Site with three mixed presets
+    - add MODX and CUSTOM domains
+    - retry failed domain provisioning
+    - domain rename
+    - make-primary
+    - delete guards and shared-root protection
+    - foreign domainId authorization rejection
+    - concurrent provision/update/delete rejection
+    - database ownership and APP_PRIMARY guards
+  modx:
+    - two MODX applications inside one Site
+    - independent versions and PHP versions
+    - update first without touching second
+    - update rollback from file and DB failure
+    - admin password and auto-login per selected domain
+    - doctor and setup cleanup per selected root
+  backup_and_transfer:
+    - whole-Site backup with multiple roots and DBs
+    - deduplicate shared legacy root
+    - v2 restore
+    - v1 restore mapping
+    - transfer to clean VPS and regenerate pools/Nginx
+  web_e2e:
+    - selector visible only for multiple main domains
+    - aliases absent
+    - query-param deep links
+    - invalid selection fallback
+    - MODX/PHP tabs conditional
+    - Files/Logs/DB content changes with selector
+    - destructive dialog names selected domain/path
+    - create three-domain wizard validation
+    - desktop and mobile layout without overlap
+  release_rehearsal:
+    - dry-run leaves DB/config hashes unchanged
+    - full upgrade on cloned production snapshots
+    - forced failure after each update phase
+    - old release fully restored after each forced failure
+    - interrupted update resumes or rolls back idempotently
+    - second update run is a no-op
+    - new clean VPS installation supports same model
+
+quality_gates:
+  code:
+    - formatting, lint and type checks pass
+    - API, agent and Web builds pass
+    - no Site-level application field references remain
+    - no ambiguous primary-domain fallback in domain actions
+  migration:
+    - Prisma migration generated through migrate dev
+    - no db push in install/update paths
+    - dry-run against every supported fixture
+    - DB row-count, integrity and foreign-key checks pass
+    - system migration is idempotent
+  runtime:
+    - php-fpm validation passes for every supported version
+    - nginx -t passes
+    - every expected socket exists
+    - all canonical domain HTTP probes return expected class
+  security:
+    - path traversal suite passes
+    - cross-Site domain authorization suite passes
+    - migration and operation logs contain no secrets
+  release:
+    - package contains migration SQL and compiled system migration
+    - rollback rehearsal passes
+    - success sentinel occurs only after final health checks
+
+acceptance_criteria:
+  A01:
+    given: new Site wizard
+    when: operator adds three domain rows with mixed presets
+    then: one Site and three independently managed domain applications are created
+  A02:
+    given: existing Site
+    when: operator adds another domain with MODX preset and explicit directory
+    then: MODX, DB, PHP pool, Nginx and SSL belong to that domain
+  A03:
+    given: Site with two MODX domains
+    when: one domain is selected
+    then: update, doctor, credentials and admin login affect only that MODX
+  A04:
+    given: two PHP domains on same version
+    then: they use separate pools/sockets under one phpX.Y-fpm service
+  A05:
+    given: two PHP domains on different versions
+    then: each uses its configured version without changing the other
+  A06:
+    given: Site detail header
+    when: domain selection changes
+    then: selected-domain tabs and actions change without a second app selector
+  A07:
+    given: alias
+    then: it routes to its parent domain app and is absent from selector
+  A08:
+    given: existing secondary domain during upgrade
+    then: it becomes CUSTOM with exact current path, appPort, Nginx and SSL state
+  A09:
+    given: current primary application during upgrade
+    then: preset, path, PHP, DB, credentials and MODX version are preserved
+  A10:
+    given: unsupported or ambiguous legacy data
+    then: automatic dry-run blocks update before production mutation
+  A11:
+    given: failure after schema migration begins
+    then: DB, runtime configs and old release are restored and old health passes
+  A12:
+    given: clean VPS installation of release
+    then: multi-domain application creation works without legacy migration steps
+  A13:
+    given: MODX update failure
+    then: selected app files and primary DB restore without touching other domains
+  A14:
+    given: domain delete with shared root
+    then: file deletion is refused
+  A15:
+    given: stale client without domainId
+    then: API never silently targets primary application
+
+release_definition_of_done:
+  - all fixed decisions D01-D14 implemented
+  - all migration blockers produce actionable redacted diagnostics
+  - all acceptance criteria A01-A15 pass
+  - migration rehearsed against supported real-world DB/config snapshots
+  - rollback rehearsed after forced failure at every mutating phase
+  - clean installation and in-place update produce same final schema/runtime model
+  - documentation describes domain selector, per-domain presets and backup semantics
+  - VERSION bumped before commit/tag
+  - release built, checksums published and update workflow verified

@@ -5,7 +5,8 @@
   "main": "dist/runner.js",
   "scripts": {
     "build": "tsc",
-    "migrate": "node dist/runner.js"
+    "migrate": "node dist/runner.js",
+    "test:release": "npm run build && node --test tests/*.test.js"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",

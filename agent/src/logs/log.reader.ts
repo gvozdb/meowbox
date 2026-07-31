@@ -1,7 +1,9 @@
 import * as fs from 'fs/promises';
 import * as path from 'path';
 import { CommandExecutor } from '../command-executor';
-import { artifactAnchor, siteDomainLogBase } from '@meowbox/shared';
+import { siteDomainLogBase } from '@meowbox/shared';
+import { PHP_LOG_DIR } from '../config';
+import { validateRuntimeKey } from '../runtime/site-domain-runtime';
 
 // Совместимо с log.tail.ts — обе подсистемы должны смотреть в одну директорию,
 // иначе на нестандартных дистрибутивах (например, /var/log/nginx-extra) часть
@@ -39,10 +41,12 @@ export class LogReader {
    * Read the last N lines of a site log file.
    */
   async read(params: {
+    siteDomainId: string;
     systemUser: string;
     domain: string;
     type: 'access' | 'error' | 'php' | 'app';
-    siteName?: string;
+    siteName: string;
+    runtimeKey: string;
     lines?: number;
   }): Promise<{ success: boolean; data?: LogReadResult; error?: string }> {
     const maxLines = Math.min(params.lines || 200, 1000);
@@ -86,9 +90,11 @@ export class LogReader {
    * List available log files for a site.
    */
   async listAvailable(params: {
+    siteDomainId: string;
     systemUser: string;
     domain: string;
-    siteName?: string;
+    siteName: string;
+    runtimeKey: string;
   }): Promise<{ success: boolean; data?: Array<{ type: string; path: string; sizeBytes: number }> }> {
     const types: Array<'access' | 'error' | 'php' | 'app'> = ['access', 'error', 'php', 'app'];
     const available: Array<{ type: string; path: string; sizeBytes: number }> = [];
@@ -173,17 +179,11 @@ export class LogReader {
     return SYSTEM_LOG_SOURCES;
   }
 
-  /**
-   * Resolve the path to a site log file.
-   * Пути к логам якорятся на `siteName` (Site.name = Linux-юзер) если он
-   * передан — новая схема. Fallback на `domain` — для сайтов, которые ещё
-   * не мигрировали на новую схему именования артефактов.
-   */
   resolveLogPath(params: {
     domain: string;
     type: string;
-    siteName?: string;
-    systemUser?: string;
+    siteName: string;
+    runtimeKey: string;
   }): string | null {
     return this.resolveLogPathCandidates(params)[0] || null;
   }
@@ -191,8 +191,8 @@ export class LogReader {
   private resolveLogPathCandidates(params: {
     domain: string;
     type: string;
-    siteName?: string;
-    systemUser?: string;
+    siteName: string;
+    runtimeKey: string;
   }): string[] {
     switch (params.type) {
       case 'access':
@@ -200,27 +200,31 @@ export class LogReader {
       case 'error':
         return this.nginxLogCandidates(params, 'error');
       case 'php':
-        return [`/var/log/php/${artifactAnchor({ siteName: params.siteName, domain: params.domain })}-error.log`];
+        return this.phpLogCandidates(params);
       case 'app':
-        if (params.siteName) {
-          return [`${process.env.HOME || '/root'}/.pm2/logs/${params.siteName}-out.log`];
-        }
-        return [];
+        return this.appLogCandidates(params);
       default:
         return [];
     }
   }
 
   private nginxLogCandidates(
-    params: { domain: string; siteName?: string },
+    params: { domain: string; siteName: string },
     type: 'access' | 'error',
   ): string[] {
-    const bases = [
-      siteDomainLogBase({ siteName: params.siteName, domain: params.domain }),
-      (params.siteName || '').trim(),
-      (params.domain || '').trim(),
-    ].filter(Boolean);
-    return Array.from(new Set(bases)).map((base) => path.join(NGINX_LOG_DIR, `${base}-${type}.log`));
+    const base = siteDomainLogBase(params);
+    return [path.join(NGINX_LOG_DIR, `${base}-${type}.log`)];
+  }
+
+  private phpLogCandidates(params: { runtimeKey: string }): string[] {
+    const runtimeKey = validateRuntimeKey(params.runtimeKey);
+    return [path.join(PHP_LOG_DIR, `${runtimeKey}-error.log`)];
+  }
+
+  private appLogCandidates(params: { runtimeKey: string }): string[] {
+    const pm2Dir = `${process.env.HOME || '/root'}/.pm2/logs`;
+    const runtimeKey = validateRuntimeKey(params.runtimeKey);
+    return [path.join(pm2Dir, `site-${runtimeKey}-out.log`)];
   }
 
   private async firstExistingPath(paths: string[]): Promise<string | null> {
@@ -229,7 +233,7 @@ export class LogReader {
         await fs.access(file);
         return file;
       } catch {
-        // Try next legacy candidate.
+        // Try next domain-owned candidate.
       }
     }
     return null;

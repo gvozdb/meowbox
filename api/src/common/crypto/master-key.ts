@@ -28,7 +28,7 @@ import * as path from 'path';
  *                                ключ записывается в .env при bootstrap'е,
  *                                чтобы PHP-плагин читал готовое значение)
  *   - `meowbox:ssh:v1`         — Site.sshPasswordEnc (ssh-cipher)
- *   - `meowbox:cms:v1`         — Site.cmsAdminPasswordEnc (cms-cipher)
+ *   - `meowbox:cms:v1`         — SiteDomain.cmsAdminPasswordEnc (cms-cipher)
  *
  * При смене master-key все шифротексты неотменяемо теряются.
  * Бэкапить файл `.master-key` ВМЕСТЕ С БД.

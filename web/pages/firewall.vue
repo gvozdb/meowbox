@@ -198,7 +198,7 @@ function parseUfwTo(to: string): { port: string; protocol: string } {
   // "443" → port=443, protocol=BOTH
   // "ispmanager" → port=ispmanager, protocol=—
   const m = to.match(/^(\d+(?::\d+)?)\/?(tcp|udp)?$/i);
-  if (m) return { port: m[1], protocol: m[2] ? m[2].toUpperCase() : 'BOTH' };
+  if (m) return { port: m[1] ?? to, protocol: m[2]?.toUpperCase() ?? 'BOTH' };
   return { port: to, protocol: '—' };
 }
 

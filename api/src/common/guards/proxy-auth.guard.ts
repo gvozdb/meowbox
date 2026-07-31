@@ -45,6 +45,7 @@ export class ProxyAuthGuard implements CanActivate {
     const req = context.switchToHttp().getRequest<{
       headers: Record<string, string | undefined>;
       user?: unknown;
+      proxyAuthenticated?: boolean;
       ip?: string;
     }>();
 
@@ -83,6 +84,7 @@ export class ProxyAuthGuard implements CanActivate {
         username: admin.username,
         role: admin.role,
       };
+      req.proxyAuthenticated = true;
       return true;
     }
 

@@ -2,6 +2,14 @@ import { CommandExecutor } from '../command-executor';
 import * as fs from 'fs';
 import * as path from 'path';
 import { COMPOSER_CANDIDATES, DEFAULT_PHP_VERSION } from '../config';
+import { isUnderAllowedSiteRoot } from '../config';
+import {
+  resolveSiteDomainRoot,
+  validatePhpVersion,
+  validateRuntimeKey,
+} from '../runtime/site-domain-runtime';
+import { safeErrorMessage } from '@meowbox/shared';
+import { resolveDeployRuntime } from './deploy-runtime';
 
 // Защита от arg-flag smuggling: git fetch/clone/checkout принимает любой аргумент
 // начинающийся с `-` как флаг (`--upload-pack=...`, `-c core.sshCommand=...`).
@@ -36,11 +44,25 @@ function assertGitCommit(sha: string): void {
 interface DeployParams {
   siteType: string;
   rootPath: string;
+  filesRelPath: string;
   gitRepository: string;
   branch: string;
-  phpVersion?: string;
-  appPort?: number;
+  phpVersion?: string | null;
+  runtimeKey: string;
+  appPort?: number | null;
   domain: string;
+  envVars?: Record<string, string>;
+}
+
+interface RollbackParams {
+  rootPath: string;
+  filesRelPath: string;
+  commitSha: string;
+  siteType: string;
+  domain: string;
+  phpVersion?: string | null;
+  runtimeKey: string;
+  appPort?: number | null;
   envVars?: Record<string, string>;
 }
 
@@ -67,11 +89,13 @@ export class DeployExecutor {
   async deploy(params: DeployParams, onLog: LogFn): Promise<DeployResult> {
     const output: string[] = [];
     const log = (line: string) => {
-      output.push(line);
-      onLog(line + '\n');
+      const safeLine = safeErrorMessage(line, 'Deploy log unavailable', 50_000);
+      output.push(safeLine);
+      onLog(safeLine + '\n');
     };
 
     try {
+      params = this.resolveDomainRoot(params);
       log(`[deploy] Starting deploy for ${params.domain}`);
       log(`[deploy] Type: ${params.siteType}, Branch: ${params.branch}`);
 
@@ -107,22 +131,24 @@ export class DeployExecutor {
   }
 
   async rollback(
-    params: { rootPath: string; commitSha: string; siteType: string; domain: string; phpVersion?: string },
+    params: RollbackParams,
     onLog: LogFn,
   ): Promise<DeployResult> {
     const output: string[] = [];
     const log = (line: string) => {
-      output.push(line);
-      onLog(line + '\n');
+      const safeLine = safeErrorMessage(line, 'Deploy log unavailable', 50_000);
+      output.push(safeLine);
+      onLog(safeLine + '\n');
     };
 
     try {
+      params = this.resolveDomainRoot(params);
       log(`[rollback] Rolling back ${params.domain} to ${params.commitSha.substring(0, 8)}`);
       assertGitCommit(params.commitSha);
 
       // Git checkout to specified commit
       const checkout = await this.executor.execute(
-        'git', ['checkout', '--', params.commitSha],
+        'git', ['checkout', '--detach', params.commitSha],
         { cwd: params.rootPath, allowFailure: true },
       );
       if (checkout.exitCode !== 0) {
@@ -134,10 +160,14 @@ export class DeployExecutor {
       const buildParams: DeployParams = {
         siteType: params.siteType,
         rootPath: params.rootPath,
+        filesRelPath: '.',
         gitRepository: '',
         branch: '',
         domain: params.domain,
         phpVersion: params.phpVersion,
+        runtimeKey: params.runtimeKey,
+        appPort: params.appPort,
+        envVars: params.envVars,
       };
       await this.buildStep(buildParams, log);
 
@@ -183,7 +213,7 @@ export class DeployExecutor {
       log('[git] Checking out and resetting...');
       const checkout = await this.executor.execute(
         'git',
-        ['checkout', '--', branch],
+        ['checkout', branch],
         { cwd: rootPath, allowFailure: true },
       );
       if (checkout.exitCode !== 0) {
@@ -225,6 +255,20 @@ export class DeployExecutor {
     }
   }
 
+  private resolveDomainRoot<T extends { rootPath: string; filesRelPath: string; runtimeKey: string }>(
+    params: T,
+  ): T {
+    validateRuntimeKey(params.runtimeKey);
+    const rootPath = resolveSiteDomainRoot(
+      params.rootPath,
+      params.filesRelPath,
+    );
+    if (!isUnderAllowedSiteRoot(rootPath)) {
+      throw new Error(`Deploy rootPath is outside allowed site roots: ${rootPath}`);
+    }
+    return { ...params, rootPath, filesRelPath: '.' };
+  }
+
   private async getCommitInfo(
     rootPath: string,
   ): Promise<{ sha?: string; message?: string }> {
@@ -248,44 +292,31 @@ export class DeployExecutor {
   }
 
   private async buildStep(params: DeployParams, log: LogFn): Promise<void> {
-    const { siteType, rootPath, phpVersion, envVars } = params;
+    const { rootPath, phpVersion, envVars } = params;
+    const runtime = resolveDeployRuntime(params.siteType, params.appPort);
 
-    switch (siteType) {
-      case 'MODX_REVO':
-      case 'MODX_3':
-        await this.buildPhp(rootPath, phpVersion, log);
-        break;
-
-      case 'NUXT_3':
-      case 'REACT':
-      case 'NESTJS':
-        await this.buildNode(rootPath, envVars, log);
-        break;
-
-      case 'STATIC_HTML':
-        // Check if there's a package.json (e.g., Vite static)
-        if (fs.existsSync(path.join(rootPath, 'package.json'))) {
-          await this.buildNode(rootPath, envVars, log);
-        } else {
-          log('[build] Static site — no build required');
-        }
-        break;
-
-      case 'CUSTOM':
-      default:
-        log('[build] Custom type — skipping automated build');
-        break;
+    if (runtime === 'php') {
+      await this.buildPhp(rootPath, phpVersion, log);
+      return;
     }
+
+    if (runtime === 'node' || fs.existsSync(path.join(rootPath, 'package.json'))) {
+      await this.buildNode(rootPath, envVars, log);
+      return;
+    }
+
+    log('[build] Custom application — no automated build required');
   }
 
-  private async buildPhp(rootPath: string, phpVersion: string | undefined, log: LogFn): Promise<void> {
+  private async buildPhp(rootPath: string, phpVersion: string | null | undefined, log: LogFn): Promise<void> {
     // Check for composer.json
     if (!fs.existsSync(path.join(rootPath, 'composer.json'))) {
       log('[build] No composer.json found, skipping');
       return;
     }
 
-    const phpBin = phpVersion ? `php${phpVersion}` : 'php';
+    const version = phpVersion ? validatePhpVersion(phpVersion) : DEFAULT_PHP_VERSION;
+    const phpBin = `php${version}`;
 
     log('[build] Running composer install...');
     // Берём первый composer из списка кандидатов (env COMPOSER_PATHS).
@@ -383,57 +414,43 @@ export class DeployExecutor {
   }
 
   private async restartStep(params: DeployParams, log: LogFn): Promise<void> {
-    const { siteType, domain, phpVersion } = params;
+    const runtime = resolveDeployRuntime(params.siteType, params.appPort);
 
-    switch (siteType) {
-      case 'MODX_REVO':
-      case 'MODX_3': {
-        // Restart PHP-FPM pool
-        const version = phpVersion || DEFAULT_PHP_VERSION;
-        log(`[restart] Reloading php${version}-fpm...`);
-        const result = await this.executor.execute(
-          'systemctl',
-          ['reload', `php${version}-fpm`],
-          { allowFailure: true },
+    if (runtime === 'php') {
+      const version = params.phpVersion
+        ? validatePhpVersion(params.phpVersion)
+        : DEFAULT_PHP_VERSION;
+      log(`[restart] Reloading php${version}-fpm...`);
+      const result = await this.executor.execute(
+        'systemctl',
+        ['reload', `php${version}-fpm`],
+        { allowFailure: true },
+      );
+      if (result.exitCode !== 0) {
+        log(`[restart] Warning: PHP-FPM reload failed: ${result.stderr}`);
+      }
+    } else if (runtime === 'node') {
+      const pmName = `site-${params.runtimeKey}`;
+      log(`[restart] Restarting PM2 process ${pmName}...`);
+      const result = await this.executor.execute(
+        'pm2',
+        ['restart', pmName],
+        { allowFailure: true },
+      );
+      if (result.exitCode !== 0) {
+        log('[restart] PM2 process not found, starting...');
+        const startResult = await this.executor.execute(
+          'pm2',
+          ['start', 'npm', '--name', pmName, '--', 'start'],
+          { cwd: params.rootPath, allowFailure: true },
         );
-        if (result.exitCode !== 0) {
-          log(`[restart] Warning: PHP-FPM reload failed: ${result.stderr}`);
+        if (startResult.exitCode !== 0) {
+          log(`[restart] Warning: PM2 start failed: ${startResult.stderr}`);
         }
-        break;
       }
-
-      case 'NUXT_3':
-      case 'REACT':
-      case 'NESTJS': {
-        // Restart PM2 process
-        const pmName = `site-${domain}`;
-        log(`[restart] Restarting PM2 process ${pmName}...`);
-        const result = await this.executor.execute('pm2', ['restart', pmName], { allowFailure: true });
-        if (result.exitCode !== 0) {
-          // Process might not exist yet — try to start it
-          log('[restart] PM2 process not found, starting...');
-          const startResult = await this.executor.execute('pm2', [
-            'start',
-            'npm',
-            '--name',
-            pmName,
-            '--',
-            'start',
-          ], { cwd: params.rootPath, allowFailure: true });
-          if (startResult.exitCode !== 0) {
-            log(`[restart] Warning: PM2 start failed: ${startResult.stderr}`);
-          }
-        }
-        break;
-      }
-
-      case 'STATIC_HTML':
-      case 'CUSTOM':
-      default:
-        // Reload Nginx in case configs changed
-        log('[restart] Reloading Nginx...');
-        await this.executor.execute('systemctl', ['reload', 'nginx']);
-        break;
+    } else {
+      log('[restart] Reloading Nginx...');
+      await this.executor.execute('systemctl', ['reload', 'nginx']);
     }
 
     log('[restart] Services restarted');

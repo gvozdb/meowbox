@@ -4,9 +4,21 @@ import * as path from 'path';
 import * as os from 'os';
 import { spawn } from 'child_process';
 import { createHash, randomBytes } from 'crypto';
-import { BACKUP_LOCAL_PATH, S3_DEFAULTS, BACKUP_S3, RESTIC_OPS } from '../config';
+import {
+  BACKUP_LOCAL_PATH,
+  S3_DEFAULTS,
+  BACKUP_S3,
+  RESTIC_OPS,
+  isUnderAllowedSiteRoot,
+} from '../config';
 import { childProcessRegistry } from '../process-registry';
 import { dumpDatabaseToFile } from './db-dump';
+import { normalizeRestoreIncludePaths } from '@meowbox/shared';
+import {
+  assertSiteBackupId,
+  removeSiteBackupManifest,
+  writeSiteBackupManifest,
+} from './site-manifest-file';
 
 // Strict allowlist для имён БД — попадает в argv `mysql ... <name>` и
 // `psql -d <name>`. Защищает от arg-flag smuggling в случае некорректных
@@ -49,6 +61,7 @@ export interface ResticStorage {
 }
 
 export interface ResticBackupParams {
+  backupId: string;
   siteName: string;
   rootPath: string;
   excludePaths: string[];
@@ -57,6 +70,7 @@ export interface ResticBackupParams {
   // FULL/FILES_ONLY/DB_ONLY — управляет тем, что включено в снапшот
   type: 'FULL' | 'FILES_ONLY' | 'DB_ONLY';
   storage: ResticStorage;
+  manifest?: string;
 }
 
 export interface ResticSnapshot {
@@ -334,6 +348,14 @@ export class ResticExecutor {
     error?: string;
   }> {
     const { siteName, rootPath, excludePaths, storage, databases, type, excludeTableData } = params;
+    const tempFiles: string[] = [];
+    assertSiteBackupId(params.backupId);
+    const tmpDbDir = path.join(
+      BACKUP_LOCAL_PATH,
+      'restic-tmp',
+      params.backupId,
+    );
+    let manifestPath: string | null = null;
 
     try {
       onProgress(5);
@@ -350,8 +372,10 @@ export class ResticExecutor {
       onProgress(10);
 
       // 2. Дамп БД (если нужно) → tmp-файлы, они тоже попадут в снапшот
-      const tempFiles: string[] = [];
-      const tmpDbDir = path.join(BACKUP_LOCAL_PATH, 'restic-tmp', siteName);
+      manifestPath = writeSiteBackupManifest(
+        params.backupId,
+        params.manifest,
+      );
       if (type !== 'FILES_ONLY' && databases?.length) {
         fs.mkdirSync(tmpDbDir, { recursive: true, mode: 0o700 });
         for (const db of databases) {
@@ -368,6 +392,7 @@ export class ResticExecutor {
       const paths: string[] = [];
       if (type !== 'DB_ONLY') paths.push(rootPath);
       paths.push(...tempFiles);
+      if (manifestPath) paths.push(manifestPath);
 
       if (paths.length === 0) {
         return { success: false, error: 'Нет путей для бэкапа' };
@@ -413,12 +438,6 @@ export class ResticExecutor {
         }
       });
 
-      // 5. Cleanup tmp db dumps
-      for (const f of tempFiles) {
-        try { fs.unlinkSync(f); } catch { /* ignore */ }
-      }
-      try { fs.rmdirSync(tmpDbDir); } catch { /* ignore */ }
-
       if (result.exitCode !== 0) {
         return {
           success: false,
@@ -443,6 +462,32 @@ export class ResticExecutor {
         }
       }
 
+      const requiredPaths = [
+        ...(manifestPath ? [manifestPath] : []),
+        ...tempFiles,
+      ];
+      if (
+        !snapshotId ||
+        !(await this.snapshotContainsPaths(
+          base,
+          env,
+          snapshotId,
+          requiredPaths,
+        ))
+      ) {
+        if (snapshotId) {
+          await this.executor.execute(
+            'restic',
+            [...base, 'forget', snapshotId],
+            { env, timeout: 60_000, allowFailure: true },
+          );
+        }
+        return {
+          success: false,
+          error: 'Restic snapshot is missing required manifest or database dumps',
+        };
+      }
+
       onProgress(100);
       return {
         success: true,
@@ -451,7 +496,46 @@ export class ResticExecutor {
       };
     } catch (err) {
       return { success: false, error: (err as Error).message };
+    } finally {
+      for (const file of tempFiles) {
+        try { fs.unlinkSync(file); } catch { /* ignore */ }
+      }
+      try { fs.rmdirSync(tmpDbDir); } catch { /* ignore */ }
+      removeSiteBackupManifest(manifestPath);
     }
+  }
+
+  private async snapshotContainsPaths(
+    base: string[],
+    env: Record<string, string>,
+    snapshotId: string,
+    requiredPaths: string[],
+  ): Promise<boolean> {
+    if (requiredPaths.length === 0) return true;
+    const result = await this.executor.execute(
+      'restic',
+      [...base, 'ls', snapshotId, '--json', '--', ...requiredPaths],
+      { env, timeout: 120_000, allowFailure: true },
+    );
+    if (result.exitCode !== 0) return false;
+
+    const found = new Set<string>();
+    for (const line of result.stdout.split('\n')) {
+      try {
+        const entry = JSON.parse(line) as {
+          message_type?: string;
+          path?: string;
+        };
+        if (entry.message_type === 'node' && entry.path) {
+          found.add(path.resolve('/', entry.path));
+        }
+      } catch {
+        // Restic may print a non-JSON diagnostic line.
+      }
+    }
+    return requiredPaths.every((required) =>
+      found.has(path.resolve(required)),
+    );
   }
 
   // ---------------------------------------------------------------------------
@@ -567,11 +651,13 @@ export class ResticExecutor {
   // ---------------------------------------------------------------------------
 
   async restore(params: {
+    backupId: string;
+    restoreId: string;
     siteName: string;
     snapshotId: string;
     rootPath: string;
     cleanup?: boolean; // чистое восстановление
-    databases?: Array<{ name: string; type: string }>;
+    databases?: Array<{ name: string; sourceName?: string; type: string }>;
     storage: ResticStorage;
     // scope: FILES_AND_DB | FILES_ONLY | DB_ONLY (по умолчанию FILES_AND_DB)
     scope?: 'FILES_AND_DB' | 'FILES_ONLY' | 'DB_ONLY';
@@ -583,29 +669,33 @@ export class ResticExecutor {
     const scope = params.scope || 'FILES_AND_DB';
     const restoreFiles = scope === 'FILES_AND_DB' || scope === 'FILES_ONLY';
     const restoreDb = scope === 'FILES_AND_DB' || scope === 'DB_ONLY';
-    // Жёсткая фильтрация (defense-in-depth — даже если API скомпрометирован).
-    // Отсечь dot-only/empty/абсолютные/null-byte/backslash/'..'  — иначе пустой
-    // rel вызовет копирование ВСЕГО extractedRoot и обойдёт selective restore.
-    const includePaths = (params.includePaths || [])
-      .map((p) => String(p || '').trim().replace(/^\.\/+/, '').replace(/\/+$/, ''))
-      .filter((p) =>
-        p.length > 0
-        && p !== '.'
-        && !p.includes('..')
-        && !p.includes('\0')
-        && !p.includes('\\')
-        && !p.startsWith('/'),
-      );
-
+    let restoreTemp: string | null = null;
     try {
+      assertSiteBackupId(params.backupId);
+      assertSiteBackupId(params.restoreId);
+      const includePaths = normalizeRestoreIncludePaths(params.includePaths);
+      const targetRoot = path.resolve(rootPath);
+      if (
+        !path.isAbsolute(rootPath) ||
+        !isUnderAllowedSiteRoot(targetRoot) ||
+        (fs.existsSync(targetRoot) &&
+          !isUnderAllowedSiteRoot(fs.realpathSync(targetRoot)))
+      ) {
+        throw new Error('Restore target is outside allowed Site roots');
+      }
       const base = this.buildResticBaseArgs(siteName, storage);
       const env = this.buildEnv(storage);
 
       onProgress(5);
 
       // 1. Восстанавливаем в temp-директорию (снапшот содержит rootPath + tmp/*.sql)
-      const restoreTemp = path.join(BACKUP_LOCAL_PATH, `restic-restore-${Date.now()}`);
-      fs.mkdirSync(restoreTemp, { recursive: true, mode: 0o700 });
+      fs.mkdirSync(BACKUP_LOCAL_PATH, { recursive: true, mode: 0o700 });
+      restoreTemp = fs.mkdtempSync(
+        path.join(
+          BACKUP_LOCAL_PATH,
+          `restic-restore-${params.backupId}-${params.restoreId}-`,
+        ),
+      );
 
       const result = await this.executor.execute(
         'restic',
@@ -614,32 +704,69 @@ export class ResticExecutor {
       );
 
       if (result.exitCode !== 0) {
-        await this.executor.execute('rm', ['-rf', restoreTemp]);
-        return { success: false, error: `restic restore failed: ${result.stderr.substring(0, 500)}` };
+        throw new Error(
+          `restic restore failed: ${result.stderr.substring(0, 500)}`,
+        );
       }
 
       onProgress(50);
 
       // 2. Восстанавливаем БД из .sql дампов (если есть в снапшоте)
       if (restoreDb) {
-        const dbTmpPath = path.join(restoreTemp, BACKUP_LOCAL_PATH, 'restic-tmp', siteName).replace(/\/+/g, '/');
+        assertSiteBackupId(params.backupId);
+        const dbTmpPath = path
+          .join(
+            restoreTemp,
+            BACKUP_LOCAL_PATH,
+            'restic-tmp',
+            params.backupId,
+          )
+          .replace(/\/+/g, '/');
+        const legacyDbTmpPath = path
+          .join(
+            restoreTemp,
+            BACKUP_LOCAL_PATH,
+            'restic-tmp',
+            siteName,
+          )
+          .replace(/\/+/g, '/');
         if (databases?.length) {
           for (const db of databases) {
             assertDbName(db.name);
-            const dumpFile = path.join(dbTmpPath, `${db.name}.sql`);
-            if (!fs.existsSync(dumpFile)) continue;
+            const sourceName = db.sourceName || db.name;
+            assertDbName(sourceName);
+            const dumpFile = [
+              path.join(dbTmpPath, `${sourceName}.sql`),
+              path.join(legacyDbTmpPath, `${sourceName}.sql`),
+            ].find((candidate) => fs.existsSync(candidate));
+            if (!dumpFile) {
+              throw new Error(`Database dump is missing for ${sourceName}`);
+            }
 
             // Защита: путь должен быть внутри restoreTemp
             const safeDump = path.resolve(dumpFile);
-            if (!/^[A-Za-z0-9_./-]+$/.test(safeDump) || !safeDump.startsWith(restoreTemp + path.sep)) {
-              continue;
+            const realDump = fs.realpathSync(safeDump);
+            if (
+              !safeDump.startsWith(restoreTemp + path.sep) ||
+              !realDump.startsWith(restoreTemp + path.sep) ||
+              !fs.statSync(realDump).isFile()
+            ) {
+              throw new Error(`Invalid database dump path for ${sourceName}`);
             }
 
             if (db.type === 'POSTGRESQL') {
-              await this.executor.execute('sudo', ['-u', 'postgres', 'psql', '-d', db.name, '-f', safeDump], { timeout: 600_000, allowFailure: true });
+              await this.executor.execute(
+                'sudo',
+                ['-u', 'postgres', 'psql', '-d', db.name, '-f', realDump],
+                { timeout: 600_000 },
+              );
             } else {
               const cmd = db.type === 'MARIADB' ? 'mariadb' : 'mysql';
-              await this.executor.execute(cmd, ['-u', 'root', db.name, '-e', `source ${safeDump}`], { timeout: 600_000, allowFailure: true });
+              await this.executor.execute(
+                cmd,
+                ['-u', 'root', db.name, '-e', `source ${realDump}`],
+                { timeout: 600_000 },
+              );
             }
           }
         }
@@ -649,46 +776,77 @@ export class ResticExecutor {
 
       // 3. Восстанавливаем файлы сайта (тот сегмент дерева, что был rootPath)
       if (restoreFiles) {
-        const extractedRoot = path.join(restoreTemp, rootPath.replace(/^\//, ''));
-        if (fs.existsSync(extractedRoot)) {
-          if (includePaths.length === 0) {
-            // Без selective: весь корень
-            if (cleanup) {
-              await this.executor.execute('rsync', [
-                '-a', '--delete',
-                `${extractedRoot}/`,
-                `${rootPath}/`,
-              ], { timeout: 600_000, allowFailure: true });
-            } else {
-              await this.executor.execute('cp', ['-a', `${extractedRoot}/.`, rootPath], { timeout: 600_000, allowFailure: true });
-            }
+        const extractedRoot = path.join(
+          restoreTemp,
+          targetRoot.replace(/^\//, ''),
+        );
+        if (!fs.existsSync(extractedRoot)) {
+          throw new Error(`Backup root not found in snapshot: ${targetRoot}`);
+        }
+        if (includePaths.length === 0) {
+          // Без selective: весь корень
+          if (cleanup) {
+            await this.executor.execute('rsync', [
+              '-a', '--delete',
+              `${extractedRoot}/`,
+              `${targetRoot}/`,
+            ], { timeout: 600_000 });
           } else {
-            // Selective: только указанные пути первого уровня (и дальше).
-            // Каждый путь rsync'им/cp'им отдельно из extractedRoot/<rel> в rootPath/<rel>.
-            for (const rel of includePaths) {
-              const src = path.resolve(extractedRoot, rel);
-              const dst = path.resolve(rootPath, rel);
-              const extRootResolved = path.resolve(extractedRoot);
-              const rootResolved = path.resolve(rootPath);
-              // Защита от traversal: src/dst ДОЛЖНЫ быть СТРОГО ВНУТРИ корней
-              // (НЕ равны корню — иначе selective скопирует весь rootPath
-              // и --delete снесёт всё лишнее).
-              if (src === extRootResolved || dst === rootResolved) continue;
-              if (!src.startsWith(extRootResolved + path.sep)) continue;
-              if (!dst.startsWith(rootResolved + path.sep)) continue;
-              if (!fs.existsSync(src)) continue;
-              const isDir = fs.statSync(src).isDirectory();
-              // Гарантируем что родительская директория цели существует
-              await this.executor.execute('mkdir', ['-p', path.dirname(dst)], { timeout: 30_000 });
-              if (isDir) {
-                if (cleanup) {
-                  await this.executor.execute('rsync', ['-a', '--delete', `${src}/`, `${dst}/`], { timeout: 600_000, allowFailure: true });
-                } else {
-                  await this.executor.execute('rsync', ['-a', `${src}/`, `${dst}/`], { timeout: 600_000, allowFailure: true });
-                }
+            await this.executor.execute(
+              'cp',
+              ['-a', `${extractedRoot}/.`, targetRoot],
+              { timeout: 600_000 },
+            );
+          }
+        } else {
+          // Selective: только указанные пути первого уровня (и дальше).
+          // Каждый путь rsync'им/cp'им отдельно из extractedRoot/<rel> в rootPath/<rel>.
+          for (const rel of includePaths) {
+            const src = path.resolve(extractedRoot, rel);
+            const dst = path.resolve(targetRoot, rel);
+            const extRootResolved = path.resolve(extractedRoot);
+            const rootResolved = targetRoot;
+            // Защита от traversal: src/dst ДОЛЖНЫ быть СТРОГО ВНУТРИ корней
+            // (НЕ равны корню — иначе selective скопирует весь rootPath
+            // и --delete снесёт всё лишнее).
+            if (
+              src === extRootResolved ||
+              dst === rootResolved ||
+              !src.startsWith(extRootResolved + path.sep) ||
+              !dst.startsWith(rootResolved + path.sep)
+            ) {
+              throw new Error(`Invalid selective restore path: ${rel}`);
+            }
+            if (!fs.existsSync(src)) {
+              throw new Error(`Selected backup path not found: ${rel}`);
+            }
+            const isDir = fs.statSync(src).isDirectory();
+            // Гарантируем что родительская директория цели существует
+            await this.executor.execute(
+              'mkdir',
+              ['-p', path.dirname(dst)],
+              { timeout: 30_000 },
+            );
+            if (isDir) {
+              if (cleanup) {
+                await this.executor.execute(
+                  'rsync',
+                  ['-a', '--delete', `${src}/`, `${dst}/`],
+                  { timeout: 600_000 },
+                );
               } else {
-                await this.executor.execute('cp', ['-a', src, dst], { timeout: 60_000 });
+                await this.executor.execute(
+                  'rsync',
+                  ['-a', `${src}/`, `${dst}/`],
+                  { timeout: 600_000 },
+                );
               }
+            } else {
+              await this.executor.execute(
+                'cp',
+                ['-a', src, dst],
+                { timeout: 60_000 },
+              );
             }
           }
         }
@@ -696,12 +854,18 @@ export class ResticExecutor {
 
       onProgress(95);
 
-      await this.executor.execute('rm', ['-rf', restoreTemp]);
-
       onProgress(100);
       return { success: true };
     } catch (err) {
       return { success: false, error: (err as Error).message };
+    } finally {
+      if (restoreTemp) {
+        try {
+          fs.rmSync(restoreTemp, { recursive: true, force: true });
+        } catch {
+          // A later restore uses a unique temp path, so stale data is isolated.
+        }
+      }
     }
   }
 

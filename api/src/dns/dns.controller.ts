@@ -1,5 +1,5 @@
 import {
-  Body, Controller, Delete, Get, Param, ParseUUIDPipe, Patch, Post, Query,
+  Body, Controller, Delete, Get, GoneException, Param, ParseUUIDPipe, Patch, Post, Query,
 } from '@nestjs/common';
 import { Throttle } from '@nestjs/throttler';
 import { Roles } from '../common/decorators/roles.decorator';
@@ -147,19 +147,40 @@ export class DnsController {
 
   @Get('sites/:siteId')
   @Roles('ADMIN')
-  async getSiteDnsView(@Param('siteId', ParseUUIDPipe) siteId: string) {
-    const data = await this.service.getSiteDnsView(siteId);
+  getLegacySiteDnsView() {
+    throw new GoneException(
+      'Use /dns/sites/:siteId/domains/:domainId',
+    );
+  }
+
+  @Get('sites/:siteId/domains/:domainId')
+  @Roles('ADMIN')
+  async getSiteDnsView(
+    @Param('siteId', ParseUUIDPipe) siteId: string,
+    @Param('domainId', ParseUUIDPipe) domainId: string,
+  ) {
+    const data = await this.service.getSiteDnsView(siteId, domainId);
     return { success: true, data };
   }
 
   @Post('sites/:siteId/relink')
   @Roles('ADMIN')
   @Throttle({ medium: { ttl: 10000, limit: 50 } })
-  async relinkSite(@Param('siteId', ParseUUIDPipe) siteId: string) {
-    // Чисто триггерит автолинк по доменам (без обращений к провайдерам).
-    // Полезно после переименования сайта/смены домена.
+  relinkLegacySite() {
+    throw new GoneException(
+      'Use /dns/sites/:siteId/domains/:domainId/relink',
+    );
+  }
+
+  @Post('sites/:siteId/domains/:domainId/relink')
+  @Roles('ADMIN')
+  @Throttle({ medium: { ttl: 10000, limit: 50 } })
+  async relinkSite(
+    @Param('siteId', ParseUUIDPipe) siteId: string,
+    @Param('domainId', ParseUUIDPipe) domainId: string,
+  ) {
     await this.service.autoLinkZonesToSites();
-    const data = await this.service.getSiteDnsView(siteId);
+    const data = await this.service.getSiteDnsView(siteId, domainId);
     return { success: true, data };
   }
 }

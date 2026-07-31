@@ -29,6 +29,7 @@ import { parseHostpanelNginx } from './parsers/nginx.parser';
 import { parseCrontab } from './parsers/crontab.parser';
 import { validateSqlIdentifier } from './sql-safety';
 import { SUPPORTED_PHP_VERSIONS } from '../../config';
+import { hostpanelPresetFromSource } from '@meowbox/shared';
 
 interface HostpanelSiteRow {
   id: number;
@@ -186,6 +187,10 @@ export async function runShortlist(
       sourceCmsVersion: row.version,
       sourcePhpVersion: phpV,
       sourceMysqlDb: row.mysql_db,
+      preset: hostpanelPresetFromSource(
+        row.cms === 'modx' ? 'modx' : null,
+        row.version,
+      ),
       newName: sanitizeName(row.user),
       newDomain: row.site,
       defaultSelected: !isAdminerLike && !isHostUser,
@@ -787,6 +792,7 @@ async function buildPlanItem(
     sourceCmsVersion: row.version,
     sourcePhpVersion: phpV,
     sourceMysqlPrefix: tablePrefix,
+    preset: hostpanelPresetFromSource(isModx ? 'modx' : null, row.version),
 
     newName,
     newDomain,
@@ -993,7 +999,7 @@ function lastPathSegment(p: string): string {
 }
 
 /**
- * Webroot относительно /var/www/<sourceUser>/. Используется для `Site.filesRelPath`
+ * Webroot относительно /var/www/<sourceUser>/. Используется для `SiteDomain.filesRelPath`
  * и nginx-`root` на slave. Если nginx указывает /var/www/u/public_html/,
  * вернёт `'public_html'`. Если ничего не нашли — `'www'`.
  */

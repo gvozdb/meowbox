@@ -158,8 +158,8 @@ const sectionLabels: Record<string, string> = {
 const groupedUpdates = computed(() => {
   const groups: Record<string, UpdatablePackage[]> = {};
   for (const pkg of updates.value) {
-    if (!groups[pkg.section]) groups[pkg.section] = [];
-    groups[pkg.section].push(pkg);
+    const group = groups[pkg.section] ?? (groups[pkg.section] = []);
+    group.push(pkg);
   }
   return groups;
 });

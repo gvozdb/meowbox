@@ -2,7 +2,7 @@
  * Парсер старых nginx-конфигов hostPanel (живут в /var/www/<user>/{access,domains,main}.nginx).
  * Не полноценный AST, а pragmatic-парсер: извлекает то, что нам нужно для
  * генерации нашего layered-конфига:
- *   - server_name + main_host (→ Site.domain + Site.aliases)
+ *   - server_name + main_host (→ primary and alias SiteDomain records)
  *   - bot-блок (если есть `if ($http_user_agent ~* (Bots...)) return 444`)
  *   - location-блоки adminka/connectors_xxx (имена директорий MODX)
  *   - неопознанные snippet'ы → копируем в Site.nginxCustomConfig (95-custom.conf)

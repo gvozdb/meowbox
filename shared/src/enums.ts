@@ -4,8 +4,7 @@
 
 // Meowbox поддерживает только MODX (Revo/3) и пустой (CUSTOM) шаблон сайта.
 // Для CUSTOM PHP и БД подключаются опционально через модули при создании.
-// Старые типы (NUXT_3, REACT, NESTJS, STATIC_HTML) выпилены — существующие сайты
-// автоматически переименовываются в CUSTOM при миграции (prisma db push + UPDATE).
+// Исторические типы миграция детерминированно переводит в CUSTOM.
 export enum SiteType {
   MODX_REVO = 'MODX_REVO',
   MODX_3 = 'MODX_3',
@@ -17,6 +16,20 @@ export enum SiteStatus {
   STOPPED = 'STOPPED',
   ERROR = 'ERROR',
   DEPLOYING = 'DEPLOYING',
+}
+
+/**
+ * Lifecycle of one application boundary (`SiteDomain`).
+ *
+ * This is intentionally separate from SiteStatus: a domain deploy/update must
+ * not make the shared Linux Site appear unavailable.
+ */
+export enum DomainApplicationStatus {
+  PROVISIONING = 'PROVISIONING',
+  RUNNING = 'RUNNING',
+  DEPLOYING = 'DEPLOYING',
+  UPDATING = 'UPDATING',
+  ERROR = 'ERROR',
 }
 
 // =============================================================================
@@ -36,6 +49,12 @@ export enum DatabaseType {
   MARIADB = 'MARIADB',
   MYSQL = 'MYSQL',
   POSTGRESQL = 'POSTGRESQL',
+}
+
+/** Ownership role of a database within one domain application. */
+export enum DatabasePurpose {
+  APP_PRIMARY = 'APP_PRIMARY',
+  AUXILIARY = 'AUXILIARY',
 }
 
 // =============================================================================

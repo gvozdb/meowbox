@@ -80,8 +80,13 @@ if [[ "$RELEASE_MODE" == "release" ]]; then
   CODE_DIR="$SCRIPT_DIR"
   STATE_DIR="$MEOWBOX_DIR/state"
   ENV_FILE="$STATE_DIR/.env"
-  mkdir -p "$STATE_DIR/data" "$STATE_DIR/logs" "$STATE_DIR/backups" "$STATE_DIR/snapshots"
+  mkdir -p "$STATE_DIR/data" "$STATE_DIR/data/migrations" "$STATE_DIR/logs" "$STATE_DIR/backups" "$STATE_DIR/snapshots"
   chmod 700 "$STATE_DIR/data"
+  # Pre-create the shared release lock.  Read-only dry-runs/status checks use
+  # it without initialising or mutating the release state themselves.
+  if [[ ! -e "$STATE_DIR/data/migrations/release-update.lock" ]]; then
+    (umask 077; : > "$STATE_DIR/data/migrations/release-update.lock")
+  fi
 else
   # Legacy: всё в корне MEOWBOX_DIR
   CODE_DIR="$MEOWBOX_DIR"
@@ -496,6 +501,12 @@ NODE_ENV="production"
 # Site storage base path (per-site user home directories created here)
 SITES_BASE_PATH="/var/www"
 
+# --- Release transaction ---
+# Maximum wait for active panel writes to drain before update maintenance.
+MEOWBOX_QUIESCE_TIMEOUT=120
+# Free space reserved for candidate, SQLite clone and rollback snapshot (KiB).
+MEOWBOX_RELEASE_MIN_FREE_KB=524288
+
 # Adminer SSO — общий секрет между Node API и PHP Adminer для шифрования
 # одноразовых ticket'ов и сессионных кук (AES-256-GCM, 32 байта в base64).
 ADMINER_SSO_KEY="${ADMINER_SSO_KEY}"
@@ -585,8 +596,11 @@ fi
 # Install npm dependencies + build
 # =============================================================================
 
-mkdir -p "${STATE_DIR}/data"
+mkdir -p "${STATE_DIR}/data" "${STATE_DIR}/data/migrations"
 chmod 700 "${STATE_DIR}/data"
+if [[ ! -e "${STATE_DIR}/data/migrations/release-update.lock" ]]; then
+  (umask 077; : > "${STATE_DIR}/data/migrations/release-update.lock")
+fi
 
 cd "${CODE_DIR}"
 
@@ -666,18 +680,56 @@ else
 fi
 
 # =============================================================================
-# Database setup (SQLite via Prisma)
+# Database setup (SQLite via tracked Prisma migrations)
 # =============================================================================
 
-log "Applying SQLite schema..."
+log "Applying fresh SQLite schema through tracked Prisma migrations..."
+if [[ "$RELEASE_MODE" == "release" ]]; then
+  PANEL_DB_FILE="${STATE_DIR}/data/meowbox.db"
+else
+  PANEL_DB_FILE="${MEOWBOX_DIR}/data/meowbox.db"
+fi
+
+# Legacy source installs did not previously install/build the release safety
+# helper.  It is required here so an untracked DB is baselined only after an
+# exact supported-schema fingerprint match; do not bypass it with schema sync.
+if [[ ! -f "${CODE_DIR}/migrations/dist/release-cli.js" ]]; then
+  [[ -f "${CODE_DIR}/migrations/package.json" ]] || error "migrations package is missing"
+  log "Building migration safety helper..."
+  (cd "${CODE_DIR}/migrations" && npm ci --no-audit --no-fund >> "$LOG_FILE" 2>&1) \
+    || error "migrations npm ci failed — see $LOG_FILE"
+  mkdir -p "${CODE_DIR}/migrations/node_modules/@meowbox" "${CODE_DIR}/migrations/node_modules/@prisma"
+  ln -sfn "../../../shared" "${CODE_DIR}/migrations/node_modules/@meowbox/shared"
+  if [[ -d "${CODE_DIR}/api/node_modules/@prisma/client" ]]; then
+    ln -sfn "../../../api/node_modules/@prisma/client" "${CODE_DIR}/migrations/node_modules/@prisma/client"
+  fi
+  (cd "${CODE_DIR}/migrations" && npm run build >> "$LOG_FILE" 2>&1) \
+    || error "migrations build failed — see $LOG_FILE"
+fi
+[[ -f "${CODE_DIR}/migrations/dist/release-cli.js" ]] || error "release migration safety helper is missing"
 (
   cd "${CODE_DIR}/api"
   set -a; source "${ENV_FILE}"; set +a
   npx prisma generate >> "$LOG_FILE" 2>&1
-  # db push: применяет schema.prisma без формальных миграций —
-  # подходит для self-hosted панели (одна ветка схемы на всю историю).
-  npx prisma db push --skip-generate --accept-data-loss >> "$LOG_FILE" 2>&1
 )
+if [[ -e "$PANEL_DB_FILE" ]]; then
+  # An existing panel DB can require the domain mapper, a matched snapshot and
+  # maintenance quiescence.  Never baseline/deploy it directly from install:
+  # that could leave the table-copy Prisma migration in a failed state.
+  node "${CODE_DIR}/migrations/dist/release-cli.js" \
+    baseline --db "$PANEL_DB_FILE" --api-dir "${CODE_DIR}/api" \
+    --contract "${CODE_DIR}/migrations/release/supported-baselines.json" --json >> "$LOG_FILE" 2>&1 || true
+  error "Existing SQLite database requires transactional make update (clone/map/snapshot/quiesce); install refuses direct baseline or migrate deploy."
+fi
+log "Fresh SQLite database: no legacy baseline is needed before migrate deploy."
+(
+  cd "${CODE_DIR}/api"
+  DATABASE_URL="file:${PANEL_DB_FILE}" npx prisma migrate deploy --schema prisma/schema.prisma >> "$LOG_FILE" 2>&1
+) || error "prisma migrate deploy failed — see $LOG_FILE"
+DATABASE_URL="file:${PANEL_DB_FILE}" \
+  node "${CODE_DIR}/migrations/dist/runner.js" \
+  baseline-fresh-install --fresh-install >> "$LOG_FILE" 2>&1 \
+  || error "fresh-install system migration baseline failed — see $LOG_FILE"
 
 # =============================================================================
 # Build (только в legacy-mode — в release dist уже в тарболле)

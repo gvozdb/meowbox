@@ -14,8 +14,9 @@ import type {
   QuickCommand,
   QuickCommandRunResult,
 } from '@meowbox/shared';
+import { SiteType } from '@meowbox/shared';
 import { QuickCommandInputDto } from './site-node.dto';
-import { resolveDomainFilesRelPath } from '../sites/site-domains.helper';
+import { DomainContextService } from '../sites/domain-context.service';
 
 const PROC_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,99}$/;
 type ProcessAction = 'stop' | 'restart' | 'reload' | 'delete';
@@ -34,52 +35,38 @@ export class SiteNodeService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly agent: AgentRelayService,
+    private readonly domainContext: DomainContextService,
   ) {}
 
-  /** Системный юзер + web-root сайта. Бросает 404, если сайта нет. */
   private async siteCtx(
     siteId: string,
+    domainId: string,
   ): Promise<{ systemUser: string; filesRelPath: string; domainRoots: NodeDomainRef[] }> {
-    const site = await this.prisma.site.findUnique({
-      where: { id: siteId },
-      select: {
-        name: true,
-        domain: true,
-        filesRelPath: true,
-        domains: {
-          select: {
-            id: true,
-            domain: true,
-            isPrimary: true,
-            position: true,
-            filesRelPath: true,
-          },
-          orderBy: [{ isPrimary: 'desc' }, { position: 'asc' }],
-        },
-      },
-    });
-    if (!site) throw new NotFoundException('Сайт не найден');
-
-    const siteFilesRelPath = site.filesRelPath || 'www';
-    const domainRoots: NodeDomainRef[] = site.domains.map((d) => ({
-      domainId: d.id,
-      domain: d.domain,
-      filesRelPath: resolveDomainFilesRelPath(d.filesRelPath, siteFilesRelPath),
-      isPrimary: d.isPrimary,
-      position: d.position,
-    }));
-
-    if (domainRoots.length === 0 && site.domain) {
-      domainRoots.push({
-        domainId: null,
-        domain: site.domain,
-        filesRelPath: siteFilesRelPath,
-        isPrimary: true,
-        position: 0,
-      });
+    const { site, domain } =
+      await this.domainContext.requireOwnedSiteDomain(
+        siteId,
+        domainId,
+        '',
+        'ADMIN',
+      );
+    if (domain.preset !== 'CUSTOM') {
+      throw new BadRequestException('Node.js is available only for CUSTOM applications');
     }
 
-    return { systemUser: site.name, filesRelPath: siteFilesRelPath, domainRoots };
+    return {
+      systemUser: site.systemUser || site.name,
+      filesRelPath: domain.filesRelPath,
+      domainRoots: [
+        {
+          domainId: domain.id,
+          domain: domain.domain,
+          preset: SiteType.CUSTOM,
+          filesRelPath: domain.filesRelPath,
+          isPrimary: domain.isPrimary,
+          position: domain.position,
+        },
+      ],
+    };
   }
 
   private unwrap<T>(
@@ -102,8 +89,8 @@ export class SiteNodeService {
   // PM2-процессы
   // ----------------------------------------------------------------
 
-  async getProcesses(siteId: string): Promise<NodeProcessesResult> {
-    const ctx = await this.siteCtx(siteId);
+  async getProcesses(siteId: string, domainId: string): Promise<NodeProcessesResult> {
+    const ctx = await this.siteCtx(siteId, domainId);
     const result = await this.agent.emitToAgent<NodeProcessesResult>(
       'node:processes',
       ctx,
@@ -113,10 +100,11 @@ export class SiteNodeService {
 
   async startEcosystem(
     siteId: string,
+    domainId: string,
     file: string,
     only?: string,
   ): Promise<void> {
-    const ctx = await this.siteCtx(siteId);
+    const ctx = await this.siteCtx(siteId, domainId);
     const result = await this.agent.emitToAgent('node:ecosystem-start', {
       ...ctx,
       file,
@@ -128,11 +116,12 @@ export class SiteNodeService {
 
   async controlProcess(
     siteId: string,
+    domainId: string,
     action: ProcessAction,
     name: string,
   ): Promise<void> {
     this.assertProcName(name);
-    const ctx = await this.siteCtx(siteId);
+    const ctx = await this.siteCtx(siteId, domainId);
     const result = await this.agent.emitToAgent('node:process-control', {
       ...ctx,
       action,
@@ -144,11 +133,12 @@ export class SiteNodeService {
 
   async getProcessLogs(
     siteId: string,
+    domainId: string,
     name: string,
     lines: number,
   ): Promise<string> {
     this.assertProcName(name);
-    const ctx = await this.siteCtx(siteId);
+    const ctx = await this.siteCtx(siteId, domainId);
     const result = await this.agent.emitToAgent<string>('node:process-logs', {
       ...ctx,
       name,
@@ -161,8 +151,8 @@ export class SiteNodeService {
   // Автозагрузка
   // ----------------------------------------------------------------
 
-  async getAutostart(siteId: string): Promise<{ enabled: boolean }> {
-    const ctx = await this.siteCtx(siteId);
+  async getAutostart(siteId: string, domainId: string): Promise<{ enabled: boolean }> {
+    const ctx = await this.siteCtx(siteId, domainId);
     const result = await this.agent.emitToAgent<{ enabled: boolean }>(
       'node:autostart-get',
       { systemUser: ctx.systemUser },
@@ -170,8 +160,8 @@ export class SiteNodeService {
     return this.unwrap(result, 'Не удалось получить статус автозагрузки');
   }
 
-  async setAutostart(siteId: string, enable: boolean): Promise<void> {
-    const ctx = await this.siteCtx(siteId);
+  async setAutostart(siteId: string, domainId: string, enable: boolean): Promise<void> {
+    const ctx = await this.siteCtx(siteId, domainId);
     const result = await this.agent.emitToAgent('node:autostart-set', {
       systemUser: ctx.systemUser,
       enable,
@@ -184,8 +174,11 @@ export class SiteNodeService {
   // Быстрые команды
   // ----------------------------------------------------------------
 
-  async discoverCommands(siteId: string): Promise<DiscoveredCommandGroup[]> {
-    const ctx = await this.siteCtx(siteId);
+  async discoverCommands(
+    siteId: string,
+    domainId: string,
+  ): Promise<DiscoveredCommandGroup[]> {
+    const ctx = await this.siteCtx(siteId, domainId);
     const result = await this.agent.emitToAgent<DiscoveredCommandGroup[]>(
       'node:commands-discover',
       ctx,
@@ -193,8 +186,8 @@ export class SiteNodeService {
     return this.unwrap(result, 'Не удалось просканировать команды');
   }
 
-  async listQuickCommands(siteId: string): Promise<QuickCommand[]> {
-    await this.siteCtx(siteId); // 404 если сайта нет
+  async listQuickCommands(siteId: string, domainId: string): Promise<QuickCommand[]> {
+    await this.siteCtx(siteId, domainId);
     const rows = await this.prisma.siteQuickCommand.findMany({
       where: { siteId },
       orderBy: [{ sortOrder: 'asc' }, { createdAt: 'asc' }],
@@ -212,9 +205,10 @@ export class SiteNodeService {
   /** Полная замена набора быстрых команд сайта (сохранение из модалки «Настроить»). */
   async replaceQuickCommands(
     siteId: string,
+    domainId: string,
     commands: QuickCommandInputDto[],
   ): Promise<QuickCommand[]> {
-    await this.siteCtx(siteId);
+    await this.siteCtx(siteId, domainId);
     await this.prisma.$transaction([
       this.prisma.siteQuickCommand.deleteMany({ where: { siteId } }),
       this.prisma.siteQuickCommand.createMany({
@@ -228,14 +222,15 @@ export class SiteNodeService {
         })),
       }),
     ]);
-    return this.listQuickCommands(siteId);
+    return this.listQuickCommands(siteId, domainId);
   }
 
   async runQuickCommand(
     siteId: string,
+    domainId: string,
     commandId: string,
   ): Promise<QuickCommandRunResult> {
-    const ctx = await this.siteCtx(siteId);
+    const ctx = await this.siteCtx(siteId, domainId);
     const cmd = await this.prisma.siteQuickCommand.findFirst({
       where: { id: commandId, siteId },
     });

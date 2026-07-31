@@ -218,7 +218,6 @@ export class ServicesService implements OnModuleInit {
 
     // Один запрос: все БД с привязкой к сайту, сгруппированные по типу.
     const rows = await this.prisma.database.findMany({
-      where: { siteId: { not: null } },
       select: { type: true, siteId: true },
     });
 
@@ -277,7 +276,7 @@ export class ServicesService implements OnModuleInit {
   private async computeUsageForService(catalog: ServiceCatalogEntry): Promise<number> {
     if (getServiceScope(catalog) === 'global' && catalog.databaseTypes && catalog.databaseTypes.length > 0) {
       const rows = await this.prisma.database.findMany({
-        where: { siteId: { not: null }, type: { in: [...catalog.databaseTypes] } },
+        where: { type: { in: [...catalog.databaseTypes] } },
         select: { siteId: true },
       });
       return new Set(rows.map((r) => r.siteId).filter((v): v is string => !!v)).size;
@@ -321,8 +320,7 @@ export class ServicesService implements OnModuleInit {
       );
     }
 
-    // Для DB-сервисов (mariadb/postgresql) считаем по таблице Database,
-    // включая БД, не привязанные к сайту (siteId IS NULL).
+    // Для DB-сервисов (mariadb/postgresql) считаем по таблице Database.
     if (getServiceScope(catalog) === 'global' && catalog.databaseTypes && catalog.databaseTypes.length > 0) {
       const dbCount = await this.prisma.database.count({
         where: { type: { in: [...catalog.databaseTypes] } },

@@ -32,6 +32,16 @@ export enum SiteStatus {
   DEPLOYING = 'DEPLOYING',
 }
 
+// Lifecycle of the application owned by one SiteDomain. SiteStatus stays the
+// shared container/Site lifecycle and must not be used for a domain deploy.
+export enum DomainApplicationStatus {
+  PROVISIONING = 'PROVISIONING',
+  RUNNING = 'RUNNING',
+  DEPLOYING = 'DEPLOYING',
+  UPDATING = 'UPDATING',
+  ERROR = 'ERROR',
+}
+
 // ---------------------------------------------------------------------------
 // Databases
 // ---------------------------------------------------------------------------
@@ -40,6 +50,11 @@ export enum DatabaseType {
   MARIADB = 'MARIADB',
   MYSQL = 'MYSQL',
   POSTGRESQL = 'POSTGRESQL',
+}
+
+export enum DatabasePurpose {
+  APP_PRIMARY = 'APP_PRIMARY',
+  AUXILIARY = 'AUXILIARY',
 }
 
 // ---------------------------------------------------------------------------

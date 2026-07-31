@@ -9,17 +9,235 @@
  *
  * Применяется автоматически в make update после prisma migrate deploy.
  */
-import { execFile } from 'node:child_process';
+import { execFile, spawnSync } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
-import { promises as fs } from 'node:fs';
+import { existsSync, mkdirSync, promises as fs } from 'node:fs';
 import * as path from 'node:path';
 import { promisify } from 'node:util';
 
 import { PrismaClient } from '@prisma/client';
 
+import { assessSystemMigrationHistory } from './system-history';
 import type { MigrationContext, SystemMigration } from './system/_types';
 
 const execFileP = promisify(execFile);
+const DOMAIN_APPLICATION_MIGRATION_ID = 'z20260731000000_domain_centric_applications';
+const FRESH_INSTALL_BASELINE_COMMAND = 'baseline-fresh-install';
+
+interface SqliteNameRow {
+  name: string;
+}
+
+interface SqliteCountRow {
+  count: bigint | number;
+}
+
+interface SqliteIntegrityRow {
+  integrity_check: string;
+}
+
+function quoteSqliteIdentifier(identifier: string): string {
+  return `"${identifier.replace(/"/g, '""')}"`;
+}
+
+function countValue(rows: SqliteCountRow[], label: string): number {
+  if (rows.length !== 1) {
+    throw new Error(`Fresh-install baseline could not verify ${label}`);
+  }
+  const count = Number(rows[0].count);
+  if (!Number.isSafeInteger(count) || count < 0) {
+    throw new Error(`Fresh-install baseline received an invalid ${label} count`);
+  }
+  return count;
+}
+
+/**
+ * Run direct system-migration invocations under the same advisory OS lock as
+ * tools/update.sh.  The updater sets MEOWBOX_RELEASE_LOCK_HELD=1 after it has
+ * acquired the descriptor itself, so a child runner does not attempt to nest
+ * a second flock.
+ */
+function ensureReleaseFlock(readOnly: boolean): void {
+  if (process.env.MEOWBOX_RELEASE_LOCK_HELD === '1') return;
+
+  const panelDir = path.resolve(__dirname, '..', '..');
+  const stateDir = process.env.MEOWBOX_STATE_DIR ?? path.join(panelDir, 'state');
+  const migrationStateDir = process.env.MEOWBOX_MIGRATION_STATE_DIR ?? path.join(stateDir, 'data', 'migrations');
+  const lockFile = process.env.MEOWBOX_RELEASE_LOCK_FILE ?? path.join(migrationStateDir, 'release-update.lock');
+  if (readOnly) {
+    if (!existsSync(path.dirname(lockFile)) || !existsSync(lockFile)) {
+      throw new Error(
+        `Read-only runner requires the pre-initialised release flock: ${lockFile}. ` +
+        'Complete installation before running a dry-run or status check.',
+      );
+    }
+  } else {
+    try {
+      mkdirSync(path.dirname(lockFile), { recursive: true, mode: 0o700 });
+    } catch (error) {
+      throw new Error(`Cannot create release lock directory for ${lockFile}: ${(error as Error).message}`);
+    }
+  }
+
+  const child = spawnSync(
+    'flock',
+    ['-n', lockFile, process.execPath, ...process.execArgv, __filename, ...process.argv.slice(2)],
+    {
+      stdio: 'inherit',
+      env: { ...process.env, MEOWBOX_RELEASE_LOCK_HELD: '1', MEOWBOX_RELEASE_LOCK_FILE: lockFile },
+    },
+  );
+  if (child.error) {
+    throw new Error(`Cannot acquire release flock (${lockFile}): ${child.error.message}`);
+  }
+  process.exit(child.status ?? 1);
+}
+
+async function assertNoSymlinkPathComponents(destination: string): Promise<void> {
+  const absolute = path.resolve(destination);
+  const parsed = path.parse(absolute);
+  const components = absolute.slice(parsed.root.length).split(path.sep).filter(Boolean);
+  let current = parsed.root;
+  for (const component of components) {
+    current = path.join(current, component);
+    try {
+      const metadata = await fs.lstat(current);
+      if (metadata.isSymbolicLink()) {
+        throw new Error(`Refusing managed write through symlink path component: ${current}`);
+      }
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return;
+      throw error;
+    }
+  }
+}
+
+/** Atomic write with fsync and preserved owner/mode for managed config files. */
+async function atomicWriteText(
+  destination: string,
+  content: string,
+  mode?: number,
+  ownership?: { uid: number; gid: number },
+): Promise<void> {
+  // A managed config target must be a real file.  Following a pre-existing
+  // symlink would let a permitted /etc path redirect an atomic write to an
+  // unrelated file (for example /etc/passwd).  Replacing a symlink is also
+  // not an implicit supported operation: the renderer must model symlinks via
+  // its own explicit, validated runtime integration.
+  await assertNoSymlinkPathComponents(destination);
+  const destinationMetadata = await fs.lstat(destination).catch((error: NodeJS.ErrnoException) => {
+    if (error.code === 'ENOENT') return null;
+    throw error;
+  });
+  if (destinationMetadata?.isSymbolicLink()) {
+    throw new Error(`Refusing to write managed config through symlink: ${destination}`);
+  }
+  const writePath = destination;
+  const dir = path.dirname(writePath);
+  await fs.mkdir(dir, { recursive: true, mode: 0o700 });
+  await assertNoSymlinkPathComponents(destination);
+  const existing = await fs.stat(writePath).catch(() => null);
+  const finalMode = mode ?? (existing ? existing.mode & 0o7777 : undefined);
+  const temporary = path.join(
+    dir,
+    `.${path.basename(writePath)}.meowbox-migration-${process.pid}-${randomUUID()}`,
+  );
+  try {
+    const handle = await fs.open(temporary, 'wx', finalMode);
+    try {
+      await handle.writeFile(content, 'utf8');
+      await handle.sync();
+    } finally {
+      await handle.close();
+    }
+    if (ownership) {
+      await fs.chown(temporary, ownership.uid, ownership.gid);
+    } else if (existing) {
+      await fs.chown(temporary, existing.uid, existing.gid);
+    }
+    if (finalMode !== undefined) await fs.chmod(temporary, finalMode);
+    await fs.rename(temporary, writePath);
+    const directory = await fs.open(dir, 'r').catch(() => null);
+    if (directory) {
+      try {
+        await directory.sync().catch(() => {});
+      } finally {
+        await directory.close();
+      }
+    }
+  } catch (error) {
+    await fs.unlink(temporary).catch(() => {});
+    throw error;
+  }
+}
+
+/**
+ * Prisma exposes model delegates dynamically.  The planning context gets a
+ * defensive proxy that rejects every mutator even if a future migration
+ * accidentally calls `create`/`update` during `plan()` or `preflight()`.
+ */
+function assertReadOnlyRawQuery(args: readonly unknown[], method: string): void {
+  const first = args[0] as { raw?: readonly string[] } | undefined;
+  const text = typeof first === 'string'
+    ? first
+    : Array.isArray(first?.raw) ? first.raw.join('?') : null;
+  if (text === null) {
+    throw new Error(`Prisma ${method} is forbidden in a read-only migration plan without a static SQL statement`);
+  }
+  const statement = text.replace(/\/\*[\s\S]*?\*\//g, ' ').replace(/--[^\n]*/g, ' ').trim().replace(/;\s*$/, '');
+  if (statement.includes(';')) {
+    throw new Error(`Prisma ${method} has multiple statements in a read-only migration plan`);
+  }
+  const allowed = /^(?:EXPLAIN\s+)?SELECT\b/i.test(statement)
+    || /^PRAGMA\s+(?:table_(?:info|xinfo)|foreign_key_check|integrity_check|application_id|user_version)\b/i.test(statement);
+  if (!allowed) {
+    throw new Error(`Prisma ${method} is not a permitted read-only SELECT/PRAGMA statement`);
+  }
+}
+
+function readOnlyPrismaClient(prisma: PrismaClient): PrismaClient {
+  const mutationMethods = new Set([
+    'create', 'createMany', 'createManyAndReturn', 'update', 'updateMany',
+    'updateManyAndReturn', 'upsert', 'delete', 'deleteMany',
+  ]);
+  const topLevelMutators = new Set([
+    '$executeRaw', '$executeRawUnsafe', '$transaction', '$extends',
+  ]);
+  const rawReadMethods = new Set(['$queryRaw', '$queryRawUnsafe']);
+  return new Proxy(prisma, {
+    get(target, property, receiver) {
+      if (typeof property === 'string' && topLevelMutators.has(property)) {
+        return () => {
+          throw new Error(`Prisma ${property} is forbidden in a read-only migration plan`);
+        };
+      }
+      const value = Reflect.get(target, property, receiver) as unknown;
+      if (typeof property === 'string' && rawReadMethods.has(property)) {
+        if (typeof value !== 'function') throw new Error(`Prisma ${property} is unavailable`);
+        return (...args: unknown[]) => {
+          assertReadOnlyRawQuery(args, property);
+          return (value as (...callArgs: unknown[]) => unknown).apply(target, args);
+        };
+      }
+      if (!value || typeof value !== 'object' || typeof property !== 'string' || property.startsWith('$')) {
+        return typeof value === 'function' ? (value as (...args: unknown[]) => unknown).bind(target) : value;
+      }
+      return new Proxy(value, {
+        get(delegate, method, delegateReceiver) {
+          if (typeof method === 'string' && mutationMethods.has(method)) {
+            return () => {
+              throw new Error(`Prisma delegate ${property}.${method} is forbidden in a read-only migration plan`);
+            };
+          }
+          const delegateValue = Reflect.get(delegate, method, delegateReceiver) as unknown;
+          return typeof delegateValue === 'function'
+            ? (delegateValue as (...args: unknown[]) => unknown).bind(delegate)
+            : delegateValue;
+        },
+      });
+    },
+  }) as PrismaClient;
+}
 
 // =============================================================================
 // CLI
@@ -30,6 +248,7 @@ async function main() {
   const cmd = argv[0] ?? 'status';
   const dryRun = argv.includes('--dry-run');
   const verbose = argv.includes('--verbose') || argv.includes('-v');
+  ensureReleaseFlock(dryRun || cmd === 'status');
 
   const runner = new MigrationsRunner({ dryRun, verbose });
   try {
@@ -41,9 +260,22 @@ async function main() {
       const id = argv[1];
       if (!id) throw new Error('Usage: runner.js down <migration-id>');
       await runner.down(id);
+    } else if (cmd === FRESH_INSTALL_BASELINE_COMMAND) {
+      if (!argv.includes('--fresh-install')) {
+        throw new Error(
+          `Usage: runner.js ${FRESH_INSTALL_BASELINE_COMMAND} --fresh-install`,
+        );
+      }
+      if (dryRun) {
+        throw new Error(`${FRESH_INSTALL_BASELINE_COMMAND} does not accept --dry-run`);
+      }
+      await runner.baselineFreshInstall();
     } else {
       console.error(`Unknown command: ${cmd}`);
-      console.error('Usage: runner.js [up|status|down <id>] [--dry-run] [--verbose]');
+      console.error(
+        `Usage: runner.js [up|status|down <id>|${FRESH_INSTALL_BASELINE_COMMAND} --fresh-install] ` +
+          '[--dry-run] [--verbose]',
+      );
       process.exit(2);
     }
   } catch (e) {
@@ -81,20 +313,13 @@ class MigrationsRunner {
   async up(): Promise<void> {
     const all = await this.discoverMigrations();
     const applied = await this.getApplied();
+    const history = assessSystemMigrationHistory(all, applied);
     const appliedIds = new Set(applied.filter((m) => m.ok).map((m) => m.id));
 
-    // Проверяем чексумы уже применённых — warning если кто-то задним числом отредактировал.
-    for (const m of all) {
-      if (appliedIds.has(m.id)) {
-        const stored = applied.find((a) => a.id === m.id);
-        if (stored && stored.checksum !== m.checksum) {
-          console.warn(
-            `[migrate] WARNING: миграция ${m.id} была изменена после применения (` +
-              `stored=${stored.checksum.slice(0, 12)}, current=${m.checksum.slice(0, 12)}). ` +
-              `Это значит, кто-то отредактировал файл миграции после её применения. Не делай так.`,
-          );
-        }
-      }
+    for (const accepted of history.acceptedLegacy) {
+      console.log(
+        `[migrate] accepted legacy history: ${accepted.id} (${accepted.kind})`,
+      );
     }
 
     const pending = all.filter((m) => !appliedIds.has(m.id));
@@ -106,7 +331,30 @@ class MigrationsRunner {
     for (const m of pending) console.log(`  · ${m.id} — ${m.module.description}`);
 
     if (this.opts.dryRun) {
-      console.log('[migrate] --dry-run: миграции не применяются.');
+      // Do not call up() in a dry-run.  Historical migrations predate the
+      // release transaction contract and some have side effects outside the
+      // database.  A migration must explicitly provide a zero-write plan.
+      for (const m of pending) {
+        if (!m.module.plan) {
+          throw new Error(
+            `Pending system migration ${m.id} has no zero-write plan() hook; ` +
+            'dry-run refuses to execute up() against production state.',
+          );
+        }
+        // Refuse before invoking *any* migration hook.  A historical
+        // preflight may contain a side effect even though it predates the
+        // plan() contract, so merely calling it to inspect its result would
+        // invalidate a read-only rehearsal.
+        const ctx = this.makeContext();
+        if (m.module.preflight) {
+          const pf = await m.module.preflight(ctx);
+          if (!pf.ok) throw new Error(`Preflight failed for ${m.id}: ${pf.reason ?? '(no reason)'}`);
+        }
+        const plan = await m.module.plan(ctx);
+        console.log(`[migrate] plan ${m.id}: ${plan.summary}`);
+        if (plan.fingerprint) console.log(`[migrate]   plan-fingerprint=${plan.fingerprint}`);
+      }
+      console.log('[migrate] --dry-run: all pending migrations planned with zero writes.');
       return;
     }
 
@@ -155,9 +403,183 @@ class MigrationsRunner {
     console.log(`[migrate] OK: ${id} rolled back`);
   }
 
+  /**
+   * A fresh Prisma install already represents the current release and must not
+   * replay historical host mutations on its first update.  Record the exact
+   * compiled artifacts only after proving that the database has the final
+   * schema and contains no application or operator data.
+   */
+  async baselineFreshInstall(): Promise<void> {
+    const all = await this.discoverMigrations();
+    assessSystemMigrationHistory(all, []);
+
+    const added = await this.prisma.$transaction(async (tx: PrismaClient) => {
+      await this.assertFreshInstallDatabase(tx);
+
+      const applied = await tx.systemMigration.findMany({ orderBy: { id: 'asc' } });
+      const discovered = new Map(all.map((migration) => [migration.id, migration]));
+
+      for (const row of applied) {
+        const migration = discovered.get(row.id);
+        if (!migration) {
+          throw new Error(
+            `Fresh-install baseline found an unknown system migration record: ${row.id}`,
+          );
+        }
+        if (
+          !row.ok ||
+          row.errorLog !== null ||
+          row.durationMs !== 0 ||
+          row.checksum !== migration.checksum
+        ) {
+          throw new Error(
+            `Fresh-install baseline record mismatch for ${row.id}; ` +
+              'refusing to overwrite migration history',
+          );
+        }
+      }
+
+      const appliedIds = new Set(applied.map((migration) => migration.id));
+      const pending = all.filter((migration) => !appliedIds.has(migration.id));
+      if (pending.length === 0) return 0;
+
+      for (const migration of pending) {
+        await tx.systemMigration.create({
+          data: {
+            id: migration.id,
+            durationMs: 0,
+            checksum: migration.checksum,
+            ok: true,
+            errorLog: null,
+          },
+        });
+      }
+      return pending.length;
+    });
+
+    console.log(
+      `[migrate] Fresh-install system baseline: ${all.length} known, ${added} added.`,
+    );
+  }
+
   // ---------------------------------------------------------------------------
   // Internals
   // ---------------------------------------------------------------------------
+
+  private async assertFreshInstallDatabase(prisma: PrismaClient): Promise<void> {
+    const tables = await prisma.$queryRawUnsafe<SqliteNameRow[]>(
+      `SELECT "name"
+       FROM "sqlite_master"
+       WHERE "type" = 'table'
+         AND "name" NOT LIKE 'sqlite_%'
+       ORDER BY "name"`,
+    );
+    const tableNames = new Set(tables.map((table) => table.name));
+    for (const required of ['_prisma_migrations', 'system_migrations', 'sites', 'site_domains']) {
+      if (!tableNames.has(required)) {
+        throw new Error(`Fresh-install baseline requires final table ${required}`);
+      }
+    }
+    const stagingTables = tables
+      .map((table) => table.name)
+      .filter((name) => name.startsWith('_meowbox_'));
+    if (stagingTables.length > 0) {
+      throw new Error(
+        `Fresh-install baseline found migration staging tables: ${stagingTables.join(', ')}`,
+      );
+    }
+
+    const appliedDomainMigration = countValue(
+      await prisma.$queryRawUnsafe<SqliteCountRow[]>(
+        `SELECT COUNT(*) AS "count"
+         FROM "_prisma_migrations"
+         WHERE "migration_name" = ?
+           AND "finished_at" IS NOT NULL
+           AND "rolled_back_at" IS NULL
+           AND "applied_steps_count" > 0`,
+        DOMAIN_APPLICATION_MIGRATION_ID,
+      ),
+      'domain application Prisma migration',
+    );
+    if (appliedDomainMigration !== 1) {
+      throw new Error(
+        `Fresh-install baseline requires applied Prisma migration ${DOMAIN_APPLICATION_MIGRATION_ID}`,
+      );
+    }
+
+    const interruptedPrismaMigrations = countValue(
+      await prisma.$queryRawUnsafe<SqliteCountRow[]>(
+        `SELECT COUNT(*) AS "count"
+         FROM "_prisma_migrations"
+         WHERE "finished_at" IS NULL OR "rolled_back_at" IS NOT NULL`,
+      ),
+      'interrupted Prisma migrations',
+    );
+    if (interruptedPrismaMigrations !== 0) {
+      throw new Error('Fresh-install baseline refuses interrupted or rolled-back Prisma migrations');
+    }
+
+    const siteColumns = new Set(
+      (
+        await prisma.$queryRawUnsafe<SqliteNameRow[]>(
+          'PRAGMA table_xinfo("sites")',
+        )
+      ).map((column) => column.name),
+    );
+    for (const removed of ['type', 'php_version', 'files_rel_path', 'app_port', 'env_vars']) {
+      if (siteColumns.has(removed)) {
+        throw new Error(`Fresh-install baseline found legacy sites.${removed}`);
+      }
+    }
+
+    const domainColumns = new Set(
+      (
+        await prisma.$queryRawUnsafe<SqliteNameRow[]>(
+          'PRAGMA table_xinfo("site_domains")',
+        )
+      ).map((column) => column.name),
+    );
+    for (const required of [
+      'preset',
+      'app_status',
+      'files_rel_path',
+      'runtime_key',
+      'php_version',
+      'app_port',
+    ]) {
+      if (!domainColumns.has(required)) {
+        throw new Error(`Fresh-install baseline requires site_domains.${required}`);
+      }
+    }
+
+    const integrity = await prisma.$queryRawUnsafe<SqliteIntegrityRow[]>(
+      'PRAGMA integrity_check',
+    );
+    if (integrity.length !== 1 || integrity[0].integrity_check !== 'ok') {
+      throw new Error('Fresh-install baseline requires a successful SQLite integrity_check');
+    }
+    const foreignKeyFailures = await prisma.$queryRawUnsafe<unknown[]>(
+      'PRAGMA foreign_key_check',
+    );
+    if (foreignKeyFailures.length > 0) {
+      throw new Error('Fresh-install baseline requires a successful SQLite foreign_key_check');
+    }
+
+    for (const table of tables) {
+      if (table.name === '_prisma_migrations' || table.name === 'system_migrations') continue;
+      const count = countValue(
+        await prisma.$queryRawUnsafe<SqliteCountRow[]>(
+          `SELECT COUNT(*) AS "count" FROM ${quoteSqliteIdentifier(table.name)}`,
+        ),
+        `${table.name} rows`,
+      );
+      if (count !== 0) {
+        throw new Error(
+          `Fresh-install baseline refuses non-empty application table ${table.name}`,
+        );
+      }
+    }
+  }
 
   private async discoverMigrations(): Promise<DiscoveredMigration[]> {
     let entries: string[];
@@ -249,16 +671,31 @@ class MigrationsRunner {
   }
 
   private makeContext(): MigrationContext {
+    const readOnly = this.opts.dryRun;
     const stateDir = process.env.MEOWBOX_STATE_DIR ?? path.join(this.panelDir, 'state');
     const currentDir = process.env.MEOWBOX_CURRENT_DIR ?? this.panelDir;
+    const migrationStateDir = process.env.MEOWBOX_MIGRATION_STATE_DIR ?? path.join(stateDir, 'data', 'migrations');
+    const releaseLockFile = process.env.MEOWBOX_RELEASE_LOCK_FILE ?? path.join(migrationStateDir, 'release-update.lock');
+    const checkpointPath = (migrationId: string): string => {
+      if (!/^[0-9]{4}-[0-9]{2}-[0-9]{2}-[0-9]{3}-[a-z0-9-]+$/.test(migrationId)) {
+        throw new Error(`Unsafe system migration checkpoint id: ${migrationId}`);
+      }
+      return path.join(migrationStateDir, `${migrationId}.json`);
+    };
     return {
-      prisma: this.prisma,
+      prisma: readOnly ? readOnlyPrismaClient(this.prisma) : this.prisma,
       exec: {
         async run(cmd, args, opts) {
+          if (readOnly) {
+            throw new Error(`External command is forbidden in a read-only migration plan: ${cmd} ${args.join(' ')}`);
+          }
           const r = await execFileP(cmd, args, { cwd: opts?.cwd, env: opts?.env, maxBuffer: 50 * 1024 * 1024 });
           return { stdout: r.stdout.toString(), stderr: r.stderr.toString() };
         },
         async runShell(script, opts) {
+          if (readOnly) {
+            throw new Error(`Shell execution is forbidden in a read-only migration plan: ${script.slice(0, 120)}`);
+          }
           const r = await execFileP('/bin/bash', ['-c', script], { cwd: opts?.cwd, maxBuffer: 50 * 1024 * 1024 });
           return { stdout: r.stdout.toString(), stderr: r.stderr.toString() };
         },
@@ -274,47 +711,40 @@ class MigrationsRunner {
       async readFile(p: string) {
         return fs.readFile(p, 'utf8');
       },
-      async writeFile(p: string, content: string, mode?: number) {
-        const writePath = await fs.lstat(p)
-          .then((stat) => stat.isSymbolicLink() ? fs.realpath(p) : p)
-          .catch(() => p);
-        const dir = path.dirname(writePath);
-        await fs.mkdir(dir, { recursive: true });
-        const existing = await fs.stat(writePath).catch(() => null);
-        const finalMode = mode ?? (existing ? existing.mode & 0o7777 : undefined);
-        const tmp = path.join(
-          dir,
-          `.${path.basename(writePath)}.meowbox-migration-${process.pid}-${randomUUID()}`,
-        );
-        try {
-          const handle = await fs.open(tmp, 'wx', finalMode);
+      async writeFile(p: string, content: string, mode?: number, ownership?: { uid: number; gid: number }) {
+        if (readOnly) throw new Error(`File write is forbidden in a read-only migration plan: ${p}`);
+        await atomicWriteText(p, content, mode, ownership);
+      },
+      checkpoints: {
+        async read<T>(migrationId: string): Promise<T | null> {
+          const file = checkpointPath(migrationId);
           try {
-            await handle.writeFile(content, 'utf8');
-            await handle.sync();
-          } finally {
-            await handle.close();
+            return JSON.parse(await fs.readFile(file, 'utf8')) as T;
+          } catch (error) {
+            if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
+            throw new Error(`Cannot read checkpoint ${file}: ${(error as Error).message}`);
           }
-          if (existing) await fs.chown(tmp, existing.uid, existing.gid);
-          if (finalMode !== undefined) await fs.chmod(tmp, finalMode);
-          await fs.rename(tmp, writePath);
-          const dirHandle = await fs.open(dir, 'r').catch(() => null);
-          if (dirHandle) {
-            try {
-              await dirHandle.sync().catch(() => {});
-            } finally {
-              await dirHandle.close();
-            }
-          }
-        } catch (err) {
-          await fs.unlink(tmp).catch(() => {});
-          throw err;
-        }
+        },
+        async write<T>(migrationId: string, value: T): Promise<void> {
+          if (readOnly) throw new Error(`Checkpoint write is forbidden in a read-only migration plan: ${migrationId}`);
+          const file = checkpointPath(migrationId);
+          await atomicWriteText(file, `${JSON.stringify(value, null, 2)}\n`, 0o600);
+        },
+        async remove(migrationId: string): Promise<void> {
+          if (readOnly) throw new Error(`Checkpoint removal is forbidden in a read-only migration plan: ${migrationId}`);
+          await fs.unlink(checkpointPath(migrationId)).catch((error: NodeJS.ErrnoException) => {
+            if (error.code !== 'ENOENT') throw error;
+          });
+        },
+        pathFor: checkpointPath,
       },
       log: (msg: string) => console.log(`[migrate]     ${msg}`),
       config: {
         panelDir: this.panelDir,
         currentDir,
         stateDir,
+        migrationStateDir,
+        releaseLockFile,
         sitesBasePath: process.env.SITES_BASE_PATH ?? '/var/www',
         nodeEnv: (process.env.NODE_ENV as 'production' | 'development') ?? 'production',
       },

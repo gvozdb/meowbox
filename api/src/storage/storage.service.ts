@@ -47,9 +47,11 @@ export class StorageService {
       select: {
         id: true,
         name: true,
-        domain: true,
         rootPath: true,
-        filesRelPath: true,
+        domains: {
+          orderBy: { position: 'asc' },
+          select: { domain: true, filesRelPath: true },
+        },
         databases: { select: { sizeBytes: true } },
       },
       orderBy: { name: 'asc' },
@@ -59,7 +61,7 @@ export class StorageService {
       return sites.map((s) => ({
         siteId: s.id,
         siteName: s.name,
-        domain: s.domain,
+        domain: s.domains[0]?.domain || '',
         wwwBytes: 0,
         logsBytes: 0,
         tmpBytes: 0,
@@ -74,13 +76,22 @@ export class StorageService {
       try {
         const res = await this.agentRelay.emitToAgent<{
           wwwBytes: number; logsBytes: number; tmpBytes: number; totalBytes: number;
-        }>('site:storage', { rootPath: site.rootPath, filesRelPath: site.filesRelPath || undefined }, 30_000);
+        }>(
+          'site:storage',
+          {
+            rootPath: site.rootPath,
+            filesRelPaths: [
+              ...new Set(site.domains.map((domain) => domain.filesRelPath)),
+            ],
+          },
+          30_000,
+        );
 
         if (res.success && res.data) {
           results.push({
             siteId: site.id,
             siteName: site.name,
-            domain: site.domain,
+            domain: site.domains[0]?.domain || '',
             wwwBytes: res.data.wwwBytes,
             logsBytes: res.data.logsBytes,
             tmpBytes: res.data.tmpBytes,
@@ -89,13 +100,13 @@ export class StorageService {
           });
         } else {
           results.push({
-            siteId: site.id, siteName: site.name, domain: site.domain,
+            siteId: site.id, siteName: site.name, domain: site.domains[0]?.domain || '',
             wwwBytes: 0, logsBytes: 0, tmpBytes: 0, dbBytes, totalBytes: dbBytes,
           });
         }
       } catch {
         results.push({
-          siteId: site.id, siteName: site.name, domain: site.domain,
+          siteId: site.id, siteName: site.name, domain: site.domains[0]?.domain || '',
           wwwBytes: 0, logsBytes: 0, tmpBytes: 0, dbBytes, totalBytes: dbBytes,
         });
       }
@@ -107,14 +118,24 @@ export class StorageService {
   async getSiteTopFiles(siteId: string, userId: string, role: string): Promise<TopFile[]> {
     const site = await this.prisma.site.findUnique({
       where: { id: siteId },
-      select: { rootPath: true, filesRelPath: true, userId: true },
+      select: {
+        rootPath: true,
+        userId: true,
+        domains: { select: { filesRelPath: true } },
+      },
     });
     if (!site) throw new NotFoundException('Site not found');
     if (role !== 'ADMIN' && site.userId !== userId) throw new ForbiddenException();
 
     const res = await this.agentRelay.emitToAgent<TopFile[]>(
       'site:top-files',
-      { rootPath: site.rootPath, limit: 20, filesRelPath: site.filesRelPath || undefined },
+      {
+        rootPath: site.rootPath,
+        limit: 20,
+        filesRelPaths: [
+          ...new Set(site.domains.map((domain) => domain.filesRelPath)),
+        ],
+      },
       60_000,
     );
     return res.success && res.data ? res.data : [];

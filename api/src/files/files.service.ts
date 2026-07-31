@@ -1,15 +1,16 @@
 import {
   Injectable,
-  NotFoundException,
   ForbiddenException,
   BadRequestException,
   InternalServerErrorException,
+  NotFoundException,
 } from '@nestjs/common';
-import * as fs from 'fs';
+import { randomUUID } from 'crypto';
+import { constants as fsConstants } from 'fs';
 import * as fsPromises from 'fs/promises';
 import * as path from 'path';
-import { PrismaService } from '../common/prisma.service';
 import { AgentRelayService } from '../gateway/agent-relay.service';
+import { DomainContextService } from '../sites/domain-context.service';
 
 export interface FileItem {
   name: string;
@@ -23,15 +24,26 @@ export interface FileItem {
 @Injectable()
 export class FilesService {
   constructor(
-    private readonly prisma: PrismaService,
+    private readonly domainContext: DomainContextService,
     private readonly agentRelay: AgentRelayService,
   ) {}
 
-  async listFiles(siteId: string, userId: string, role: string, dirPath: string) {
-    const site = await this.getSiteOrFail(siteId, userId, role);
+  async listFiles(
+    siteId: string,
+    domainId: string,
+    userId: string,
+    role: string,
+    dirPath: string,
+  ) {
+    const { applicationRoot } = await this.domainContext.requireOwnedSiteDomain(
+      siteId,
+      domainId,
+      userId,
+      role,
+    );
 
     const result = await this.agentRelay.emitToAgent<FileItem[]>('file:list', {
-      rootPath: site.rootPath,
+      rootPath: applicationRoot,
       path: dirPath || '/',
     });
 
@@ -42,11 +54,22 @@ export class FilesService {
     return result.data;
   }
 
-  async readFile(siteId: string, userId: string, role: string, filePath: string) {
-    const site = await this.getSiteOrFail(siteId, userId, role);
+  async readFile(
+    siteId: string,
+    domainId: string,
+    userId: string,
+    role: string,
+    filePath: string,
+  ) {
+    const { applicationRoot } = await this.domainContext.requireOwnedSiteDomain(
+      siteId,
+      domainId,
+      userId,
+      role,
+    );
 
     const result = await this.agentRelay.emitToAgent<string>('file:read', {
-      rootPath: site.rootPath,
+      rootPath: applicationRoot,
       path: filePath,
     });
 
@@ -57,11 +80,23 @@ export class FilesService {
     return result.data;
   }
 
-  async writeFile(siteId: string, userId: string, role: string, filePath: string, content: string) {
-    const site = await this.getSiteOrFail(siteId, userId, role);
+  async writeFile(
+    siteId: string,
+    domainId: string,
+    userId: string,
+    role: string,
+    filePath: string,
+    content: string,
+  ) {
+    const { applicationRoot } = await this.domainContext.requireOwnedSiteDomain(
+      siteId,
+      domainId,
+      userId,
+      role,
+    );
 
     const result = await this.agentRelay.emitToAgent('file:write', {
-      rootPath: site.rootPath,
+      rootPath: applicationRoot,
       path: filePath,
       content,
     });
@@ -71,11 +106,23 @@ export class FilesService {
     }
   }
 
-  async createItem(siteId: string, userId: string, role: string, itemPath: string, type: 'file' | 'directory') {
-    const site = await this.getSiteOrFail(siteId, userId, role);
+  async createItem(
+    siteId: string,
+    domainId: string,
+    userId: string,
+    role: string,
+    itemPath: string,
+    type: 'file' | 'directory',
+  ) {
+    const { applicationRoot } = await this.domainContext.requireOwnedSiteDomain(
+      siteId,
+      domainId,
+      userId,
+      role,
+    );
 
     const result = await this.agentRelay.emitToAgent('file:create', {
-      rootPath: site.rootPath,
+      rootPath: applicationRoot,
       path: itemPath,
       type,
     });
@@ -85,11 +132,22 @@ export class FilesService {
     }
   }
 
-  async deleteItem(siteId: string, userId: string, role: string, itemPath: string) {
-    const site = await this.getSiteOrFail(siteId, userId, role);
+  async deleteItem(
+    siteId: string,
+    domainId: string,
+    userId: string,
+    role: string,
+    itemPath: string,
+  ) {
+    const { applicationRoot } = await this.domainContext.requireOwnedSiteDomain(
+      siteId,
+      domainId,
+      userId,
+      role,
+    );
 
     const result = await this.agentRelay.emitToAgent('file:delete', {
-      rootPath: site.rootPath,
+      rootPath: applicationRoot,
       path: itemPath,
     });
 
@@ -98,11 +156,23 @@ export class FilesService {
     }
   }
 
-  async renameItem(siteId: string, userId: string, role: string, oldPath: string, newPath: string) {
-    const site = await this.getSiteOrFail(siteId, userId, role);
+  async renameItem(
+    siteId: string,
+    domainId: string,
+    userId: string,
+    role: string,
+    oldPath: string,
+    newPath: string,
+  ) {
+    const { applicationRoot } = await this.domainContext.requireOwnedSiteDomain(
+      siteId,
+      domainId,
+      userId,
+      role,
+    );
 
     const result = await this.agentRelay.emitToAgent('file:rename', {
-      rootPath: site.rootPath,
+      rootPath: applicationRoot,
       oldPath,
       newPath,
     });
@@ -116,22 +186,73 @@ export class FilesService {
    * Resolve a file path safely within the site's rootPath.
    * Prevents directory traversal attacks.
    */
-  async resolveFilePath(siteId: string, userId: string, role: string, relativePath: string): Promise<string> {
-    const site = await this.getSiteOrFail(siteId, userId, role);
+  async resolveFilePath(
+    siteId: string,
+    domainId: string,
+    userId: string,
+    role: string,
+    relativePath: string,
+  ): Promise<string> {
+    const { applicationRoot } = await this.domainContext.requireOwnedSiteDomain(
+      siteId,
+      domainId,
+      userId,
+      role,
+    );
 
     if (!relativePath) {
       throw new BadRequestException('Path is required');
     }
 
-    const root = path.resolve(site.rootPath);
+    const root = path.resolve(applicationRoot);
     const resolved = path.resolve(root, relativePath.replace(/^\/+/, ''));
+    this.assertContained(root, resolved, 'Invalid path');
 
-    // Prevent directory traversal
-    if (!resolved.startsWith(root + path.sep) && resolved !== root) {
-      throw new ForbiddenException('Invalid path');
+    return this.resolveExistingContainedPath(root, resolved);
+  }
+
+  async openDownloadFile(
+    siteId: string,
+    domainId: string,
+    userId: string,
+    role: string,
+    relativePath: string,
+  ) {
+    const resolved = await this.resolveFilePath(
+      siteId,
+      domainId,
+      userId,
+      role,
+      relativePath,
+    );
+
+    let handle: fsPromises.FileHandle;
+    try {
+      handle = await fsPromises.open(
+        resolved,
+        fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW,
+      );
+    } catch (error) {
+      this.throwPathError(error);
     }
 
-    return resolved;
+    let stat;
+    try {
+      stat = await handle!.stat();
+    } catch (error) {
+      await handle!.close().catch(() => undefined);
+      this.throwPathError(error);
+    }
+    if (!stat.isFile()) {
+      await handle!.close();
+      throw new BadRequestException('Невозможно скачать этот тип файла');
+    }
+
+    return {
+      filename: path.basename(resolved),
+      size: stat.size,
+      stream: handle!.createReadStream({ autoClose: true }),
+    };
   }
 
   /**
@@ -140,36 +261,53 @@ export class FilesService {
    */
   async uploadFile(
     siteId: string,
+    domainId: string,
     userId: string,
     role: string,
     targetDir: string,
     file: Express.Multer.File,
   ) {
-    const site = await this.getSiteOrFail(siteId, userId, role);
+    const { site, applicationRoot } =
+      await this.domainContext.requireOwnedSiteDomain(
+        siteId,
+        domainId,
+        userId,
+        role,
+      );
 
-    const root = path.resolve(site.rootPath);
+    const root = path.resolve(applicationRoot);
     const dir = path.resolve(root, targetDir.replace(/^\/+/, ''));
-
-    // Prevent directory traversal
-    if (!dir.startsWith(root + path.sep) && dir !== root) {
-      throw new ForbiddenException('Invalid path');
-    }
+    this.assertContained(root, dir, 'Invalid path');
 
     // Multer parses Content-Disposition filename as latin1; decode back to UTF-8
     const originalName = Buffer.from(file.originalname, 'latin1').toString('utf8');
-    const targetPath = path.join(dir, originalName);
-
-    // Ensure target stays within root
-    if (!targetPath.startsWith(root + path.sep)) {
+    if (
+      !originalName ||
+      originalName === '.' ||
+      originalName === '..' ||
+      originalName.includes('\0') ||
+      originalName.includes('/') ||
+      originalName.includes('\\')
+    ) {
       throw new ForbiddenException('Invalid filename');
     }
 
+    const { realRoot, realDirectory } = await this.ensureUploadDirectory(
+      root,
+      dir,
+    );
+    const targetPath = path.join(realDirectory, originalName);
+    this.assertContained(realRoot, targetPath, 'Invalid filename');
+    const temporaryPath = path.join(realDirectory, `.${randomUUID()}.upload`);
+
     try {
-      // Ensure directory exists
-      await fsPromises.mkdir(dir, { recursive: true });
-      // Write file
-      await fsPromises.writeFile(targetPath, file.buffer);
+      await fsPromises.writeFile(temporaryPath, file.buffer, {
+        flag: 'wx',
+        mode: 0o600,
+      });
+      await fsPromises.rename(temporaryPath, targetPath);
     } catch (err) {
+      await fsPromises.unlink(temporaryPath).catch(() => undefined);
       throw new InternalServerErrorException(`Failed to write file: ${(err as Error).message}`);
     }
 
@@ -186,17 +324,84 @@ export class FilesService {
     }
   }
 
-  private async getSiteOrFail(siteId: string, userId: string, role: string) {
-    const site = await this.prisma.site.findUnique({
-      where: { id: siteId },
-      select: { id: true, rootPath: true, userId: true, systemUser: true },
-    });
+  private async resolveExistingContainedPath(
+    root: string,
+    candidate: string,
+  ): Promise<string> {
+    try {
+      const [realRoot, realCandidate] = await Promise.all([
+        fsPromises.realpath(root),
+        fsPromises.realpath(candidate),
+      ]);
+      this.assertContained(realRoot, realCandidate, 'Invalid path');
+      return realCandidate;
+    } catch (error) {
+      if (error instanceof ForbiddenException) throw error;
+      this.throwPathError(error);
+    }
+  }
 
-    if (!site) throw new NotFoundException('Site not found');
-    if (role !== 'ADMIN' && site.userId !== userId) {
-      throw new ForbiddenException('Access denied');
+  private async ensureUploadDirectory(
+    root: string,
+    candidate: string,
+  ): Promise<{ realRoot: string; realDirectory: string }> {
+    let realRoot: string;
+    try {
+      realRoot = await fsPromises.realpath(root);
+    } catch (error) {
+      this.throwPathError(error);
     }
 
-    return site;
+    const relative = path.relative(root, candidate);
+    let current = realRoot!;
+    for (const segment of relative.split(path.sep).filter(Boolean)) {
+      const next = path.join(current, segment);
+      try {
+        await fsPromises.mkdir(next);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'EEXIST') {
+          this.throwPathError(error);
+        }
+      }
+
+      let realNext: string;
+      try {
+        realNext = await fsPromises.realpath(next);
+        const stat = await fsPromises.stat(realNext);
+        if (!stat.isDirectory()) {
+          throw new BadRequestException('Upload path is not a directory');
+        }
+      } catch (error) {
+        if (error instanceof BadRequestException) throw error;
+        this.throwPathError(error);
+      }
+
+      this.assertContained(realRoot!, realNext!, 'Invalid path');
+      current = realNext!;
+    }
+
+    return { realRoot: realRoot!, realDirectory: current };
   }
+
+  private assertContained(
+    root: string,
+    candidate: string,
+    message: string,
+  ): void {
+    if (candidate !== root && !candidate.startsWith(`${root}${path.sep}`)) {
+      throw new ForbiddenException(message);
+    }
+  }
+
+  private throwPathError(error: unknown): never {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === 'ENOENT' || code === 'ENOTDIR') {
+      throw new NotFoundException('Файл или директория не найдены');
+    }
+    if (code === 'ELOOP' || code === 'EACCES' || code === 'EPERM') {
+      throw new ForbiddenException('Invalid path');
+    }
+    throw new InternalServerErrorException('Failed to resolve file path');
+  }
+
 }

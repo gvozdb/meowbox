@@ -67,13 +67,22 @@ export class NginxService {
 
     // Even if agent doesn't support list-configs, fallback to DB sites
     const sites = await this.prisma.site.findMany({
-      select: { id: true, name: true, domain: true },
+      select: {
+        id: true,
+        name: true,
+        domains: {
+          orderBy: { position: 'asc' },
+          select: { domain: true },
+        },
+      },
     });
 
     const siteMap = new Map<string, (typeof sites)[number]>();
     for (const site of sites) {
-      siteMap.set(site.domain, site);
       siteMap.set(site.name, site);
+      for (const domain of site.domains) {
+        siteMap.set(domain.domain, site);
+      }
     }
 
     if (result.success && result.data) {
@@ -90,7 +99,7 @@ export class NginxService {
 
     // Fallback: just return sites from DB
     return sites.map((s) => ({
-      domain: s.domain,
+      domain: s.domains[0]?.domain || s.name,
       enabled: true,
       siteName: s.name,
       siteId: s.id,
@@ -105,10 +114,27 @@ export class NginxService {
    */
   private async resolveAnchor(key: string): Promise<{ siteName?: string; domain: string }> {
     const site = await this.prisma.site.findFirst({
-      where: { OR: [{ name: key }, { domain: key }] },
-      select: { name: true, domain: true },
+      where: {
+        OR: [
+          { name: key },
+          { domains: { some: { domain: key } } },
+        ],
+      },
+      select: {
+        name: true,
+        domains: {
+          orderBy: { position: 'asc' },
+          take: 1,
+          select: { domain: true },
+        },
+      },
     });
-    if (site) return { siteName: site.name, domain: site.domain };
+    if (site) {
+      return {
+        siteName: site.name,
+        domain: site.domains[0]?.domain || key,
+      };
+    }
     return { domain: key };
   }
 

@@ -1,3 +1,5 @@
+import type { SiteType } from '@meowbox/shared';
+
 /**
  * PlanItem — описание миграции одного сайта со старой hostPanel.
  * Сериализуется в `hostpanel_migration_items.plan` как JSON.
@@ -82,11 +84,13 @@ export interface PlanItem {
   sourceCmsVersion: string;  // hostpanel.version
   sourcePhpVersion: string;  // hostpanel.php
   sourceMysqlPrefix: string; // hostpanel.mysql_table_prefix
+  /** Explicit application preset; execution never guesses it. */
+  preset: SiteType;
 
   /** ====== Mapping (редактируется в Plan-таблице) ====== */
   newName: string;       // → Site.name (и Linux user, и DB name)
-  newDomain: string;     // → Site.domain
-  newAliases: string[];  // → Site.aliases (JSON-array строк)
+  newDomain: string;     // → primary SiteDomain.domain
+  newAliases: string[];  // → alias SiteDomain records
   /**
    * Если true — все алиасы 301-редиректят на главный домен (выставляется
    * парсером nginx когда на источнике есть `if ($host != $main_host) return 301`).
@@ -130,7 +134,7 @@ export interface PlanItem {
   /**
    * Webroot относительно `Site.rootPath`. Извлекается из nginx `root`
    * директивы или hostpanel.path. Обычно `'www'`, но бывает `'public_html'`.
-   * Используется в `applyNginxStage` и `Site.filesRelPath` (spec §7.2).
+   * Используется в `applyNginxStage` и `SiteDomain.filesRelPath` (spec §7.2).
    */
   filesRelPath?: string;
 
@@ -162,6 +166,7 @@ export interface ShortlistItem {
   sourceCmsVersion: string;
   sourcePhpVersion: string;
   sourceMysqlDb: string;
+  preset: SiteType;
   newName: string;
   newDomain: string;
   defaultSelected: boolean;

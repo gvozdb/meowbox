@@ -41,7 +41,7 @@ function pawStyle(i: number) {
     { top: '40%', right: '3%', rotate: '-10deg', opacity: 0.02, delay: '3s' },
     { top: '88%', left: '20%', rotate: '20deg', opacity: 0.03, delay: '5s' },
   ];
-  const p = positions[i - 1];
+  const p = positions[i - 1] ?? positions[0]!;
   return {
     position: 'absolute' as const,
     ...p,

@@ -3,6 +3,7 @@ import {
   Controller,
   Delete,
   Get,
+  Headers,
   Param,
   Post,
   Put,
@@ -19,6 +20,7 @@ import {
   CreateSiteDomainDto,
   UpdateSiteDomainDto,
   UpdateSiteDomainAliasesDto,
+  DeleteSiteDomainDto,
 } from './site-domains.dto';
 
 interface AuthCtx {
@@ -50,8 +52,15 @@ export class SiteDomainsController {
     @Param('id', new ParseUUIDPipe()) id: string,
     @Body() dto: CreateSiteDomainDto,
     @CurrentUser() user: AuthCtx,
+    @Headers('idempotency-key') idempotencyKey?: string,
   ) {
-    const data = await this.service.createDomain(id, dto, user.id, user.role);
+    const data = await this.service.createDomain(
+      id,
+      dto,
+      user.id,
+      user.role,
+      idempotencyKey,
+    );
     return { success: true, data };
   }
 
@@ -62,8 +71,16 @@ export class SiteDomainsController {
     @Param('domainId', new ParseUUIDPipe()) domainId: string,
     @Body() dto: UpdateSiteDomainDto,
     @CurrentUser() user: AuthCtx,
+    @Headers('idempotency-key') idempotencyKey?: string,
   ) {
-    const data = await this.service.updateDomain(id, domainId, dto, user.id, user.role);
+    const data = await this.service.updateDomain(
+      id,
+      domainId,
+      dto,
+      user.id,
+      user.role,
+      idempotencyKey,
+    );
     return { success: true, data };
   }
 
@@ -72,9 +89,18 @@ export class SiteDomainsController {
   async delete(
     @Param('id', new ParseUUIDPipe()) id: string,
     @Param('domainId', new ParseUUIDPipe()) domainId: string,
+    @Body() dto: DeleteSiteDomainDto,
     @CurrentUser() user: AuthCtx,
+    @Headers('idempotency-key') idempotencyKey?: string,
   ) {
-    const data = await this.service.deleteDomain(id, domainId, user.id, user.role);
+    const data = await this.service.deleteDomain(
+      id,
+      domainId,
+      dto,
+      user.id,
+      user.role,
+      idempotencyKey,
+    );
     return { success: true, data };
   }
 
@@ -84,8 +110,15 @@ export class SiteDomainsController {
     @Param('id', new ParseUUIDPipe()) id: string,
     @Param('domainId', new ParseUUIDPipe()) domainId: string,
     @CurrentUser() user: AuthCtx,
+    @Headers('idempotency-key') idempotencyKey?: string,
   ) {
-    const data = await this.service.makePrimary(id, domainId, user.id, user.role);
+    const data = await this.service.makePrimary(
+      id,
+      domainId,
+      user.id,
+      user.role,
+      idempotencyKey,
+    );
     return { success: true, data };
   }
 
@@ -96,8 +129,16 @@ export class SiteDomainsController {
     @Param('domainId', new ParseUUIDPipe()) domainId: string,
     @Body() dto: UpdateSiteDomainAliasesDto,
     @CurrentUser() user: AuthCtx,
+    @Headers('idempotency-key') idempotencyKey?: string,
   ) {
-    const data = await this.service.updateAliases(id, domainId, dto, user.id, user.role);
+    const data = await this.service.updateAliases(
+      id,
+      domainId,
+      dto,
+      user.id,
+      user.role,
+      idempotencyKey,
+    );
     return { success: true, data };
   }
 }

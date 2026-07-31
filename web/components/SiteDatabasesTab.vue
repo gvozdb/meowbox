@@ -3,9 +3,9 @@
     <!-- Header: счётчик + кнопка создания -->
     <div class="site-dbs__header">
       <div class="site-dbs__title-block">
-        <h3 class="site-dbs__title">Базы данных сайта</h3>
+        <h3 class="site-dbs__title">Базы данных приложения</h3>
         <p class="site-dbs__subtitle">
-          На сайт можно подключить несколько БД любых движков. Удалить движок с сервера
+          Привязаны только к выбранному домену. Удалить движок с сервера
           (на <NuxtLink to="/services" class="link">/services</NuxtLink>) можно только когда
           ни одной БД этого движка не осталось.
         </p>
@@ -25,7 +25,7 @@
     </div>
 
     <div v-else-if="!databases.length" class="site-dbs__empty">
-      <p class="site-dbs__empty-text">Нет ни одной БД для этого сайта.</p>
+      <p class="site-dbs__empty-text">У приложения нет баз данных.</p>
       <p v-if="availableEngines.length === 0" class="site-dbs__empty-hint">
         Сначала установи движок на странице <NuxtLink to="/services" class="link">/services</NuxtLink>.
       </p>
@@ -43,6 +43,7 @@
             <span class="db-card__name">{{ db.name }}</span>
             <span class="db-card__meta">
               <span class="db-card__badge">{{ dbTypeLabel(db.type) }}</span>
+              <span v-if="db.purpose === 'APP_PRIMARY'" class="db-card__badge">Основная</span>
               · {{ formatBytes(db.sizeBytes) }}
               <template v-if="db.dbUser"> · юзер <code>{{ db.dbUser }}</code></template>
             </span>
@@ -76,7 +77,7 @@
     <Teleport to="body">
       <div v-if="showCreate" class="modal-overlay" @mousedown.self="showCreate = false">
         <div class="modal">
-          <h3 class="modal__title">Создать БД для сайта «{{ siteName }}»</h3>
+          <h3 class="modal__title">Создать БД для приложения «{{ siteName }}»</h3>
           <div class="modal__fields">
             <div class="form-group">
               <label class="form-label">Имя БД</label>
@@ -174,6 +175,7 @@ import { copyToClipboard } from '~/utils/clipboard';
 
 const props = defineProps<{
   siteId: string;
+  domainId: string;
   siteName: string;
   /** Активна ли вкладка — чтобы не грузить впустую при первом mount. */
   active: boolean;
@@ -186,11 +188,15 @@ const emit = defineEmits<{
 
 const api = useApi();
 const toast = useMbToast();
+const databasesApi = computed(
+  () => `/sites/${props.siteId}/domains/${props.domainId}/databases`,
+);
 
 interface DbItem {
   id: string;
   name: string;
   type: string;
+  purpose: 'APP_PRIMARY' | 'AUXILIARY';
   dbUser?: string;
   sizeBytes?: number;
   site?: { id: string; name: string };
@@ -248,7 +254,7 @@ function formatBytes(bytes?: number) {
 async function loadDatabases() {
   loading.value = true;
   try {
-    databases.value = await api.get<DbItem[]>(`/databases?siteId=${encodeURIComponent(props.siteId)}`);
+    databases.value = await api.get<DbItem[]>(databasesApi.value);
   } catch {
     toast.error('Не удалось загрузить базы данных');
   } finally {
@@ -288,10 +294,9 @@ async function createDatabase() {
     const body: Record<string, string> = {
       name: createForm.name || defaultDbName.value,
       type: createForm.type,
-      siteId: props.siteId,
     };
     if (createForm.dbUser) body.dbUser = createForm.dbUser;
-    await api.post('/databases', body);
+    await api.post(databasesApi.value, body);
     showCreate.value = false;
     toast.success('База данных создана');
     await loadDatabases();
@@ -307,7 +312,15 @@ async function doDelete() {
   if (!deleteTarget.value) return;
   deleting.value = true;
   try {
-    await api.del(`/databases/${deleteTarget.value.id}`);
+    await api.del(
+      `${databasesApi.value}/${deleteTarget.value.id}`,
+      undefined,
+      {
+        headers: {
+          'Idempotency-Key': `database-delete-${crypto.randomUUID()}`,
+        },
+      },
+    );
     toast.success('БД удалена');
     deleteTarget.value = null;
     await loadDatabases();
@@ -324,7 +337,7 @@ async function openAdminer(db: DbItem) {
   // window.open в синхронном click-handler — иначе popup-blocker зарежет.
   const win = window.open('about:blank', '_blank');
   try {
-    const data = await api.post<{ url: string }>(`/databases/${db.id}/adminer-ticket`);
+    const data = await api.post<{ url: string }>(`${databasesApi.value}/${db.id}/adminer-ticket`);
     if (!data?.url) throw new Error('Пустой URL от SSO');
     if (win) win.location.href = data.url;
     else window.location.href = data.url;
@@ -339,13 +352,16 @@ async function openAdminer(db: DbItem) {
 async function exportDb(db: DbItem) {
   busy[db.id] = 'export';
   try {
-    const data = await api.post<{ filePath: string }>(`/databases/${db.id}/export`);
+    const data = await api.post<{ filePath: string }>(`${databasesApi.value}/${db.id}/export`);
     if (!data.filePath) {
       toast.error('Экспорт не вернул путь к файлу');
       return;
     }
     const filename = data.filePath.split('/').pop() || `${db.name}.sql`;
-    await api.download(`/databases/${db.id}/download?filePath=${encodeURIComponent(data.filePath)}`, filename);
+    await api.download(
+      `${databasesApi.value}/${db.id}/download?filePath=${encodeURIComponent(data.filePath)}`,
+      filename,
+    );
     toast.success('Дамп скачан');
   } catch (err) {
     toast.error((err as Error).message || 'Ошибка экспорта');
@@ -356,12 +372,21 @@ async function exportDb(db: DbItem) {
 
 async function importFile(event: Event, db: DbItem) {
   const input = event.target as HTMLInputElement;
-  if (!input.files?.length) return;
-  const file = input.files[0];
+  const file = input.files?.[0];
+  if (!file) return;
   busy[db.id] = 'import';
   try {
     toast.success(`Импорт ${file.name}...`);
-    await api.upload(`/databases/${db.id}/import-upload`, file);
+    await api.upload(
+      `${databasesApi.value}/${db.id}/import-upload`,
+      file,
+      undefined,
+      {
+        headers: {
+          'Idempotency-Key': `database-import-${crypto.randomUUID()}`,
+        },
+      },
+    );
     toast.success('Импорт завершён');
     await loadDatabases();
   } catch (err) {
@@ -374,7 +399,9 @@ async function importFile(event: Event, db: DbItem) {
 
 async function resetPassword(db: DbItem) {
   try {
-    const data = await api.post<{ plainPassword: string }>(`/databases/${db.id}/reset-password`);
+    const data = await api.post<{ plainPassword: string }>(
+      `${databasesApi.value}/${db.id}/reset-password`,
+    );
     newPassword.value = data.plainPassword;
     passwordDbName.value = db.name;
     passwordDbUser.value = db.dbUser || '';
@@ -389,7 +416,7 @@ async function revealPassword(db: DbItem) {
   busy[db.id] = 'reveal';
   try {
     const data = await api.post<{ password: string; dbUser: string; name: string }>(
-      `/databases/${db.id}/reveal-password`,
+      `${databasesApi.value}/${db.id}/reveal-password`,
     );
     if (!data?.password) {
       toast.error('Пароль пуст или не сохранён');
@@ -425,10 +452,10 @@ async function copyPassword() {
 }
 
 // Перезагружаем при первом открытии вкладки. Если уже грузили — не дёргаем.
-let loaded = false;
-watch(() => props.active, (active) => {
-  if (active && !loaded) {
-    loaded = true;
+let loadedDomainId = '';
+watch([() => props.active, () => props.domainId], ([active, domainId]) => {
+  if (active && domainId && loadedDomainId !== domainId) {
+    loadedDomainId = domainId;
     loadEngines();
     loadDatabases();
   }

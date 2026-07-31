@@ -11,6 +11,7 @@ import {
   MODX_DB_DEFAULTS,
 } from '@meowbox/shared';
 import { TIMEOUTS, HTTP_CHECK, COMPOSER_CANDIDATES } from '../config';
+import { resolveSiteDomainRoot } from '../runtime/site-domain-runtime';
 
 type LogFn = (line: string) => void;
 
@@ -43,6 +44,18 @@ interface ModxInstallParams {
    * (либо юзерское, либо рандомный `[a-z]{7}_`).
    */
   tablePrefix?: string;
+}
+
+export interface ModxDatabaseRewriteParams {
+  rootPath: string;
+  filesRelPath: string;
+  dbName: string;
+  dbUser: string;
+  dbPassword: string;
+  dbType: 'MARIADB' | 'MYSQL';
+  tablePrefix: string;
+  managerPath?: string;
+  connectorsPath?: string;
 }
 
 interface ModxUpdateParams {
@@ -133,9 +146,8 @@ export class SiteInstaller {
     try {
       log(`[install] MODX 3 via composer create-project (version ${version}, PHP: ${phpBinForComposer})...`);
 
-      // Composer требует, чтобы директория либо не существовала, либо была пуста.
-      // Пересоздаём wwwDir пустой.
-      await this.executor.execute('rm', ['-rf', wwwDir]);
+      // Root preflight в handler гарантирует отсутствующую или пустую директорию.
+      // Не удаляем её: повторная проверка должна оставаться fail-closed.
       await this.executor.execute('mkdir', ['-p', path.dirname(wwwDir)]);
 
       const owner = params.systemUser ? `${params.systemUser}:${params.systemUser}` : 'www-data:www-data';
@@ -322,8 +334,11 @@ export class SiteInstaller {
       const upgradeRes = await this.runModxUpgrade(wwwDir, params, log);
       if (!upgradeRes.success) {
         log(`[update] CLI upgrade failed: ${upgradeRes.error}`);
-        log('[update] Файлы накатаны — завершите апгрейд через /setup/ в браузере');
         await this.cleanupModxDevFiles(wwwDir, log, false); // оставить setup/
+        return {
+          success: false,
+          error: `MODX upgrade failed: ${upgradeRes.error}`,
+        };
       } else {
         await this.cleanupModxDevFiles(wwwDir, log, true); // грохнуть setup/
       }
@@ -421,8 +436,11 @@ export class SiteInstaller {
       const upgradeRes = await this.runModxUpgrade(wwwDir, params, log);
       if (!upgradeRes.success) {
         log(`[update] CLI upgrade failed: ${upgradeRes.error}`);
-        log('[update] Файлы обновлены через composer — завершите апгрейд через /setup/ или manager');
         await this.cleanupModxDevFiles(wwwDir, log, false); // оставить setup/ для ручного завершения
+        return {
+          success: false,
+          error: `MODX upgrade failed: ${upgradeRes.error}`,
+        };
       } else {
         await this.cleanupModxDevFiles(wwwDir, log, true);
       }
@@ -470,24 +488,24 @@ export class SiteInstaller {
       ], { timeout: TIMEOUTS.MEDIUM, allowFailure: true });
 
       if (dlResult.exitCode !== 0) {
-        log(`[install] Download failed (code ${dlResult.exitCode}), creating MODX-ready structure...`);
-        await this.createModxStub(wwwDir, params);
-        log('[install] MODX-ready structure created. Upload MODX manually or via Deploy.');
-        return { success: true };
+        await fs.unlink(zipPath).catch(() => {});
+        const error = `MODX download failed (curl exit code ${dlResult.exitCode})`;
+        log(`[install] ${error}`);
+        return { success: false, error };
       }
 
       try {
         const stat = await fs.stat(zipPath);
         if (stat.size < 100_000) {
-          log(`[install] Downloaded file too small (${stat.size} bytes), creating stub...`);
           await fs.unlink(zipPath).catch(() => {});
-          await this.createModxStub(wwwDir, params);
-          return { success: true };
+          const error = `Downloaded MODX archive is too small (${stat.size} bytes)`;
+          log(`[install] ${error}`);
+          return { success: false, error };
         }
       } catch {
-        log('[install] Downloaded file not found, creating stub...');
-        await this.createModxStub(wwwDir, params);
-        return { success: true };
+        const error = 'Downloaded MODX archive was not found';
+        log(`[install] ${error}`);
+        return { success: false, error };
       }
 
       // Step 2: Распаковка
@@ -499,10 +517,10 @@ export class SiteInstaller {
       await fs.unlink(zipPath).catch(() => {});
 
       if (!extracted) {
-        log('[install] Extraction failed, creating stub...');
         await this.executor.execute('rm', ['-rf', tmpDir]);
-        await this.createModxStub(wwwDir, params);
-        return { success: true };
+        const error = 'MODX archive extraction failed';
+        log(`[install] ${error}`);
+        return { success: false, error };
       }
 
       const entries = await fs.readdir(tmpDir);
@@ -793,8 +811,7 @@ export class SiteInstaller {
 
   /** Определяет путь до web-root из rootPath + filesRelPath. */
   private resolveWwwDir(rootPath: string, filesRelPath?: string): string {
-    const rel = (filesRelPath || 'www').replace(/^\/+/, '').replace(/\.\.+/g, '').replace(/\/+$/, '');
-    return path.join(rootPath, rel || 'www');
+    return resolveSiteDomainRoot(rootPath, filesRelPath || 'www');
   }
 
   /**
@@ -1367,39 +1384,150 @@ console.log(\`Extracted \${count} files (skipped unsafe: \${skipped})\`);
     }
   }
 
-  private async createModxStub(
-    wwwDir: string,
-    params: ModxInstallParams,
-  ): Promise<void> {
-    for (const dir of [
-      'core/cache', 'core/config', 'core/packages', 'core/model',
-      'assets/components', 'assets/images',
-      'manager', 'connectors',
-    ]) {
-      await this.executor.execute('mkdir', ['-p', path.join(wwwDir, dir)]);
+  async rewriteModxDatabaseConfig(
+    params: ModxDatabaseRewriteParams,
+  ): Promise<InstallResult> {
+    let tempPath: string | null = null;
+    try {
+      const wwwDir = this.resolveWwwDir(
+        params.rootPath,
+        params.filesRelPath,
+      );
+      const configPath = path.join(
+        wwwDir,
+        'core',
+        'config',
+        'config.inc.php',
+      );
+      const stat = await fs.lstat(configPath);
+      if (!stat.isFile() || stat.isSymbolicLink()) {
+        throw new Error('MODX config must be a regular file');
+      }
+      const realConfig = await fs.realpath(configPath);
+      if (
+        realConfig !== configPath
+        || !realConfig.startsWith(`${wwwDir}${path.sep}`)
+      ) {
+        throw new Error('MODX config escapes application root');
+      }
+
+      const managerPath = this.normalizeConfigSubpath(
+        params.managerPath || 'manager',
+      );
+      const connectorsPath = this.normalizeConfigSubpath(
+        params.connectorsPath || 'connectors',
+      );
+      const dbHost = MODX_DB_DEFAULTS.HOST;
+      const dbDsn =
+        `mysql:host=${dbHost};port=${MODX_DB_DEFAULTS.MYSQL_PORT};` +
+        `dbname=${params.dbName};charset=${MODX_DB_DEFAULTS.CHARSET}`;
+      let config = await fs.readFile(configPath, 'utf8');
+
+      const replaceAssignment = (
+        names: string[],
+        value: string,
+        required = true,
+      ): void => {
+        let matches = 0;
+        for (const name of names) {
+          const pattern = new RegExp(
+            `(^[\\t ]*\\$${name}[\\t ]*=[\\t ]*)(['"])(?:\\\\.|(?!\\2)[^\\r\\n])*\\2[\\t ]*;[\\t ]*$`,
+            'gm',
+          );
+          config = config.replace(pattern, (_line, prefix: string) => {
+            matches += 1;
+            return `${prefix}'${this.phpSingleQuote(value)}';`;
+          });
+        }
+        if ((required && matches !== 1) || (!required && matches > 1)) {
+          throw new Error(
+            `Unsupported MODX config shape for ${names.join('/')}`,
+          );
+        }
+      };
+
+      replaceAssignment(['database_type', 'modx_database_type'], 'mysql');
+      replaceAssignment(
+        ['database_server', 'modx_database_server'],
+        dbHost,
+      );
+      replaceAssignment(['database_user', 'modx_database_user'], params.dbUser);
+      replaceAssignment(
+        ['database_password', 'modx_database_password'],
+        params.dbPassword,
+      );
+      replaceAssignment(['dbase', 'modx_dbase'], params.dbName);
+      replaceAssignment(
+        ['table_prefix', 'modx_table_prefix'],
+        params.tablePrefix,
+      );
+      replaceAssignment(['database_dsn', 'modx_database_dsn'], dbDsn, false);
+      replaceAssignment(
+        ['database_connection_charset'],
+        MODX_DB_DEFAULTS.CHARSET,
+        false,
+      );
+
+      replaceAssignment(['modx_core_path'], `${wwwDir}/core/`);
+      replaceAssignment(
+        ['modx_processors_path'],
+        `${wwwDir}/core/model/modx/processors/`,
+      );
+      replaceAssignment(
+        ['modx_connectors_path'],
+        `${wwwDir}/${connectorsPath}/`,
+      );
+      replaceAssignment(['modx_connectors_url'], `/${connectorsPath}/`);
+      replaceAssignment(['modx_manager_path'], `${wwwDir}/${managerPath}/`);
+      replaceAssignment(['modx_manager_url'], `/${managerPath}/`);
+      replaceAssignment(['modx_base_path'], `${wwwDir}/`);
+      replaceAssignment(['modx_base_url'], '/');
+      replaceAssignment(['modx_assets_path'], `${wwwDir}/assets/`);
+      replaceAssignment(['modx_assets_url'], '/assets/');
+
+      tempPath = path.join(
+        path.dirname(configPath),
+        `.config.inc.php.meowbox-${process.pid}-${crypto.randomUUID()}`,
+      );
+      const handle = await fs.open(tempPath, 'wx', stat.mode & 0o777);
+      try {
+        await handle.writeFile(config, 'utf8');
+        await handle.sync();
+        await handle.chmod(stat.mode & 0o777);
+        await handle.chown(stat.uid, stat.gid);
+      } finally {
+        await handle.close();
+      }
+      await fs.rename(tempPath, configPath);
+      tempPath = null;
+      const directory = await fs.open(path.dirname(configPath), 'r');
+      try {
+        await directory.sync();
+      } finally {
+        await directory.close();
+      }
+      return { success: true };
+    } catch (error) {
+      if (tempPath) await fs.unlink(tempPath).catch(() => undefined);
+      return { success: false, error: (error as Error).message };
     }
+  }
 
-    const dbInfo = params.dbName
-      ? `Database: ${params.dbName} / User: ${params.dbUser}`
-      : 'No database configured yet';
-
-    const indexPhp = `<?php
-/**
- * Site: ${params.domain}
- * MODX files pending installation.
- */
-echo '<h1>${params.domain}</h1>';
-echo '<p>MODX not yet installed. Upload files or deploy from git.</p>';
-echo '<p>${dbInfo}</p>';
-`;
-    await fs.writeFile(path.join(wwwDir, 'index.php'), indexPhp, 'utf-8');
-
-    if (params.dbName) {
-      await this.writeModxConfig(wwwDir, params);
+  private normalizeConfigSubpath(value: string): string {
+    const normalized = value.trim().replace(/^\/+|\/+$/g, '');
+    if (
+      !normalized
+      || normalized.length > 255
+      || !/^[A-Za-z0-9._-]+(?:\/[A-Za-z0-9._-]+)*$/.test(normalized)
+      || normalized.split('/').some((part) => part === '.' || part === '..')
+    ) {
+      throw new Error('Invalid MODX subpath');
     }
+    return normalized;
+  }
 
-    const owner = params.systemUser ? `${params.systemUser}:${params.systemUser}` : 'www-data:www-data';
-    await this.executor.execute('chown', ['-R', owner, path.dirname(wwwDir)]);
+  private phpSingleQuote(value: string): string {
+    return String(value).replace(/\\/g, '\\\\').replace(/'/g, "\\'");
   }
 
   private async writeModxConfig(
@@ -1519,7 +1647,7 @@ if (!defined('MODX_CORE_PATH')) {
       await fs.writeFile(
         path.join(wwwDir, 'index.html'),
         indexHtml,
-        'utf-8',
+        { encoding: 'utf-8', flag: 'wx' },
       );
 
       const owner = systemUser ? `${systemUser}:${systemUser}` : 'www-data:www-data';

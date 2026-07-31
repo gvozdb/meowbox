@@ -48,21 +48,26 @@
       <NuxtLink
         v-for="site in filteredSites"
         :key="site.id"
-        :to="`/sites/${site.id}`"
+        :to="`/sites/${site.id}${site.primaryDomain?.id ? `?domain=${site.primaryDomain.id}` : ''}`"
         class="site-card"
       >
         <div class="site-card__header">
-          <SiteTypeIcon :type="site.type" />
+          <SiteTypeIcon :type="primaryPreset(site)" />
           <SiteStatusBadge :status="site.status" />
         </div>
         <div class="site-card__body">
           <h3 class="site-card__name">{{ site.displayName || site.name }}</h3>
-          <p class="site-card__domain">{{ site.domain }}</p>
+          <p class="site-card__domain">{{ primaryDomainLabel(site) }}</p>
         </div>
         <div class="site-card__footer">
-          <span v-if="site.phpVersion" class="site-card__tag">PHP {{ site.phpVersion }}</span>
-          <span v-if="site.appPort" class="site-card__tag">:{{ site.appPort }}</span>
-          <span v-if="site._count?.databases" class="site-card__tag">{{ site._count.databases }} DB</span>
+          <span v-if="getApplicationCount(site)" class="site-card__tag">{{ getApplicationCount(site) }} app</span>
+          <span
+            v-for="(value, preset) in site.presetCounts || {}"
+            :key="`${site.id}-${preset}`"
+            class="site-card__tag"
+          >
+            {{ formatPresetPresetCount(preset, value) }}
+          </span>
         </div>
       </NuxtLink>
     </div>
@@ -86,12 +91,18 @@ definePageMeta({ middleware: 'auth' });
 interface SiteItem {
   id: string;
   name: string;
-  domain: string;
-  type: string;
+  displayName?: string | null;
+  primaryDomain?: {
+    id: string;
+    domain: string;
+    preset: string;
+    isPrimary: boolean;
+    position: number;
+  } | null;
+  presetCounts?: Record<string, number>;
+  domains?: Array<{ id: string; domain: string }>|undefined;
+  applicationCount?: number;
   status: string;
-  phpVersion: string | null;
-  appPort: number | null;
-  _count?: { databases: number; backups: number };
 }
 
 const api = useApi();
@@ -106,6 +117,38 @@ const statusFilters = [
   { label: 'Деплой', value: 'DEPLOYING' },
 ];
 
+const presetDisplay = {
+  MODX_REVO: 'MODX_REVO',
+  MODX_3: 'MODX_3',
+  CUSTOM: 'CUSTOM',
+};
+
+function primaryPreset(site: SiteItem): string {
+  if (site.primaryDomain?.preset) return site.primaryDomain.preset;
+  if (site.presetCounts) {
+    if (site.presetCounts.MODX_3) return 'MODX_3';
+    if (site.presetCounts.MODX_REVO) return 'MODX_REVO';
+    if (site.presetCounts.CUSTOM) return 'CUSTOM';
+  }
+  return 'CUSTOM';
+}
+
+function primaryDomainLabel(site: SiteItem): string {
+  if (site.primaryDomain?.domain) return site.primaryDomain.domain;
+  return site.name;
+}
+
+function getApplicationCount(site: SiteItem): number {
+  if (typeof site.applicationCount === 'number') return site.applicationCount;
+  return site.domains?.length || 0;
+}
+
+function formatPresetPresetCount(preset: string, value: number): string {
+  if (!value) return '';
+  const label = presetDisplay[preset as keyof typeof presetDisplay] || preset;
+  return `${value}×${label}`;
+}
+
 const filteredSites = computed(() => {
   let result = sites.value;
   if (search.value) {
@@ -113,11 +156,11 @@ const filteredSites = computed(() => {
     result = result.filter(
       (s) =>
         s.name.toLowerCase().includes(q) ||
-        s.domain.toLowerCase().includes(q),
+        primaryDomainLabel(s).toLowerCase().includes(q),
     );
   }
   if (statusFilter.value) {
-    result = result.filter((s) => s.status === statusFilter.value);
+  result = result.filter((s) => s.status === statusFilter.value);
   }
   return result;
 });

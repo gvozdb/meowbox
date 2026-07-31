@@ -2,8 +2,21 @@ import { CommandExecutor } from '../command-executor';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as https from 'https';
-import { BACKUP_LOCAL_PATH, BACKUP_HOSTS } from '../config';
+import { randomUUID } from 'crypto';
+import { pipeline } from 'stream/promises';
+import { createGzip } from 'zlib';
+import {
+  BACKUP_LOCAL_PATH,
+  BACKUP_HOSTS,
+  isUnderAllowedSiteRoot,
+} from '../config';
 import { dumpDatabaseToFile } from './db-dump';
+import {
+  assertSiteBackupId,
+  removeSiteBackupManifest,
+  writeSiteBackupManifest,
+} from './site-manifest-file';
+import { normalizeRestoreIncludePaths } from '@meowbox/shared';
 
 interface BackupParams {
   backupId: string;
@@ -18,6 +31,7 @@ interface BackupParams {
   baseTimestamp?: string;
   excludeTableData?: string[];
   keepLocalCopy?: boolean;
+  manifest?: string;
 }
 
 interface BackupResult {
@@ -56,24 +70,32 @@ export class BackupExecutor {
   }
 
   async execute(params: BackupParams, onProgress: ProgressFn): Promise<BackupResult> {
+    const tempFiles: string[] = [];
+    let manifestPath: string | null = null;
     try {
+      assertSiteBackupId(params.backupId);
       // Ensure backup dir exists
       await this.executor.execute('mkdir', ['-p', BACKUP_DIR]);
 
       const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
       const typeLabel = params.type === 'DIFFERENTIAL' ? 'diff' : params.type.toLowerCase();
-      const archiveName = `${params.siteName}_${typeLabel}_${timestamp}.tar.gz`;
+      const archiveName =
+        `${params.siteName}_${typeLabel}_${timestamp}_${params.backupId.slice(0, 8)}.tar.gz`;
       const archivePath = path.join(BACKUP_DIR, archiveName);
 
       onProgress(5);
 
-      const tempFiles: string[] = [];
+      manifestPath = writeSiteBackupManifest(params.backupId, params.manifest);
+      if (manifestPath) tempFiles.push(manifestPath);
 
       // Step 1: Dump databases if needed
       if (params.type !== 'FILES_ONLY' && params.databases?.length) {
         for (const db of params.databases) {
           assertDbName(db.name);
-          const dumpPath = path.join(BACKUP_DIR, `${db.name}.sql`);
+          const dumpPath = path.join(
+            BACKUP_DIR,
+            `${params.backupId}-${db.name}.sql`,
+          );
           await this.dumpDatabase(db.name, db.type, dumpPath, params.excludeTableData);
           tempFiles.push(dumpPath);
         }
@@ -89,19 +111,26 @@ export class BackupExecutor {
         // Only databases — archive the SQL dumps
         if (tempFiles.length) {
           await this.createArchive(archivePath, tempFiles, BACKUP_DIR, []);
+          await this.verifyArchiveMembers(
+            archivePath,
+            tempFiles,
+            BACKUP_DIR,
+          );
         }
       } else {
-        // Files (and optionally DB dumps)
-        const allPaths = [params.rootPath, ...tempFiles];
-        await this.createArchive(archivePath, allPaths, '/', params.excludePaths, newerThan);
+        // User excludes apply only to the Site tree. Manifest and database
+        // dumps are appended separately and cannot be excluded accidentally.
+        await this.createArchive(
+          archivePath,
+          [params.rootPath],
+          '/',
+          params.excludePaths,
+          newerThan,
+          tempFiles,
+        );
       }
 
       onProgress(60);
-
-      // Clean up temp SQL dumps
-      for (const f of tempFiles) {
-        try { fs.unlinkSync(f); } catch { /* ignore */ }
-      }
 
       // Verify archive exists
       if (!fs.existsSync(archivePath)) {
@@ -142,6 +171,11 @@ export class BackupExecutor {
         sizeBytes: 0,
         error: (err as Error).message || 'Backup failed',
       };
+    } finally {
+      for (const file of tempFiles) {
+        try { fs.unlinkSync(file); } catch { /* ignore */ }
+      }
+      removeSiteBackupManifest(manifestPath);
     }
   }
 
@@ -211,6 +245,7 @@ export class BackupExecutor {
   async restore(
     params: {
       backupId: string;
+      restoreId: string;
       siteId: string;
       siteName: string;
       rootPath: string;
@@ -231,30 +266,30 @@ export class BackupExecutor {
     const scope = params.scope || 'FILES_AND_DB';
     const restoreFiles = scope === 'FILES_AND_DB' || scope === 'FILES_ONLY';
     const restoreDb = scope === 'FILES_AND_DB' || scope === 'DB_ONLY';
-    // Жёсткая фильтрация (defense-in-depth — даже если API скомпрометирован).
-    // См. подробнее в restic.executor.ts — пустой/dot-only rel вызывает
-    // полное копирование корня и обход selective restore.
-    const includePaths = (params.includePaths || [])
-      .map((p) => String(p || '').trim().replace(/^\.\/+/, '').replace(/\/+$/, ''))
-      .filter((p) =>
-        p.length > 0
-        && p !== '.'
-        && !p.includes('..')
-        && !p.includes('\0')
-        && !p.includes('\\')
-        && !p.startsWith('/'),
-      );
+    const filesToClean: string[] = [];
+    let tempDir: string | null = null;
     try {
+      assertSiteBackupId(params.backupId);
+      assertSiteBackupId(params.restoreId);
+      const includePaths = normalizeRestoreIncludePaths(params.includePaths);
+      const targetRoot = path.resolve(params.rootPath);
+      if (
+        !path.isAbsolute(params.rootPath) ||
+        !isUnderAllowedSiteRoot(targetRoot) ||
+        (fs.existsSync(targetRoot) &&
+          !isUnderAllowedSiteRoot(fs.realpathSync(targetRoot)))
+      ) {
+        throw new Error('Restore target is outside allowed Site roots');
+      }
       onProgress(5);
 
       const isDifferential = !!params.baseFilePath;
-      const filesToClean: string[] = [];
 
       // Download diff archive
       let localDiffPath = params.filePath;
       localDiffPath = await this.downloadIfRemote(
         params.filePath, params.storageType, params.storageConfig,
-        `restore_diff_${params.backupId}.tar.gz`,
+        `restore_diff_${params.backupId}_${params.restoreId}.tar.gz`,
       );
       if (localDiffPath !== params.filePath) filesToClean.push(localDiffPath);
 
@@ -269,7 +304,7 @@ export class BackupExecutor {
           params.baseFilePath,
           params.baseStorageType || params.storageType,
           params.baseStorageConfig || params.storageConfig,
-          `restore_base_${params.backupId}.tar.gz`,
+          `restore_base_${params.backupId}_${params.restoreId}.tar.gz`,
         );
         if (localBasePath !== params.baseFilePath) filesToClean.push(localBasePath);
 
@@ -280,8 +315,13 @@ export class BackupExecutor {
 
       onProgress(20);
 
-      const tempDir = path.join(BACKUP_DIR, `restore_${params.backupId}`);
-      await this.executor.execute('mkdir', ['-p', tempDir]);
+      fs.mkdirSync(BACKUP_DIR, { recursive: true, mode: 0o700 });
+      tempDir = fs.mkdtempSync(
+        path.join(
+          BACKUP_DIR,
+          `restore-${params.backupId}-${params.restoreId}-`,
+        ),
+      );
 
       // Параметры tar для restore:
       //   --no-same-owner / --no-same-permissions — не доверяем uid/perms
@@ -332,23 +372,39 @@ export class BackupExecutor {
           const sourceName = db.sourceName || db.name;
           assertDbName(sourceName);
           const dumpFile = path.join(tempDir, `${sourceName}.sql`);
-          const altDumpFile = path.join(tempDir, 'var', 'meowbox', 'backups', `${sourceName}.sql`);
-          const actualDump = fs.existsSync(dumpFile) ? dumpFile : fs.existsSync(altDumpFile) ? altDumpFile : null;
+          const currentDumpFile = path.join(
+            tempDir,
+            'var',
+            'meowbox',
+            'backups',
+            `${params.backupId}-${sourceName}.sql`,
+          );
+          const legacyDumpFile = path.join(
+            tempDir,
+            'var',
+            'meowbox',
+            'backups',
+            `${sourceName}.sql`,
+          );
+          const actualDump = [dumpFile, currentDumpFile, legacyDumpFile].find(
+            (candidate) => fs.existsSync(candidate),
+          ) || null;
 
-          if (actualDump) {
-            // Путь собран нами из tempDir (под BACKUP_LOCAL_PATH) + имени БД
-            // (имя БД прошло валидацию на уровне API). Но всё равно перестрахуемся:
-            // запрещаем метасимволы, проверяем что файл внутри tempDir.
-            const safeDump = path.resolve(actualDump);
-            if (!/^[A-Za-z0-9_./-]+$/.test(safeDump) || !safeDump.startsWith(tempDir + path.sep)) {
-              return { success: false, error: `Invalid dump path: ${actualDump}` };
-            }
-            if (db.type === 'POSTGRESQL') {
-              await this.executor.execute('sudo', ['-u', 'postgres', 'psql', '-d', db.name, '-f', safeDump], { timeout: 600_000 });
-            } else {
-              const cmd = db.type === 'MARIADB' ? 'mariadb' : 'mysql';
-              await this.executor.execute(cmd, ['-u', 'root', db.name, '-e', `source ${safeDump}`], { timeout: 600_000 });
-            }
+          if (!actualDump) {
+            throw new Error(`Database dump is missing for ${sourceName}`);
+          }
+          // Путь собран нами из tempDir (под BACKUP_LOCAL_PATH) + имени БД
+          // (имя БД прошло валидацию на уровне API). Но всё равно перестрахуемся:
+          // запрещаем метасимволы, проверяем что файл внутри tempDir.
+          const safeDump = path.resolve(actualDump);
+          if (!/^[A-Za-z0-9_./-]+$/.test(safeDump) || !safeDump.startsWith(tempDir + path.sep)) {
+            throw new Error(`Invalid dump path: ${actualDump}`);
+          }
+          if (db.type === 'POSTGRESQL') {
+            await this.executor.execute('sudo', ['-u', 'postgres', 'psql', '-d', db.name, '-f', safeDump], { timeout: 600_000 });
+          } else {
+            const cmd = db.type === 'MARIADB' ? 'mariadb' : 'mysql';
+            await this.executor.execute(cmd, ['-u', 'root', db.name, '-e', `source ${safeDump}`], { timeout: 600_000 });
           }
         }
       }
@@ -357,7 +413,7 @@ export class BackupExecutor {
 
       // Restore files to rootPath
       if (restoreFiles) {
-        const sourceRootPath = params.sourceRootPath || params.rootPath;
+        const sourceRootPath = params.sourceRootPath || targetRoot;
         const sourceRootRel = sourceRootPath.replace(/^\/+/, '');
         if (
           sourceRootRel.length === 0 ||
@@ -381,18 +437,18 @@ export class BackupExecutor {
             await this.executor.execute('rsync', [
               '-a', '--delete',
               `${extractedRoot}/`,
-              `${params.rootPath}/`,
+              `${targetRoot}/`,
             ], { timeout: 300_000 });
           } else {
-            await this.executor.execute('cp', ['-a', `${extractedRoot}/.`, params.rootPath], { timeout: 300_000 });
+            await this.executor.execute('cp', ['-a', `${extractedRoot}/.`, targetRoot], { timeout: 300_000 });
           }
         } else {
           // Selective: только указанные пути первого уровня
           for (const rel of includePaths) {
             const src = path.resolve(extractedRoot, rel);
-            const dst = path.resolve(params.rootPath, rel);
+            const dst = path.resolve(targetRoot, rel);
             const extRootResolved = path.resolve(extractedRoot);
-            const rootResolved = path.resolve(params.rootPath);
+            const rootResolved = targetRoot;
             // Strict containment: НЕ равны корню — иначе обход selective.
             if (src === extRootResolved || dst === rootResolved) continue;
             if (!src.startsWith(extRootResolved + path.sep)) continue;
@@ -415,16 +471,25 @@ export class BackupExecutor {
 
       onProgress(95);
 
-      // Cleanup
-      await this.executor.execute('rm', ['-rf', tempDir]);
-      for (const f of filesToClean) {
-        try { fs.unlinkSync(f); } catch { /* ignore */ }
-      }
-
       onProgress(100);
       return { success: true };
     } catch (err) {
       return { success: false, error: (err as Error).message };
+    } finally {
+      if (tempDir) {
+        try {
+          fs.rmSync(tempDir, { recursive: true, force: true });
+        } catch {
+          // A later restore uses a unique temp path, so stale data is isolated.
+        }
+      }
+      for (const file of filesToClean) {
+        try {
+          fs.unlinkSync(file);
+        } catch {
+          // Best-effort cleanup of downloaded remote archives.
+        }
+      }
     }
   }
 
@@ -615,7 +680,20 @@ export class BackupExecutor {
     basePath: string,
     excludePaths: string[],
     newerThan?: string,
+    requiredPaths: string[] = [],
   ): Promise<void> {
+    if (requiredPaths.length > 0) {
+      await this.createArchiveWithRequiredMembers(
+        archivePath,
+        paths,
+        basePath,
+        excludePaths,
+        newerThan,
+        requiredPaths,
+      );
+      return;
+    }
+
     const args = ['-czf', archivePath, '-C', basePath];
 
     if (newerThan) {
@@ -639,6 +717,100 @@ export class BackupExecutor {
     if (result.exitCode !== 0) {
       throw new Error(`Archive creation failed: ${result.stderr}`);
     }
+  }
+
+  private async createArchiveWithRequiredMembers(
+    archivePath: string,
+    paths: string[],
+    basePath: string,
+    excludePaths: string[],
+    newerThan: string | undefined,
+    requiredPaths: string[],
+  ): Promise<void> {
+    const token = randomUUID();
+    const tarPath = `${archivePath}.${token}.tar`;
+    const gzipPath = `${archivePath}.${token}.partial`;
+    try {
+      const createArgs = ['-cf', tarPath, '-C', basePath];
+      if (newerThan) createArgs.push(`--newer-mtime=${newerThan}`);
+      for (const excluded of excludePaths) {
+        createArgs.push(`--exclude=${excluded}`);
+      }
+      createArgs.push(
+        ...paths.map((value) => this.archiveMember(basePath, value)),
+      );
+      const created = await this.executor.execute('tar', createArgs, {
+        timeout: 600_000,
+        allowFailure: true,
+      });
+      if (created.exitCode !== 0) {
+        throw new Error(`Archive creation failed: ${created.stderr}`);
+      }
+
+      const requiredMembers = requiredPaths.map((value) =>
+        this.archiveMember(basePath, value),
+      );
+      const appended = await this.executor.execute(
+        'tar',
+        ['-rf', tarPath, '-C', basePath, '--', ...requiredMembers],
+        { timeout: 600_000, allowFailure: true },
+      );
+      if (appended.exitCode !== 0) {
+        throw new Error(
+          `Required backup metadata append failed: ${appended.stderr}`,
+        );
+      }
+
+      await pipeline(
+        fs.createReadStream(tarPath),
+        createGzip(),
+        fs.createWriteStream(gzipPath, { flags: 'wx', mode: 0o600 }),
+      );
+      await fs.promises.rename(gzipPath, archivePath);
+      await this.verifyArchiveMembers(archivePath, requiredPaths, basePath);
+    } finally {
+      for (const temporary of [tarPath, gzipPath]) {
+        try {
+          await fs.promises.unlink(temporary);
+        } catch {
+          // Best-effort cleanup after failed archive creation.
+        }
+      }
+    }
+  }
+
+  private async verifyArchiveMembers(
+    archivePath: string,
+    paths: string[],
+    basePath: string,
+  ): Promise<void> {
+    if (paths.length === 0) return;
+    const members = paths.map((value) =>
+      this.archiveMember(basePath, value),
+    );
+    const result = await this.executor.execute(
+      'tar',
+      ['-tzf', archivePath, '--', ...members],
+      { timeout: 120_000, allowFailure: true },
+    );
+    if (result.exitCode !== 0) {
+      throw new Error(
+        'Backup archive is missing required metadata or database dumps',
+      );
+    }
+  }
+
+  private archiveMember(basePath: string, sourcePath: string): string {
+    const relative = path.relative(basePath, sourcePath);
+    if (
+      !relative ||
+      path.isAbsolute(relative) ||
+      relative === '..' ||
+      relative.startsWith(`..${path.sep}`)
+    ) {
+      throw new Error(`Backup path escapes archive root: ${sourcePath}`);
+    }
+    return relative;
   }
 
   // ===========================================================================

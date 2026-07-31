@@ -22,9 +22,21 @@ export {
 
 export type { SupportedPhpVersion } from './constants';
 
+export {
+  redactSensitiveText,
+  safeErrorMessage,
+} from './safe-error-message';
+
+export {
+  RESTORE_INCLUDE_PATH_LIMIT,
+  RESTORE_INCLUDE_PATH_MAX_LENGTH,
+  normalizeRestoreIncludePaths,
+} from './backup-restore';
+
 // Artifact helpers (anchor for nginx/PHP-FPM/socket paths).
 export {
   artifactAnchor,
+  runtimeArtifactAnchor,
   artifactAnchorOrEmpty,
   sanitizeDomainForFilename,
   siteDomainLogBase,
@@ -63,9 +75,10 @@ export type {
 export {
   SiteType,
   SiteStatus,
+  DomainApplicationStatus,
   UserRole,
   DatabaseType,
-  PhpVersion,
+  DatabasePurpose,
   BackupStorageType,
   BackupType,
   BackupStatus,
@@ -77,6 +90,13 @@ export {
   FirewallProtocol,
   CronJobStatus,
 } from './enums';
+export type { PhpVersion } from './enums';
+
+export {
+  hostpanelPresetFromSource,
+  normalizeHostpanelPreset,
+  isModxPreset,
+} from './domain-presets';
 
 // Entity interfaces
 export type {
@@ -90,6 +110,8 @@ export type {
   BackupStorageConfig,
   SslCertificate,
   DeployLog,
+  HealthCheckPing,
+  AuditLog,
   CronJob,
   NotificationSetting,
   TelegramNotificationConfig,
@@ -117,6 +139,8 @@ export type {
   UpdateUserRequest,
   CreateSiteRequest,
   UpdateSiteRequest,
+  CreateSiteDomainRequest,
+  UpdateSiteDomainRequest,
   SiteListQuery,
   CreateDatabaseRequest,
   DatabaseResponse,

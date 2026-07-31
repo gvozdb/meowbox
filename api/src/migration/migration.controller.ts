@@ -14,7 +14,11 @@ import { Throttle } from '@nestjs/throttler';
 import * as fs from 'fs';
 import * as path from 'path';
 import { Response } from 'express';
-import { MigrationService, MigrateParams } from './migration.service';
+import {
+  DatabaseSnapshot,
+  MigrationService,
+  MigrateParams,
+} from './migration.service';
 import { CurrentUser } from '../common/decorators/current-user.decorator';
 import { Public } from '../common/decorators/public.decorator';
 import { Roles } from '../common/decorators/roles.decorator';
@@ -91,7 +95,7 @@ class ImportPullDto {
 
   @IsOptional()
   @IsArray()
-  databases?: Array<{ name: string; sourceName?: string; type: string; dbUser: string; dbPassword: string }>;
+  databases?: DatabaseSnapshot[];
 }
 
 class ApplySiteExtrasDto {

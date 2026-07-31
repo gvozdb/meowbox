@@ -15,12 +15,14 @@ import { SiteBackupScheduleController } from './site-backup-schedule.controller'
 import { NotificationsModule } from '../notifications/notifications.module';
 import { StorageLocationsModule } from '../storage-locations/storage-locations.module';
 import { PanelSettingsModule } from '../panel-settings/panel-settings.module';
+import { SitesModule } from '../sites/sites.module';
 
 @Module({
   imports: [
     NotificationsModule,
     StorageLocationsModule,
     PanelSettingsModule,
+    SitesModule,
     // JWT для подписи/проверки one-shot download-токенов в STREAM-экспорте.
     // Используем тот же ACCESS_SECRET что и для обычной auth.
     JwtModule.registerAsync({

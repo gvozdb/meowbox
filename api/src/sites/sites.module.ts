@@ -7,11 +7,37 @@ import { SitesNginxController } from './sites-nginx.controller';
 import { SiteDomainsService } from './site-domains.service';
 import { SiteDomainsController } from './site-domains.controller';
 import { PanelSettingsModule } from '../panel-settings/panel-settings.module';
+import { DomainContextService } from './domain-context.service';
+import { DomainApplicationsService } from './domain-applications.service';
+import { SiteDuplicateService } from './site-duplicate.service';
+import {
+  DomainApplicationLoginController,
+  DomainApplicationsController,
+} from './domain-applications.controller';
 
 @Module({
   imports: [PanelSettingsModule],
-  controllers: [SitesController, SitesNginxController, SiteDomainsController],
-  providers: [SitesService, ModxVersionsService, SitesNginxService, SiteDomainsService],
-  exports: [SitesService, SiteDomainsService],
+  controllers: [
+    SitesController,
+    SitesNginxController,
+    SiteDomainsController,
+    DomainApplicationsController,
+    DomainApplicationLoginController,
+  ],
+  providers: [
+    SitesService,
+    ModxVersionsService,
+    SitesNginxService,
+    SiteDomainsService,
+    DomainContextService,
+    DomainApplicationsService,
+    SiteDuplicateService,
+  ],
+  exports: [
+    SitesService,
+    SiteDomainsService,
+    DomainContextService,
+    DomainApplicationsService,
+  ],
 })
 export class SitesModule {}

@@ -94,10 +94,10 @@
             :to="`/sites/${site.id}`"
             class="site-row"
           >
-            <SiteTypeIcon :type="site.type" />
+            <SiteTypeIcon :type="site.primaryDomain?.preset || 'CUSTOM'" />
             <div class="site-row__info">
               <span class="site-row__name">{{ site.displayName || site.name }}</span>
-              <span class="site-row__domain">{{ site.domain }}</span>
+              <span class="site-row__domain">{{ site.primaryDomain?.domain || site.name }}</span>
             </div>
             <SiteStatusBadge :status="site.status" />
           </NuxtLink>
@@ -271,8 +271,12 @@ definePageMeta({ middleware: 'auth' });
 interface SiteItem {
   id: string;
   name: string;
-  domain: string;
-  type: string;
+  displayName?: string | null;
+  primaryDomain?: {
+    id: string;
+    domain: string;
+    preset: string;
+  } | null;
   status: string;
 }
 

@@ -543,9 +543,9 @@ function renderMd(text: string): string {
 
     // Check if second row is separator (|---|---|)
     const sep = rows[1];
-    if (!/^\|[\s\-:|]+\|$/.test(sep.trim())) return match;
+    if (!sep || !/^\|[\s\-:|]+\|$/.test(sep.trim())) return match;
 
-    const headerCells = rows[0].split('|').filter((c: string, idx: number, arr: string[]) => idx > 0 && idx < arr.length - 1);
+    const headerCells = (rows[0] ?? '').split('|').filter((c: string, idx: number, arr: string[]) => idx > 0 && idx < arr.length - 1);
     const thead = '<thead><tr>' + headerCells.map((c: string) => `<th>${c.trim()}</th>`).join('') + '</tr></thead>';
 
     const bodyRows = rows.slice(2);
@@ -624,16 +624,17 @@ function parseQuestions(input: string): ParsedQuestion[] {
 const selections = ref<Record<string, Record<number, string[]>>>({});
 
 function toggleOpt(toolId: string, qIdx: number, label: string, multiSelect?: boolean) {
-  if (!selections.value[toolId]) selections.value[toolId] = {};
-  const sel = selections.value[toolId];
-  if (!sel[qIdx]) sel[qIdx] = [];
+  const sel =
+    selections.value[toolId] ??
+    (selections.value[toolId] = {});
+  const selected = sel[qIdx] ?? (sel[qIdx] = []);
 
   if (multiSelect) {
-    const i = sel[qIdx].indexOf(label);
-    if (i >= 0) sel[qIdx].splice(i, 1);
-    else sel[qIdx].push(label);
+    const i = selected.indexOf(label);
+    if (i >= 0) selected.splice(i, 1);
+    else selected.push(label);
   } else {
-    sel[qIdx] = sel[qIdx][0] === label ? [] : [label];
+    sel[qIdx] = selected[0] === label ? [] : [label];
   }
 }
 
@@ -658,7 +659,7 @@ function submitAnswers(toolId: string, questions: ParsedQuestion[]) {
   for (let i = 0; i < questions.length; i++) {
     const q = questions[i];
     const chosen = sel[i] || [];
-    if (!chosen.length) continue;
+    if (!q || !chosen.length) continue;
     parts.push(`Ответ на вопрос «${q.question}»: ${chosen.join(', ')}`);
   }
 

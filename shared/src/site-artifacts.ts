@@ -1,10 +1,10 @@
 /**
- * Хелперы для имён артефактов сайта — nginx-конфиг, PHP-FPM pool, сокет и т.д.
+ * Хелперы для имён runtime-артефактов сайта — PHP-FPM pool, сокет и логи.
  *
- * Артефакты ЯКОРЯТСЯ на `Site.name` (= Linux-юзер, immutable), а не на домене.
- * При смене главного домена artifact-anchor не меняется, только `server_name`
- * внутри nginx-конфига. До этого было наоборот — файл `{domain}.conf` приходилось
- * переименовывать при смене домена → лишняя сложность и race conditions.
+ * Final domain-centric identity is `SiteDomain.runtimeKey`. `Site.name` remains
+ * a compatibility fallback for pre-W01 callers and for a migrated primary key.
+ * Nginx access/error logs deliberately retain their domain-based naming via
+ * siteDomainLogBase(); only PHP/application runtime artifacts use runtimeKey.
  *
  * Legacy-fallback: для сайтов, которые ещё не мигрированы, siteName может быть
  * пустым. Тогда используем domain. Миграция идёт при старте API (см.
@@ -12,29 +12,38 @@
  */
 
 export interface AnchorParams {
-  /** Site.name — новая схема (предпочтительно). */
+  /** Immutable SiteDomain runtime identity (preferred for PHP/app artifacts). */
+  runtimeKey?: string | null;
+  /** Legacy Site.name fallback. */
   siteName?: string | null;
   /** Legacy fallback: домен, если siteName не задан. */
   domain?: string | null;
 }
 
 /**
- * Выбирает anchor для имён файлов/pool'ов/сокетов.
- * Возвращает siteName, если он задан и не пустой, иначе domain.
+ * Выбирает anchor для PHP/app файлов, pool'ов и сокетов.
+ * Returns runtimeKey first, then legacy siteName, then domain.
  *
- * @throws Error если оба не заданы (защищает от "случайных" пустых путей).
+ * @throws Error если ни один identity key не задан.
  */
 export function artifactAnchor(params: AnchorParams): string {
+  const runtimeKey = (params.runtimeKey || '').trim();
+  if (runtimeKey) return runtimeKey;
   const siteName = (params.siteName || '').trim();
   if (siteName) return siteName;
   const domain = (params.domain || '').trim();
   if (domain) return domain;
-  throw new Error('artifactAnchor: both siteName and domain are empty');
+  throw new Error('artifactAnchor: runtimeKey, siteName, and domain are empty');
+}
+
+/** Explicit name for the runtimeKey-first PHP/application artifact contract. */
+export function runtimeArtifactAnchor(params: AnchorParams): string {
+  return artifactAnchor(params);
 }
 
 /** Без throw — для мест, где пустой результат — не баг, а "сайт ещё не создан". */
 export function artifactAnchorOrEmpty(params: AnchorParams): string {
-  return (params.siteName || '').trim() || (params.domain || '').trim();
+  return (params.runtimeKey || '').trim() || (params.siteName || '').trim() || (params.domain || '').trim();
 }
 
 /** Санитайзит домен под имя файла лога (no slashes/dots-as-path). */
@@ -46,11 +55,14 @@ export function sanitizeDomainForFilename(domain: string): string {
  * База имени nginx-логов домена.
  *
  * В multi-domain схеме у каждого основного домена свой access/error log:
- * `{Site.name}__{domain}-access.log`. Legacy fallback — обычный artifactAnchor.
+ * `{Site.name}__{domain}-access.log`. The runtimeKey fallback is used only if
+ * no routing identity is available, never to replace normal Nginx log names.
  */
 export function siteDomainLogBase(params: AnchorParams): string {
   const siteName = (params.siteName || '').trim();
   const domain = (params.domain || '').trim();
   if (siteName && domain) return `${siteName}__${sanitizeDomainForFilename(domain)}`;
+  if (siteName) return siteName;
+  if (domain) return domain;
   return artifactAnchor(params);
 }
