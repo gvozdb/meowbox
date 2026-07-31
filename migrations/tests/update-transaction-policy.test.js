@@ -9,6 +9,7 @@ const test = require('node:test');
 const root = path.resolve(__dirname, '..', '..');
 const policy = path.join(root, 'tools', 'release-transaction-policy.sh');
 const updater = path.join(root, 'tools', 'update.sh');
+const releaseWorkflow = path.join(root, '.github', 'workflows', 'release.yml');
 
 function action(armed, committed, journalState) {
   return execFileSync(
@@ -81,4 +82,16 @@ test('updater wires tested policy across ordered transaction phases', () => {
     assert.notEqual(next, -1, `missing ordered marker: ${marker}`);
     offset = next + marker.length;
   }
+});
+
+test('release workflow packs the baseline contract required by the updater', () => {
+  const updaterSource = fs.readFileSync(updater, 'utf8');
+  const workflowSource = fs.readFileSync(releaseWorkflow, 'utf8');
+  const contract = 'migrations/release/supported-baselines.json';
+
+  assert.match(updaterSource, new RegExp(contract.replaceAll('/', '\\/')));
+  assert.match(
+    workflowSource,
+    /cp migrations\/release\/supported-baselines\.json "\$STAGE\/migrations\/release\/"/,
+  );
 });

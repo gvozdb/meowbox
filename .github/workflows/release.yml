@@ -126,6 +126,11 @@ jobs:
           cp migrations/package.json "$STAGE/migrations/"
           cp -r migrations/dist "$STAGE/migrations/"
           cp -r migrations/system "$STAGE/migrations/" 2>/dev/null || true
+          mkdir -p "$STAGE/migrations/release"
+          cp migrations/release/supported-baselines.json "$STAGE/migrations/release/"
+
+          # Keep the packed artifact contract aligned with tools/update.sh.
+          test -f "$STAGE/migrations/release/supported-baselines.json"
 
           # Архив
           mkdir -p dist
