@@ -132,7 +132,9 @@ exclusive OS `flock` shared with the system migration runner.
    and reloads PM2.
 8. `verify` requires PM2 API/Web/agent status, a non-5xx API result, Web build
    artifact/version, `nginx -t`, declared services/sockets/probes, and final
-   SQLite invariants.
+   SQLite invariants. Domain probes are compared with the read-only preflight
+   baseline: a new or changed failure blocks the release; an exact pre-existing
+   status may pass without being misreported as newly healthy.
 9. `commit` marks the journal boundary and reopens writes. It performs
    idempotent post-commit cleanup and repeats strict health (including agent
    and representative read hooks); only then does it write

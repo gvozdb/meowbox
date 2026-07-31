@@ -146,6 +146,7 @@ CANDIDATE_DIR="$TX_DIR/stage/release"
 DRY_DIR="$TX_DIR/dry-run"
 RUNTIME_STAGE="$TX_DIR/runtime-stage"
 RUNTIME_MANIFEST="$TX_DIR/runtime-manifest.json"
+HTTP_PROBE_BASELINE="$TX_DIR/http-probe-baseline.json"
 JOURNAL="$TX_DIR/journal.json"
 SNAPSHOT_DIR=""
 ROLLBACK_ARMED=false
@@ -270,7 +271,14 @@ on_exit() {
       echo "[update] pre-commit failure; restoring SQLite, managed runtime and previous release" >&2
       if MEOWBOX_RELEASE_LOCK_HELD=1 MEOWBOX_RELEASE_LOCK_FILE="$LOCK_FILE" \
         bash "$SCRIPT_DIR/rollback.sh" precommit "$TRANSACTION_ID"; then
-        run_hook "$QUIESCE_HOOK" resume --transaction "$TRANSACTION_ID" --rollback || \
+        local resume_hook="$QUIESCE_HOOK"
+        local resume_candidate="$CANDIDATE_DIR"
+        if [[ ! -x "$resume_hook" && ! ( -f "$resume_hook" && "$resume_hook" == *.js ) ]]; then
+          resume_candidate="$TX_DIR/failed-candidate-$TARGET"
+          resume_hook="$resume_candidate/migrations/dist/quiesce.js"
+        fi
+        run_hook "$resume_hook" resume --transaction "$TRANSACTION_ID" \
+          --candidate "$resume_candidate" --database "$DB_FILE" || \
           echo "[update] old release restored but maintenance gate resume needs operator repair" >&2
       else
         echo "[update] rollback failed; preserve transaction $TRANSACTION_ID for operator recovery" >&2
@@ -593,8 +601,9 @@ prisma_deploy() {
 
 source_hash_inputs() {
   # SQLite SHM is transient lock/index state and changes on read-only access.
-  # Main + WAL + rollback journal are the durable database input.
-  mb_hash_paths "$DB_FILE" "$DB_FILE-wal" "$DB_FILE-journal"
+  # Filesystem timestamps are also not data. Main + WAL + rollback-journal
+  # content and presence are the durable database input.
+  mb_hash_file_contents "$DB_FILE" "$DB_FILE-wal" "$DB_FILE-journal"
 }
 
 source_file_fingerprint() {
@@ -604,6 +613,67 @@ source_file_fingerprint() {
 managed_runtime_hash() {
   local paths_file="$1"
   mb_hash_path_file "$paths_file"
+}
+
+capture_http_probe_baseline() {
+  local manifest="$1"
+  local output="$2"
+  python3 - "$manifest" <<'PY' | mb_atomic_write_stdin "$output"
+import json
+import re
+import subprocess
+import sys
+import time
+from urllib.parse import urlparse
+
+with open(sys.argv[1], encoding="utf-8") as handle:
+    manifest = json.load(handle)
+
+urls = []
+for probe in manifest.get("httpProbes", []):
+    if not isinstance(probe, dict) or not isinstance(probe.get("url"), str):
+        raise SystemExit("invalid HTTP probe in runtime manifest")
+    url = probe["url"]
+    parsed = urlparse(url)
+    if (
+        parsed.scheme not in {"http", "https"}
+        or not parsed.hostname
+        or parsed.username
+        or parsed.password
+        or re.search(r"[\x00-\x1f\x7f]", url)
+    ):
+        raise SystemExit("unsafe HTTP probe URL")
+    urls.append(url)
+
+if len(urls) != len(set(urls)):
+    raise SystemExit("duplicate HTTP probe URL")
+
+probes = []
+for url in sorted(urls):
+    status = None
+    for attempt in range(3):
+        result = subprocess.run(
+            ["curl", "-sS", "-o", "/dev/null", "-w", "%{http_code}", "--max-time", "5", url],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=7,
+        )
+        value = result.stdout.strip()
+        if re.fullmatch(r"\d{3}", value) and value != "000":
+            code = int(value)
+            if 100 <= code <= 599:
+                status = code
+                break
+        if attempt < 2:
+            time.sleep(0.5)
+    if status is None:
+        raise SystemExit(f"HTTP probe baseline is unreachable: {url}")
+    probes.append({"url": url, "status": status})
+
+print(json.dumps({"version": 1, "probes": probes}, indent=2, sort_keys=True))
+PY
+  say "captured HTTP baseline for $(python3 -c 'import json,sys; print(len(json.load(open(sys.argv[1], encoding="utf-8"))["probes"]))' "$output") domain probe(s)"
 }
 
 baseline_decision() {
@@ -783,6 +853,7 @@ run_dry_run() {
   prisma_deploy "$clone_db"
   release_cli invariants --db "$clone_db" --phase final --baseline-counts "$baseline_counts" --json > "$invariant_report"
   prepare_runtime "$clone_db" dry-run
+  capture_http_probe_baseline "$RUNTIME_MANIFEST" "$HTTP_PROBE_BASELINE"
   mb_collect_manifest_paths "$RUNTIME_MANIFEST" "$manifest_paths"
   mb_merge_path_files "$all_paths" "$legacy_paths" "$manifest_paths"
   local config_before
@@ -915,7 +986,8 @@ PY
 verify_release() {
   stage U08-verify "final PM2/API/Web/agent/Nginx/PHP/HTTP/SQLite verification"
   MEOWBOX_DATABASE_FILE="$DB_FILE" MEOWBOX_RELEASE_HEALTH_HOOKS_REQUIRED=1 \
-    bash "$SCRIPT_DIR/healthcheck.sh" --strict --manifest "$RUNTIME_MANIFEST" --release-dir "$CANDIDATE_DIR" --expected-version "$TARGET"
+    bash "$SCRIPT_DIR/healthcheck.sh" --strict --manifest "$RUNTIME_MANIFEST" \
+      --probe-baseline "$HTTP_PROBE_BASELINE" --release-dir "$CANDIDATE_DIR" --expected-version "$TARGET"
   release_cli invariants --db "$DB_FILE" --phase final --baseline-counts "$TX_DIR/live-baseline-counts.json" --json > "$TX_DIR/final-invariants.json"
   journal_update verify "final health and invariants passed"
 }
@@ -931,7 +1003,8 @@ forward_repair() {
 
 verify_post_commit_cleanup() {
   MEOWBOX_DATABASE_FILE="$DB_FILE" MEOWBOX_RELEASE_HEALTH_HOOKS_REQUIRED=1 \
-    bash "$SCRIPT_DIR/healthcheck.sh" --strict --manifest "$RUNTIME_MANIFEST" --release-dir "$CANDIDATE_DIR" --expected-version "$TARGET"
+    bash "$SCRIPT_DIR/healthcheck.sh" --strict --manifest "$RUNTIME_MANIFEST" \
+      --probe-baseline "$HTTP_PROBE_BASELINE" --release-dir "$CANDIDATE_DIR" --expected-version "$TARGET"
 }
 
 post_commit_forward_repair() {

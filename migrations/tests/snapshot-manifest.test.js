@@ -39,8 +39,28 @@ test('SQLite fingerprints ignore transient SHM lock state', () => {
     fs.writeFileSync(`${database}-wal`, 'wal-after');
     assert.notEqual(fingerprint(), before);
 
+    const inputFingerprint = () => execFileSync(
+      'bash',
+      [
+        '-c',
+        'source "$1"; mb_hash_file_contents "$2" "$2-wal" "$2-journal"',
+        'input-fingerprint-test',
+        releaseLib,
+        database,
+      ],
+      { encoding: 'utf8' },
+    ).trim();
+    const inputBefore = inputFingerprint();
+    fs.utimesSync(database, new Date(), new Date(Date.now() + 1000));
+    fs.chmodSync(database, 0o640);
+    assert.equal(inputFingerprint(), inputBefore);
+    fs.writeFileSync(`${database}-journal`, 'pending-transaction');
+    assert.notEqual(inputFingerprint(), inputBefore);
+
     assert.doesNotMatch(fs.readFileSync(updater, 'utf8'), /DB_FILE-shm/);
     assert.doesNotMatch(fs.readFileSync(snapshotScript, 'utf8'), /DB_FILE-shm/);
+    assert.match(fs.readFileSync(updater, 'utf8'), /mb_hash_file_contents/);
+    assert.match(fs.readFileSync(snapshotScript, 'utf8'), /mb_hash_file_contents/);
   } finally {
     fs.rmSync(temp, { recursive: true, force: true });
   }

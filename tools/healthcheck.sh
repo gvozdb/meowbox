@@ -2,7 +2,8 @@
 # =============================================================================
 # Release health verification.  In strict mode it validates the current
 # release artifact, PM2, API/Web, Nginx, declared PHP services/sockets and
-# manifest-provided domain probes.  It never accepts a 5xx response as health.
+# manifest-provided domain probes. New or changed failures are rejected; an
+# exact pre-existing status may be carried through a release transaction.
 # =============================================================================
 set -euo pipefail
 
@@ -15,6 +16,7 @@ MANIFEST=""
 STRICT=false
 RELEASE_DIR=""
 EXPECTED_VERSION=""
+PROBE_BASELINE=""
 SKIP_PM2=false
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -22,9 +24,10 @@ while [[ $# -gt 0 ]]; do
     --strict) STRICT=true; shift ;;
     --release-dir) RELEASE_DIR="${2:-}"; shift 2 ;;
     --expected-version) EXPECTED_VERSION="${2:-}"; shift 2 ;;
+    --probe-baseline) PROBE_BASELINE="${2:-}"; shift 2 ;;
     --skip-pm2) SKIP_PM2=true; shift ;;
     *)
-      echo "Usage: healthcheck.sh [--strict] [--manifest FILE] [--release-dir DIR] [--expected-version VERSION] [--skip-pm2]" >&2
+      echo "Usage: healthcheck.sh [--strict] [--manifest FILE] [--probe-baseline FILE] [--release-dir DIR] [--expected-version VERSION] [--skip-pm2]" >&2
       exit 2
       ;;
   esac
@@ -139,9 +142,13 @@ fi
 if [[ -n "$MANIFEST" ]]; then
   [[ -f "$MANIFEST" ]] || { err "runtime manifest not found: $MANIFEST"; MANIFEST=""; }
 fi
+if [[ -n "$PROBE_BASELINE" && ! -f "$PROBE_BASELINE" ]]; then
+  err "HTTP probe baseline not found: $PROBE_BASELINE"
+  PROBE_BASELINE=""
+fi
 if [[ -n "$MANIFEST" ]]; then
   manifest_checks=""
-  if ! manifest_checks="$(python3 - "$MANIFEST" <<'PY'
+  if ! manifest_checks="$(python3 - "$MANIFEST" "$PROBE_BASELINE" <<'PY'
 import json
 import re
 import sys
@@ -151,14 +158,34 @@ with open(sys.argv[1], encoding="utf-8") as handle:
     manifest = json.load(handle)
 if manifest.get("version") != 1 or not isinstance(manifest.get("artifacts"), list):
     raise SystemExit("invalid runtime manifest")
+
+baseline = {}
+if sys.argv[2]:
+    with open(sys.argv[2], encoding="utf-8") as handle:
+        payload = json.load(handle)
+    if payload.get("version") != 1 or not isinstance(payload.get("probes"), list):
+        raise SystemExit("invalid HTTP probe baseline")
+    for probe in payload["probes"]:
+        if (
+            not isinstance(probe, dict)
+            or not isinstance(probe.get("url"), str)
+            or type(probe.get("status")) is not int
+            or probe["status"] < 100
+            or probe["status"] > 599
+            or probe["url"] in baseline
+        ):
+            raise SystemExit("invalid HTTP probe baseline entry")
+        baseline[probe["url"]] = probe["status"]
+
+manifest_probe_urls = set()
 for service in manifest.get("phpServices", []):
     if not isinstance(service, str) or not re.fullmatch(r"php\d+\.\d+-fpm", service):
         raise SystemExit("unsafe php service in runtime manifest")
-    print("service\t" + service + "\t")
+    print("service\t" + service + "\t-\t-")
 for socket in manifest.get("socketPaths", []):
     if not isinstance(socket, str) or not re.fullmatch(r"/var/run/php/php\d+\.\d+-fpm-[a-z][a-z0-9._-]{0,63}\.sock", socket):
         raise SystemExit("unsafe PHP socket in runtime manifest")
-    print("socket\t" + socket + "\t")
+    print("socket\t" + socket + "\t-\t-")
 for probe in manifest.get("httpProbes", []):
     if not isinstance(probe, dict) or not isinstance(probe.get("url"), str):
         raise SystemExit("invalid HTTP probe")
@@ -169,13 +196,25 @@ for probe in manifest.get("httpProbes", []):
     statuses = probe.get("expectedStatus", [200, 301, 302])
     if not isinstance(statuses, list) or not statuses or any(type(code) is not int or code < 100 or code > 599 for code in statuses):
         raise SystemExit("invalid expected HTTP status")
-    print("probe\t" + url + "\t" + ",".join(str(code) for code in sorted(set(statuses))))
+    if url in manifest_probe_urls:
+        raise SystemExit("duplicate HTTP probe URL")
+    manifest_probe_urls.add(url)
+    print(
+        "probe\t"
+        + url
+        + "\t"
+        + ",".join(str(code) for code in sorted(set(statuses)))
+        + "\t"
+        + (str(baseline[url]) if url in baseline else "-")
+    )
+if baseline and set(baseline) != manifest_probe_urls:
+    raise SystemExit("HTTP probe baseline does not match runtime manifest")
 PY
 )"; then
     err "runtime manifest validation failed"
     manifest_checks=""
   fi
-  while IFS=$'\t' read -r kind value expected; do
+  while IFS=$'\t' read -r kind value expected baseline; do
     case "$kind" in
       service)
         if systemctl is-active --quiet "$value"; then say "✓ $value active"; else err "$value is not active"; fi
@@ -185,7 +224,13 @@ PY
         ;;
       probe)
         code="$(http_code_with_retry "$value")"
-        if [[ ",$expected," == *",$code,"* ]]; then say "✓ probe $value (HTTP $code)"; else err "probe $value returned HTTP $code (expected $expected)"; fi
+        if [[ ",$expected," == *",$code,"* ]]; then
+          say "✓ probe $value (HTTP $code)"
+        elif [[ "$baseline" != "-" && "$baseline" == "$code" ]]; then
+          say "✓ probe $value unchanged pre-existing HTTP $code"
+        else
+          err "probe $value returned HTTP $code (expected $expected; baseline $baseline)"
+        fi
         ;;
     esac
   done <<< "$manifest_checks"

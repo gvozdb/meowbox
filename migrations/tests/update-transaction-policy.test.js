@@ -95,3 +95,12 @@ test('release workflow packs the baseline contract required by the updater', () 
     /cp migrations\/release\/supported-baselines\.json "\$STAGE\/migrations\/release\/"/,
   );
 });
+
+test('pre-commit rollback resumes the gate from the retained candidate', () => {
+  const source = fs.readFileSync(updater, 'utf8');
+  assert.match(source, /failed-candidate-\$TARGET/);
+  assert.match(
+    source,
+    /resume --transaction "\$TRANSACTION_ID" \\\n+\s+--candidate "\$resume_candidate" --database "\$DB_FILE"/,
+  );
+});

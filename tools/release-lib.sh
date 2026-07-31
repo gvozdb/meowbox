@@ -226,6 +226,42 @@ print(hashlib.sha256(payload).hexdigest())
 PY
 }
 
+# Hash exact file contents and presence without volatile filesystem metadata.
+# This is suitable for SQLite main/WAL/journal identity checks: mtime can move
+# without a logical write, while any durable byte or journal-state change must
+# still invalidate the release plan.
+mb_hash_file_contents() {
+  python3 - "$@" <<'PY'
+import hashlib
+import json
+import os
+import stat
+import sys
+
+def file_hash(path):
+    digest = hashlib.sha256()
+    with open(path, "rb", buffering=0) as handle:
+        while True:
+            chunk = handle.read(1024 * 1024)
+            if not chunk:
+                return digest.hexdigest()
+            digest.update(chunk)
+
+rows = []
+for item in sorted({os.path.abspath(value) for value in sys.argv[1:]}):
+    try:
+        metadata = os.stat(item)
+        if not stat.S_ISREG(metadata.st_mode):
+            raise RuntimeError(f"release input is not a regular file: {item}")
+        rows.append({"path": item, "type": "file", "sha256": file_hash(item)})
+    except FileNotFoundError:
+        rows.append({"path": item, "type": "missing"})
+
+payload = json.dumps(rows, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode()
+print(hashlib.sha256(payload).hexdigest())
+PY
+}
+
 # Read one exact path per line without re-parsing it through the shell.  A
 # manifest target is data, not shell syntax: whitespace and glob characters
 # must reach the hashing proof byte-for-byte.  An empty path list deliberately
