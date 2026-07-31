@@ -158,7 +158,7 @@ export SNAPSHOT_CONFIG_HASH="$CONFIG_HASH"
 export SNAPSHOT_CURRENT_RELEASE="$CURRENT_RELEASE"
 export SNAPSHOT_CREATED_AT="$(mb_now_utc)"
 export SNAPSHOT_DB_PRESENT="$( [[ -f "$DB_FILE" ]] && printf true || printf false )"
-printf '%s' "$PM2_STATE" | python3 - "$SNAP_DIR/manifest.json" <<'PY'
+python3 - "$SNAP_DIR/manifest.json" 3<<<"$PM2_STATE" <<'PY'
 import json
 import os
 import pathlib
@@ -166,9 +166,28 @@ import sys
 import tempfile
 
 try:
-    pm2 = json.load(sys.stdin)
-except json.JSONDecodeError:
-    pm2 = []
+    with os.fdopen(3, encoding="utf-8") as handle:
+        raw_pm2 = json.load(handle)
+except (json.JSONDecodeError, OSError):
+    raw_pm2 = []
+
+# PM2's raw process dump contains the complete environment, including panel
+# secrets. Rollback only needs process identity/health; never persist env data.
+pm2 = []
+for item in raw_pm2 if isinstance(raw_pm2, list) else []:
+    if not isinstance(item, dict):
+        continue
+    env = item.get("pm2_env") if isinstance(item.get("pm2_env"), dict) else {}
+    pm2.append({
+        "name": item.get("name"),
+        "pid": item.get("pid"),
+        "pmId": item.get("pm_id", env.get("pm_id")),
+        "namespace": env.get("namespace"),
+        "status": env.get("status"),
+        "restartTime": env.get("restart_time"),
+        "execPath": env.get("pm_exec_path"),
+        "cwd": env.get("pm_cwd"),
+    })
 manifest = {
     "version": 2,
     "createdAt": os.environ["SNAPSHOT_CREATED_AT"],
