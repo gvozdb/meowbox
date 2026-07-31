@@ -13,6 +13,24 @@ import {
 } from './hooks/release-health';
 import { safeErrorMessage } from './release/redaction';
 
+type ReleaseHealthFetcher = typeof fetchReleaseHealth;
+
+export async function waitForAgentConnection(
+  database: string,
+  timeoutMs = 30_000,
+  fetcher: ReleaseHealthFetcher = fetchReleaseHealth,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  do {
+    const remaining = Math.max(1_000, deadline - Date.now());
+    const health = await fetcher(database, Math.min(5_000, remaining));
+    if (health.agentConnected) return;
+    if (Date.now() >= deadline) break;
+    await new Promise((resolve) => setTimeout(resolve, Math.min(500, deadline - Date.now())));
+  } while (Date.now() < deadline);
+  throw new Error('candidate agent did not connect to API before timeout');
+}
+
 export async function main(argv = process.argv.slice(2)): Promise<number> {
   try {
     const arguments_ = parseHookArguments(argv, true);
@@ -30,8 +48,7 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
       if (!metadata.isFile()) throw new Error('candidate agent entrypoint is missing');
       await assertPathInsideRelease(agent.cwd, releaseDirectory, 'meowbox-agent cwd');
       await assertPathInsideRelease(agent.executable, releaseDirectory, 'meowbox-agent executable');
-      const health = await fetchReleaseHealth(database);
-      if (!health.agentConnected) throw new Error('candidate agent is not connected to API');
+      await waitForAgentConnection(database);
     }
 
     process.stdout.write(`[agent-health] ${arguments_.command} passed\n`);

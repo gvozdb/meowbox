@@ -134,7 +134,8 @@ exclusive OS `flock` shared with the system migration runner.
    artifact/version, `nginx -t`, declared services/sockets/probes, and final
    SQLite invariants. Domain probes are compared with the read-only preflight
    baseline: a new or changed failure blocks the release; an exact pre-existing
-   status may pass without being misreported as newly healthy.
+   status may pass without being misreported as newly healthy. Agent readiness
+   waits for a confirmed API connection instead of sampling the PM2 restart race.
 9. `commit` marks the journal boundary and reopens writes. It performs
    idempotent post-commit cleanup and repeats strict health (including agent
    and representative read hooks); only then does it write
