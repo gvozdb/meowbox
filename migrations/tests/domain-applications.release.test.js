@@ -179,6 +179,33 @@ test('release path validation matches API and agent runtime contracts', () => {
   );
 });
 
+test('database fingerprint ignores transient SHM but tracks durable WAL', async () => {
+  const tempRoot = await mkdtemp(
+    join(tmpdir(), 'meowbox-domain-release-test-'),
+  );
+  const dbPath = join(tempRoot, 'fingerprint.db');
+  try {
+    await writeFile(dbPath, 'main');
+    await writeFile(`${dbPath}-wal`, 'wal');
+    await writeFile(`${dbPath}-shm`, 'shm-before');
+
+    const before = await fingerprintDatabaseFiles(dbPath);
+    assert.equal(before.shm, null);
+
+    await writeFile(`${dbPath}-shm`, 'shm-after');
+    assert.deepEqual(await fingerprintDatabaseFiles(dbPath), before);
+
+    await writeFile(`${dbPath}-wal`, 'wal-after');
+    assert.notEqual(
+      (await fingerprintDatabaseFiles(dbPath)).combined,
+      before.combined,
+    );
+  } finally {
+    assertTemporaryPath(tempRoot);
+    await rm(tempRoot, { recursive: true, force: true });
+  }
+});
+
 test(
   'legacy fixture maps deterministically, blocks missing map, migrates once, and preserves ownership',
   { timeout: 180_000 },

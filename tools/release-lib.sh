@@ -129,11 +129,10 @@ except PermissionError:
 PY
 }
 
-# This mirrors migrations/release/stable.ts:fingerprintDatabaseFiles.  It is
-# intentionally content-only (main/WAL/SHM) so a mapper can bind itself to the
-# exact pre-write SQLite image without leaking its absolute location.  The
-# broader mb_hash_paths proof below additionally covers a rollback journal and
-# metadata changes.
+# This mirrors migrations/release/stable.ts:fingerprintDatabaseFiles. It hashes
+# durable SQLite content (main/WAL), not the transient SHM lock/index file: SHM
+# bytes change during read-only access and are rebuilt from WAL. The broader
+# mb_hash_paths proof below additionally covers a rollback journal and metadata.
 mb_sqlite_file_fingerprint() {
   local database="$1"
   python3 - "$database" <<'PY'
@@ -165,7 +164,7 @@ def optional(path):
 parts = {
     "main": digest(database),
     "wal": optional(str(database) + "-wal"),
-    "shm": optional(str(database) + "-shm"),
+    "shm": None,
 }
 encoded = json.dumps(parts, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode()
 print(hashlib.sha256(encoded).hexdigest())

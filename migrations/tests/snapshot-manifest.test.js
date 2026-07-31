@@ -9,6 +9,42 @@ const test = require('node:test');
 
 const root = path.resolve(__dirname, '..', '..');
 const snapshotScript = path.join(root, 'tools', 'snapshot.sh');
+const releaseLib = path.join(root, 'tools', 'release-lib.sh');
+const updater = path.join(root, 'tools', 'update.sh');
+
+test('SQLite fingerprints ignore transient SHM lock state', () => {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'meowbox-fingerprint-'));
+  try {
+    const database = path.join(temp, 'meowbox.db');
+    fs.writeFileSync(database, 'main');
+    fs.writeFileSync(`${database}-wal`, 'wal');
+    fs.writeFileSync(`${database}-shm`, 'shm-before');
+
+    const fingerprint = () => execFileSync(
+      'bash',
+      [
+        '-c',
+        'source "$1"; mb_sqlite_file_fingerprint "$2"',
+        'fingerprint-test',
+        releaseLib,
+        database,
+      ],
+      { encoding: 'utf8' },
+    ).trim();
+
+    const before = fingerprint();
+    fs.writeFileSync(`${database}-shm`, 'shm-after');
+    assert.equal(fingerprint(), before);
+
+    fs.writeFileSync(`${database}-wal`, 'wal-after');
+    assert.notEqual(fingerprint(), before);
+
+    assert.doesNotMatch(fs.readFileSync(updater, 'utf8'), /DB_FILE-shm/);
+    assert.doesNotMatch(fs.readFileSync(snapshotScript, 'utf8'), /DB_FILE-shm/);
+  } finally {
+    fs.rmSync(temp, { recursive: true, force: true });
+  }
+});
 
 test('snapshot manifest records redacted PM2 state without pipefail', () => {
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'meowbox-snapshot-'));

@@ -592,7 +592,9 @@ prisma_deploy() {
 }
 
 source_hash_inputs() {
-  mb_hash_paths "$DB_FILE" "$DB_FILE-wal" "$DB_FILE-shm" "$DB_FILE-journal"
+  # SQLite SHM is transient lock/index state and changes on read-only access.
+  # Main + WAL + rollback journal are the durable database input.
+  mb_hash_paths "$DB_FILE" "$DB_FILE-wal" "$DB_FILE-journal"
 }
 
 source_file_fingerprint() {
@@ -796,7 +798,7 @@ run_dry_run() {
   config_after="$(managed_runtime_hash "$all_paths")"
   legacy_config_after="$(mb_hash_path_file "$legacy_paths")"
   [[ "$db_before" == "$db_after" ]] || die "dry-run changed live SQLite input hash"
-  [[ "$db_file_before" == "$db_file_after" ]] || die "dry-run changed live SQLite main/WAL/SHM fingerprint"
+  [[ "$db_file_before" == "$db_file_after" ]] || die "dry-run changed live SQLite main/WAL fingerprint"
   [[ "$legacy_config_before" == "$legacy_config_after" ]] || die "dry-run changed live managed runtime hash"
   [[ "$config_before" == "$config_after" ]] || die "dry-run changed live managed runtime hash"
   cp -- "$all_paths" "$TX_DIR/managed-runtime-paths.txt"
@@ -824,7 +826,7 @@ apply_database() {
   actual_hash="$(source_hash_inputs)"
   actual_file_hash="$(source_file_fingerprint)"
   [[ "$expected_hash" == "$actual_hash" ]] || die "SQLite changed after dry-run/snapshot; rerun dry-run before any database mutation"
-  [[ "$expected_file_hash" == "$actual_file_hash" ]] || die "SQLite main/WAL/SHM changed after dry-run/snapshot; rerun dry-run before any database mutation"
+  [[ "$expected_file_hash" == "$actual_file_hash" ]] || die "SQLite main/WAL changed after dry-run/snapshot; rerun dry-run before any database mutation"
   [[ "$SNAPSHOT_SOURCE_FILE_HASH" == "$actual_file_hash" ]] || die "SQLite no longer matches the snapshot-bound mapper source image"
   [[ "$(managed_runtime_hash "$TX_DIR/managed-runtime-paths.txt")" == "$SNAPSHOT_CONFIG_HASH" ]] || \
     die "managed runtime changed before the database phase; rerun dry-run before mutation"
@@ -953,7 +955,7 @@ SNAPSHOT_SOURCE_HASH="$(mb_snapshot_json_value "$SNAPSHOT_DIR" database.sourceHa
 SNAPSHOT_SOURCE_FILE_HASH="$(mb_snapshot_json_value "$SNAPSHOT_DIR" database.sourceFileHash)"
 SNAPSHOT_CONFIG_HASH="$(mb_snapshot_json_value "$SNAPSHOT_DIR" managedRuntime.sourceHash)"
 [[ "$SNAPSHOT_SOURCE_HASH" == "$(<"$TX_DIR/dry-run-source-db.hash")" ]] || die "SQLite changed between dry-run and snapshot; retry update"
-[[ "$SNAPSHOT_SOURCE_FILE_HASH" == "$(<"$TX_DIR/dry-run-source-file.hash")" ]] || die "SQLite main/WAL/SHM changed between dry-run and snapshot; retry update"
+[[ "$SNAPSHOT_SOURCE_FILE_HASH" == "$(<"$TX_DIR/dry-run-source-file.hash")" ]] || die "SQLite main/WAL changed between dry-run and snapshot; retry update"
 [[ "$SNAPSHOT_CONFIG_HASH" == "$(<"$TX_DIR/dry-run-managed-runtime.hash")" ]] || die "managed runtime changed between dry-run and snapshot; retry update"
 journal_update snapshot "consistent DB/config/release/process snapshot complete"
 
@@ -962,7 +964,7 @@ ROLLBACK_ARMED=true
 journal_update quiesce "quiesce requested; rollback boundary armed"
 run_hook "$QUIESCE_HOOK" quiesce --transaction "$TRANSACTION_ID" --candidate "$CANDIDATE_DIR" --database "$DB_FILE" --timeout "$MEOWBOX_QUIESCE_TIMEOUT"
 [[ "$(source_hash_inputs)" == "$SNAPSHOT_SOURCE_HASH" ]] || die "SQLite changed after quiesce; rollback is required"
-[[ "$(source_file_fingerprint)" == "$SNAPSHOT_SOURCE_FILE_HASH" ]] || die "SQLite main/WAL/SHM changed after quiesce; rollback is required"
+[[ "$(source_file_fingerprint)" == "$SNAPSHOT_SOURCE_FILE_HASH" ]] || die "SQLite main/WAL changed after quiesce; rollback is required"
 [[ "$(managed_runtime_hash "$TX_DIR/managed-runtime-paths.txt")" == "$SNAPSHOT_CONFIG_HASH" ]] || die "managed runtime changed after quiesce; rollback is required"
 
 apply_database

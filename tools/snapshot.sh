@@ -88,13 +88,13 @@ say "Snapshot → $SNAP_DIR"
 SOURCE_DB_HASH="missing"
 SOURCE_DB_FILE_HASH="missing"
 if [[ -f "$DB_FILE" ]]; then
-  SOURCE_DB_HASH="$(mb_hash_paths "$DB_FILE" "$DB_FILE-wal" "$DB_FILE-shm" "$DB_FILE-journal")"
+  SOURCE_DB_HASH="$(mb_hash_paths "$DB_FILE" "$DB_FILE-wal" "$DB_FILE-journal")"
   SOURCE_DB_FILE_HASH="$(mb_sqlite_file_fingerprint "$DB_FILE")"
   mb_sqlite_backup "$DB_FILE" "$SNAP_DIR/meowbox.db"
-  DB_HASH_AFTER="$(mb_hash_paths "$DB_FILE" "$DB_FILE-wal" "$DB_FILE-shm" "$DB_FILE-journal")"
+  DB_HASH_AFTER="$(mb_hash_paths "$DB_FILE" "$DB_FILE-wal" "$DB_FILE-journal")"
   DB_FILE_HASH_AFTER="$(mb_sqlite_file_fingerprint "$DB_FILE")"
   [[ "$SOURCE_DB_HASH" == "$DB_HASH_AFTER" ]] || die "SQLite changed during backup; retry after writers are quiescent"
-  [[ "$SOURCE_DB_FILE_HASH" == "$DB_FILE_HASH_AFTER" ]] || die "SQLite main/WAL/SHM changed during backup; retry after writers are quiescent"
+  [[ "$SOURCE_DB_FILE_HASH" == "$DB_FILE_HASH_AFTER" ]] || die "SQLite main/WAL changed during backup; retry after writers are quiescent"
   say "✓ SQLite online backup API"
 fi
 

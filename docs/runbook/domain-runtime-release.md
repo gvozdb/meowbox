@@ -25,7 +25,8 @@ Normal updates retain redacted JSON and text reports below
 `state/data/migrations/reports/`. A read-only dry-run writes only redacted
 reports below `${TMPDIR:-/tmp}/meowbox-release-reports/` (or
 `MEOWBOX_DRY_RUN_REPORT_DIR`) and removes its SQLite clone on exit. A passed
-report records hashes of the live SQLite input (`.db`, WAL, SHM, journal) and
+report records hashes of the durable live SQLite input (`.db`, WAL, journal;
+SHM lock/index bytes are intentionally excluded) and
 the managed runtime artifact tree before and after the clone run. Hashes must
 match exactly.
 

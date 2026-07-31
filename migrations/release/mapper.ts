@@ -77,7 +77,7 @@ export interface MigrationMapEnvelope {
   readonly targetMigration: string;
   /** Stable checksum of the source mapping inputs (excludes the staging table). */
   readonly sourceDbSha256: string;
-  /** Physical SQLite main/WAL/SHM checksum observed before this read-only map. */
+  /** Durable SQLite main/WAL checksum observed before this read-only map. */
   readonly sourceFileSha256: string;
   readonly sourceSchemaSha256: string;
   readonly rows: readonly MigrationMapRow[];

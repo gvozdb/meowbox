@@ -58,16 +58,16 @@ async function optionalFileHash(filePath: string): Promise<string | null> {
 }
 
 /**
- * Hash SQLite's main/WAL/SHM triplet without exposing its absolute location.
+ * Hash SQLite's durable main/WAL content without exposing its absolute path.
+ * SHM is a transient lock/index file: read-only connections mutate it and
+ * SQLite rebuilds it from WAL, so it must not participate in data identity.
  * The caller must take its own read/update lock; this detects a concurrent
  * writer between the beginning and end of a supposedly read-only preflight.
  */
 export async function fingerprintDatabaseFiles(dbPath: string): Promise<DatabaseFileFingerprint> {
   const main = await sha256File(dbPath);
-  const [wal, shm] = await Promise.all([
-    optionalFileHash(`${dbPath}-wal`),
-    optionalFileHash(`${dbPath}-shm`),
-  ]);
+  const wal = await optionalFileHash(`${dbPath}-wal`);
+  const shm = null;
   const combined = sha256Json({ main, wal, shm });
   return { main, wal, shm, combined };
 }
