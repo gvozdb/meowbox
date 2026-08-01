@@ -143,6 +143,9 @@ jobs:
           cp tools/bootstrap-release-update.sh "dist/meowbox-bootstrap-${{ steps.ver.outputs.version }}.sh"
           chmod 0755 "dist/meowbox-bootstrap-${{ steps.ver.outputs.version }}.sh"
           (cd dist && sha256sum "meowbox-bootstrap-${{ steps.ver.outputs.version }}.sh" > "meowbox-bootstrap-${{ steps.ver.outputs.version }}.sh.sha256")
+          cp tools/recover-missing-release.sh "dist/meowbox-recover-${{ steps.ver.outputs.version }}.sh"
+          chmod 0755 "dist/meowbox-recover-${{ steps.ver.outputs.version }}.sh"
+          (cd dist && sha256sum "meowbox-recover-${{ steps.ver.outputs.version }}.sh" > "meowbox-recover-${{ steps.ver.outputs.version }}.sh.sha256")
 
           ls -la dist/
 
@@ -170,3 +173,5 @@ jobs:
             dist/SHA256SUMS
             dist/meowbox-bootstrap-${{ steps.ver.outputs.version }}.sh
             dist/meowbox-bootstrap-${{ steps.ver.outputs.version }}.sh.sha256
+            dist/meowbox-recover-${{ steps.ver.outputs.version }}.sh
+            dist/meowbox-recover-${{ steps.ver.outputs.version }}.sh.sha256

@@ -13,6 +13,8 @@ PANEL_DIR="${MEOWBOX_PANEL_DIR:-/opt/meowbox}"
 PANEL_DIR="$(cd "$PANEL_DIR" && pwd -P)"
 [[ ! -f "$PANEL_DIR/.dev-mode" ]] || die "release update is unavailable on a dev workspace"
 [[ -L "$PANEL_DIR/current" ]] || die "panel current release symlink is missing"
+[[ -d "$PANEL_DIR/current" ]] || \
+  die "panel current release target is missing; restore it with the checksum-verified recovery asset first"
 [[ -f "$PANEL_DIR/state/data/meowbox.db" ]] || die "panel SQLite database is missing"
 
 GITHUB_REPO="${GITHUB_REPO:-gvozdb/meowbox}"

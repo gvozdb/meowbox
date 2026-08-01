@@ -11,7 +11,9 @@ const {
   mkdir,
   mkdtemp,
   readFile,
+  realpath,
   rm,
+  stat,
   symlink,
   writeFile,
 } = require('node:fs/promises');
@@ -70,6 +72,7 @@ test('v0.6.63 Prisma db push hands off without touching the legacy database', { 
     await copyFile(markerSource, path.join(api, 'prisma', 'legacy-panel-update-bridge.json'));
     await writeFile(path.join(release, 'VERSION'), 'v9.9.9\n', { mode: 0o644 });
     await writeFile(path.join(currentRelease, 'VERSION'), 'v0.6.63\n', { mode: 0o644 });
+    await writeFile(path.join(currentRelease, 'Makefile'), 'update:\n\t@true\n', { mode: 0o644 });
     await symlink('releases/v0.6.63', path.join(panel, 'current'));
 
     const realCli = path.join(api, 'node_modules', 'prisma', 'build', 'index.js');
@@ -88,6 +91,9 @@ set -euo pipefail
   printf '%s\\n' "$MEOWBOX_LEGACY_BRIDGE_SOURCE_DIR"
   printf '%s\\n' "$MEOWBOX_LEGACY_PANEL_BRIDGE"
 } > "$BRIDGE_CAPTURE"
+if [[ "\${BRIDGE_FAIL:-0}" == "1" ]]; then
+  exit 79
+fi
 `;
     await writeFile(path.join(release, 'tools', 'update.sh'), updateStub, { mode: 0o755 });
     await chmod(path.join(release, 'tools', 'update.sh'), 0o755);
@@ -97,6 +103,43 @@ set -euo pipefail
 
     await execFileP(process.execPath, [path.join(api, 'scripts', 'install-prisma-legacy-bridge.cjs')]);
     assert.equal((await lstat(prismaBin)).isSymbolicLink(), false);
+
+    await assert.rejects(
+      execFileP(
+        process.execPath,
+        [prismaBin, 'db', 'push', '--skip-generate', '--accept-data-loss'],
+        {
+          cwd: api,
+          env: {
+            ...process.env,
+            DATABASE_URL: `file:${database}`,
+            BRIDGE_CAPTURE: capture,
+            BRIDGE_FAIL: '1',
+          },
+          maxBuffer: 8 * 1024 * 1024,
+        },
+      ),
+      (error) => {
+        assert.match(error.stdout, /rollback release protected/);
+        assert.match(error.stderr, /Transactional migration failed/);
+        return true;
+      },
+    );
+
+    const protectedCurrent = await realpath(path.join(panel, 'current'));
+    assert.equal(path.dirname(protectedCurrent), path.join(panel, 'releases'));
+    assert.match(path.basename(protectedCurrent), /^\.legacy-rollback-v0\.6\.63$/);
+    assert.equal(await readFile(path.join(protectedCurrent, 'VERSION'), 'utf8'), 'v0.6.63\n');
+    assert.equal(
+      (await stat(path.join(protectedCurrent, 'VERSION'))).ino,
+      (await stat(path.join(currentRelease, 'VERSION'))).ino,
+    );
+    assert.equal(digest(await readFile(database)), before);
+
+    // Exact legacy cleanup can now delete the visible old directory without
+    // invalidating current or the rollback target recorded by the child.
+    await rm(currentRelease, { recursive: true, force: true });
+    assert.equal(await readFile(path.join(panel, 'current', 'VERSION'), 'utf8'), 'v0.6.63\n');
 
     const result = await execFileP(
       process.execPath,
@@ -126,7 +169,7 @@ set -euo pipefail
       '1',
     ]);
 
-    await writeFile(path.join(currentRelease, 'VERSION'), 'v0.6.49\n', { mode: 0o644 });
+    await writeFile(path.join(panel, 'current', 'VERSION'), 'v0.6.49\n', { mode: 0o644 });
     await assert.rejects(
       execFileP(
         process.execPath,

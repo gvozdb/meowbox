@@ -12,6 +12,7 @@ const releasesDir = path.dirname(releaseDir);
 const panelDir = path.dirname(releasesDir);
 const markerPath = path.join(apiRoot, 'prisma', 'legacy-panel-update-bridge.json');
 const realCli = path.join(apiRoot, 'node_modules', 'prisma', 'build', 'index.js');
+const currentLink = path.join(panelDir, 'current');
 
 function stop(message, detail) {
   console.error(`[legacy-panel-bridge] ✗ ${message}`);
@@ -73,6 +74,110 @@ function compareVersions(left, right) {
   return 0;
 }
 
+function fsyncDirectory(directory) {
+  const descriptor = fs.openSync(directory, 'r');
+  try {
+    fs.fsyncSync(descriptor);
+  } finally {
+    fs.closeSync(descriptor);
+  }
+}
+
+function atomicSwitchCurrent(target) {
+  const temporary = path.join(
+    panelDir,
+    `.current-legacy-bridge-${process.pid}-${Date.now()}`,
+  );
+  try {
+    fs.symlinkSync(target, temporary);
+    fs.renameSync(temporary, currentLink);
+    fsyncDirectory(panelDir);
+  } catch (error) {
+    fs.rmSync(temporary, { force: true });
+    stop('Cannot protect the legacy rollback release', error.message);
+  }
+}
+
+function protectLegacyRollbackRelease(currentVersion) {
+  let currentRelease;
+  try {
+    if (!fs.lstatSync(currentLink).isSymbolicLink()) {
+      stop('Legacy panel current path is not a symlink');
+    }
+    currentRelease = fs.realpathSync(currentLink);
+  } catch (error) {
+    stop('Cannot resolve the current legacy release', error.message);
+  }
+
+  const releasesRoot = fs.realpathSync(releasesDir);
+  if (
+    path.dirname(currentRelease) !== releasesRoot
+    || !fs.statSync(currentRelease, { throwIfNoEntry: false })?.isDirectory()
+  ) {
+    stop('Current legacy release is outside releases/ or missing');
+  }
+
+  // v0.6.50-v0.6.64 run release pruning from an unconditional EXIT trap.
+  // A failed candidate can therefore make the serving release the oldest
+  // visible directory and delete it after the transactional child rolled
+  // back. Keep an atomic hard-link clone under a dot-directory: the exact
+  // legacy `ls -1t releases/` cleanup cannot see it, while snapshots and
+  // `current` retain a complete rollback target without duplicating bytes.
+  const protectedName = `.legacy-rollback-${currentVersion}`;
+  const protectedRelease = path.join(releasesRoot, protectedName);
+  if (currentRelease === protectedRelease) return protectedRelease;
+
+  // Even if creating the hard-link clone fails, make the current directory
+  // newest before stopping so the legacy default retention keeps it.
+  const now = new Date();
+  fs.utimesSync(currentRelease, now, now);
+
+  if (fs.existsSync(protectedRelease)) {
+    const protectedMetadata = fs.lstatSync(protectedRelease);
+    if (
+      !protectedMetadata.isDirectory()
+      || protectedMetadata.isSymbolicLink()
+      || fs.realpathSync(path.dirname(protectedRelease)) !== releasesRoot
+    ) {
+      stop(`Existing protected rollback release is invalid: ${protectedRelease}`);
+    }
+    let protectedVersion;
+    try {
+      protectedVersion = fs.readFileSync(
+        path.join(protectedRelease, 'VERSION'),
+        'utf8',
+      ).trim();
+    } catch (error) {
+      stop(`Existing protected rollback release is invalid: ${protectedRelease}`, error.message);
+    }
+    if (
+      protectedVersion !== currentVersion
+      || !fs.statSync(path.join(protectedRelease, 'Makefile'), { throwIfNoEntry: false })?.isFile()
+    ) {
+      stop(`Existing protected rollback release is invalid: ${protectedRelease}`);
+    }
+  } else {
+    const temporary = path.join(
+      releasesRoot,
+      `.legacy-rollback-tmp-${process.pid}-${Date.now()}`,
+    );
+    const copy = spawnSync('/bin/cp', ['-a', '-l', '--', currentRelease, temporary], {
+      env: process.env,
+      stdio: 'inherit',
+    });
+    if (copy.error || copy.status !== 0) {
+      fs.rmSync(temporary, { recursive: true, force: true });
+      stop('Cannot create the protected rollback release', copy.error?.message);
+    }
+    fs.renameSync(temporary, protectedRelease);
+    fsyncDirectory(releasesRoot);
+  }
+
+  atomicSwitchCurrent(protectedRelease);
+  console.log(`[legacy-panel-bridge] rollback release protected at ${protectedRelease}`);
+  return protectedRelease;
+}
+
 const isDbPush = args[0] === 'db' && args[1] === 'push';
 if (!isDbPush || !fs.existsSync(markerPath)) delegateToPrisma();
 
@@ -103,18 +208,7 @@ if (!/^v\d+\.\d+\.\d+(?:[-+][A-Za-z0-9.-]+)?$/.test(version)) {
   stop('Candidate VERSION is invalid');
 }
 
-const database = parseDatabasePath(process.env.DATABASE_URL);
-const expectedDatabase = path.join(panelDir, 'state', 'data', 'meowbox.db');
-for (const candidate of [database, expectedDatabase]) {
-  if (!fs.statSync(candidate, { throwIfNoEntry: false })?.isFile()) {
-    stop(`Panel SQLite database is missing: ${candidate}`);
-  }
-}
-if (fs.realpathSync(database) !== fs.realpathSync(expectedDatabase)) {
-  stop('DATABASE_URL does not point to the panel persistent database');
-}
-
-const currentVersionFile = path.join(panelDir, 'current', 'VERSION');
+const currentVersionFile = path.join(currentLink, 'VERSION');
 let currentVersion;
 try {
   currentVersion = fs.readFileSync(currentVersionFile, 'utf8').trim();
@@ -128,6 +222,19 @@ if (
   || compareVersions(parsedCurrentVersion, maximumLegacyVersion) > 0
 ) {
   stop(`Current panel version ${currentVersion || 'unknown'} is not supported by this legacy bridge`);
+}
+
+protectLegacyRollbackRelease(currentVersion);
+
+const database = parseDatabasePath(process.env.DATABASE_URL);
+const expectedDatabase = path.join(panelDir, 'state', 'data', 'meowbox.db');
+for (const candidate of [database, expectedDatabase]) {
+  if (!fs.statSync(candidate, { throwIfNoEntry: false })?.isFile()) {
+    stop(`Panel SQLite database is missing: ${candidate}`);
+  }
+}
+if (fs.realpathSync(database) !== fs.realpathSync(expectedDatabase)) {
+  stop('DATABASE_URL does not point to the panel persistent database');
 }
 
 const releaseCli = path.join(releaseDir, 'migrations', 'dist', 'release-cli.js');
@@ -166,6 +273,14 @@ if (update.error || update.status !== 0) {
     'Transactional migration failed; its rollback journal and snapshots were retained',
     update.error?.message,
   );
+}
+
+// The legacy parent still has its unconditional EXIT cleanup armed. The
+// committed target must be among its newest visible entries; the protected
+// previous release is hidden and remains available to the matched snapshot.
+if (fs.statSync(releaseDir, { throwIfNoEntry: false })?.isDirectory()) {
+  const now = new Date();
+  fs.utimesSync(releaseDir, now, now);
 }
 
 console.log('[legacy-panel-bridge] transactional migration committed');

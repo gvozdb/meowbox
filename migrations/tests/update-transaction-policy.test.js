@@ -10,6 +10,7 @@ const root = path.resolve(__dirname, '..', '..');
 const policy = path.join(root, 'tools', 'release-transaction-policy.sh');
 const updater = path.join(root, 'tools', 'update.sh');
 const bootstrapUpdater = path.join(root, 'tools', 'bootstrap-release-update.sh');
+const releaseRecovery = path.join(root, 'tools', 'recover-missing-release.sh');
 const releaseWorkflow = path.join(root, '.github', 'workflows', 'release.yml');
 const apiPackage = path.join(root, 'api', 'package.json');
 const prismaBridge = path.join(root, 'api', 'scripts', 'prisma-legacy-bridge.cjs');
@@ -107,6 +108,7 @@ test('legacy bootstrap verifies the artifact and bypasses prisma db push', () =>
   assert.match(source, /MEOWBOX_UPDATE_CANDIDATE_DIR="\$CANDIDATE"/);
   assert.match(source, /bash "\$CANDIDATE\/tools\/update\.sh" "\$TARGET"/);
   assert.doesNotMatch(source, /npx\s+prisma\s+db\s+push/);
+  assert.match(source, /panel current release target is missing/);
 });
 
 test('detached transactional tools share an explicit production panel root', () => {
@@ -125,6 +127,21 @@ test('release publishes the standalone legacy bootstrap with a separate checksum
   const source = fs.readFileSync(releaseWorkflow, 'utf8');
   assert.match(source, /meowbox-bootstrap-\$\{\{ steps\.ver\.outputs\.version \}\}\.sh/);
   assert.match(source, /meowbox-bootstrap-\$\{\{ steps\.ver\.outputs\.version \}\}\.sh\.sha256/);
+  assert.match(source, /meowbox-recover-\$\{\{ steps\.ver\.outputs\.version \}\}\.sh/);
+  assert.match(source, /meowbox-recover-\$\{\{ steps\.ver\.outputs\.version \}\}\.sh\.sha256/);
+});
+
+test('standalone recovery only rehydrates a dangling exact release', () => {
+  const source = fs.readFileSync(releaseRecovery, 'utf8');
+  execFileSync('bash', ['-n', releaseRecovery]);
+
+  assert.match(source, /if \[\[ -d "\$CURRENT_LINK" \]\]/);
+  assert.match(source, /release checksum verification failed/);
+  assert.match(source, /mv -- "\$STAGE_DIR" "\$MISSING_RELEASE"/);
+  assert.match(source, /persistent database, configuration, Nginx and PM2 were not changed/);
+  assert.doesNotMatch(source, /prisma\s+(?:db\s+push|migrate\s+deploy)/);
+  assert.doesNotMatch(source, /pm2\s+(?:start|restart|reload|delete)/);
+  assert.doesNotMatch(source, /systemctl/);
 });
 
 test('release artifact installs the guarded legacy panel bridge', () => {
@@ -139,9 +156,18 @@ test('release artifact installs the guarded legacy panel bridge', () => {
   assert.match(bridgeSource, /args\[0\] === 'db' && args\[1\] === 'push'/);
   assert.match(bridgeSource, /compareVersions\(parsedCurrentVersion, minimumLegacyVersion\)/);
   assert.match(bridgeSource, /snapshot-backed transactional migration/);
+  assert.match(bridgeSource, /\.legacy-rollback-/);
+  assert.match(bridgeSource, /atomicSwitchCurrent\(protectedRelease\)/);
+  assert.match(bridgeSource, /spawnSync\('\/bin\/cp', \['-a', '-l'/);
   assert.doesNotMatch(bridgeSource, /releaseCli,\s*'baseline'/);
   assert.match(bridgeSource, /MEOWBOX_LEGACY_BRIDGE_SOURCE_DIR: releaseDir/);
   assert.doesNotMatch(bridgeSource, /--force-reset/);
+});
+
+test('transactional updater never prunes release directories from an EXIT trap', () => {
+  const source = fs.readFileSync(updater, 'utf8');
+  assert.doesNotMatch(source, /trap\s+['"][^'"\n]*cleanup_old_releases/);
+  assert.doesNotMatch(source, /rm\s+-rf\s+--?\s+"\$RELEASES_DIR\//);
 });
 
 test('transactional updater only replaces an explicitly verified legacy candidate', () => {
