@@ -59,7 +59,8 @@ http_code_with_retry() {
   local deadline=$(( $(date +%s) + TIMEOUT ))
   local code="000"
   while [[ $(date +%s) -lt $deadline ]]; do
-    code="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 3 "$url" 2>/dev/null || printf 000)"
+    code="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 3 "$url" 2>/dev/null || true)"
+    [[ "$code" =~ ^[0-9]{3}$ ]] || code="000"
     [[ "$code" != "000" ]] && break
     sleep 1
   done

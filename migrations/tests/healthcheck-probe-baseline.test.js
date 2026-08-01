@@ -72,3 +72,57 @@ test('healthcheck accepts only an unchanged pre-existing probe failure', async (
     fs.rmSync(temp, { recursive: true, force: true });
   }
 });
+
+test('healthcheck retries a transient curl transport failure', async () => {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'meowbox-health-retry-'));
+  const server = http.createServer((_request, response) => {
+    response.statusCode = 200;
+    response.end('test');
+  });
+
+  try {
+    const port = await listen(server);
+    const envFile = path.join(temp, '.env');
+    const manifest = path.join(temp, 'manifest.json');
+    const fakeBin = path.join(temp, 'bin');
+    const fakeCurl = path.join(fakeBin, 'curl');
+    const attemptFile = path.join(temp, 'flaky-attempted');
+    const flakyUrl = `http://127.0.0.1:${port}/flaky`;
+    fs.mkdirSync(fakeBin);
+    fs.writeFileSync(envFile, `API_PORT=${port}\nWEB_PORT=${port}\n`);
+    fs.writeFileSync(manifest, JSON.stringify({
+      version: 1,
+      requiresRuntimeCutover: false,
+      artifacts: [],
+      httpProbes: [{ url: flakyUrl, expectedStatus: [200] }],
+    }));
+    fs.writeFileSync(fakeCurl, `#!/usr/bin/env bash
+set -euo pipefail
+url="\${!#}"
+if [[ "$url" == "${flakyUrl}" && ! -e "${attemptFile}" ]]; then
+  touch "${attemptFile}"
+  printf 000
+  exit 7
+fi
+exec /usr/bin/curl "$@"
+`, { mode: 0o755 });
+
+    const passed = await execFileAsync(
+      'bash',
+      [healthcheck, '--manifest', manifest, '--skip-pm2'],
+      {
+        env: {
+          ...process.env,
+          PATH: `${fakeBin}:${process.env.PATH}`,
+          MEOWBOX_ENV_FILE: envFile,
+          HEALTHCHECK_TIMEOUT: '3',
+        },
+      },
+    );
+    assert.match(passed.stdout, new RegExp(`probe ${flakyUrl} \\(HTTP 200\\)`));
+    assert.equal(fs.existsSync(attemptFile), true);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+    fs.rmSync(temp, { recursive: true, force: true });
+  }
+});
