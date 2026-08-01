@@ -61,6 +61,18 @@ function readJson(file, label) {
   }
 }
 
+function parseVersion(value) {
+  const match = /^v(\d+)\.(\d+)\.(\d+)$/.exec(value);
+  return match ? match.slice(1).map(Number) : null;
+}
+
+function compareVersions(left, right) {
+  for (let index = 0; index < 3; index += 1) {
+    if (left[index] !== right[index]) return left[index] - right[index];
+  }
+  return 0;
+}
+
 const isDbPush = args[0] === 'db' && args[1] === 'push';
 if (!isDbPush || !fs.existsSync(markerPath)) delegateToPrisma();
 
@@ -73,7 +85,15 @@ if (path.basename(releasesDir) !== 'releases') {
 }
 
 const marker = readJson(markerPath, 'legacy bridge marker');
-if (marker.version !== 1 || marker.minimumLegacyVersion !== 'v0.6.64') {
+const minimumLegacyVersion = parseVersion(marker.legacyVersionRange?.min);
+const maximumLegacyVersion = parseVersion(marker.legacyVersionRange?.max);
+if (
+  marker.version !== 2
+  || marker.interceptedCommand !== 'prisma db push --skip-generate --accept-data-loss'
+  || minimumLegacyVersion === null
+  || maximumLegacyVersion === null
+  || compareVersions(minimumLegacyVersion, maximumLegacyVersion) > 0
+) {
   stop('Legacy panel bridge marker has an unsupported contract');
 }
 
@@ -94,6 +114,22 @@ if (fs.realpathSync(database) !== fs.realpathSync(expectedDatabase)) {
   stop('DATABASE_URL does not point to the panel persistent database');
 }
 
+const currentVersionFile = path.join(panelDir, 'current', 'VERSION');
+let currentVersion;
+try {
+  currentVersion = fs.readFileSync(currentVersionFile, 'utf8').trim();
+} catch (error) {
+  stop('Cannot read current panel VERSION', error.message);
+}
+const parsedCurrentVersion = parseVersion(currentVersion);
+if (
+  parsedCurrentVersion === null
+  || compareVersions(parsedCurrentVersion, minimumLegacyVersion) < 0
+  || compareVersions(parsedCurrentVersion, maximumLegacyVersion) > 0
+) {
+  stop(`Current panel version ${currentVersion || 'unknown'} is not supported by this legacy bridge`);
+}
+
 const releaseCli = path.join(releaseDir, 'migrations', 'dist', 'release-cli.js');
 const baselineContract = path.join(releaseDir, 'migrations', 'release', 'supported-baselines.json');
 const updateScript = path.join(releaseDir, 'tools', 'update.sh');
@@ -103,59 +139,8 @@ for (const required of [releaseCli, baselineContract, updateScript]) {
   }
 }
 
-const assessmentRun = spawnSync(
-  process.execPath,
-  [
-    releaseCli,
-    'baseline',
-    '--db', database,
-    '--api-dir', apiRoot,
-    '--contract', baselineContract,
-    '--json',
-  ],
-  { env: process.env, encoding: 'utf8', maxBuffer: 8 * 1024 * 1024 },
-);
-if (assessmentRun.error) {
-  stop(
-    'Database is not an approved upgrade baseline; no changes were made',
-    assessmentRun.error.message,
-  );
-}
-
-let assessment;
-try {
-  assessment = JSON.parse(assessmentRun.stdout).assessment;
-} catch (error) {
-  const detail = assessmentRun.stderr.trim() || error.message;
-  stop('Baseline assessor returned invalid JSON; no changes were made', detail);
-}
-if (assessmentRun.status !== 0) {
-  const blockerCodes = Array.isArray(assessment?.blockers)
-    ? assessment.blockers
-      .map((blocker) => blocker?.code)
-      .filter((code) => typeof code === 'string')
-      .join(',')
-    : '';
-  const schema = typeof assessment?.schemaSha256 === 'string'
-    ? assessment.schemaSha256
-    : 'unknown';
-  stop(
-    'Database is not an approved upgrade baseline; no changes were made',
-    `schema=${schema}; blockers=${blockerCodes || 'unknown'}`,
-  );
-}
-const supportedLegacy = assessment?.ok === true
-  && assessment.decision === 'baseline-required'
-  && assessment.legacyMappingRequired === true;
-const resumableFinal = assessment?.ok === true
-  && assessment.decision === 'already-tracked'
-  && assessment.legacyMappingRequired === false;
-if (!supportedLegacy && !resumableFinal) {
-  stop('Database baseline is unsupported for automatic legacy handoff; no changes were made');
-}
-
 console.log('[legacy-panel-bridge] old Prisma db push intercepted before any database write');
-console.log('[legacy-panel-bridge] handing off to snapshot-backed transactional migration');
+console.log(`[legacy-panel-bridge] ${currentVersion} handing off to snapshot-backed transactional migration`);
 
 const bridgeEnv = {
   ...process.env,

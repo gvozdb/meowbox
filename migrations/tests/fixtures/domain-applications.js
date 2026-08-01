@@ -234,8 +234,8 @@ const DOMAIN_RELEASE_MIGRATIONS = new Set([
   'zz20260731104000_backup_schema_alignment',
 ]);
 
-const V0664_PRISMA_SCHEMA_LINEAGES = Object.freeze({
-  canonical: Object.freeze(['v0.6.64']),
+const PRE_DOMAIN_PRISMA_SCHEMA_LINEAGES = Object.freeze({
+  canonical: Object.freeze(['v0.6.63']),
   sequential: Object.freeze([
     'v0.6.0',
     'v0.6.15',
@@ -265,14 +265,14 @@ async function createLegacyCoreFixture(dbPath, prismaMigrationsDir, runSqliteScr
   await runSqliteScript(dbPath, legacyFixtureSql);
 }
 
-async function createV0664PrismaFixture(
+async function createPreDomainPrismaFixture(
   dbPath,
   projectRoot,
   runSqliteScript,
   lineage = 'canonical',
 ) {
-  const schemaTags = V0664_PRISMA_SCHEMA_LINEAGES[lineage];
-  if (schemaTags === undefined) throw new Error(`Unknown v0.6.64 schema lineage: ${lineage}`);
+  const schemaTags = PRE_DOMAIN_PRISMA_SCHEMA_LINEAGES[lineage];
+  if (schemaTags === undefined) throw new Error(`Unknown pre-domain schema lineage: ${lineage}`);
   const prismaBin = join(projectRoot, 'api', 'node_modules', '.bin', 'prisma');
   const schemaPaths = [];
   await writeFile(dbPath, '', { flag: 'wx', mode: 0o600 });
@@ -321,7 +321,7 @@ async function createV0664PrismaFixture(
 module.exports = {
   IDS,
   createLegacyCoreFixture,
-  createV0664PrismaFixture,
+  createPreDomainPrismaFixture,
   legacyAlignmentFixtureSql,
   legacyFixtureSql,
   runtimeEvidence,

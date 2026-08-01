@@ -7,7 +7,7 @@ const apiRoot = path.resolve(__dirname, '..');
 const marker = path.join(apiRoot, 'prisma', 'legacy-panel-update-bridge.json');
 
 // Source/dev installs keep the ordinary Prisma CLI. The marker exists only in
-// signed release artifacts that must remain consumable by the v0.6.64 updater.
+// signed release artifacts that must remain consumable by approved legacy updaters.
 if (!fs.existsSync(marker)) process.exit(0);
 
 const realCli = path.join(apiRoot, 'node_modules', 'prisma', 'build', 'index.js');

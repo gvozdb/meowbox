@@ -127,7 +127,7 @@ test('release publishes the standalone legacy bootstrap with a separate checksum
   assert.match(source, /meowbox-bootstrap-\$\{\{ steps\.ver\.outputs\.version \}\}\.sh\.sha256/);
 });
 
-test('release artifact installs the guarded v0.6.64 panel bridge', () => {
+test('release artifact installs the guarded legacy panel bridge', () => {
   const workflowSource = fs.readFileSync(releaseWorkflow, 'utf8');
   const packageJson = JSON.parse(fs.readFileSync(apiPackage, 'utf8'));
   const bridgeSource = fs.readFileSync(prismaBridge, 'utf8');
@@ -137,7 +137,9 @@ test('release artifact installs the guarded v0.6.64 panel bridge', () => {
   assert.match(workflowSource, /legacy-panel-update-bridge\.json/);
   assert.match(workflowSource, /cp -r api\/scripts "\$STAGE\/api\/"/);
   assert.match(bridgeSource, /args\[0\] === 'db' && args\[1\] === 'push'/);
-  assert.match(bridgeSource, /assessment\.decision === 'baseline-required'/);
+  assert.match(bridgeSource, /compareVersions\(parsedCurrentVersion, minimumLegacyVersion\)/);
+  assert.match(bridgeSource, /snapshot-backed transactional migration/);
+  assert.doesNotMatch(bridgeSource, /releaseCli,\s*'baseline'/);
   assert.match(bridgeSource, /MEOWBOX_LEGACY_BRIDGE_SOURCE_DIR: releaseDir/);
   assert.doesNotMatch(bridgeSource, /--force-reset/);
 });

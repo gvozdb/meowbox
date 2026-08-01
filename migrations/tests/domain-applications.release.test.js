@@ -33,7 +33,7 @@ const {
 const {
   IDS,
   createLegacyCoreFixture,
-  createV0664PrismaFixture,
+  createPreDomainPrismaFixture,
   legacyAlignmentFixtureSql,
   runtimeEvidence,
 } = require('./fixtures/domain-applications');
@@ -147,7 +147,7 @@ test('database fingerprint ignores transient SHM but tracks durable WAL', async 
 });
 
 test(
-  'v0.6.64 Prisma schema lineages follow the shared transactional migration path',
+  'pre-domain Prisma schema lineages follow the shared transactional migration path',
   { timeout: 300_000 },
   async () => {
     const tempRoot = await mkdtemp(
@@ -166,8 +166,8 @@ test(
         },
       ];
       for (const variant of variants) {
-        const dbPath = join(tempRoot, `${variant.lineage}-v0.6.64.db`);
-        await createV0664PrismaFixture(
+        const dbPath = join(tempRoot, `${variant.lineage}-pre-domain.db`);
+        await createPreDomainPrismaFixture(
           dbPath,
           projectRoot,
           runSqliteScript,
@@ -179,7 +179,7 @@ test(
         const assessment = await assessBaseline({ dbPath, apiDir, contract });
         assert.equal(assessment.ok, true, JSON.stringify(assessment.blockers));
         assert.equal(assessment.decision, 'baseline-required');
-        assert.equal(assessment.supportedBaselineId, 'v0.6.64-pre-domain-applications');
+        assert.equal(assessment.supportedBaselineId, 'pre-domain-applications');
         assert.equal(assessment.legacyMappingRequired, true);
 
         const mapped = await applyLegacyMigrationMap({

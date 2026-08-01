@@ -1,5 +1,8 @@
 {
-  "version": 1,
-  "minimumLegacyVersion": "v0.6.64",
+  "version": 2,
+  "legacyVersionRange": {
+    "min": "v0.6.50",
+    "max": "v0.6.64"
+  },
   "interceptedCommand": "prisma db push --skip-generate --accept-data-loss"
 }

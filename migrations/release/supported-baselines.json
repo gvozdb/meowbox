@@ -2,7 +2,7 @@
   "version": 2,
   "supportedBaselines": [
     {
-      "id": "v0.6.64-pre-domain-applications",
+      "id": "pre-domain-applications",
       "schemaVariants": [
         {
           "id": "historical-migration-chain",
