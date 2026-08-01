@@ -524,9 +524,13 @@ export class ResticExecutor {
       try {
         const entry = JSON.parse(line) as {
           message_type?: string;
+          struct_type?: string;
           path?: string;
         };
-        if (entry.message_type === 'node' && entry.path) {
+        // `restic backup --json` uses message_type, while `restic ls --json`
+        // uses struct_type. Accept both to support the installed/restored CLI.
+        const entryType = entry.struct_type ?? entry.message_type;
+        if (entryType === 'node' && entry.path) {
           found.add(path.resolve('/', entry.path));
         }
       } catch {

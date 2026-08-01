@@ -11,6 +11,7 @@
     "test:deploy-runtime": "TS_NODE_TRANSPILE_ONLY=1 node --test -r ts-node/register -r ../tools/register-shared-source.js test/deploy-runtime.test.js",
     "test:backup-archive": "TS_NODE_TRANSPILE_ONLY=1 node --test -r ts-node/register -r ../tools/register-shared-source.js test/backup-archive.test.js",
     "test:backup-restore-safety": "TS_NODE_TRANSPILE_ONLY=1 node --test -r ts-node/register -r ../tools/register-shared-source.js test/backup-restore-safety.test.js",
+    "test:restic-snapshot-validation": "TS_NODE_TRANSPILE_ONLY=1 node --test -r ts-node/register -r ../tools/register-shared-source.js test/restic-snapshot-validation.test.js",
     "test:restic-restore-safety": "TS_NODE_TRANSPILE_ONLY=1 node --test -r ts-node/register -r ../tools/register-shared-source.js test/restic-restore-safety.test.js",
     "test:restore-validation": "TS_NODE_TRANSPILE_ONLY=1 node --test -r ts-node/register -r ../tools/register-shared-source.js test/restore-validation.test.js",
     "test:installer-fail-closed": "TS_NODE_TRANSPILE_ONLY=1 node --test -r ts-node/register -r ../tools/register-shared-source.js test/site-installer-fail-closed.test.js"
