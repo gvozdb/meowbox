@@ -14,7 +14,7 @@ export interface AppliedSystemMigrationRecord {
 
 export interface AcceptedLegacySystemMigration {
   id: string;
-  kind: 'checksum-alias' | 'retired' | 'superseded-failure';
+  kind: 'checksum-alias' | 'retired' | 'superseded-failure' | 'retryable-failure';
   reason: string;
 }
 
@@ -23,6 +23,10 @@ interface ChecksumAliasCompatibility {
   currentChecksum: string;
   acceptedStoredChecksums: readonly string[];
   reason: string;
+  retryableFailure?: {
+    requiredErrorFragments: readonly string[];
+    reason: string;
+  };
 }
 
 interface RetiredSuccessfulMigration {
@@ -57,6 +61,21 @@ const SHA256 = /^[a-f0-9]{64}$/;
  * sides of the comparison: changing either artifact invalidates the contract.
  */
 const CHECKSUM_ALIASES: readonly ChecksumAliasCompatibility[] = [
+  {
+    id: '2026-04-30-002-rate-limit-zones-bootstrap',
+    currentChecksum:
+      '7c5ae51941e1fea4e3d33c5a75d8782b5e4da42dc2186cad736542fede250f79',
+    acceptedStoredChecksums: [
+      'c098109414932b789927f41691b5fd5349ec11d2a2623b009b760ccbed91ff2f',
+    ],
+    reason: 'reviewed compatibility fix for legacy rate-limit zone bootstrap',
+    retryableFailure: {
+      requiredErrorFragments: [
+        'nginx -t failed после регенерации zones:',
+      ],
+      reason: 'retry exact failed legacy zone rewrite with merge-safe artifact',
+    },
+  },
   {
     id: '2026-04-29-001-nginx-layered-rebuild',
     currentChecksum:
@@ -182,6 +201,15 @@ function validateCompatibilityContract(
       !== compatibility.acceptedStoredChecksums.length) {
       throw new Error(`Duplicate stored checksum alias for ${compatibility.id}`);
     }
+    if (
+      compatibility.retryableFailure
+      && (
+        compatibility.retryableFailure.requiredErrorFragments.length === 0
+        || compatibility.retryableFailure.requiredErrorFragments.some((fragment) => !fragment)
+      )
+    ) {
+      throw new Error(`Invalid retryable failure contract for ${compatibility.id}`);
+    }
     const current = currentById.get(compatibility.id);
     if (!current) {
       throw new Error(
@@ -245,9 +273,28 @@ export function assessSystemMigrationHistory(
     const currentRecord = currentById.get(stored.id);
     if (currentRecord) {
       if (!stored.ok) {
-        throw new Error(
-          `Interrupted/failed system migration state blocks release update: ${stored.id}`,
-        );
+        const compatibility = aliasesById.get(stored.id);
+        const retryable = compatibility?.retryableFailure;
+        const exactArtifact =
+          compatibility?.currentChecksum === currentRecord.checksum
+          && compatibility.acceptedStoredChecksums.includes(stored.checksum);
+        const errorLog = stored.errorLog;
+        const exactFailure =
+          errorLog !== null
+          && retryable?.requiredErrorFragments.every((fragment) =>
+            errorLog.includes(fragment),
+          ) === true;
+        if (!retryable || !exactArtifact || !exactFailure) {
+          throw new Error(
+            `Interrupted/failed system migration state blocks release update: ${stored.id}`,
+          );
+        }
+        acceptedLegacy.push({
+          id: stored.id,
+          kind: 'retryable-failure',
+          reason: retryable.reason,
+        });
+        continue;
       }
       if (stored.errorLog !== null) {
         throw new Error(

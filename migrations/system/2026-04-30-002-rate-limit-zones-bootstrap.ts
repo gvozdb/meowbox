@@ -1,91 +1,209 @@
 /**
- * Bootstrap rate-limit zones для существующих сайтов (one-shot).
+ * Bootstrap rate-limit zones for existing configs (one-shot).
  *
- * Что делает:
- *   1. Читает все сайты из БД.
- *   2. Генерирует `/etc/nginx/conf.d/meowbox-zones.conf`:
- *      - legacy zone `site_limit` (для старых конфигов, ещё не пере-генерены)
- *      - per-site zone `site_<name>` для каждого сайта (rate из БД или 30 по умолчанию)
- *   3. nginx -t + reload (с откатом из бэкапа при fail).
- *
- * Идемпотентно: повторный запуск просто перепишет файл с теми же значениями.
- *
- * Зачем нужна:
- *   - На свежесмигрированных серверах поле `nginx_rate_limit_*` = NULL/default.
- *   - Старые конфиги сайтов ссылаются на `site_limit` (legacy zone) — нужна fallback-зона.
- *   - Новые сайты (после миграции 3) используют per-site `site_<name>` зоны.
+ * Preserves all declarations already present in meowbox-zones.conf and adds
+ * only zones referenced by active managed configs. This is compatible with
+ * both the historical `site_*` layout and the current `mb_*` domain layout.
  */
 
 import * as fs from 'node:fs/promises';
+import * as path from 'node:path';
 
-import type { SystemMigration } from './_types';
+import {
+  collectDeclaredRateLimitZones,
+  collectReferencedRateLimitZones,
+  mergeRateLimitZones,
+} from './_rate-limit-zones';
+import type { MigrationContext, SystemMigration } from './_types';
 
-const ZONES_PATH = '/etc/nginx/conf.d/meowbox-zones.conf';
-
-interface SiteRow {
-  name: string;
-  nginxRateLimitEnabled: boolean | null;
-  nginxRateLimitRps: number | null;
+export interface RateLimitZonesMigrationPaths {
+  zonesPath: string;
+  configRoots: readonly string[];
+  nginxBinary: string;
+  systemctlBinary: string;
 }
 
-const migration: SystemMigration = {
-  id: '2026-04-30-002-rate-limit-zones-bootstrap',
-  description: 'Регенерирует /etc/nginx/conf.d/meowbox-zones.conf под per-site rate-limit zones',
+const DEFAULT_PATHS: RateLimitZonesMigrationPaths = {
+  zonesPath: '/etc/nginx/conf.d/meowbox-zones.conf',
+  configRoots: [
+    '/etc/nginx/nginx.conf',
+    '/etc/nginx/meowbox',
+    '/etc/nginx/sites-enabled',
+    '/etc/nginx/conf.d',
+  ],
+  nginxBinary: '/usr/sbin/nginx',
+  systemctlBinary: '/usr/bin/systemctl',
+};
 
-  async up(ctx) {
-    const sites = (await ctx.prisma.site.findMany({
-      select: {
-        name: true,
-        nginxRateLimitEnabled: true,
-        nginxRateLimitRps: true,
-      },
-    })) as SiteRow[];
+async function readOptional(ctx: MigrationContext, file: string): Promise<string | null> {
+  try {
+    return await ctx.readFile(file);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
+    throw error;
+  }
+}
 
-    ctx.log(`Сайтов в БД: ${sites.length}`);
+interface ManagedZoneState {
+  referenced: Set<string>;
+  externallyDeclared: Set<string>;
+}
 
-    const lines: string[] = [
-      '# === Meowbox global rate-limit zones (управляется агентом + миграциями) ===',
-      '# Файл регенерируется при создании/удалении сайта и при изменении rate-limit настроек.',
-      '# Не редактируй вручную — изменения будут затёрты.',
-      '',
-      '# Legacy fallback zone (для конфигов сайтов, которые ещё не пере-генерены под per-site zone).',
-      'limit_req_zone $binary_remote_addr zone=site_limit:10m rate=30r/s;',
-      '',
-    ];
+async function collectManagedZoneState(
+  paths: RateLimitZonesMigrationPaths,
+): Promise<ManagedZoneState> {
+  const referenced = new Set<string>();
+  const externallyDeclared = new Set<string>();
 
-    for (const s of sites) {
-      const safe = s.name.replace(/[^a-zA-Z0-9_-]/g, '_');
-      if (!safe) continue;
-      const rate = s.nginxRateLimitRps && s.nginxRateLimitRps > 0 ? s.nginxRateLimitRps : 30;
-      lines.push(`limit_req_zone $binary_remote_addr zone=site_${safe}:1m rate=${rate}r/s;`);
-    }
-    const content = lines.join('\n') + '\n';
+  const collect = (content: string): void => {
+    for (const zone of collectReferencedRateLimitZones(content)) referenced.add(zone);
+    for (const zone of collectDeclaredRateLimitZones(content)) externallyDeclared.add(zone);
+  };
 
-    if (ctx.dryRun) {
-      ctx.log(`would write ${ZONES_PATH} (${lines.length} lines, ${sites.length} per-site zones)`);
+  const walk = async (entryPath: string): Promise<void> => {
+    let entries: import('node:fs').Dirent[];
+    try {
+      entries = await fs.readdir(entryPath, { withFileTypes: true });
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOTDIR') {
+        if (entryPath !== paths.zonesPath && entryPath.endsWith('.conf')) {
+          const content = await fs.readFile(entryPath, 'utf8').catch(() => null);
+          if (content !== null) collect(content);
+        }
+      }
       return;
     }
 
-    // Бэкап существующего файла.
-    const backup = `${ZONES_PATH}.bak`;
-    try { await fs.copyFile(ZONES_PATH, backup); } catch { /* nothing yet */ }
-
-    await fs.mkdir('/etc/nginx/conf.d', { recursive: true });
-    await fs.writeFile(ZONES_PATH, content, 'utf8');
-    await fs.chmod(ZONES_PATH, 0o644).catch(() => {});
-
-    // nginx -t. При fail — откат.
-    try {
-      await ctx.exec.run('/usr/sbin/nginx', ['-t']);
-      ctx.log(`OK: ${ZONES_PATH} перезаписан (${sites.length} per-site zones)`);
-      // Reload (best-effort).
-      await ctx.exec.run('/usr/bin/systemctl', ['reload', 'nginx']).catch(() => {});
-      await fs.unlink(backup).catch(() => {});
-    } catch (e) {
-      try { await fs.copyFile(backup, ZONES_PATH); } catch { /* */ }
-      throw new Error(`nginx -t failed после регенерации zones: ${(e as Error).message}`);
+    entries.sort((a, b) => a.name.localeCompare(b.name));
+    for (const entry of entries) {
+      const child = path.join(entryPath, entry.name);
+      if (entry.isDirectory()) {
+        await walk(child);
+      } else if (entry.isFile() || entry.isSymbolicLink()) {
+        if (child === paths.zonesPath) continue;
+        const content = await fs.readFile(child, 'utf8').catch(() => null);
+        if (content === null) continue;
+        collect(content);
+      }
     }
-  },
-};
+  };
+
+  for (const root of paths.configRoots) await walk(root);
+  return { referenced, externallyDeclared };
+}
+
+async function buildUpdate(ctx: MigrationContext, paths: RateLimitZonesMigrationPaths) {
+  const currentContent = await readOptional(ctx, paths.zonesPath);
+  const zoneState = await collectManagedZoneState(paths);
+  return {
+    currentContent,
+    result: mergeRateLimitZones(
+      currentContent,
+      zoneState.referenced,
+      zoneState.externallyDeclared,
+    ),
+  };
+}
+
+async function restoreOriginal(
+  ctx: MigrationContext,
+  paths: RateLimitZonesMigrationPaths,
+  originalContent: string | null,
+): Promise<void> {
+  if (originalContent === null) {
+    await fs.unlink(paths.zonesPath).catch((error: NodeJS.ErrnoException) => {
+      if (error.code !== 'ENOENT') throw error;
+    });
+    return;
+  }
+  await ctx.writeFile(paths.zonesPath, originalContent);
+}
+
+export function createRateLimitZonesMigration(
+  paths: RateLimitZonesMigrationPaths = DEFAULT_PATHS,
+): SystemMigration {
+  return {
+    id: '2026-04-30-002-rate-limit-zones-bootstrap',
+    description: 'Безопасно дополняет meowbox-zones.conf используемыми rate-limit zones',
+
+    async preflight(ctx) {
+      for (const executable of [paths.nginxBinary, paths.systemctlBinary]) {
+        if (!(await ctx.exists(executable))) {
+          return { ok: false, reason: `Не найден обязательный executable: ${executable}` };
+        }
+      }
+      return { ok: true };
+    },
+
+    async plan(ctx) {
+      const { result } = await buildUpdate(ctx, paths);
+      return {
+        summary:
+          `preserve ${result.declaredCount - result.addedZones.length} declared zones; ` +
+          `ensure ${result.referencedCount} referenced zones and site_limit; ` +
+          `append ${result.addedZones.length}`,
+        details: {
+          declaredZones: result.declaredCount,
+          referencedZones: result.referencedCount,
+          zonesToAppend: result.addedZones.length,
+        },
+      };
+    },
+
+    async up(ctx) {
+      await ctx.exec.run(paths.nginxBinary, ['-t']).catch((error) => {
+        throw new Error(`nginx -t failed до изменения zones: ${(error as Error).message}`);
+      });
+
+      const { currentContent, result } = await buildUpdate(ctx, paths);
+
+      if (ctx.dryRun) {
+        ctx.log(`would append ${result.addedZones.length} missing zones to ${paths.zonesPath}`);
+        return;
+      }
+
+      if (result.content === (currentContent ?? '')) {
+        ctx.log(`OK: ${paths.zonesPath} уже содержит все используемые зоны`);
+        return;
+      }
+
+      let wrote = false;
+      try {
+        await ctx.writeFile(
+          paths.zonesPath,
+          result.content,
+          currentContent === null ? 0o644 : undefined,
+        );
+        wrote = true;
+        await ctx.exec.run(paths.nginxBinary, ['-t']);
+        await ctx.exec.run(paths.systemctlBinary, ['reload', 'nginx']);
+        ctx.log(
+          `OK: ${paths.zonesPath} дополнен (${result.addedZones.length} zones; ` +
+          `${result.declaredCount} total)`,
+        );
+      } catch (error) {
+        let rollbackError: Error | null = null;
+        if (wrote) {
+          try {
+            await restoreOriginal(ctx, paths, currentContent);
+            await ctx.exec.run(paths.nginxBinary, ['-t']);
+            await ctx.exec.run(paths.systemctlBinary, ['reload', 'nginx']);
+          } catch (restoreError) {
+            rollbackError = restoreError as Error;
+          }
+        }
+        const rollbackSuffix = rollbackError
+          ? `; rollback failed: ${rollbackError.message}`
+          : '; исходный zones-файл восстановлен';
+        throw new Error(
+          `nginx activation failed после обновления zones: ` +
+          `${(error as Error).message}${rollbackSuffix}`,
+        );
+      }
+    },
+  };
+}
+
+const migration = createRateLimitZonesMigration();
 
 export default migration;

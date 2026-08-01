@@ -36,6 +36,13 @@ const KNOWN_XRAY_FAILURE_LOG =
 function productionLegacyRows() {
   return [
     {
+      id: '2026-04-30-002-rate-limit-zones-bootstrap',
+      ok: true,
+      checksum:
+        'c098109414932b789927f41691b5fd5349ec11d2a2623b009b760ccbed91ff2f',
+      errorLog: null,
+    },
+    {
       id: '2026-04-29-001-nginx-layered-rebuild',
       ok: true,
       checksum:
@@ -105,7 +112,7 @@ test('accepts only the exact reviewed legacy history contract', () => {
     currentArtifacts(),
     productionLegacyRows(),
   );
-  assert.equal(result.acceptedLegacy.length, 8);
+  assert.equal(result.acceptedLegacy.length, 9);
   assert.deepEqual(
     result.acceptedLegacy
       .filter((entry) => entry.kind === 'superseded-failure')
@@ -186,6 +193,35 @@ test('an uncontracted failed current migration still blocks the release', () => 
           errorLog: 'unexpected failure',
         },
       ]),
+    /Interrupted\/failed system migration state blocks release update/,
+  );
+});
+
+test('retries only the reviewed failed legacy rate-limit migration', () => {
+  const current = currentArtifacts();
+  const failed = {
+    id: '2026-04-30-002-rate-limit-zones-bootstrap',
+    ok: false,
+    checksum:
+      'c098109414932b789927f41691b5fd5349ec11d2a2623b009b760ccbed91ff2f',
+    errorLog:
+      'ERROR: Error: nginx -t failed после регенерации zones: Command failed: ' +
+      '/usr/sbin/nginx -t\nnginx: [emerg] zero size shared memory zone "mb_example"\n',
+  };
+
+  const accepted = assessSystemMigrationHistory(current, [failed]);
+  assert.deepEqual(accepted.acceptedLegacy, [
+    {
+      id: failed.id,
+      kind: 'retryable-failure',
+      reason: 'retry exact failed legacy zone rewrite with merge-safe artifact',
+    },
+  ]);
+
+  assert.throws(
+    () => assessSystemMigrationHistory(current, [
+      { ...failed, errorLog: 'ERROR: unrelated nginx failure' },
+    ]),
     /Interrupted\/failed system migration state blocks release update/,
   );
 });
