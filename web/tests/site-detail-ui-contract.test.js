@@ -53,3 +53,14 @@ test('application modals are opaque and hide deferred deploy/env controls', () =
   assert.match(domainsTab, /:show-environment="false"/);
   assert.match(domainsTab, /\.btn \{/);
 });
+
+test('application subtab strip has a complete top edge', () => {
+  const styles = sitePage.slice(sitePage.indexOf('<style scoped>'));
+  const block = styles.slice(
+    styles.indexOf('.site-detail__tabs--application'),
+    styles.indexOf('.site-detail__tab--application'),
+  );
+  assert.match(block, /border:\s*1px solid var\(--border-secondary\)/);
+  assert.match(block, /border-radius:\s*10px/);
+  assert.doesNotMatch(block, /border-top:\s*0/);
+});

@@ -37,6 +37,8 @@ RUNTIME_APPLY_HOOK="${MEOWBOX_RUNTIME_APPLY_HOOK:-}"
 MAPPER_EVIDENCE_HOOK="${MEOWBOX_MAPPER_EVIDENCE_HOOK:-}"
 AGENT_HEALTH_HOOK="${MEOWBOX_AGENT_HEALTH_HOOK:-}"
 REPRESENTATIVE_READ_HOOK="${MEOWBOX_REPRESENTATIVE_READ_HOOK:-}"
+LEGACY_BRIDGE_SOURCE_DIR="${MEOWBOX_LEGACY_BRIDGE_SOURCE_DIR:-}"
+LEGACY_BRIDGE_RETIRED_SOURCE=""
 QUIESCE_HOOK_WAS_CONFIGURED=false
 AGENT_HEALTH_HOOK_WAS_CONFIGURED=false
 REPRESENTATIVE_READ_HOOK_WAS_CONFIGURED=false
@@ -127,6 +129,32 @@ if [[ -z "$TARGET" ]]; then
 fi
 [[ "$TARGET" =~ ^[A-Za-z0-9._-]{1,128}$ ]] || die "invalid target version"
 say "current=$CURRENT_VERSION target=$TARGET"
+
+validate_legacy_bridge_source() {
+  local enabled="${MEOWBOX_LEGACY_PANEL_BRIDGE:-}"
+  if [[ -z "$LEGACY_BRIDGE_SOURCE_DIR" && -z "$enabled" ]]; then
+    return 0
+  fi
+  [[ "$enabled" == "1" && -n "$LEGACY_BRIDGE_SOURCE_DIR" ]] || \
+    die "legacy bridge requires both MEOWBOX_LEGACY_PANEL_BRIDGE=1 and an explicit source directory"
+  [[ -n "${MEOWBOX_UPDATE_CANDIDATE_DIR:-}" ]] || \
+    die "legacy bridge requires a local verified candidate directory"
+  [[ "$LEGACY_BRIDGE_SOURCE_DIR" == /* && -d "$LEGACY_BRIDGE_SOURCE_DIR" && ! -L "$LEGACY_BRIDGE_SOURCE_DIR" ]] || \
+    die "legacy bridge source must be an existing non-symlink absolute directory"
+
+  local source_real candidate_real expected_real source_version
+  source_real="$(cd "$LEGACY_BRIDGE_SOURCE_DIR" && pwd -P)"
+  candidate_real="$(cd "$MEOWBOX_UPDATE_CANDIDATE_DIR" && pwd -P)"
+  expected_real="$(readlink -f "$RELEASES_DIR/$TARGET")"
+  [[ "$source_real" == "$candidate_real" && "$source_real" == "$expected_real" ]] || \
+    die "legacy bridge source must be the verified releases/$TARGET candidate"
+  [[ -f "$source_real/VERSION" ]] || die "legacy bridge source has no VERSION"
+  source_version="$(tr -d '[:space:]' < "$source_real/VERSION")"
+  [[ "$source_version" == "$TARGET" ]] || die "legacy bridge source VERSION does not match target"
+  LEGACY_BRIDGE_SOURCE_DIR="$source_real"
+}
+
+validate_legacy_bridge_source
 
 if $CHECK_ONLY; then
   if [[ "$TARGET" == "$CURRENT_VERSION" ]]; then say "already current"; else say "update available: $CURRENT_VERSION → $TARGET"; fi
@@ -955,7 +983,21 @@ prepare_apply_runtime() {
 switch_release() {
   stage U07-switch "commit managed runtime, atomically switch release, then restart panel"
   local final_release="$RELEASES_DIR/$TARGET"
-  [[ ! -e "$final_release" ]] || die "target release directory already exists: $final_release"
+  if [[ -e "$final_release" ]]; then
+    if [[ -n "$LEGACY_BRIDGE_SOURCE_DIR" ]] && \
+       [[ "$(readlink -f "$final_release")" == "$LEGACY_BRIDGE_SOURCE_DIR" ]]; then
+      LEGACY_BRIDGE_RETIRED_SOURCE="$TX_DIR/legacy-bridge-source"
+      [[ ! -e "$LEGACY_BRIDGE_RETIRED_SOURCE" ]] || die "legacy bridge retirement path already exists"
+      mv -- "$final_release" "$LEGACY_BRIDGE_RETIRED_SOURCE"
+      # Keep rollback/health helpers reachable during the rename gap. Bash has
+      # the updater itself open, but a later `bash $SCRIPT_DIR/rollback.sh`
+      # still needs a durable pathname if journaling or mv(2) fails here.
+      SCRIPT_DIR="$LEGACY_BRIDGE_RETIRED_SOURCE/tools"
+      journal_update switch-intent "verified legacy updater candidate retired; transactional candidate will replace it"
+    else
+      die "target release directory already exists: $final_release"
+    fi
+  fi
   local staged_candidate="$CANDIDATE_DIR"
   # Persist the final destination before rename.  A hard kill between mv(2)
   # and a later journal write must still leave rollback enough information to
@@ -964,6 +1006,7 @@ switch_release() {
   journal_update switch-intent "candidate release destination reserved; runtime switch pending"
   # Move candidate before the symlink switch; it is still invisible to PM2.
   mv -- "$staged_candidate" "$CANDIDATE_DIR"
+  SCRIPT_DIR="$CANDIDATE_DIR/tools"
   refresh_candidate_health_hook_paths
   # Persist the moved candidate before any mutable runtime work.  A rollback
   # can then quarantine it under the transaction instead of blocking a safe
@@ -1064,6 +1107,15 @@ fi
 if ! verify_post_commit_cleanup; then
   journal_update forward-repair "post-commit health check failed; retry forward repair" true
   die "post-commit health check failed; DB rollback is forbidden, repair forward"
+fi
+if [[ -n "$LEGACY_BRIDGE_RETIRED_SOURCE" ]]; then
+  if [[ "$LEGACY_BRIDGE_RETIRED_SOURCE" == "$TX_DIR/legacy-bridge-source" ]] && \
+     [[ -d "$LEGACY_BRIDGE_RETIRED_SOURCE" ]]; then
+    rm -rf -- "$LEGACY_BRIDGE_RETIRED_SOURCE"
+    say "retired legacy updater candidate removed after committed health checks"
+  else
+    say "warning: retained unexpected legacy bridge source for manual inspection"
+  fi
 fi
 printf '%s\n' "$TARGET" | mb_atomic_write_stdin "$STATE_DIR/.update-success"
 journal_update committed "post-commit cleanup and final health complete" true

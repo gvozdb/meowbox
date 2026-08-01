@@ -6420,11 +6420,11 @@ html.theme-light .site-detail__hp-banner-text code {
 .site-detail__tabs--application {
   gap: 0;
   margin-bottom: 1.25rem;
-  padding: 0 0.35rem;
+  padding: 0.12rem 0.35rem 0;
   border: 1px solid var(--border-secondary);
-  border-top: 0;
-  border-radius: 0 0 10px 10px;
+  border-radius: 10px;
   background: var(--bg-surface);
+  box-shadow: var(--shadow-card);
 }
 
 .site-detail__tab--application {

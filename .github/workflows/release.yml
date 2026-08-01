@@ -105,6 +105,8 @@ jobs:
           cp api/package.json api/package-lock.json "$STAGE/api/"
           cp -r api/dist "$STAGE/api/"
           cp -r api/prisma "$STAGE/api/"
+          cp -r api/scripts "$STAGE/api/"
+          cp migrations/release/legacy-panel-update-bridge.json "$STAGE/api/prisma/"
 
           # agent
           mkdir -p "$STAGE/agent"
@@ -131,6 +133,8 @@ jobs:
 
           # Keep the packed artifact contract aligned with tools/update.sh.
           test -f "$STAGE/migrations/release/supported-baselines.json"
+          test -f "$STAGE/api/prisma/legacy-panel-update-bridge.json"
+          test -f "$STAGE/api/scripts/prisma-legacy-bridge.cjs"
 
           # Архив
           mkdir -p dist

@@ -11,6 +11,8 @@ const policy = path.join(root, 'tools', 'release-transaction-policy.sh');
 const updater = path.join(root, 'tools', 'update.sh');
 const bootstrapUpdater = path.join(root, 'tools', 'bootstrap-release-update.sh');
 const releaseWorkflow = path.join(root, '.github', 'workflows', 'release.yml');
+const apiPackage = path.join(root, 'api', 'package.json');
+const prismaBridge = path.join(root, 'api', 'scripts', 'prisma-legacy-bridge.cjs');
 
 function action(armed, committed, journalState) {
   return execFileSync(
@@ -123,6 +125,29 @@ test('release publishes the standalone legacy bootstrap with a separate checksum
   const source = fs.readFileSync(releaseWorkflow, 'utf8');
   assert.match(source, /meowbox-bootstrap-\$\{\{ steps\.ver\.outputs\.version \}\}\.sh/);
   assert.match(source, /meowbox-bootstrap-\$\{\{ steps\.ver\.outputs\.version \}\}\.sh\.sha256/);
+});
+
+test('release artifact installs the guarded v0.6.64 panel bridge', () => {
+  const workflowSource = fs.readFileSync(releaseWorkflow, 'utf8');
+  const packageJson = JSON.parse(fs.readFileSync(apiPackage, 'utf8'));
+  const bridgeSource = fs.readFileSync(prismaBridge, 'utf8');
+
+  assert.equal(packageJson.scripts.postinstall, 'node scripts/install-prisma-legacy-bridge.cjs');
+  assert.equal(packageJson.dependencies.prisma, '^5.19.0');
+  assert.match(workflowSource, /legacy-panel-update-bridge\.json/);
+  assert.match(workflowSource, /cp -r api\/scripts "\$STAGE\/api\/"/);
+  assert.match(bridgeSource, /args\[0\] === 'db' && args\[1\] === 'push'/);
+  assert.match(bridgeSource, /assessment\.decision === 'baseline-required'/);
+  assert.match(bridgeSource, /MEOWBOX_LEGACY_BRIDGE_SOURCE_DIR: releaseDir/);
+  assert.doesNotMatch(bridgeSource, /--force-reset/);
+});
+
+test('transactional updater only replaces an explicitly verified legacy candidate', () => {
+  const source = fs.readFileSync(updater, 'utf8');
+  assert.match(source, /MEOWBOX_LEGACY_PANEL_BRIDGE/);
+  assert.match(source, /legacy bridge source must be the verified releases\/\$TARGET candidate/);
+  assert.match(source, /LEGACY_BRIDGE_RETIRED_SOURCE="\$TX_DIR\/legacy-bridge-source"/);
+  assert.match(source, /retired legacy updater candidate removed after committed health checks/);
 });
 
 test('pre-commit rollback resumes the gate from the retained candidate', () => {

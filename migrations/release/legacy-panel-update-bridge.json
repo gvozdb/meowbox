@@ -1,0 +1,5 @@
+{
+  "version": 1,
+  "minimumLegacyVersion": "v0.6.64",
+  "interceptedCommand": "prisma db push --skip-generate --accept-data-loss"
+}

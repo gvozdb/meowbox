@@ -1,5 +1,8 @@
 'use strict';
 
+const { readdir, readFile, writeFile } = require('node:fs/promises');
+const { join } = require('node:path');
+
 const IDS = Object.freeze({
   user: '00000000-0000-4000-8000-000000000001',
   modx2Site: '10000000-0000-4000-8000-000000000001',
@@ -186,8 +189,31 @@ const runtimeEvidence = Object.freeze({
   },
 });
 
+const DOMAIN_RELEASE_MIGRATIONS = new Set([
+  'z20260731000000_domain_centric_applications',
+  'zz20260731102000_backup_manifest_v2',
+  'zz20260731103000_deploy_operations',
+  'zz20260731104000_backup_schema_alignment',
+]);
+
+async function createLegacyCoreFixture(dbPath, prismaMigrationsDir, runSqliteScript) {
+  await writeFile(dbPath, '', { flag: 'wx', mode: 0o600 });
+  const entries = await readdir(prismaMigrationsDir, { withFileTypes: true });
+  const migrationNames = entries
+    .filter((entry) => entry.isDirectory() && !DOMAIN_RELEASE_MIGRATIONS.has(entry.name))
+    .map((entry) => entry.name)
+    .sort();
+
+  for (const migrationName of migrationNames) {
+    const sql = await readFile(join(prismaMigrationsDir, migrationName, 'migration.sql'), 'utf8');
+    await runSqliteScript(dbPath, sql);
+  }
+  await runSqliteScript(dbPath, legacyFixtureSql);
+}
+
 module.exports = {
   IDS,
+  createLegacyCoreFixture,
   legacyFixtureSql,
   runtimeEvidence,
 };

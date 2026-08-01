@@ -4,6 +4,7 @@
   "description": "Meowbox API server (NestJS)",
   "private": true,
   "scripts": {
+    "postinstall": "node scripts/install-prisma-legacy-bridge.cjs",
     "build": "tsc -p tsconfig.build.json --incremental false",
     "start": "node dist/main.js",
     "start:dev": "nest start --watch",
@@ -47,6 +48,7 @@
     "nodemailer": "^8.0.1",
     "passport": "^0.7.0",
     "passport-jwt": "^4.0.1",
+    "prisma": "^5.19.0",
     "qrcode": "^1.5.4",
     "reflect-metadata": "^0.2.2",
     "rxjs": "^7.8.1",
@@ -64,7 +66,6 @@
     "@types/nodemailer": "^7.0.10",
     "@types/passport-jwt": "^4.0.1",
     "@types/ssh2": "^1.15.5",
-    "prisma": "^5.19.0",
     "ts-node": "^10.9.2",
     "typescript": "^5.4.0"
   }

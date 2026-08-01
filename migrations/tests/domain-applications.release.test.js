@@ -31,7 +31,7 @@ const {
 } = require('../dist/release');
 const {
   IDS,
-  legacyFixtureSql,
+  createLegacyCoreFixture,
   runtimeEvidence,
 } = require('./fixtures/domain-applications');
 
@@ -56,36 +56,9 @@ function assertTemporaryPath(path) {
   );
 }
 
-async function applyHistoricalSchema(dbPath) {
-  assertTemporaryPath(dbPath);
-  await writeFile(dbPath, '', { flag: 'wx', mode: 0o600 });
-  const entries = await readdir(prismaMigrationsDir, { withFileTypes: true });
-  const migrationNames = entries
-    .filter(
-      (entry) =>
-        entry.isDirectory() &&
-        ![
-          'z20260731000000_domain_centric_applications',
-          'zz20260731102000_backup_manifest_v2',
-          'zz20260731103000_deploy_operations',
-          'zz20260731104000_backup_schema_alignment',
-        ].includes(entry.name),
-    )
-    .map((entry) => entry.name)
-    .sort();
-
-  for (const migrationName of migrationNames) {
-    const sql = await readFile(
-      join(prismaMigrationsDir, migrationName, 'migration.sql'),
-      'utf8',
-    );
-    await runSqliteScript(dbPath, sql);
-  }
-}
-
 async function createLegacyFixture(dbPath) {
-  await applyHistoricalSchema(dbPath);
-  await runSqliteScript(dbPath, legacyFixtureSql);
+  assertTemporaryPath(dbPath);
+  await createLegacyCoreFixture(dbPath, prismaMigrationsDir, runSqliteScript);
   await runSqliteScript(
     dbPath,
     `INSERT INTO "server_path_backup_configs" (
