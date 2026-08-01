@@ -115,10 +115,10 @@ const assessmentRun = spawnSync(
   ],
   { env: process.env, encoding: 'utf8', maxBuffer: 8 * 1024 * 1024 },
 );
-if (assessmentRun.error || assessmentRun.status !== 0) {
+if (assessmentRun.error) {
   stop(
     'Database is not an approved upgrade baseline; no changes were made',
-    assessmentRun.error?.message || assessmentRun.stderr.trim(),
+    assessmentRun.error.message,
   );
 }
 
@@ -126,7 +126,23 @@ let assessment;
 try {
   assessment = JSON.parse(assessmentRun.stdout).assessment;
 } catch (error) {
-  stop('Baseline assessor returned invalid JSON', error.message);
+  const detail = assessmentRun.stderr.trim() || error.message;
+  stop('Baseline assessor returned invalid JSON; no changes were made', detail);
+}
+if (assessmentRun.status !== 0) {
+  const blockerCodes = Array.isArray(assessment?.blockers)
+    ? assessment.blockers
+      .map((blocker) => blocker?.code)
+      .filter((code) => typeof code === 'string')
+      .join(',')
+    : '';
+  const schema = typeof assessment?.schemaSha256 === 'string'
+    ? assessment.schemaSha256
+    : 'unknown';
+  stop(
+    'Database is not an approved upgrade baseline; no changes were made',
+    `schema=${schema}; blockers=${blockerCodes || 'unknown'}`,
+  );
 }
 const supportedLegacy = assessment?.ok === true
   && assessment.decision === 'baseline-required'

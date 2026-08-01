@@ -38,7 +38,7 @@ export interface PrismaMigrationSpec {
   readonly appliedStepsCount?: number;
 }
 
-export interface SupportedBaseline {
+export interface SupportedSchemaVariant {
   readonly id: string;
   /**
    * Optional embedded structural manifest. A SHA-256 of the canonical manifest
@@ -46,16 +46,20 @@ export interface SupportedBaseline {
    * approved fixture archive rather than duplicating it in every artifact.
    */
   readonly fingerprint?: SchemaFingerprint;
-  /** SHA-256 of the canonical table/column/index fingerprint. */
-  readonly fingerprintSha256: string;
-  /** Explicit structural variants that share the same approved migration set. */
-  readonly fingerprintSha256Aliases?: readonly string[];
+  /** SHA-256 of the exact table/column/index fingerprint. */
+  readonly sha256: string;
+}
+
+export interface SupportedBaseline {
+  readonly id: string;
+  /** Named, exact schema variants that share one approved migration lineage. */
+  readonly schemaVariants: readonly SupportedSchemaVariant[];
   /** Every historical migration that must be recorded before migrate deploy. */
   readonly prismaMigrations: readonly PrismaMigrationSpec[];
 }
 
 export interface BaselineContract {
-  readonly version: 1;
+  readonly version: 2;
   readonly supportedBaselines: readonly SupportedBaseline[];
 }
 
@@ -239,27 +243,33 @@ function parseMigrationSpec(value: unknown, context: string): PrismaMigrationSpe
   return appliedStepsCount === undefined ? { name, checksum } : { name, checksum, appliedStepsCount };
 }
 
-function parseSupportedBaseline(value: unknown, context: string): SupportedBaseline {
+function parseSchemaVariant(value: unknown, context: string): SupportedSchemaVariant {
   if (!isRecord(value)) throw new ContractError(`${context} must be an object`);
   const fingerprint = value.fingerprint === undefined ? undefined : parseFingerprint(value.fingerprint, `${context}.fingerprint`);
-  const fingerprintSha256 = expectString(value.fingerprintSha256, `${context}.fingerprintSha256`);
-  if (!/^[a-f0-9]{64}$/.test(fingerprintSha256)) throw new ContractError(`${context}.fingerprintSha256 must be lowercase SHA-256`);
-  const fingerprintSha256Aliases = value.fingerprintSha256Aliases === undefined
-    ? []
-    : expectArray(value.fingerprintSha256Aliases, `${context}.fingerprintSha256Aliases`)
-      .map((item, index) => expectString(item, `${context}.fingerprintSha256Aliases[${index}]`));
-  const fingerprintDigests = new Set([fingerprintSha256]);
-  for (const [index, alias] of fingerprintSha256Aliases.entries()) {
-    if (!/^[a-f0-9]{64}$/.test(alias)) {
-      throw new ContractError(`${context}.fingerprintSha256Aliases[${index}] must be lowercase SHA-256`);
-    }
-    if (fingerprintDigests.has(alias)) {
-      throw new ContractError(`${context}.fingerprintSha256Aliases contains duplicate ${alias}`);
-    }
-    fingerprintDigests.add(alias);
+  const sha256 = expectString(value.sha256, `${context}.sha256`);
+  if (!/^[a-f0-9]{64}$/.test(sha256)) throw new ContractError(`${context}.sha256 must be lowercase SHA-256`);
+  if (fingerprint !== undefined && fingerprintDigest(fingerprint) !== sha256) {
+    throw new ContractError(`${context}.sha256 does not match the supplied fingerprint`);
   }
-  if (fingerprint !== undefined && fingerprintDigest(fingerprint) !== fingerprintSha256) {
-    throw new ContractError(`${context}.fingerprintSha256 does not match the supplied fingerprint`);
+  return {
+    id: expectString(value.id, `${context}.id`),
+    fingerprint,
+    sha256,
+  };
+}
+
+function parseSupportedBaseline(value: unknown, context: string): SupportedBaseline {
+  if (!isRecord(value)) throw new ContractError(`${context} must be an object`);
+  const schemaVariants = expectArray(value.schemaVariants, `${context}.schemaVariants`)
+    .map((item, index) => parseSchemaVariant(item, `${context}.schemaVariants[${index}]`));
+  if (schemaVariants.length === 0) throw new ContractError(`${context}.schemaVariants must not be empty`);
+  const variantIds = new Set<string>();
+  const variantDigests = new Set<string>();
+  for (const variant of schemaVariants) {
+    if (variantIds.has(variant.id)) throw new ContractError(`${context}.schemaVariants contains duplicate id ${variant.id}`);
+    if (variantDigests.has(variant.sha256)) throw new ContractError(`${context}.schemaVariants contains duplicate SHA-256 ${variant.sha256}`);
+    variantIds.add(variant.id);
+    variantDigests.add(variant.sha256);
   }
   const prismaMigrations = expectArray(value.prismaMigrations, `${context}.prismaMigrations`)
     .map((item, index) => parseMigrationSpec(item, `${context}.prismaMigrations[${index}]`));
@@ -270,9 +280,7 @@ function parseSupportedBaseline(value: unknown, context: string): SupportedBasel
   }
   return {
     id: expectString(value.id, `${context}.id`),
-    fingerprint,
-    fingerprintSha256,
-    fingerprintSha256Aliases,
+    schemaVariants,
     prismaMigrations,
   };
 }
@@ -283,7 +291,8 @@ function assertUniqueBaselines(supportedBaselines: readonly SupportedBaseline[])
   for (const baseline of supportedBaselines) {
     if (ids.has(baseline.id)) throw new ContractError(`Baseline contract contains duplicate id ${baseline.id}`);
     ids.add(baseline.id);
-    for (const digest of [baseline.fingerprintSha256, ...(baseline.fingerprintSha256Aliases ?? [])]) {
+    for (const variant of baseline.schemaVariants) {
+      const digest = variant.sha256;
       const owner = fingerprints.get(digest);
       if (owner !== undefined) {
         throw new ContractError(`Baseline fingerprint ${digest} is assigned to both ${owner} and ${baseline.id}`);
@@ -302,11 +311,11 @@ export async function loadBaselineContract(contractPath: string): Promise<Baseli
     throw new ContractError(`Could not read baseline contract: ${(error as Error).message}`);
   }
   if (!isRecord(parsed)) throw new ContractError('Baseline contract must be a JSON object');
-  if (parsed.version !== 1) throw new ContractError('Baseline contract version must be 1');
+  if (parsed.version !== 2) throw new ContractError('Baseline contract version must be 2');
   const supportedBaselines = expectArray(parsed.supportedBaselines, 'supportedBaselines')
     .map((item, index) => parseSupportedBaseline(item, `supportedBaselines[${index}]`));
   assertUniqueBaselines(supportedBaselines);
-  return { version: 1, supportedBaselines };
+  return { version: 2, supportedBaselines };
 }
 
 async function prismaTableExists(dbPath: string): Promise<boolean> {
@@ -530,10 +539,10 @@ function matchesBaselineFingerprint(
   sha256: string,
   schema: SchemaFingerprint,
 ): boolean {
-  if (baseline.fingerprintSha256 === sha256) {
-    return baseline.fingerprint === undefined || sameFingerprint(baseline.fingerprint, schema);
-  }
-  return baseline.fingerprintSha256Aliases?.includes(sha256) === true;
+  return baseline.schemaVariants.some((variant) =>
+    variant.sha256 === sha256
+      && (variant.fingerprint === undefined || sameFingerprint(variant.fingerprint, schema)),
+  );
 }
 
 /** Decide whether a supported untracked DB needs a history baseline. No write. */
@@ -765,9 +774,9 @@ function diagnosticToJson(diagnostic: Diagnostic): JsonObject {
 /** Test and integration helper: validates a decoded external contract object. */
 export function parseBaselineContract(value: unknown): BaselineContract {
   if (!isRecord(value)) throw new ContractError('Baseline contract must be a JSON object');
-  if (value.version !== 1) throw new ContractError('Baseline contract version must be 1');
+  if (value.version !== 2) throw new ContractError('Baseline contract version must be 2');
   const supportedBaselines = expectArray(value.supportedBaselines, 'supportedBaselines')
     .map((item, index) => parseSupportedBaseline(item, `supportedBaselines[${index}]`));
   assertUniqueBaselines(supportedBaselines);
-  return { version: 1, supportedBaselines };
+  return { version: 2, supportedBaselines };
 }

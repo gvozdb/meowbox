@@ -1,7 +1,11 @@
 'use strict';
 
-const { readdir, readFile, writeFile } = require('node:fs/promises');
-const { join } = require('node:path');
+const { execFile } = require('node:child_process');
+const { readdir, readFile, rm, writeFile } = require('node:fs/promises');
+const { dirname, join } = require('node:path');
+const { promisify } = require('node:util');
+
+const execFileP = promisify(execFile);
 
 const IDS = Object.freeze({
   user: '00000000-0000-4000-8000-000000000001',
@@ -164,6 +168,40 @@ INSERT INTO "deploy_logs" (
 COMMIT;
 `;
 
+const legacyAlignmentFixtureSql = `
+INSERT INTO "server_path_backup_configs" (
+  "id", "name", "path", "warning_acknowledged", "enabled", "updated_at"
+) VALUES (
+  'alignment-server-config', 'Alignment server config', '/var/log', 1, 1, '${NOW}'
+);
+INSERT INTO "server_path_backups" (
+  "id", "config_id", "status", "engine", "file_path"
+) VALUES (
+  'alignment-server-backup', 'alignment-server-config',
+  'COMPLETED', 'TAR', '/tmp/alignment-server.tar.gz'
+);
+INSERT INTO "panel_data_backup_configs" (
+  "id", "name", "enabled", "updated_at"
+) VALUES (
+  'alignment-panel-config', 'Alignment panel config', 0, '${NOW}'
+);
+INSERT INTO "panel_data_backups" (
+  "id", "config_id", "status", "engine"
+) VALUES (
+  'alignment-panel-backup', 'alignment-panel-config', 'FAILED', 'RESTIC'
+);
+INSERT INTO "site_backup_schedules" (
+  "id", "name", "enabled", "check_enabled", "check_read_data", "updated_at"
+) VALUES (
+  'alignment-schedule', 'Alignment schedule', 1, 1, 0, '${NOW}'
+);
+INSERT INTO "notification_digest_queue" (
+  "id", "config_type", "config_id", "config_name", "event", "resource_label"
+) VALUES (
+  'alignment-digest', 'SITE_SCHEDULE', 'alignment-schedule',
+  'Alignment schedule', 'BACKUP_COMPLETED', 'fixture'
+);`;
+
 const runtimeEvidence = Object.freeze({
   domains: {
     [IDS.modx2Domain]: {
@@ -196,6 +234,22 @@ const DOMAIN_RELEASE_MIGRATIONS = new Set([
   'zz20260731104000_backup_schema_alignment',
 ]);
 
+const V0664_PRISMA_SCHEMA_LINEAGES = Object.freeze({
+  canonical: Object.freeze(['v0.6.64']),
+  sequential: Object.freeze([
+    'v0.6.0',
+    'v0.6.15',
+    'v0.6.16',
+    'v0.6.17',
+    'v0.6.23',
+    'v0.6.27',
+    'v0.6.35',
+    'v0.6.36',
+    'v0.6.43',
+    'v0.6.50',
+  ]),
+});
+
 async function createLegacyCoreFixture(dbPath, prismaMigrationsDir, runSqliteScript) {
   await writeFile(dbPath, '', { flag: 'wx', mode: 0o600 });
   const entries = await readdir(prismaMigrationsDir, { withFileTypes: true });
@@ -211,9 +265,64 @@ async function createLegacyCoreFixture(dbPath, prismaMigrationsDir, runSqliteScr
   await runSqliteScript(dbPath, legacyFixtureSql);
 }
 
+async function createV0664PrismaFixture(
+  dbPath,
+  projectRoot,
+  runSqliteScript,
+  lineage = 'canonical',
+) {
+  const schemaTags = V0664_PRISMA_SCHEMA_LINEAGES[lineage];
+  if (schemaTags === undefined) throw new Error(`Unknown v0.6.64 schema lineage: ${lineage}`);
+  const prismaBin = join(projectRoot, 'api', 'node_modules', '.bin', 'prisma');
+  const schemaPaths = [];
+  await writeFile(dbPath, '', { flag: 'wx', mode: 0o600 });
+  try {
+    for (const schemaTag of schemaTags) {
+      const schemaPath = join(
+        dirname(dbPath),
+        `${lineage}-${schemaTag}-schema.prisma`,
+      );
+      const { stdout: schema } = await execFileP(
+        'git',
+        ['show', `${schemaTag}:api/prisma/schema.prisma`],
+        { cwd: projectRoot, maxBuffer: 2 * 1024 * 1024 },
+      );
+      await writeFile(schemaPath, schema, { flag: 'wx', mode: 0o600 });
+      schemaPaths.push(schemaPath);
+    }
+    for (const [index, schemaPath] of schemaPaths.entries()) {
+      const from = index === 0
+        ? ['--from-empty']
+        : ['--from-url', `file:${dbPath}`];
+      const { stdout: ddl } = await execFileP(
+        prismaBin,
+        [
+          'migrate',
+          'diff',
+          ...from,
+          '--to-schema-datamodel',
+          schemaPath,
+          '--script',
+        ],
+        {
+          cwd: join(projectRoot, 'api'),
+          env: { ...process.env, DATABASE_URL: `file:${dbPath}` },
+          maxBuffer: 8 * 1024 * 1024,
+        },
+      );
+      await runSqliteScript(dbPath, ddl);
+    }
+    await runSqliteScript(dbPath, legacyFixtureSql + legacyAlignmentFixtureSql);
+  } finally {
+    await Promise.all(schemaPaths.map((schemaPath) => rm(schemaPath, { force: true })));
+  }
+}
+
 module.exports = {
   IDS,
   createLegacyCoreFixture,
+  createV0664PrismaFixture,
+  legacyAlignmentFixtureSql,
   legacyFixtureSql,
   runtimeEvidence,
 };

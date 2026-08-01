@@ -21,11 +21,10 @@ const test = require('node:test');
 const { promisify } = require('node:util');
 
 const { runSqliteScript } = require('../dist/release');
-const { createLegacyCoreFixture } = require('./fixtures/domain-applications');
+const { createV0664PrismaFixture } = require('./fixtures/domain-applications');
 
 const execFileP = promisify(execFile);
 const projectRoot = path.resolve(__dirname, '..', '..');
-const prismaMigrations = path.join(projectRoot, 'api', 'prisma', 'migrations');
 const bridgeScripts = path.join(projectRoot, 'api', 'scripts');
 const markerSource = path.join(
   projectRoot,
@@ -88,7 +87,7 @@ set -euo pipefail
     await writeFile(path.join(release, 'tools', 'update.sh'), updateStub, { mode: 0o755 });
     await chmod(path.join(release, 'tools', 'update.sh'), 0o755);
 
-    await createLegacyCoreFixture(database, prismaMigrations, runSqliteScript);
+    await createV0664PrismaFixture(database, projectRoot, runSqliteScript);
     const before = digest(await readFile(database));
 
     await execFileP(process.execPath, [path.join(api, 'scripts', 'install-prisma-legacy-bridge.cjs')]);

@@ -23,6 +23,7 @@ const {
   assessBaseline,
   buildLegacyMigrationMap,
   checkMigrationInvariants,
+  fingerprintDatabase,
   fingerprintDatabaseFiles,
   loadBaselineContract,
   normalizeRelativePath,
@@ -32,6 +33,8 @@ const {
 const {
   IDS,
   createLegacyCoreFixture,
+  createV0664PrismaFixture,
+  legacyAlignmentFixtureSql,
   runtimeEvidence,
 } = require('./fixtures/domain-applications');
 
@@ -59,43 +62,7 @@ function assertTemporaryPath(path) {
 async function createLegacyFixture(dbPath) {
   assertTemporaryPath(dbPath);
   await createLegacyCoreFixture(dbPath, prismaMigrationsDir, runSqliteScript);
-  await runSqliteScript(
-    dbPath,
-    `INSERT INTO "server_path_backup_configs" (
-       "id", "name", "path", "warning_acknowledged", "enabled"
-     ) VALUES (
-       'alignment-server-config', 'Alignment server config', '/var/log', 1, 1
-     );
-     INSERT INTO "server_path_backups" (
-       "id", "config_id", "status", "engine", "file_path"
-     ) VALUES (
-       'alignment-server-backup', 'alignment-server-config',
-       'COMPLETED', 'TAR', '/tmp/alignment-server.tar.gz'
-     );
-     INSERT INTO "panel_data_backup_configs" (
-       "id", "name", "enabled"
-     ) VALUES (
-       'alignment-panel-config', 'Alignment panel config', 0
-     );
-     INSERT INTO "panel_data_backups" (
-       "id", "config_id", "status", "engine"
-     ) VALUES (
-       'alignment-panel-backup', 'alignment-panel-config',
-       'FAILED', 'RESTIC'
-     );
-     INSERT INTO "site_backup_schedules" (
-       "id", "name", "enabled", "check_enabled", "check_read_data"
-     ) VALUES (
-       'alignment-schedule', 'Alignment schedule', 1, 1, 0
-     );
-     INSERT INTO "notification_digest_queue" (
-       "id", "config_type", "config_id", "config_name", "event",
-       "resource_label"
-     ) VALUES (
-       'alignment-digest', 'SITE_SCHEDULE', 'alignment-schedule',
-       'Alignment schedule', 'BACKUP_COMPLETED', 'fixture'
-     );`,
-  );
+  await runSqliteScript(dbPath, legacyAlignmentFixtureSql);
 }
 
 async function prismaMigrateDeploy(dbPath) {
@@ -178,6 +145,104 @@ test('database fingerprint ignores transient SHM but tracks durable WAL', async 
     await rm(tempRoot, { recursive: true, force: true });
   }
 });
+
+test(
+  'v0.6.64 Prisma schema lineages follow the shared transactional migration path',
+  { timeout: 300_000 },
+  async () => {
+    const tempRoot = await mkdtemp(
+      join(tmpdir(), 'meowbox-domain-release-test-'),
+    );
+    try {
+      const contract = await loadBaselineContract(baselineContractPath);
+      const variants = [
+        {
+          lineage: 'canonical',
+          sha256: '79fe39421c8e6dc923396dd30af4dcb8ff720672b3ad9f1102ef23c3f2397b9e',
+        },
+        {
+          lineage: 'sequential',
+          sha256: 'c04316d77194a6e4095e6ccba7069a5df6fa29aea14dd7a09dcb77c33666c090',
+        },
+      ];
+      for (const variant of variants) {
+        const dbPath = join(tempRoot, `${variant.lineage}-v0.6.64.db`);
+        await createV0664PrismaFixture(
+          dbPath,
+          projectRoot,
+          runSqliteScript,
+          variant.lineage,
+        );
+        const sourceFingerprint = await fingerprintDatabase(dbPath);
+        assert.equal(sourceFingerprint.sha256, variant.sha256, variant.lineage);
+
+        const assessment = await assessBaseline({ dbPath, apiDir, contract });
+        assert.equal(assessment.ok, true, JSON.stringify(assessment.blockers));
+        assert.equal(assessment.decision, 'baseline-required');
+        assert.equal(assessment.supportedBaselineId, 'v0.6.64-pre-domain-applications');
+        assert.equal(assessment.legacyMappingRequired, true);
+
+        const mapped = await applyLegacyMigrationMap({
+          dbPath,
+          runtimeEvidence,
+          writeMode: 'clone',
+        });
+        assert.equal(mapped.report.ok, true, JSON.stringify(mapped.report.blockers));
+        assert.equal(mapped.changed, true);
+
+        const baseline = await applyBaseline({
+          dbPath,
+          apiDir,
+          contract,
+          writeMode: 'clone',
+        });
+        assert.equal(baseline.changed, true);
+        await prismaMigrateDeploy(dbPath);
+
+        const invariants = await checkMigrationInvariants({
+          dbPath,
+          phase: 'final',
+          baselineCounts: { sites: 4, siteDomains: 7, databases: 4 },
+        });
+        assert.equal(invariants.ok, true, JSON.stringify(invariants.blockers));
+        const [health] = await querySqliteJson(
+          dbPath,
+          `SELECT
+             (SELECT COUNT(*) FROM "sites") AS sites,
+             (SELECT COUNT(*) FROM "site_domains") AS domains,
+             (SELECT COUNT(*) FROM "databases") AS databases,
+             (SELECT COUNT(*) FROM "server_path_backup_configs"
+                WHERE "id" = 'alignment-server-config') +
+             (SELECT COUNT(*) FROM "server_path_backups"
+                WHERE "id" = 'alignment-server-backup') +
+             (SELECT COUNT(*) FROM "panel_data_backup_configs"
+                WHERE "id" = 'alignment-panel-config') +
+             (SELECT COUNT(*) FROM "panel_data_backups"
+                WHERE "id" = 'alignment-panel-backup') +
+             (SELECT COUNT(*) FROM "site_backup_schedules"
+                WHERE "id" = 'alignment-schedule') +
+             (SELECT COUNT(*) FROM "notification_digest_queue"
+                WHERE "id" = 'alignment-digest') AS alignment_rows,
+             ((SELECT "integrity_check" FROM pragma_integrity_check LIMIT 1) = 'ok')
+               AS integrity_ok,
+             (NOT EXISTS (SELECT 1 FROM pragma_foreign_key_check))
+               AS foreign_keys_ok;`,
+        );
+        assert.deepEqual(health, {
+          sites: 4,
+          domains: 7,
+          databases: 4,
+          alignment_rows: 6,
+          integrity_ok: 1,
+          foreign_keys_ok: 1,
+        }, variant.lineage);
+      }
+    } finally {
+      assertTemporaryPath(tempRoot);
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  },
+);
 
 test(
   'legacy fixture maps deterministically, blocks missing map, migrates once, and preserves ownership',

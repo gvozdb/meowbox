@@ -1,11 +1,25 @@
 {
-  "version": 1,
+  "version": 2,
   "supportedBaselines": [
     {
-      "id": "pre-domain-applications-2026-07-30",
-      "fingerprintSha256": "0b8d5a05923399d0e450eeab1bc2a529f9ab875c10ea840da8fd5ea6389aea64",
-      "fingerprintSha256Aliases": [
-        "1bf1ead83a0260cb58b1acfd3586a7c7fc8d85263269fb6130e95e64d4e8f139"
+      "id": "v0.6.64-pre-domain-applications",
+      "schemaVariants": [
+        {
+          "id": "historical-migration-chain",
+          "sha256": "0b8d5a05923399d0e450eeab1bc2a529f9ab875c10ea840da8fd5ea6389aea64"
+        },
+        {
+          "id": "legacy-production-snapshot",
+          "sha256": "1bf1ead83a0260cb58b1acfd3586a7c7fc8d85263269fb6130e95e64d4e8f139"
+        },
+        {
+          "id": "canonical-prisma-db-push",
+          "sha256": "79fe39421c8e6dc923396dd30af4dcb8ff720672b3ad9f1102ef23c3f2397b9e"
+        },
+        {
+          "id": "sequential-prisma-upgrades",
+          "sha256": "c04316d77194a6e4095e6ccba7069a5df6fa29aea14dd7a09dcb77c33666c090"
+        }
       ],
       "prismaMigrations": [
         { "name": "0_init", "checksum": "12febe880e7764365df157ca696fa6cadaa25dd79c8cd168a0ea6b73703008ff" },
