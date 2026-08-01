@@ -9,7 +9,12 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PANEL_DIR="$(dirname "$SCRIPT_DIR")"
+PANEL_DIR="${MEOWBOX_PANEL_DIR:-$(dirname "$SCRIPT_DIR")}"
+[[ "$PANEL_DIR" == /* && -d "$PANEL_DIR" ]] || {
+  echo "[rollback] ✗ MEOWBOX_PANEL_DIR must be an existing absolute directory" >&2
+  exit 1
+}
+PANEL_DIR="$(cd "$PANEL_DIR" && pwd -P)"
 # shellcheck source=tools/release-lib.sh
 source "$SCRIPT_DIR/release-lib.sh"
 

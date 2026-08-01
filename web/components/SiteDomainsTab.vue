@@ -119,6 +119,8 @@
               :default-db-name="siteName || 'site'"
               :default-db-user="siteName || 'site'"
               :default-files-rel-path="defaultFilesRelPath || 'www'"
+              :show-git-deploy="false"
+              :show-environment="false"
               :disabled="busy"
             />
             <p v-if="addError" class="domain-modal__error">{{ addError }}</p>
@@ -177,33 +179,6 @@
               <input v-model="editDraft.httpsRedirect" type="checkbox" />
               <span>Редирект HTTP → HTTPS</span>
             </label>
-
-            <template v-if="editTarget.preset === 'CUSTOM'">
-              <label>
-                <span>Git-репозиторий</span>
-                <input v-model="editDraft.gitRepository" maxlength="512" />
-              </label>
-              <label>
-                <span>Ветка</span>
-                <input v-model="editDraft.deployBranch" maxlength="128" />
-              </label>
-            </template>
-
-            <div class="domain-modal__env">
-              <span>Переменные окружения</span>
-              <div v-for="(_pair, index) in editDraft.envVars" :key="index" class="domain-modal__env-row">
-                <input v-model="editDraft.envVars[index]!.key" placeholder="KEY" maxlength="128" />
-                <input v-model="editDraft.envVars[index]!.value" placeholder="VALUE" maxlength="8192" />
-                <button type="button" @click="editDraft.envVars.splice(index, 1)">×</button>
-              </div>
-              <button
-                type="button"
-                class="domain-modal__add-row"
-                @click="editDraft.envVars.push({ key: '', value: '' })"
-              >
-                + Добавить переменную
-              </button>
-            </div>
 
             <p v-if="editError" class="domain-modal__error">{{ editError }}</p>
           </div>
@@ -920,6 +895,45 @@ onMounted(() => {
 .domain-row__meta code { color: var(--text-secondary); }
 .domain-row__error { margin: 0.35rem 0 0; color: var(--danger-light); font-size: 0.7rem; }
 .domain-row__actions { justify-content: flex-end; flex-wrap: wrap; }
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.4rem;
+  min-height: 36px;
+  padding: 0.52rem 0.9rem;
+  border: 1px solid transparent;
+  border-radius: 9px;
+  font: 600 0.78rem/1 'DM Sans', sans-serif;
+  text-decoration: none;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: transform 0.15s, box-shadow 0.15s, border-color 0.15s, background 0.15s, color 0.15s;
+}
+.btn:disabled { opacity: 0.42; cursor: not-allowed; }
+.btn--xs { min-height: 28px; padding: 0.3rem 0.62rem; border-radius: 7px; font-size: 0.7rem; }
+.btn--sm { min-height: 32px; padding: 0.4rem 0.75rem; border-radius: 8px; font-size: 0.74rem; }
+.btn--primary {
+  background: linear-gradient(135deg, var(--primary-light), var(--primary-dark));
+  color: var(--primary-text-on);
+}
+.btn--primary:hover:not(:disabled) { transform: translateY(-1px); box-shadow: var(--shadow-button-hover); }
+.btn--ghost {
+  border-color: var(--border-strong);
+  background: var(--bg-input);
+  color: var(--text-tertiary);
+}
+.btn--ghost:hover:not(:disabled) {
+  border-color: var(--primary-border);
+  background: var(--bg-surface-hover);
+  color: var(--text-primary);
+}
+.btn--danger {
+  border-color: var(--danger-border);
+  background: var(--danger-bg);
+  color: var(--danger-light);
+}
+.btn--danger:hover:not(:disabled) { border-color: var(--danger); background: rgba(239, 68, 68, 0.16); }
 .domain-row__delete {
   width: 28px;
   height: 28px;
@@ -929,12 +943,13 @@ onMounted(() => {
   color: var(--danger-light);
   cursor: pointer;
 }
+.domain-row__delete:hover:not(:disabled) { background: var(--danger-bg); border-color: var(--danger); }
 .domain-row__delete:disabled { opacity: 0.35; cursor: not-allowed; }
 .domains-tab__empty { padding: 2rem; color: var(--text-muted); text-align: center; }
 
 .domain-modal-overlay {
   position: fixed;
-  z-index: 1000;
+  z-index: 1200;
   inset: 0;
   display: flex;
   align-items: center;
@@ -951,8 +966,10 @@ onMounted(() => {
   overflow: hidden;
   border: 1px solid var(--border-secondary);
   border-radius: 15px;
-  background: var(--bg-card);
-  box-shadow: var(--shadow-card);
+  background-color: var(--bg-modal);
+  background-image: var(--bg-modal-gradient);
+  box-shadow: var(--shadow-modal);
+  isolation: isolate;
 }
 .domain-modal--wide { width: min(760px, 100%); }
 .domain-modal__header,
@@ -968,11 +985,23 @@ onMounted(() => {
 .domain-modal__header h3 { margin: 0; color: var(--text-primary); font-size: 0.95rem; }
 .domain-modal__header p { margin: 0.2rem 0 0; color: var(--text-muted); font-size: 0.72rem; }
 .domain-modal__header > button {
-  border: 0;
-  background: transparent;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  flex: 0 0 32px;
+  border: 1px solid var(--border-secondary);
+  border-radius: 8px;
+  background: var(--bg-input);
   color: var(--text-muted);
   font-size: 1.25rem;
   cursor: pointer;
+}
+.domain-modal__header > button:hover:not(:disabled) {
+  border-color: var(--border-strong);
+  background: var(--bg-surface-hover);
+  color: var(--text-primary);
 }
 .domain-modal__body { padding: 1rem; overflow: auto; }
 .domain-modal__footer { border-top: 1px solid var(--bar-bg); justify-content: flex-end; }

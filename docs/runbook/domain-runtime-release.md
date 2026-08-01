@@ -34,6 +34,28 @@ Do not run `tools/snapshot.sh` or `tools/update.sh` manually against a live
 production installation while diagnosing a release. The updater creates the
 matched transaction snapshot itself.
 
+### One-time upgrade from v0.6.64
+
+The updater bundled with `v0.6.64` runs `prisma db push` before candidate
+migrations and cannot safely add the required domain-application ownership
+columns to a populated database. Do not use `--force-reset` or retry that UI
+path. Download the standalone bootstrap asset for the target release, verify
+its separate checksum, and let it hand off to the target's transactional
+updater:
+
+```bash
+version=vX.Y.Z
+curl -fLO "https://github.com/gvozdb/meowbox/releases/download/$version/meowbox-bootstrap-$version.sh"
+curl -fLO "https://github.com/gvozdb/meowbox/releases/download/$version/meowbox-bootstrap-$version.sh.sha256"
+sha256sum -c "meowbox-bootstrap-$version.sh.sha256"
+sudo MEOWBOX_PANEL_DIR=/opt/meowbox bash "meowbox-bootstrap-$version.sh" "$version"
+```
+
+The bootstrap verifies the main release tarball again, then uses its detached
+transactional tools against `/opt/meowbox`. Clone rehearsal, matched snapshot,
+quiescence, deterministic legacy mapping, `prisma migrate deploy`, rollback,
+and health checks are identical to a normal current release update.
+
 ## Required candidate hooks
 
 The release layer does not render application runtime files or gate API writes;

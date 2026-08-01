@@ -9,6 +9,7 @@ const test = require('node:test');
 const root = path.resolve(__dirname, '..', '..');
 const policy = path.join(root, 'tools', 'release-transaction-policy.sh');
 const updater = path.join(root, 'tools', 'update.sh');
+const bootstrapUpdater = path.join(root, 'tools', 'bootstrap-release-update.sh');
 const releaseWorkflow = path.join(root, '.github', 'workflows', 'release.yml');
 
 function action(armed, committed, journalState) {
@@ -94,6 +95,34 @@ test('release workflow packs the baseline contract required by the updater', () 
     workflowSource,
     /cp migrations\/release\/supported-baselines\.json "\$STAGE\/migrations\/release\/"/,
   );
+});
+
+test('legacy bootstrap verifies the artifact and bypasses prisma db push', () => {
+  const source = fs.readFileSync(bootstrapUpdater, 'utf8');
+  execFileSync('bash', ['-n', bootstrapUpdater]);
+
+  assert.match(source, /sha256sum "\$TARBALL"/);
+  assert.match(source, /MEOWBOX_UPDATE_CANDIDATE_DIR="\$CANDIDATE"/);
+  assert.match(source, /bash "\$CANDIDATE\/tools\/update\.sh" "\$TARGET"/);
+  assert.doesNotMatch(source, /npx\s+prisma\s+db\s+push/);
+});
+
+test('detached transactional tools share an explicit production panel root', () => {
+  for (const relative of [
+    'tools/update.sh',
+    'tools/rollback.sh',
+    'tools/snapshot.sh',
+    'tools/healthcheck.sh',
+  ]) {
+    const source = fs.readFileSync(path.join(root, relative), 'utf8');
+    assert.match(source, /PANEL_DIR="\$\{MEOWBOX_PANEL_DIR:-/);
+  }
+});
+
+test('release publishes the standalone legacy bootstrap with a separate checksum', () => {
+  const source = fs.readFileSync(releaseWorkflow, 'utf8');
+  assert.match(source, /meowbox-bootstrap-\$\{\{ steps\.ver\.outputs\.version \}\}\.sh/);
+  assert.match(source, /meowbox-bootstrap-\$\{\{ steps\.ver\.outputs\.version \}\}\.sh\.sha256/);
 });
 
 test('pre-commit rollback resumes the gate from the retained candidate', () => {

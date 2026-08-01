@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "nuxt dev",
     "build": "nuxt build",
+    "test:contracts": "node --test tests/*.test.js",
     "preview": "nuxt preview",
     "generate": "nuxt generate"
   },

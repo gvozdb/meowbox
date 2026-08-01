@@ -19,34 +19,9 @@
 
         <div class="site-detail__header-main">
           <div class="site-detail__header-left">
-            <SiteTypeIcon v-if="selectedDomain" :type="selectedDomain.preset" />
             <div>
               <h1 class="site-detail__title">{{ site.displayName || site.name }}</h1>
-              <div v-if="selectedDomain" class="site-detail__domain-context">
-                <select
-                  v-if="siteDomains.length > 1"
-                  class="site-detail__domain-select"
-                  :value="selectedDomain.id"
-                  aria-label="Выбранное приложение"
-                  @change="selectDomain(($event.target as HTMLSelectElement).value)"
-                >
-                  <option v-for="domain in siteDomains" :key="domain.id" :value="domain.id">
-                    {{ domain.domain }} · {{ typeLabels[domain.preset] || domain.preset }} · {{ appStatusLabel(domain.appStatus) }}
-                  </option>
-                </select>
-                <a
-                  v-else
-                  :href="domainHref(selectedDomain, selectedDomain.domain)"
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  class="domain-link"
-                >{{ selectedDomain.domain }}</a>
-                <span
-                  class="site-detail__app-status"
-                  :class="`site-detail__app-status--${selectedDomain.appStatus.toLowerCase()}`"
-                >{{ appStatusLabel(selectedDomain.appStatus) }}</span>
-                <span v-if="site.displayName" class="site-detail__sysname">· {{ site.name }}</span>
-              </div>
+              <div v-if="site.displayName" class="site-detail__sysname">{{ site.name }}</div>
             </div>
           </div>
           <div class="site-detail__header-right">
@@ -143,22 +118,74 @@
         <pre class="site-detail__error-banner-text">{{ selectedDomain.appErrorMessage || 'Причина не указана' }}</pre>
       </div>
 
-      <!-- Tabs -->
+      <!-- Site-level navigation -->
       <div class="site-detail__tabs">
         <button
-          v-for="t in tabs"
+          v-for="t in siteTabs"
           :key="t.id"
           class="site-detail__tab"
           :class="{
-            'site-detail__tab--active': activeTab === t.id,
+            'site-detail__tab--active': activeSiteTab === t.id,
             'site-detail__tab--far-right': t.farRight,
           }"
-          @click="activeTab = t.id"
+          @click="selectSiteTab(t.id)"
         >
           {{ t.label }}
           <span v-if="t.count !== undefined" class="site-detail__tab-count">{{ t.count }}</span>
         </button>
       </div>
+
+      <!-- Selected domain/application context -->
+      <template v-if="isApplicationTab && selectedDomain">
+        <div class="site-detail__application-header">
+          <div class="site-detail__application-preset">
+            <SiteTypeIcon :type="selectedDomain.preset" />
+            <div>
+              <span class="site-detail__application-label">Тип приложения</span>
+              <strong>{{ typeLabel }}</strong>
+            </div>
+          </div>
+          <div class="site-detail__application-picker">
+            <label for="site-domain-picker">Домен</label>
+            <select
+              id="site-domain-picker"
+              class="site-detail__domain-select"
+              :value="selectedDomain.id"
+              aria-label="Выбранное приложение"
+              @change="selectDomain(($event.target as HTMLSelectElement).value)"
+            >
+              <option v-for="domain in siteDomains" :key="domain.id" :value="domain.id">
+                {{ domain.domain }}
+              </option>
+            </select>
+            <a
+              :href="domainHref(selectedDomain, selectedDomain.domain)"
+              target="_blank"
+              rel="noopener noreferrer"
+              class="site-detail__application-open"
+              title="Открыть домен"
+              aria-label="Открыть выбранный домен"
+            >
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+                <path d="M14 3h7v7" /><path d="M10 14L21 3" /><path d="M21 14v5a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5" />
+              </svg>
+            </a>
+          </div>
+        </div>
+
+        <div class="site-detail__tabs site-detail__tabs--application">
+          <button
+            v-for="t in applicationTabs"
+            :key="t.id"
+            class="site-detail__tab site-detail__tab--application"
+            :class="{ 'site-detail__tab--active': activeTab === t.id }"
+            @click="activeTab = t.id"
+          >
+            {{ t.label }}
+            <span v-if="t.count !== undefined" class="site-detail__tab-count">{{ t.count }}</span>
+          </button>
+        </div>
+      </template>
 
       <!-- Tab content: Overview -->
       <div v-if="activeTab === 'overview'" class="tab-content">
@@ -897,7 +924,11 @@ sudo mv {{ selectedApplicationRoot }}/* {{ site?.rootPath }}/{{ editFilesRelPath
 
       <!-- Tab content: DNS -->
       <div v-if="activeTab === 'dns'" class="tab-content">
-        <SiteDnsTab :site-id="siteId" :active="activeTab === 'dns'" />
+        <SiteDnsTab
+          :site-id="siteId"
+          :domain-id="selectedDomainId"
+          :active="activeTab === 'dns'"
+        />
       </div>
 
       <!-- Tab content: Domains -->
@@ -2681,7 +2712,7 @@ async function reloadSiteAfterDbChange() {
   }
 }
 const activeTab = useTabQuery(
-  ['overview', 'domains', 'files', 'logs', 'databases', 'ssl', 'dns', 'backups', 'cron', 'nginx', 'php', 'env', 'deploy', 'services', 'node', 'danger'],
+  ['overview', 'domains', 'files', 'logs', 'databases', 'ssl', 'dns', 'backups', 'cron', 'nginx', 'php', 'services', 'node', 'danger'],
   'overview',
 );
 // Старая raw-textarea убрана — вкладка Nginx теперь рендерится компонентом
@@ -3001,7 +3032,7 @@ function appStatusLabel(status?: SiteDomainDetail['appStatus']): string {
   return status ? labels[status] : 'Нет данных';
 }
 
-const tabs = computed(() => [
+const applicationTabs = computed(() => [
   { id: 'overview', label: 'Обзор' },
   { id: 'domains', label: 'Домены' },
   { id: 'dns', label: 'DNS' },
@@ -3010,15 +3041,27 @@ const tabs = computed(() => [
   { id: 'php', label: 'PHP', hidden: !selectedDomain.value?.phpVersion },
   { id: 'databases', label: 'Базы данных', count: selectedDomainDatabases.value.length },
   { id: 'files', label: 'Файлы' },
-  { id: 'env', label: 'ENV', hidden: !isCustomDomain.value },
-  { id: 'deploy', label: 'Деплой', hidden: !isCustomDomain.value },
+  { id: 'node', label: 'Node.js', hidden: !isCustomDomain.value },
+].filter((t: { hidden?: boolean }) => !t.hidden));
+
+const siteTabs = computed(() => [
+  { id: 'sites', label: 'Сайты' },
   { id: 'backups', label: 'Бэкапы', count: site.value?._count?.backups || 0 },
   { id: 'cron', label: 'Крон', count: site.value?._count?.cronJobs || 0 },
   { id: 'services', label: 'Сервисы' },
-  { id: 'node', label: 'Node.js', hidden: !isCustomDomain.value },
   { id: 'logs', label: 'Логи' },
   { id: 'danger', label: 'Опасная зона', farRight: true },
-].filter((t: { hidden?: boolean }) => !t.hidden));
+]);
+
+const isApplicationTab = computed(() =>
+  applicationTabs.value.some((tab) => tab.id === activeTab.value),
+);
+const activeSiteTab = computed(() => (isApplicationTab.value ? 'sites' : activeTab.value));
+const lastApplicationTab = ref('overview');
+
+function selectSiteTab(tabId: string): void {
+  activeTab.value = tabId === 'sites' ? lastApplicationTab.value : tabId;
+}
 
 const envEntries = computed(() => {
   if (!selectedDomain.value?.envVars) return [];
@@ -5668,6 +5711,9 @@ async function loadLogs() {
 
 // Watch tab changes to load files/logs on demand
 watch(activeTab, (tab) => {
+  if (applicationTabs.value.some((item) => item.id === tab)) {
+    lastApplicationTab.value = tab;
+  }
   if (tab === 'files' && fmFiles.value.length === 0 && !fmLoading.value) {
     fmCurrentPath.value = '/';
     fmLoad();
@@ -5737,7 +5783,10 @@ watch(selectedDomainId, (domainId, previousDomainId) => {
   void loadSiteMetrics();
   void loadSiteHealth();
 
-  if (!tabs.value.some((tab) => tab.id === activeTab.value)) {
+  const tabAvailable =
+    applicationTabs.value.some((tab) => tab.id === activeTab.value) ||
+    siteTabs.value.some((tab) => tab.id === activeTab.value);
+  if (!tabAvailable) {
     activeTab.value = 'overview';
     return;
   }
@@ -6035,6 +6084,12 @@ onBeforeUnmount(() => {
   margin: 0;
 }
 
+.site-detail__sysname {
+  margin-top: 0.18rem;
+  color: var(--text-muted);
+  font: 0.72rem/1.3 'JetBrains Mono', monospace;
+}
+
 .site-detail__domain {
   font-size: 0.8rem;
   font-family: 'JetBrains Mono', monospace;
@@ -6047,27 +6102,81 @@ onBeforeUnmount(() => {
 }
 .site-detail__domain-sep { color: var(--text-faint); }
 
-.site-detail__domain-context {
+.site-detail__application-header {
   display: flex;
-  flex-wrap: wrap;
   align-items: center;
-  gap: 0.45rem;
-  margin-top: 0.2rem;
+  justify-content: space-between;
+  gap: 1rem;
+  margin-bottom: 0.35rem;
+  padding: 0.72rem 0.85rem;
+  border: 1px solid var(--border-secondary);
+  border-radius: 12px 12px 8px 8px;
+  background: var(--bg-surface);
+  box-shadow: var(--shadow-card);
+}
+
+.site-detail__application-preset,
+.site-detail__application-picker {
+  display: flex;
+  align-items: center;
+  gap: 0.65rem;
   min-width: 0;
-  font-size: 0.8rem;
-  font-family: 'JetBrains Mono', monospace;
+}
+
+.site-detail__application-preset > div {
+  display: flex;
+  flex-direction: column;
+  gap: 0.08rem;
+}
+
+.site-detail__application-preset strong {
+  color: var(--text-heading);
+  font-size: 0.82rem;
+  font-weight: 600;
+}
+
+.site-detail__application-label,
+.site-detail__application-picker > label {
   color: var(--text-muted);
+  font-size: 0.62rem;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.site-detail__application-picker > label {
+  flex: 0 0 auto;
 }
 
 .site-detail__domain-select {
-  min-width: min(360px, 52vw);
+  min-width: min(320px, 46vw);
   max-width: 100%;
   padding: 0.38rem 2rem 0.38rem 0.62rem;
   border: 1px solid var(--border-secondary);
   border-radius: 8px;
   background: var(--bg-elevated);
   color: var(--text-heading);
-  font: inherit;
+  font: 0.76rem/1.35 'JetBrains Mono', monospace;
+}
+
+.site-detail__application-open {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  flex: 0 0 32px;
+  border: 1px solid var(--border-secondary);
+  border-radius: 8px;
+  background: var(--bg-elevated);
+  color: var(--text-muted);
+  transition: border-color 0.15s, color 0.15s, background 0.15s;
+}
+
+.site-detail__application-open:hover {
+  border-color: var(--primary-border);
+  background: var(--primary-bg);
+  color: var(--primary-text);
 }
 
 .site-detail__app-status {
@@ -6306,6 +6415,21 @@ html.theme-light .site-detail__hp-banner-text code {
   gap: 0.1rem;
   border-bottom: 1px solid var(--border);
   margin-bottom: 1.5rem;
+}
+
+.site-detail__tabs--application {
+  gap: 0;
+  margin-bottom: 1.25rem;
+  padding: 0 0.35rem;
+  border: 1px solid var(--border-secondary);
+  border-top: 0;
+  border-radius: 0 0 10px 10px;
+  background: var(--bg-surface);
+}
+
+.site-detail__tab--application {
+  padding: 0.52rem 0.72rem;
+  font-size: 0.76rem;
 }
 
 .site-detail__tab {
@@ -8835,10 +8959,22 @@ html.theme-light .domain-modal__cmd {
   }
 
   .site-detail__header-left,
-  .site-detail__header-left > div,
-  .site-detail__domain-context {
+  .site-detail__header-left > div {
     width: 100%;
     min-width: 0;
+  }
+
+  .site-detail__application-header {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .site-detail__application-picker {
+    width: 100%;
+  }
+
+  .site-detail__application-picker > label {
+    display: none;
   }
 
   .site-detail__domain-select {

@@ -116,7 +116,7 @@
 <script setup lang="ts">
 import { ref, watch } from 'vue';
 
-const props = defineProps<{ siteId: string; active: boolean }>();
+const props = defineProps<{ siteId: string; domainId: string; active: boolean }>();
 
 interface DnsRecord {
   id: string; externalId: string; type: string; name: string;
@@ -147,18 +147,26 @@ const data = ref<SiteDnsView | null>(null);
 const loading = ref(false);
 const error = ref<string | null>(null);
 let loaded = false;
+let requestId = 0;
 
 async function load() {
+  if (!props.domainId) return;
+  const currentRequest = ++requestId;
   loading.value = true;
   error.value = null;
   try {
     // useApi уже распаковывает `.data` из {success,data}-обёртки контроллера.
-    data.value = await api.get<SiteDnsView>(`/dns/sites/${props.siteId}`);
+    const response = await api.get<SiteDnsView>(
+      `/dns/sites/${props.siteId}/domains/${props.domainId}`,
+    );
+    if (currentRequest !== requestId) return;
+    data.value = response;
     loaded = true;
   } catch (e: unknown) {
+    if (currentRequest !== requestId) return;
     error.value = (e as Error).message || 'неизвестная ошибка';
   } finally {
-    loading.value = false;
+    if (currentRequest === requestId) loading.value = false;
   }
 }
 
@@ -169,11 +177,21 @@ async function refresh() {
 
 defineExpose({ refresh });
 
-// Лениво грузим при первой активации таба
+// Лениво грузим при первой активации и сбрасываем данные при смене приложения.
 watch(
-  () => props.active,
-  (val) => {
-    if (val && !loaded) load();
+  () => [props.active, props.siteId, props.domainId] as const,
+  ([active], previous) => {
+    const identityChanged =
+      previous !== undefined &&
+      (previous[1] !== props.siteId || previous[2] !== props.domainId);
+    if (identityChanged) {
+      requestId += 1;
+      loaded = false;
+      data.value = null;
+      error.value = null;
+      loading.value = false;
+    }
+    if (active && !loaded) void load();
   },
   { immediate: true },
 );

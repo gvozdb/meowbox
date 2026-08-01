@@ -65,7 +65,7 @@ jobs:
 
       - name: Install + build web
         working-directory: web
-        run: npm ci && npx nuxt build
+        run: npm ci && npm run test:contracts && npx nuxi typecheck && npx nuxt build
 
       - name: Install + build migrations
         working-directory: migrations
@@ -82,7 +82,7 @@ jobs:
           ls -la node_modules/@meowbox/ node_modules/@prisma/
           test -f node_modules/@meowbox/shared/dist/index.js || (echo "shared/dist not found"; exit 1)
           test -f node_modules/@prisma/client/index.js || (echo "prisma client not found"; exit 1)
-          npx tsc
+          npm run test:release
 
       # ----- Сборка tarball -----
       - name: Pack release tarball
@@ -136,6 +136,9 @@ jobs:
           mkdir -p dist
           tar -czf "dist/meowbox-${{ steps.ver.outputs.version }}.tar.gz" -C "$(dirname "$STAGE")" meowbox
           (cd dist && sha256sum "meowbox-${{ steps.ver.outputs.version }}.tar.gz" > SHA256SUMS)
+          cp tools/bootstrap-release-update.sh "dist/meowbox-bootstrap-${{ steps.ver.outputs.version }}.sh"
+          chmod 0755 "dist/meowbox-bootstrap-${{ steps.ver.outputs.version }}.sh"
+          (cd dist && sha256sum "meowbox-bootstrap-${{ steps.ver.outputs.version }}.sh" > "meowbox-bootstrap-${{ steps.ver.outputs.version }}.sh.sha256")
 
           ls -la dist/
 
@@ -161,3 +164,5 @@ jobs:
           files: |
             dist/meowbox-${{ steps.ver.outputs.version }}.tar.gz
             dist/SHA256SUMS
+            dist/meowbox-bootstrap-${{ steps.ver.outputs.version }}.sh
+            dist/meowbox-bootstrap-${{ steps.ver.outputs.version }}.sh.sha256

@@ -204,7 +204,7 @@
       </section>
     </div>
 
-    <section v-if="!isModx" class="domain-app-form__section">
+    <section v-if="showGitDeploy && !isModx" class="domain-app-form__section">
       <h4>Git-деплой</h4>
       <p>Опциональная первичная загрузка кода.</p>
       <div class="domain-app-form__group">
@@ -229,7 +229,7 @@
       </div>
     </section>
 
-    <section class="domain-app-form__section">
+    <section v-if="showEnvironment" class="domain-app-form__section">
       <h4>Переменные окружения</h4>
       <div class="domain-app-form__list">
         <div
@@ -384,6 +384,8 @@ const props = withDefaults(
     defaultDbUser?: string;
     defaultFilesRelPath?: string;
     showAliases?: boolean;
+    showGitDeploy?: boolean;
+    showEnvironment?: boolean;
     disabled?: boolean;
   }>(),
   {
@@ -391,6 +393,8 @@ const props = withDefaults(
     defaultDbUser: 'site',
     defaultFilesRelPath: 'www',
     showAliases: true,
+    showGitDeploy: true,
+    showEnvironment: true,
     disabled: false,
   },
 );

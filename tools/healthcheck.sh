@@ -8,7 +8,12 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PANEL_DIR="$(dirname "$SCRIPT_DIR")"
+PANEL_DIR="${MEOWBOX_PANEL_DIR:-$(dirname "$SCRIPT_DIR")}"
+[[ "$PANEL_DIR" == /* && -d "$PANEL_DIR" ]] || {
+  echo "[healthcheck] ✗ MEOWBOX_PANEL_DIR must be an existing absolute directory" >&2
+  exit 1
+}
+PANEL_DIR="$(cd "$PANEL_DIR" && pwd -P)"
 ENV_FILE="${MEOWBOX_ENV_FILE:-$PANEL_DIR/state/.env}"
 [[ -f "$ENV_FILE" ]] || ENV_FILE="$PANEL_DIR/.env"
 
