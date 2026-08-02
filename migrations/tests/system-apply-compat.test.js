@@ -1,7 +1,14 @@
 'use strict';
 
 const assert = require('node:assert/strict');
-const { mkdir, mkdtemp, rm, writeFile } = require('node:fs/promises');
+const {
+  cp,
+  mkdir,
+  mkdtemp,
+  rm,
+  symlink,
+  writeFile,
+} = require('node:fs/promises');
 const { tmpdir } = require('node:os');
 const { join, resolve } = require('node:path');
 const test = require('node:test');
@@ -61,6 +68,21 @@ async function fixture() {
   );
   delete require.cache[require.resolve(templatesPath)];
   return { tempRoot, templatesPath };
+}
+
+async function runtimeFixture() {
+  const tempRoot = await mkdtemp(join(tmpdir(), 'meowbox-system-apply-test-'));
+  const agentDir = join(tempRoot, 'agent');
+  await cp(join(projectRoot, 'agent', 'dist'), join(agentDir, 'dist'), {
+    recursive: true,
+  });
+  await mkdir(join(agentDir, 'node_modules', '@meowbox'), { recursive: true });
+  await symlink(
+    join(projectRoot, 'shared'),
+    join(agentDir, 'node_modules', '@meowbox', 'shared'),
+    'dir',
+  );
+  return tempRoot;
 }
 
 test('apply compatibility is explicit and checksum-bound', async () => {
@@ -194,59 +216,65 @@ test('modern migrations execute without loading the legacy adapter', async () =>
 
 for (const migrationId of adaptedIds) {
   test(`${migrationId} renders through the current strict agent contract`, async () => {
-    const migration = require(`../dist/system/${migrationId}`).default;
-    const logs = [];
-    const runtimeRows = [{
-      id: 'domain-1',
-      filesRelPath: 'public',
-      preset: 'CUSTOM',
-      phpVersion: '8.3',
-      runtimeKey: 'compatfixture',
-      isPrimary: true,
-      appPort: null,
-      site: { name: 'compatfixture' },
-    }];
-    const ctx = {
-      config: { currentDir: projectRoot },
-      dryRun: true,
-      exists: async () => false,
-      exec: {
-        run: async () => ({ stdout: '', stderr: '' }),
-      },
-      writeFile: async () => {
-        throw new Error('historical compatibility dry-run attempted a write');
-      },
-      log: (message) => logs.push(message),
-      prisma: {
-        siteDomain: { findMany: async () => runtimeRows },
-        site: {
-          findMany: async () => [{
-            name: 'compatfixture',
-            status: 'RUNNING',
-            rootPath: '/var/www/compatfixture',
-            systemUser: 'compatfixture',
-            domains: [{
-              id: 'domain-1',
-              domain: 'compat.invalid',
-              aliases: '[]',
-              filesRelPath: 'public',
-              appPort: null,
-              httpsRedirect: true,
-              nginxCustomConfig: null,
-              sslCertificate: null,
-            }],
-          }],
+    const tempRoot = await runtimeFixture();
+    try {
+      const migration = require(`../dist/system/${migrationId}`).default;
+      const logs = [];
+      const runtimeRows = [{
+        id: 'domain-1',
+        filesRelPath: 'public',
+        preset: 'CUSTOM',
+        phpVersion: '8.3',
+        runtimeKey: 'compatfixture',
+        isPrimary: true,
+        appPort: null,
+        site: { name: 'compatfixture' },
+      }];
+      const ctx = {
+        config: { currentDir: tempRoot },
+        dryRun: true,
+        exists: async () => false,
+        exec: {
+          run: async () => ({ stdout: '', stderr: '' }),
         },
-      },
-    };
+        writeFile: async () => {
+          throw new Error('historical compatibility dry-run attempted a write');
+        },
+        log: (message) => logs.push(message),
+        prisma: {
+          siteDomain: { findMany: async () => runtimeRows },
+          site: {
+            findMany: async () => [{
+              name: 'compatfixture',
+              status: 'RUNNING',
+              rootPath: '/var/www/compatfixture',
+              systemUser: 'compatfixture',
+              domains: [{
+                id: 'domain-1',
+                domain: 'compat.invalid',
+                aliases: '[]',
+                filesRelPath: 'public',
+                appPort: null,
+                httpsRedirect: true,
+                nginxCustomConfig: null,
+                sslCertificate: null,
+              }],
+            }],
+          },
+        },
+      };
 
-    await applySystemMigrationWithCompatibility(
-      artifact(migrationId),
-      migration,
-      ctx,
-    );
+      await applySystemMigrationWithCompatibility(
+        artifact(migrationId),
+        migration,
+        ctx,
+      );
 
-    assert.ok(logs.some((message) => message.includes('compat: enriched legacy Nginx payload')));
-    assert.ok(logs.some((message) => message.includes('[dry-run] would:')));
+      assert.ok(logs.some((message) => message.includes('compat: enriched legacy Nginx payload')));
+      assert.ok(logs.some((message) => message.includes('[dry-run] would:')));
+    } finally {
+      assertTemporaryPath(tempRoot);
+      await rm(tempRoot, { recursive: true, force: true });
+    }
   });
 }
