@@ -186,3 +186,9 @@ test('pre-commit rollback resumes the gate from the retained candidate', () => {
     /resume --transaction "\$TRANSACTION_ID" \\\n+\s+--candidate "\$resume_candidate" --database "\$DB_FILE"/,
   );
 });
+
+test('preflight records unreachable HTTP probes instead of blocking the transaction', () => {
+  const source = fs.readFileSync(updater, 'utf8');
+  assert.match(source, /status = 0/);
+  assert.doesNotMatch(source, /HTTP probe baseline is unreachable/);
+});

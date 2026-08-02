@@ -176,8 +176,7 @@ if sys.argv[2]:
             not isinstance(probe, dict)
             or not isinstance(probe.get("url"), str)
             or type(probe.get("status")) is not int
-            or probe["status"] < 100
-            or probe["status"] > 599
+            or (probe["status"] != 0 and not 100 <= probe["status"] <= 599)
             or probe["url"] in baseline
         ):
             raise SystemExit("invalid HTTP probe baseline entry")
@@ -211,7 +210,7 @@ for probe in manifest.get("httpProbes", []):
         + "\t"
         + ",".join(str(code) for code in sorted(set(statuses)))
         + "\t"
-        + (str(baseline[url]) if url in baseline else "-")
+        + (f"{baseline[url]:03d}" if url in baseline else "-")
     )
 if baseline and set(baseline) != manifest_probe_urls:
     raise SystemExit("HTTP probe baseline does not match runtime manifest")
@@ -232,6 +231,8 @@ PY
         code="$(http_code_with_retry "$value")"
         if [[ ",$expected," == *",$code,"* ]]; then
           say "✓ probe $value (HTTP $code)"
+        elif [[ "$baseline" == "000" && "$code" == "000" ]]; then
+          say "✓ probe $value unchanged pre-existing transport failure"
         elif [[ "$baseline" != "-" && "$baseline" == "$code" ]]; then
           say "✓ probe $value unchanged pre-existing HTTP $code"
         else

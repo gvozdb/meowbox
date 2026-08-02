@@ -701,7 +701,9 @@ for url in sorted(urls):
         if attempt < 2:
             time.sleep(0.5)
     if status is None:
-        raise SystemExit(f"HTTP probe baseline is unreachable: {url}")
+        # Transport failures are a valid pre-existing state. Record them so
+        # verification can allow only the same failure or a healthy response.
+        status = 0
     probes.append({"url": url, "status": status})
 
 print(json.dumps({"version": 1, "probes": probes}, indent=2, sort_keys=True))

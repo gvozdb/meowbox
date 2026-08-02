@@ -73,6 +73,49 @@ test('healthcheck accepts only an unchanged pre-existing probe failure', async (
   }
 });
 
+test('healthcheck accepts an unchanged pre-existing transport failure', async () => {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'meowbox-health-unreachable-baseline-'));
+  const healthServer = http.createServer((_request, response) => {
+    response.statusCode = 200;
+    response.end('test');
+  });
+  const unavailableServer = http.createServer();
+
+  try {
+    const healthPort = await listen(healthServer);
+    const unavailablePort = await listen(unavailableServer);
+    await new Promise((resolve) => unavailableServer.close(resolve));
+    const envFile = path.join(temp, '.env');
+    const manifest = path.join(temp, 'manifest.json');
+    const baseline = path.join(temp, 'baseline.json');
+    const url = `http://127.0.0.1:${unavailablePort}/unreachable`;
+    fs.writeFileSync(envFile, `API_PORT=${healthPort}\nWEB_PORT=${healthPort}\n`);
+    fs.writeFileSync(manifest, JSON.stringify({
+      version: 1,
+      requiresRuntimeCutover: false,
+      artifacts: [],
+      httpProbes: [{ url, expectedStatus: [200] }],
+    }));
+    fs.writeFileSync(baseline, JSON.stringify({
+      version: 1,
+      probes: [{ url, status: 0 }],
+    }));
+
+    const passed = await execFileAsync(
+      'bash',
+      [healthcheck, '--manifest', manifest, '--probe-baseline', baseline, '--skip-pm2'],
+      { env: { ...process.env, MEOWBOX_ENV_FILE: envFile, HEALTHCHECK_TIMEOUT: '1' } },
+    );
+    assert.match(passed.stdout, /unchanged pre-existing transport failure/);
+  } finally {
+    if (unavailableServer.listening) {
+      await new Promise((resolve) => unavailableServer.close(resolve));
+    }
+    await new Promise((resolve) => healthServer.close(resolve));
+    fs.rmSync(temp, { recursive: true, force: true });
+  }
+});
+
 test('healthcheck retries a transient curl transport failure', async () => {
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'meowbox-health-retry-'));
   const server = http.createServer((_request, response) => {
