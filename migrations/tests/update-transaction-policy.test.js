@@ -88,7 +88,7 @@ test('updater wires tested policy across ordered transaction phases', () => {
   }
 });
 
-test('release workflow packs the baseline contract required by the updater', () => {
+test('release workflow packs migration compatibility required by the updater', () => {
   const updaterSource = fs.readFileSync(updater, 'utf8');
   const workflowSource = fs.readFileSync(releaseWorkflow, 'utf8');
   const contract = 'migrations/release/supported-baselines.json';
@@ -97,6 +97,10 @@ test('release workflow packs the baseline contract required by the updater', () 
   assert.match(
     workflowSource,
     /cp migrations\/release\/supported-baselines\.json "\$STAGE\/migrations\/release\/"/,
+  );
+  assert.match(
+    workflowSource,
+    /test -f "\$STAGE\/migrations\/dist\/system-plan-compat\.js"/,
   );
 });
 

@@ -133,6 +133,7 @@ jobs:
 
           # Keep the packed artifact contract aligned with tools/update.sh.
           test -f "$STAGE/migrations/release/supported-baselines.json"
+          test -f "$STAGE/migrations/dist/system-plan-compat.js"
           test -f "$STAGE/api/prisma/legacy-panel-update-bridge.json"
           test -f "$STAGE/api/scripts/prisma-legacy-bridge.cjs"
 

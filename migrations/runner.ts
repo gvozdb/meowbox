@@ -17,8 +17,13 @@ import { promisify } from 'node:util';
 
 import { PrismaClient } from '@prisma/client';
 
+import { planLegacySystemMigration } from './system-plan-compat';
 import { assessSystemMigrationHistory } from './system-history';
-import type { MigrationContext, SystemMigration } from './system/_types';
+import type {
+  MigrationContext,
+  MigrationPlan,
+  SystemMigration,
+} from './system/_types';
 
 const execFileP = promisify(execFile);
 const DOMAIN_APPLICATION_MIGRATION_ID = 'z20260731000000_domain_centric_applications';
@@ -331,26 +336,32 @@ class MigrationsRunner {
     for (const m of pending) console.log(`  · ${m.id} — ${m.module.description}`);
 
     if (this.opts.dryRun) {
-      // Do not call up() in a dry-run.  Historical migrations predate the
+      // Do not call up() in a dry-run. Historical migrations predate the
       // release transaction contract and some have side effects outside the
-      // database.  A migration must explicitly provide a zero-write plan.
+      // database. A migration must provide a native zero-write plan or match
+      // an exact reviewed artifact in the compatibility planner.
       for (const m of pending) {
-        if (!m.module.plan) {
-          throw new Error(
-            `Pending system migration ${m.id} has no zero-write plan() hook; ` +
-            'dry-run refuses to execute up() against production state.',
+        const ctx = this.makeContext();
+        let plan: MigrationPlan | null;
+        if (m.module.plan) {
+          if (m.module.preflight) {
+            const pf = await m.module.preflight(ctx);
+            if (!pf.ok) throw new Error(`Preflight failed for ${m.id}: ${pf.reason ?? '(no reason)'}`);
+          }
+          plan = await m.module.plan(ctx);
+        } else {
+          plan = await planLegacySystemMigration(
+            { id: m.id, checksum: m.checksum },
+            ctx,
           );
         }
-        // Refuse before invoking *any* migration hook.  A historical
-        // preflight may contain a side effect even though it predates the
-        // plan() contract, so merely calling it to inspect its result would
-        // invalidate a read-only rehearsal.
-        const ctx = this.makeContext();
-        if (m.module.preflight) {
-          const pf = await m.module.preflight(ctx);
-          if (!pf.ok) throw new Error(`Preflight failed for ${m.id}: ${pf.reason ?? '(no reason)'}`);
+        if (!plan) {
+          throw new Error(
+            `Pending system migration ${m.id} has no native or ` +
+            'checksum-bound zero-write plan; dry-run refuses to execute ' +
+            'up() against production state.',
+          );
         }
-        const plan = await m.module.plan(ctx);
         console.log(`[migrate] plan ${m.id}: ${plan.summary}`);
         if (plan.fingerprint) console.log(`[migrate]   plan-fingerprint=${plan.fingerprint}`);
       }

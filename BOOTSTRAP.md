@@ -20,3 +20,10 @@
 2. Persistent данные — в `/opt/meowbox/state/` (data, .env, logs). Никогда не пиши их внутри `releases/` или `current/`.
 3. Перед любой опасной операцией — `make snapshot` (бэкап БД + конфигов панели в `state/data/snapshots/`).
 4. Перед commit + tag + release сначала подними версию в файле VERSION (лежит в корне).
+
+
+## Current VPS: dev-mode (HARD)
+
+Текущий VPS — production: на нём работают важные сайты и хранятся реальные данные. Одновременно в `/opt/meowbox` ведётся разработка исходника Meowbox, поэтому текущая установка намеренно работает в `.dev-mode`.
+
+Это ожидаемый режим. **Никогда не удаляй и не перемещай `/opt/meowbox/.dev-mode`, не переводи этот VPS в release-mode и не запускай здесь `make update`.** Для обновления используй dev workflow с сохранением `.dev-mode`.
