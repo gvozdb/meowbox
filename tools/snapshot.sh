@@ -3,8 +3,8 @@
 # Consistent release snapshot.
 #
 # Uses SQLite's online backup API and a GNU-tar metadata archive for the exact
-# managed runtime artifact list.  It is safe to call manually, and update.sh
-# uses --transaction before its quiesce/database boundary.
+# managed runtime artifact list. It is safe to call manually, and update.sh
+# uses --transaction after writers are quiesced and before DB mutation.
 # =============================================================================
 set -euo pipefail
 

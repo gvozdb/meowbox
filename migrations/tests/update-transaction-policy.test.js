@@ -31,9 +31,8 @@ function action(armed, committed, journalState) {
   ).trim();
 }
 
-test('every pre-commit mutating update phase selects matched rollback', () => {
+test('every post-snapshot pre-commit phase selects matched rollback', () => {
   for (const phase of [
-    'U04-quiesce',
     'U05-database',
     'U06-runtime',
     'U07-switch',
@@ -41,7 +40,8 @@ test('every pre-commit mutating update phase selects matched rollback', () => {
   ]) {
     assert.equal(action(true, false, 'uncommitted'), 'rollback', phase);
   }
-  assert.equal(action(false, false, 'uncommitted'), 'none', 'U03-snapshot');
+  assert.equal(action(false, false, 'uncommitted'), 'none', 'U03-quiesce');
+  assert.equal(action(false, false, 'uncommitted'), 'none', 'U04-snapshot');
 });
 
 test('durable commit always selects forward repair, including hard-kill gap', () => {
@@ -70,8 +70,9 @@ test('updater wires tested policy across ordered transaction phases', () => {
   assert.match(source, /failure_action" == "manual"/);
 
   const markers = [
-    'stage U03-snapshot',
-    'stage U04-quiesce',
+    'stage U03-quiesce',
+    'stage U04-snapshot',
+    'ROLLBACK_ARMED=true',
     'apply_database',
     'prepare_apply_runtime',
     'switch_release',
@@ -86,6 +87,42 @@ test('updater wires tested policy across ordered transaction phases', () => {
     assert.notEqual(next, -1, `missing ordered marker: ${marker}`);
     offset = next + marker.length;
   }
+});
+
+test('dry-run isolates candidate hooks from a concurrently writable live SQLite database', () => {
+  const source = fs.readFileSync(updater, 'utf8');
+  const start = source.indexOf('run_dry_run()');
+  const end = source.indexOf('\napply_database()', start);
+  assert.notEqual(start, -1);
+  assert.notEqual(end, -1);
+  const dryRun = source.slice(start, end);
+
+  assert.match(dryRun, /mb_sqlite_backup "\$DB_FILE" "\$clone_db"/);
+  assert.match(dryRun, /prepare_release_health_hooks "\$clone_db"/);
+  assert.match(
+    dryRun,
+    /run_hook "\$QUIESCE_HOOK" check[^\n]+--database "\$clone_db"/,
+  );
+  assert.match(dryRun, /dry-run planning mutated the isolated SQLite clone/);
+  assert.doesNotMatch(dryRun, /dry-run changed live SQLite/);
+});
+
+test('quiesce precedes the matched snapshot and unarmed failures resume without DB rollback', () => {
+  const source = fs.readFileSync(updater, 'utf8');
+  const quiesce = source.indexOf('stage U03-quiesce');
+  const snapshot = source.indexOf('stage U04-snapshot', quiesce);
+  const snapshotReady = source.indexOf('journal_update snapshot-ready', snapshot);
+  const armed = source.indexOf('ROLLBACK_ARMED=true', snapshot);
+  const database = source.indexOf('apply_database', armed);
+
+  assert.ok(
+    quiesce < snapshot
+      && snapshot < snapshotReady
+      && snapshotReady < armed
+      && armed < database,
+  );
+  assert.match(source, /failure before rollback boundary; resuming the unchanged panel/);
+  assert.match(source, /failure_action" == "none" && "\$QUIESCE_STARTED" == "true"/);
 });
 
 test('release workflow packs migration compatibility required by the updater', () => {

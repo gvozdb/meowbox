@@ -2,9 +2,9 @@
 # =============================================================================
 # Transactional release updater.
 #
-# The only mutating path is the phase sequence below.  `--dry-run` stages a
-# candidate in a temporary directory, runs the real migration path on an
-# SQLite backup clone and proves hashes of live DB/config inputs are unchanged.
+# The only mutating path is the phase sequence below. `--dry-run` stages a
+# candidate in a temporary directory and runs the real migration path against
+# an isolated SQLite backup clone while the serving database may keep moving.
 # =============================================================================
 set -Eeuo pipefail
 
@@ -184,6 +184,7 @@ JOURNAL="$TX_DIR/journal.json"
 SNAPSHOT_DIR=""
 ROLLBACK_ARMED=false
 COMMITTED=false
+QUIESCE_STARTED=false
 REPORT_JSON="$REPORT_ROOT/$TRANSACTION_ID.json"
 REPORT_TEXT="$REPORT_ROOT/$TRANSACTION_ID.txt"
 if $DRY_RUN; then
@@ -327,6 +328,14 @@ on_exit() {
       # boundary was not crossed. Preserve it for explicit recovery rather
       # than restoring an old SQLite image blindly.
       echo "[update] journal commit state is indeterminate; automatic DB rollback is forbidden" >&2
+    elif [[ "$failure_action" == "none" && "$QUIESCE_STARTED" == "true" ]]; then
+      # Quiesce can stop the panel before a matched rollback snapshot exists.
+      # No release mutation has happened at this boundary, so restore service
+      # availability without replacing live data from an older image.
+      echo "[update] failure before rollback boundary; resuming the unchanged panel" >&2
+      run_hook "$QUIESCE_HOOK" resume --transaction "$TRANSACTION_ID" \
+        --candidate "$CANDIDATE_DIR" --database "$DB_FILE" || \
+        echo "[update] panel state is unchanged but maintenance gate resume needs operator repair" >&2
     fi
   fi
   if $DRY_RUN; then
@@ -360,16 +369,17 @@ resolve_release_hook() {
 }
 
 prepare_release_health_hooks() {
+  local database="$1"
   QUIESCE_HOOK="$(resolve_release_hook "$QUIESCE_HOOK" quiesce.js "quiesce")"
   AGENT_HEALTH_HOOK="$(resolve_release_hook "$AGENT_HEALTH_HOOK" agent-health.js "agent health")"
   REPRESENTATIVE_READ_HOOK="$(resolve_release_hook "$REPRESENTATIVE_READ_HOOK" representative-read.js "representative API-read")"
   export MEOWBOX_QUIESCE_HOOK="$QUIESCE_HOOK"
   export MEOWBOX_AGENT_HEALTH_HOOK="$AGENT_HEALTH_HOOK"
   export MEOWBOX_REPRESENTATIVE_READ_HOOK="$REPRESENTATIVE_READ_HOOK"
-  # These checks are part of the dry-run contract.  They may inspect the
-  # currently serving agent/API, but must not mutate panel state or runtime.
-  run_hook "$AGENT_HEALTH_HOOK" check --mode dry-run --release-dir "$CANDIDATE_DIR" --database "$DB_FILE"
-  run_hook "$REPRESENTATIVE_READ_HOOK" check --mode dry-run --release-dir "$CANDIDATE_DIR" --database "$DB_FILE"
+  # Candidate checks receive only the isolated clone. Agent liveness still
+  # inspects PM2, but candidate code never gets the live SQLite pathname.
+  run_hook "$AGENT_HEALTH_HOOK" check --mode dry-run --release-dir "$CANDIDATE_DIR" --database "$database"
+  run_hook "$REPRESENTATIVE_READ_HOOK" check --mode dry-run --release-dir "$CANDIDATE_DIR" --database "$database"
 }
 
 refresh_candidate_health_hook_paths() {
@@ -632,11 +642,16 @@ prisma_deploy() {
   (cd "$CANDIDATE_DIR/api" && DATABASE_URL="file:$database" npx prisma migrate deploy --schema prisma/schema.prisma)
 }
 
-source_hash_inputs() {
+sqlite_hash_inputs() {
+  local database="$1"
   # SQLite SHM is transient lock/index state and changes on read-only access.
   # Filesystem timestamps are also not data. Main + WAL + rollback-journal
   # content and presence are the durable database input.
-  mb_hash_file_contents "$DB_FILE" "$DB_FILE-wal" "$DB_FILE-journal"
+  mb_hash_file_contents "$database" "$database-wal" "$database-journal"
+}
+
+source_hash_inputs() {
+  sqlite_hash_inputs "$DB_FILE"
 }
 
 source_file_fingerprint() {
@@ -855,16 +870,15 @@ run_dry_run() {
   mb_collect_legacy_managed_paths "$DB_FILE" "$legacy_paths"
   local legacy_config_before legacy_config_after
   legacy_config_before="$(mb_hash_path_file "$legacy_paths")"
-  local db_before db_file_before
-  db_before="$(source_hash_inputs)"
-  db_file_before="$(source_file_fingerprint)"
-  # Capture the proof before invoking any pluggable integration.  Candidate
-  # hooks are contractual read-only checks in dry-run mode, but a violation is
-  # still detected by the final live-hash comparison below.
-  prepare_release_health_hooks
   check_release_capacity "$DRY_DIR"
   preflight_serving_health
   mb_sqlite_backup "$DB_FILE" "$clone_db"
+  local clone_health_before clone_health_after
+  clone_health_before="$(sqlite_hash_inputs "$clone_db")"
+  prepare_release_health_hooks "$clone_db"
+  clone_health_after="$(sqlite_hash_inputs "$clone_db")"
+  [[ "$clone_health_before" == "$clone_health_after" ]] || \
+    die "candidate health checks mutated the isolated SQLite clone"
   # Assess first without changing the clone.  The map is then bound to the
   # exact clone image before Prisma writes its bookkeeping history; that same
   # ordering is repeated after live quiescence.
@@ -887,6 +901,8 @@ run_dry_run() {
   release_cli baseline --db "$clone_db" --api-dir "$CANDIDATE_DIR/api" --contract "$CANDIDATE_DIR/migrations/release/supported-baselines.json" --apply --write-mode clone --json > "$baseline_applied_report"
   prisma_deploy "$clone_db"
   release_cli invariants --db "$clone_db" --phase final --baseline-counts "$baseline_counts" --json > "$invariant_report"
+  local clone_plan_before clone_plan_after
+  clone_plan_before="$(sqlite_hash_inputs "$clone_db")"
   prepare_runtime "$clone_db" dry-run
   capture_http_probe_baseline "$RUNTIME_MANIFEST" "$HTTP_PROBE_BASELINE"
   mb_collect_manifest_paths "$RUNTIME_MANIFEST" "$manifest_paths"
@@ -895,16 +911,15 @@ run_dry_run() {
   config_before="$(managed_runtime_hash "$all_paths")"
   # The maintenance integration owns the authoritative active-operation check.
   # Absence is a blocker rather than a best-effort warning.
-  run_hook "$QUIESCE_HOOK" check --transaction "$TRANSACTION_ID" --candidate "$CANDIDATE_DIR" --database "$DB_FILE"
+  run_hook "$QUIESCE_HOOK" check --transaction "$TRANSACTION_ID" --candidate "$CANDIDATE_DIR" --database "$clone_db"
   MEOWBOX_STATE_DIR="$DRY_DIR/state" MEOWBOX_RUNTIME_MANIFEST="$RUNTIME_MANIFEST" MEOWBOX_RUNTIME_STAGE="$RUNTIME_STAGE" \
     MEOWBOX_RUNTIME_VALIDATED=1 DATABASE_URL="file:$clone_db" node "$CANDIDATE_DIR/migrations/dist/runner.js" up --dry-run
-  local db_after db_file_after config_after
-  db_after="$(source_hash_inputs)"
-  db_file_after="$(source_file_fingerprint)"
+  clone_plan_after="$(sqlite_hash_inputs "$clone_db")"
+  local config_after
   config_after="$(managed_runtime_hash "$all_paths")"
   legacy_config_after="$(mb_hash_path_file "$legacy_paths")"
-  [[ "$db_before" == "$db_after" ]] || die "dry-run changed live SQLite input hash"
-  [[ "$db_file_before" == "$db_file_after" ]] || die "dry-run changed live SQLite main/WAL fingerprint"
+  [[ "$clone_plan_before" == "$clone_plan_after" ]] || \
+    die "dry-run planning mutated the isolated SQLite clone"
   [[ "$legacy_config_before" == "$legacy_config_after" ]] || die "dry-run changed live managed runtime hash"
   [[ "$config_before" == "$config_after" ]] || die "dry-run changed live managed runtime hash"
   cp -- "$all_paths" "$TX_DIR/managed-runtime-paths.txt"
@@ -912,15 +927,15 @@ run_dry_run() {
   cp -- "$baseline_applied_report" "$TX_DIR/dry-run-baseline-applied.json"
   cp -- "$baseline_counts" "$TX_DIR/dry-run-baseline-counts.json"
   cp -- "$invariant_report" "$TX_DIR/dry-run-invariants.json"
-  printf '%s\n' "$db_before" > "$TX_DIR/dry-run-source-db.hash"
-  printf '%s\n' "$db_file_before" > "$TX_DIR/dry-run-source-file.hash"
   printf '%s\n' "$decision" > "$TX_DIR/dry-run-baseline-decision"
   printf '%s\n' "$config_before" > "$TX_DIR/dry-run-managed-runtime.hash"
   printf '%s\n' "$(runtime_plan_hash "$RUNTIME_MANIFEST")" > "$TX_DIR/dry-run-runtime-plan.hash"
-  write_report pass "clone migration and staged runtime validation completed without live mutations" "$db_before" "$config_before"
-  DRY_RUN_DB_HASH="$db_before"
+  local observed_db
+  observed_db="$(source_hash_inputs)"
+  write_report pass "isolated clone migration and staged runtime validation completed" "$observed_db" "$config_before"
+  DRY_RUN_DB_HASH="$observed_db"
   DRY_RUN_CONFIG_HASH="$config_before"
-  journal_update dry-run "clone path passed; live DB/config hashes unchanged"
+  journal_update dry-run "isolated clone path passed; serving SQLite was not a migration target"
   say "dry-run report: $REPORT_JSON"
 }
 
@@ -1070,25 +1085,28 @@ if $DRY_RUN; then
   exit 0
 fi
 
-stage U03-snapshot "SQLite backup + metadata-preserving managed runtime snapshot"
+stage U03-quiesce "gate panel writes, drain active operations and stop panel processes"
+QUIESCE_STARTED=true
+journal_update quiesce "quiesce requested; rollback remains disarmed until a matched snapshot exists"
+run_hook "$QUIESCE_HOOK" quiesce --transaction "$TRANSACTION_ID" --candidate "$CANDIDATE_DIR" --database "$DB_FILE" --timeout "$MEOWBOX_QUIESCE_TIMEOUT"
+
+stage U04-snapshot "capture SQLite and managed runtime after writers are stopped"
 SNAPSHOT_DIR="$(MEOWBOX_STATE_DIR="$STATE_DIR" MEOWBOX_DATABASE_FILE="$DB_FILE" MEOWBOX_RELEASE_LOCK_HELD=1 \
   bash "$SCRIPT_DIR/snapshot.sh" --transaction "$TRANSACTION_ID" --paths-file "$TX_DIR/managed-runtime-paths.txt" --no-rotate | tail -n 1)"
 [[ -d "$SNAPSHOT_DIR" ]] || die "snapshot did not produce a directory"
 SNAPSHOT_SOURCE_HASH="$(mb_snapshot_json_value "$SNAPSHOT_DIR" database.sourceHash)"
 SNAPSHOT_SOURCE_FILE_HASH="$(mb_snapshot_json_value "$SNAPSHOT_DIR" database.sourceFileHash)"
 SNAPSHOT_CONFIG_HASH="$(mb_snapshot_json_value "$SNAPSHOT_DIR" managedRuntime.sourceHash)"
-[[ "$SNAPSHOT_SOURCE_HASH" == "$(<"$TX_DIR/dry-run-source-db.hash")" ]] || die "SQLite changed between dry-run and snapshot; retry update"
-[[ "$SNAPSHOT_SOURCE_FILE_HASH" == "$(<"$TX_DIR/dry-run-source-file.hash")" ]] || die "SQLite main/WAL changed between dry-run and snapshot; retry update"
+[[ "$(source_hash_inputs)" == "$SNAPSHOT_SOURCE_HASH" ]] || die "SQLite changed after the quiesced snapshot"
+[[ "$(source_file_fingerprint)" == "$SNAPSHOT_SOURCE_FILE_HASH" ]] || die "SQLite main/WAL changed after the quiesced snapshot"
 [[ "$SNAPSHOT_CONFIG_HASH" == "$(<"$TX_DIR/dry-run-managed-runtime.hash")" ]] || die "managed runtime changed between dry-run and snapshot; retry update"
-journal_update snapshot "consistent DB/config/release/process snapshot complete"
-
-stage U04-quiesce "gate panel writes and wait for active operations"
+printf '%s\n' "$SNAPSHOT_SOURCE_HASH" > "$TX_DIR/dry-run-source-db.hash"
+printf '%s\n' "$SNAPSHOT_SOURCE_FILE_HASH" > "$TX_DIR/dry-run-source-file.hash"
+DRY_RUN_DB_HASH="$SNAPSHOT_SOURCE_HASH"
+DRY_RUN_CONFIG_HASH="$SNAPSHOT_CONFIG_HASH"
+journal_update snapshot-ready "quiesced matched snapshot complete; release mutation has not started"
 ROLLBACK_ARMED=true
-journal_update quiesce "quiesce requested; rollback boundary armed"
-run_hook "$QUIESCE_HOOK" quiesce --transaction "$TRANSACTION_ID" --candidate "$CANDIDATE_DIR" --database "$DB_FILE" --timeout "$MEOWBOX_QUIESCE_TIMEOUT"
-[[ "$(source_hash_inputs)" == "$SNAPSHOT_SOURCE_HASH" ]] || die "SQLite changed after quiesce; rollback is required"
-[[ "$(source_file_fingerprint)" == "$SNAPSHOT_SOURCE_FILE_HASH" ]] || die "SQLite main/WAL changed after quiesce; rollback is required"
-[[ "$(managed_runtime_hash "$TX_DIR/managed-runtime-paths.txt")" == "$SNAPSHOT_CONFIG_HASH" ]] || die "managed runtime changed after quiesce; rollback is required"
+journal_update snapshot "quiesced DB/config/release/process snapshot complete; rollback boundary armed"
 
 apply_database
 prepare_apply_runtime
@@ -1102,6 +1120,7 @@ if ! run_hook "$QUIESCE_HOOK" resume --transaction "$TRANSACTION_ID" --candidate
   journal_update forward-repair "write gate did not reopen; forward repair required" true
   die "post-commit write gate resume failed; DB rollback is forbidden, repair forward"
 fi
+QUIESCE_STARTED=false
 if ! forward_repair; then
   journal_update forward-repair "post-commit cleanup failed; retry forward repair" true
   die "post-commit cleanup failed; serving new release without DB rollback and retrying forward repair"
