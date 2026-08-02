@@ -102,6 +102,10 @@ test('release workflow packs migration compatibility required by the updater', (
     workflowSource,
     /test -f "\$STAGE\/migrations\/dist\/system-plan-compat\.js"/,
   );
+  assert.match(
+    workflowSource,
+    /test -f "\$STAGE\/migrations\/dist\/system-apply-compat\.js"/,
+  );
 });
 
 test('legacy bootstrap verifies the artifact and bypasses prisma db push', () => {

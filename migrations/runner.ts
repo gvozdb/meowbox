@@ -17,6 +17,7 @@ import { promisify } from 'node:util';
 
 import { PrismaClient } from '@prisma/client';
 
+import { applySystemMigrationWithCompatibility } from './system-apply-compat';
 import { planLegacySystemMigration } from './system-plan-compat';
 import { assessSystemMigrationHistory } from './system-history';
 import type {
@@ -651,7 +652,11 @@ class MigrationsRunner {
     };
 
     try {
-      await m.module.up(ctx);
+      await applySystemMigrationWithCompatibility(
+        { id: m.id, checksum: m.checksum },
+        m.module,
+        ctx,
+      );
     } catch (e) {
       ok = false;
       errMsg = (e as Error).stack ?? (e as Error).message;

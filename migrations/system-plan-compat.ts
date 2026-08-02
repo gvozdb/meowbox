@@ -10,9 +10,10 @@ interface LegacySystemPlanCompatibility {
   readonly checksum: string;
   readonly summary: string;
   readonly requirements: readonly CandidateRequirement[];
+  readonly applyAdapter?: 'legacy-nginx-domain-runtime';
 }
 
-interface LegacySystemMigrationArtifact {
+export interface LegacySystemMigrationArtifact {
   readonly id: string;
   readonly checksum: string;
 }
@@ -35,12 +36,14 @@ export const LEGACY_SYSTEM_PLAN_COMPATIBILITY: readonly LegacySystemPlanCompatib
     checksum: '55678857e6823848d02db34d65476a77f2074dd4dd9b997cf56580b62aa9d7c6',
     summary: 'Reconcile Nginx trusted-certificate directives and missing certificate chains',
     requirements: ['agent-nginx-templates'],
+    applyAdapter: 'legacy-nginx-domain-runtime',
   },
   {
     id: '2026-07-04-002-ssl-stapling-ocsp-guard',
     checksum: '9f4e23f975d0c111b62e17b338015ae7a6b0395e24430e9a9762f78e50086dbd',
     summary: 'Reconcile OCSP stapling guards in managed SSL chunks',
     requirements: ['agent-nginx-templates'],
+    applyAdapter: 'legacy-nginx-domain-runtime',
   },
   {
     id: '2026-07-04-003-remove-stale-ssl-chunks',
@@ -53,24 +56,28 @@ export const LEGACY_SYSTEM_PLAN_COMPATIBILITY: readonly LegacySystemPlanCompatib
     checksum: '2a29d8b2d4440c2f2ba71e71ddd67116ac9953e5765688c37393d1517472072e',
     summary: 'Reconcile HTTPS runtime for all usable certificate statuses',
     requirements: ['agent-nginx-templates'],
+    applyAdapter: 'legacy-nginx-domain-runtime',
   },
   {
     id: '2026-07-04-005-ssl-trusted-certificate-alias-redirects',
     checksum: '5498630226108d714dc9f5f3160e79e7061689322829fd870c43a20f50a57234',
     summary: 'Reconcile trusted-certificate directives in HTTPS alias redirects',
     requirements: ['agent-nginx-templates'],
+    applyAdapter: 'legacy-nginx-domain-runtime',
   },
   {
     id: '2026-07-04-006-ssl-ocsp-system-ca-fallback',
     checksum: '60a6daa2001cfe5cd25e9c3621701be97ab56afbf7c822a1519d7f02ba1d1acb',
     summary: 'Reconcile OCSP trusted-chain fallback in managed Nginx SSL runtime',
     requirements: ['agent-nginx-templates'],
+    applyAdapter: 'legacy-nginx-domain-runtime',
   },
   {
     id: '2026-07-26-001-ssl-renewal-reliability',
     checksum: 'bd884499800b0300dfafa6f5ec15129db96417508ee7261cdea7a88da59d8141',
     summary: 'Reconcile certbot renewal hook, timer ownership and managed ACME HTTP runtime',
     requirements: ['agent-nginx-templates'],
+    applyAdapter: 'legacy-nginx-domain-runtime',
   },
   {
     id: '2026-07-26-002-certbot-hook-path',
@@ -83,6 +90,7 @@ export const LEGACY_SYSTEM_PLAN_COMPATIBILITY: readonly LegacySystemPlanCompatib
     checksum: 'e11dd40832c569d7e8d208adc382eb337d631355f39c609c0bfaa44a20443059',
     summary: 'Reconcile the stable shared ACME webroot in Nginx and certbot renewal state',
     requirements: ['agent-nginx-templates', 'agent-nginx-manager'],
+    applyAdapter: 'legacy-nginx-domain-runtime',
   },
 ];
 
@@ -123,6 +131,27 @@ function requirementPath(
   }
 }
 
+function compatibilityForArtifact(
+  artifact: LegacySystemMigrationArtifact,
+): LegacySystemPlanCompatibility | null {
+  const compatibility = compatibilityById.get(artifact.id);
+  if (!compatibility) return null;
+  if (artifact.checksum !== compatibility.checksum) {
+    throw new Error(
+      `Legacy system migration compatibility is stale for ${artifact.id}: ` +
+      `expected=${compatibility.checksum.slice(0, 12)}, ` +
+      `actual=${artifact.checksum.slice(0, 12)}`,
+    );
+  }
+  return compatibility;
+}
+
+export function requiresLegacyNginxRuntimeAdapter(
+  artifact: LegacySystemMigrationArtifact,
+): boolean {
+  return compatibilityForArtifact(artifact)?.applyAdapter === 'legacy-nginx-domain-runtime';
+}
+
 async function countRows(
   ctx: MigrationContext,
   table: 'site_domains' | 'sites',
@@ -141,15 +170,8 @@ export async function planLegacySystemMigration(
   artifact: LegacySystemMigrationArtifact,
   ctx: MigrationContext,
 ): Promise<MigrationPlan | null> {
-  const compatibility = compatibilityById.get(artifact.id);
+  const compatibility = compatibilityForArtifact(artifact);
   if (!compatibility) return null;
-  if (artifact.checksum !== compatibility.checksum) {
-    throw new Error(
-      `Legacy system migration plan compatibility is stale for ${artifact.id}: ` +
-      `expected=${compatibility.checksum.slice(0, 12)}, ` +
-      `actual=${artifact.checksum.slice(0, 12)}`,
-    );
-  }
 
   const requiredArtifacts = [...compatibility.requirements];
   for (const requirement of compatibility.requirements) {
