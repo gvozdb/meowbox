@@ -155,7 +155,11 @@ export class DuplicateSiteDto {
   databaseMappings?: DuplicateDatabaseMappingDto[];
 }
 
-/** Явное подтверждение полного необратимого удаления сайта. */
+/**
+ * Явное подтверждение удаления сайта и точный план очистки его артефактов.
+ * Все флаги обязательны: старый/закешированный клиент не должен внезапно
+ * получить новые destructive-дефолты после обновления API.
+ */
 export class DeleteSiteOptionsDto {
   @IsString()
   @IsNotEmpty()
@@ -165,6 +169,33 @@ export class DeleteSiteOptionsDto {
   @IsBoolean()
   @Equals(true, { message: 'confirmDataDeletion must be true' })
   confirmDataDeletion!: boolean;
+
+  @IsBoolean()
+  removeSslCertificate!: boolean;
+
+  @IsBoolean()
+  removeBackupsLocal!: boolean;
+
+  @IsBoolean()
+  removeBackupsRestic!: boolean;
+
+  @IsBoolean()
+  removeBackupsRemote!: boolean;
+
+  @IsBoolean()
+  removeDatabases!: boolean;
+
+  @IsBoolean()
+  removeFiles!: boolean;
+
+  @IsBoolean()
+  removeSystemUser!: boolean;
+
+  @IsBoolean()
+  removeNginxConfig!: boolean;
+
+  @IsBoolean()
+  removePhpPool!: boolean;
 }
 
 /** Запрос на обновление версии MODX установленного сайта. */

@@ -1,11 +1,7 @@
 import { Module } from '@nestjs/common';
-import { JwtModule } from '@nestjs/jwt';
-import { ConfigModule, ConfigService } from '@nestjs/config';
 import { BackupsService } from './backups.service';
 import { BackupsController } from './backups.controller';
 import { ResticCheckService } from './restic-check.service';
-import { BackupExportsService } from './backup-exports.service';
-import { BackupExportsController } from './backup-exports.controller';
 import { ServerPathBackupService } from './server-path-backup.service';
 import { ServerPathBackupController } from './server-path-backup.controller';
 import { PanelDataBackupService } from './panel-data-backup.service';
@@ -16,6 +12,7 @@ import { NotificationsModule } from '../notifications/notifications.module';
 import { StorageLocationsModule } from '../storage-locations/storage-locations.module';
 import { PanelSettingsModule } from '../panel-settings/panel-settings.module';
 import { SitesModule } from '../sites/sites.module';
+import { BackupArtifactsModule } from './backup-artifacts.module';
 
 @Module({
   imports: [
@@ -23,19 +20,10 @@ import { SitesModule } from '../sites/sites.module';
     StorageLocationsModule,
     PanelSettingsModule,
     SitesModule,
-    // JWT для подписи/проверки one-shot download-токенов в STREAM-экспорте.
-    // Используем тот же ACCESS_SECRET что и для обычной auth.
-    JwtModule.registerAsync({
-      imports: [ConfigModule],
-      inject: [ConfigService],
-      useFactory: (config: ConfigService) => ({
-        secret: config.getOrThrow<string>('JWT_ACCESS_SECRET'),
-      }),
-    }),
+    BackupArtifactsModule,
   ],
   controllers: [
     BackupsController,
-    BackupExportsController,
     ServerPathBackupController,
     PanelDataBackupController,
     SiteBackupScheduleController,
@@ -43,7 +31,6 @@ import { SitesModule } from '../sites/sites.module';
   providers: [
     BackupsService,
     ResticCheckService,
-    BackupExportsService,
     ServerPathBackupService,
     PanelDataBackupService,
     SiteBackupScheduleService,
@@ -51,7 +38,7 @@ import { SitesModule } from '../sites/sites.module';
   exports: [
     BackupsService,
     ResticCheckService,
-    BackupExportsService,
+    BackupArtifactsModule,
     ServerPathBackupService,
     PanelDataBackupService,
     SiteBackupScheduleService,

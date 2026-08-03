@@ -2122,13 +2122,88 @@ php_value[max_execution_time] = 300"
     <!-- Delete confirmation modal -->
     <Teleport to="body">
       <div v-if="showDeleteModal" class="modal-overlay" @mousedown.self="!deleting && (showDeleteModal = false)">
-        <div class="modal modal--wide">
+        <div class="modal modal--wide modal--delete">
           <h3 class="modal__title">Удалить сайт?</h3>
           <p class="modal__text">
-            Будут безвозвратно удалены файлы, базы данных, SSL, Nginx/PHP-конфигурация и Linux-пользователь сайта.
+            Отметьте артефакты, которые нужно удалить вместе с сайтом.
           </p>
+          <div class="delete-plan">
+            <div class="delete-plan__section">
+              <div class="delete-plan__heading">Данные</div>
+              <label class="delete-plan__row">
+                <input v-model="deleteOpts.removeFiles" type="checkbox" :disabled="deleting" @change="deleteSelectionChanged" />
+                <span class="delete-plan__body">
+                  <span class="delete-plan__label">Файлы сайта</span>
+                  <span class="delete-plan__hint">{{ site?.rootPath }}</span>
+                </span>
+              </label>
+              <label class="delete-plan__row">
+                <input v-model="deleteOpts.removeDatabases" type="checkbox" :disabled="deleting" @change="deleteSelectionChanged" />
+                <span class="delete-plan__body">
+                  <span class="delete-plan__label">Базы данных</span>
+                  <span class="delete-plan__hint">{{ site?.databases?.length || 0 }} шт.</span>
+                </span>
+              </label>
+            </div>
+
+            <div class="delete-plan__section">
+              <div class="delete-plan__heading">
+                Бэкапы
+                <span>{{ site?._count?.backups || 0 }} записей</span>
+              </div>
+              <label class="delete-plan__row">
+                <input v-model="deleteOpts.removeBackupsLocal" type="checkbox" :disabled="deleting" @change="deleteSelectionChanged" />
+                <span class="delete-plan__body">
+                  <span class="delete-plan__label">Локальные TAR-архивы</span>
+                </span>
+              </label>
+              <label class="delete-plan__row">
+                <input v-model="deleteOpts.removeBackupsRestic" type="checkbox" :disabled="deleting" @change="deleteSelectionChanged" />
+                <span class="delete-plan__body">
+                  <span class="delete-plan__label">Restic-снапшоты</span>
+                </span>
+              </label>
+              <label class="delete-plan__row">
+                <input v-model="deleteOpts.removeBackupsRemote" type="checkbox" :disabled="deleting" @change="deleteSelectionChanged" />
+                <span class="delete-plan__body">
+                  <span class="delete-plan__label">Удалённые копии и экспорты</span>
+                  <span class="delete-plan__hint">S3 / Яндекс.Диск / Mail.ru</span>
+                </span>
+              </label>
+            </div>
+
+            <div class="delete-plan__section">
+              <div class="delete-plan__heading">Системные артефакты</div>
+              <label class="delete-plan__row">
+                <input v-model="deleteOpts.removeSslCertificate" type="checkbox" :disabled="deleting" @change="deleteSelectionChanged" />
+                <span class="delete-plan__body">
+                  <span class="delete-plan__label">SSL-сертификаты</span>
+                  <span class="delete-plan__hint">{{ deleteSslCertificateCount }} шт.</span>
+                </span>
+              </label>
+              <label class="delete-plan__row">
+                <input v-model="deleteOpts.removeNginxConfig" type="checkbox" :disabled="deleting" @change="deleteSelectionChanged" />
+                <span class="delete-plan__body">
+                  <span class="delete-plan__label">Nginx-конфигурация</span>
+                </span>
+              </label>
+              <label class="delete-plan__row">
+                <input v-model="deleteOpts.removePhpPool" type="checkbox" :disabled="deleting" @change="deleteSelectionChanged" />
+                <span class="delete-plan__body">
+                  <span class="delete-plan__label">PHP-FPM пулы</span>
+                </span>
+              </label>
+              <label class="delete-plan__row">
+                <input v-model="deleteOpts.removeSystemUser" type="checkbox" :disabled="deleting" @change="deleteSelectionChanged" />
+                <span class="delete-plan__body">
+                  <span class="delete-plan__label">Linux-пользователь</span>
+                  <span class="delete-plan__hint">{{ site?.systemUser }}</span>
+                </span>
+              </label>
+            </div>
+          </div>
           <div class="delete-warning">
-            Перед удалением Meowbox создаст внутренний аварийный снимок. Существующие пользовательские бэкапы нужно удалить отдельно.
+            Снятая галочка оставит артефакт на сервере или в хранилище без управления из Meowbox. Сам сайт и его записи в панели будут удалены всегда. Перед операцией создаётся внутренний аварийный снимок.
           </div>
           <p class="modal__text" style="margin-top:0.75rem;">
             Введите <strong class="modal__confirm-name">{{ site?.name }}</strong> для подтверждения.
@@ -2694,6 +2769,25 @@ const showDeleteModal = ref(false);
 const deleteConfirmInput = ref('');
 const deleteError = ref('');
 const deleteIdempotencyKey = ref('');
+const defaultDeleteOptions = () => ({
+  removeFiles: true,
+  removeDatabases: true,
+  removeSslCertificate: true,
+  removeBackupsLocal: true,
+  removeBackupsRestic: true,
+  removeBackupsRemote: true,
+  removeNginxConfig: true,
+  removePhpPool: true,
+  removeSystemUser: true,
+});
+const deleteOpts = ref(defaultDeleteOptions());
+const deleteSslCertificateCount = computed(
+  () =>
+    site.value?.domains?.filter(
+      (domain) =>
+        domain.sslCertificate && domain.sslCertificate.status !== 'NONE',
+    ).length || 0,
+);
 const sshPassword = ref<string | null>(null);
 const sshPasswordVisible = ref(false);
 const cmsPassword = ref<string | null>(null);
@@ -5879,8 +5973,14 @@ function closeMigrateModal() {
 function confirmDelete() {
   deleteConfirmInput.value = '';
   deleteError.value = '';
+  deleteOpts.value = defaultDeleteOptions();
   deleteIdempotencyKey.value = domainMutationKey('site-delete');
   showDeleteModal.value = true;
+}
+
+function deleteSelectionChanged() {
+  deleteError.value = '';
+  deleteIdempotencyKey.value = domainMutationKey('site-delete');
 }
 
 async function deleteSite() {
@@ -5893,6 +5993,7 @@ async function deleteSite() {
       {
         confirmSiteName: site.value.name,
         confirmDataDeletion: true,
+        ...deleteOpts.value,
       },
       {
         headers: {
@@ -7485,6 +7586,96 @@ html.theme-light .domain-modal__cmd {
   border-radius: 10px;
   font-size: 0.8rem;
   line-height: 1.45;
+}
+
+.delete-plan {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 0.65rem;
+  margin: 0.85rem 0;
+}
+
+.modal.modal--delete {
+  width: min(760px, calc(100vw - 2rem));
+  max-width: 760px;
+  max-height: calc(100vh - 2rem);
+  overflow-y: auto;
+}
+
+.delete-plan__section {
+  padding: 0.65rem;
+  background: var(--bg-surface);
+  border: 1px solid var(--border-secondary);
+  border-radius: 10px;
+}
+
+.delete-plan__heading {
+  display: flex;
+  justify-content: space-between;
+  gap: 0.5rem;
+  margin-bottom: 0.35rem;
+  color: var(--text-muted);
+  font-size: 0.68rem;
+  font-weight: 700;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+}
+
+.delete-plan__heading span {
+  font-weight: 500;
+  letter-spacing: 0;
+  text-transform: none;
+}
+
+.delete-plan__row {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.5rem;
+  padding: 0.38rem 0.3rem;
+  border-radius: 7px;
+  cursor: pointer;
+}
+
+.delete-plan__row:hover {
+  background: var(--bg-elevated);
+}
+
+.delete-plan__row input {
+  width: 15px;
+  height: 15px;
+  margin: 0.12rem 0 0;
+  accent-color: #ef4444;
+  flex: 0 0 auto;
+}
+
+.delete-plan__body {
+  display: flex;
+  min-width: 0;
+  flex: 1;
+  flex-direction: column;
+  gap: 0.08rem;
+}
+
+.delete-plan__label {
+  color: var(--text-primary);
+  font-size: 0.78rem;
+  line-height: 1.25;
+}
+
+.delete-plan__hint {
+  overflow: hidden;
+  color: var(--text-muted);
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.65rem;
+  line-height: 1.25;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+@media (max-width: 700px) {
+  .delete-plan {
+    grid-template-columns: 1fr;
+  }
 }
 
 .delete-error {

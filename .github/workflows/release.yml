@@ -62,6 +62,7 @@ jobs:
           npm ci
           npx prisma generate
           npm run build
+          npm run test:site-deletion-options
 
       - name: Install + build web
         working-directory: web

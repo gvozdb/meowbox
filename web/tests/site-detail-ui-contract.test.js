@@ -65,7 +65,7 @@ test('application subtab strip has a complete top edge', () => {
   assert.doesNotMatch(block, /border-top:\s*0/);
 });
 
-test('site deletion matches the hardened irreversible-deletion API contract', () => {
+test('site deletion exposes and submits the explicit artifact cleanup plan', () => {
   const start = sitePage.indexOf('async function deleteSite()');
   const end = sitePage.indexOf('\nonMounted(', start);
   assert.notEqual(start, -1);
@@ -74,7 +74,23 @@ test('site deletion matches the hardened irreversible-deletion API contract', ()
 
   assert.match(deletion, /confirmSiteName: site\.value\.name/);
   assert.match(deletion, /confirmDataDeletion: true/);
+  assert.match(deletion, /\.\.\.deleteOpts\.value/);
   assert.match(deletion, /'Idempotency-Key'/);
   assert.match(deletion, /deleteError\.value = \(error as Error\)\.message/);
-  assert.doesNotMatch(sitePage, /deleteOpts|removeFiles|removeDatabases/);
+
+  for (const option of [
+    'removeFiles',
+    'removeDatabases',
+    'removeSslCertificate',
+    'removeBackupsLocal',
+    'removeBackupsRestic',
+    'removeBackupsRemote',
+    'removeNginxConfig',
+    'removePhpPool',
+    'removeSystemUser',
+  ]) {
+    assert.match(sitePage, new RegExp(`v-model="deleteOpts\\.${option}"`));
+    assert.match(sitePage, new RegExp(`${option}: true`));
+  }
+  assert.match(sitePage, /Снятая галочка оставит артефакт/);
 });

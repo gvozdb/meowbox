@@ -62,6 +62,7 @@ import {
   HOSTNAME_REGISTRY_LOCK,
   rethrowHostnameClaimConflict,
 } from './hostname-registry';
+import { BackupArtifactCleanupService } from '../backups/backup-artifact-cleanup.service';
 
 /**
  * include-фрагмент: все основные домены сайта с их SSL-сертификатами,
@@ -102,6 +103,7 @@ export class SitesService implements OnModuleInit {
     private readonly siteDomains: SiteDomainsService,
     private readonly operations: OperationsService,
     private readonly duplicateService: SiteDuplicateService,
+    private readonly backupArtifacts: BackupArtifactCleanupService,
   ) {}
 
   /**
@@ -1177,13 +1179,6 @@ export class SitesService implements OnModuleInit {
             databases: true,
           },
         },
-        backups: {
-          select: {
-            id: true,
-            filePath: true,
-            resticSnapshotId: true,
-          },
-        },
       },
     });
     if (!site) {
@@ -1210,14 +1205,6 @@ export class SitesService implements OnModuleInit {
       );
     }
 
-    const physicalBackups = site.backups.filter(
-      (backup) => backup.filePath || backup.resticSnapshotId,
-    );
-    if (physicalBackups.length > 0) {
-      throw new ConflictException(
-        `Site has ${physicalBackups.length} backup artifact(s); export or delete them explicitly before deleting the site`,
-      );
-    }
     if (!this.agentRelay.isAgentConnected()) {
       throw new ConflictException(
         'Agent is offline; destructive site deletion is unavailable',
@@ -1233,6 +1220,15 @@ export class SitesService implements OnModuleInit {
       request: {
         confirmSiteName: site.name,
         confirmDataDeletion: true,
+        removeSslCertificate: opts.removeSslCertificate,
+        removeBackupsLocal: opts.removeBackupsLocal,
+        removeBackupsRestic: opts.removeBackupsRestic,
+        removeBackupsRemote: opts.removeBackupsRemote,
+        removeDatabases: opts.removeDatabases,
+        removeFiles: opts.removeFiles,
+        removeSystemUser: opts.removeSystemUser,
+        removeNginxConfig: opts.removeNginxConfig,
+        removePhpPool: opts.removePhpPool,
       },
     });
     if (operation.replayed) {
@@ -1281,80 +1277,102 @@ export class SitesService implements OnModuleInit {
         }
       }
 
-      await this.operations.step(operation.id, 'remove-runtime', 35);
-      for (const domain of site.domains) {
-        if (
-          domain.sslCertificate &&
-          domain.sslCertificate.status !== SslStatus.NONE
-        ) {
-          const revoked = await this.agentRelay.emitToAgent(
-            'ssl:revoke',
-            {
-              operationId: `${deleteOperationId}-ssl-${domain.id}`,
-              domain: domain.domain,
-            },
-            90_000,
-          );
-          if (!revoked.success) {
-            throw new Error(
-              `SSL revoke failed for ${domain.domain}: ${revoked.error}`,
-            );
-          }
-        }
-      }
-
-      for (const domain of site.domains) {
-        if (!domain.phpVersion) continue;
-        const removed = await this.agentRelay.emitToAgent('php:remove-pool', {
-          operationId: `${deleteOperationId}-php-${domain.id}`,
-          siteDomainId: domain.id,
-          runtimeKey: domain.runtimeKey,
-          phpVersion: domain.phpVersion,
-        });
-        if (!removed.success) {
-          throw new Error(
-            `PHP pool removal failed for ${domain.domain}: ${removed.error}`,
-          );
-        }
-      }
-
-      for (const domain of site.domains) {
-        for (const database of domain.databases) {
-          const dropped = await this.agentRelay.emitToAgent('db:drop', {
-            operationId: `${deleteOperationId}-db-${database.id}`,
-            name: database.name,
-            type: database.type,
-            dbUser: database.dbUser,
-          });
-          if (!dropped.success) {
-            throw new Error(
-              `Database deletion failed for ${database.name}: ${dropped.error}`,
-            );
-          }
-        }
-      }
-
-      const nginx = await this.agentRelay.emitToAgent(
-        'nginx:remove-config',
+      await this.operations.step(operation.id, 'remove-backups', 30);
+      await this.backupArtifacts.cleanupSiteBackupArtifacts(
+        site.id,
+        site.name,
         {
-          operationId: `${deleteOperationId}-nginx`,
-          siteName: site.name,
-          domains: site.domains.map((domain) => domain.domain),
+          removeLocal: opts.removeBackupsLocal,
+          removeRestic: opts.removeBackupsRestic,
+          removeRemote: opts.removeBackupsRemote,
+          strict: true,
         },
       );
-      if (!nginx.success) {
-        throw new Error(`Nginx cleanup failed: ${nginx.error}`);
+
+      await this.operations.step(operation.id, 'remove-runtime', 45);
+      if (opts.removeSslCertificate) {
+        for (const domain of site.domains) {
+          if (
+            domain.sslCertificate &&
+            domain.sslCertificate.status !== SslStatus.NONE
+          ) {
+            const revoked = await this.agentRelay.emitToAgent(
+              'ssl:revoke',
+              {
+                operationId: `${deleteOperationId}-ssl-${domain.id}`,
+                domain: domain.domain,
+              },
+              90_000,
+            );
+            if (!revoked.success) {
+              throw new Error(
+                `SSL revoke failed for ${domain.domain}: ${revoked.error}`,
+              );
+            }
+          }
+        }
       }
 
-      const files = await this.agentRelay.emitToAgent('site:remove-files', {
-        operationId: `${deleteOperationId}-files`,
-        rootPath: site.rootPath,
-      });
-      if (!files.success) {
-        throw new Error(`Site files cleanup failed: ${files.error}`);
+      if (opts.removePhpPool) {
+        for (const domain of site.domains) {
+          if (!domain.phpVersion) continue;
+          const removed = await this.agentRelay.emitToAgent('php:remove-pool', {
+            operationId: `${deleteOperationId}-php-${domain.id}`,
+            siteDomainId: domain.id,
+            runtimeKey: domain.runtimeKey,
+            phpVersion: domain.phpVersion,
+          });
+          if (!removed.success) {
+            throw new Error(
+              `PHP pool removal failed for ${domain.domain}: ${removed.error}`,
+            );
+          }
+        }
       }
 
-      if (site.systemUser) {
+      if (opts.removeDatabases) {
+        for (const domain of site.domains) {
+          for (const database of domain.databases) {
+            const dropped = await this.agentRelay.emitToAgent('db:drop', {
+              operationId: `${deleteOperationId}-db-${database.id}`,
+              name: database.name,
+              type: database.type,
+              dbUser: database.dbUser,
+            });
+            if (!dropped.success) {
+              throw new Error(
+                `Database deletion failed for ${database.name}: ${dropped.error}`,
+              );
+            }
+          }
+        }
+      }
+
+      if (opts.removeNginxConfig) {
+        const nginx = await this.agentRelay.emitToAgent(
+          'nginx:remove-config',
+          {
+            operationId: `${deleteOperationId}-nginx`,
+            siteName: site.name,
+            domains: site.domains.map((domain) => domain.domain),
+          },
+        );
+        if (!nginx.success) {
+          throw new Error(`Nginx cleanup failed: ${nginx.error}`);
+        }
+      }
+
+      if (opts.removeFiles) {
+        const files = await this.agentRelay.emitToAgent('site:remove-files', {
+          operationId: `${deleteOperationId}-files`,
+          rootPath: site.rootPath,
+        });
+        if (!files.success) {
+          throw new Error(`Site files cleanup failed: ${files.error}`);
+        }
+      }
+
+      if (opts.removeSystemUser && site.systemUser) {
         const user = await this.agentRelay.emitToAgent('user:delete', {
           operationId: `${deleteOperationId}-user`,
           username: site.systemUser,
@@ -1368,7 +1386,9 @@ export class SitesService implements OnModuleInit {
         await tx.database.deleteMany({ where: { siteId: site.id } });
         await tx.site.delete({ where: { id: site.id } });
       });
-      await this.regenerateGlobalZones();
+      if (opts.removeNginxConfig) {
+        await this.regenerateGlobalZones();
+      }
       const result = { deletedSiteId: site.id, siteName: site.name };
       await this.operations.succeed(operation.id, result);
       return {

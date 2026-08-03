@@ -819,9 +819,14 @@ export class BackupExportsService {
   // навсегда (биллинг утечёт). Сами DB-записи здесь не трогаем — их подберёт
   // каскад `Backup.delete()`.
   async cleanupArtifactsForBackup(backupId: string): Promise<void> {
+    await this.cleanupArtifactsForBackups([backupId]);
+  }
+
+  async cleanupArtifactsForBackups(backupIds: string[]): Promise<void> {
+    if (backupIds.length === 0) return;
     const rows = await this.prisma.backupExport.findMany({
       where: {
-        backupId,
+        backupId: { in: backupIds },
         mode: BackupExportMode.S3_PRESIGNED,
         s3Key: { not: null },
       },

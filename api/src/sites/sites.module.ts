@@ -14,9 +14,10 @@ import {
   DomainApplicationLoginController,
   DomainApplicationsController,
 } from './domain-applications.controller';
+import { BackupArtifactsModule } from '../backups/backup-artifacts.module';
 
 @Module({
-  imports: [PanelSettingsModule],
+  imports: [PanelSettingsModule, BackupArtifactsModule],
   controllers: [
     SitesController,
     SitesNginxController,

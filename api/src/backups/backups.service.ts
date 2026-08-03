@@ -1,7 +1,5 @@
 import {
   Injectable,
-  Inject,
-  forwardRef,
   NotFoundException,
   ForbiddenException,
   BadRequestException,
@@ -26,7 +24,7 @@ import {
 } from '../notifications/notification-digest.service';
 import { StorageLocationsService } from '../storage-locations/storage-locations.service';
 import { PanelSettingsService } from '../panel-settings/panel-settings.service';
-import { BackupExportsService } from './backup-exports.service';
+import { BackupArtifactCleanupService } from './backup-artifact-cleanup.service';
 import {
   CreateBackupConfigDto,
   TriggerBackupDto,
@@ -157,10 +155,7 @@ export class BackupsService {
     private readonly digest: NotificationDigestService,
     private readonly storageLocations: StorageLocationsService,
     private readonly panelSettings: PanelSettingsService,
-    // forwardRef защищает от потенциального цикла на старте Nest, хотя
-    // BackupExportsService не зависит от BackupsService напрямую сейчас.
-    @Inject(forwardRef(() => BackupExportsService))
-    private readonly backupExports: BackupExportsService,
+    private readonly backupArtifacts: BackupArtifactCleanupService,
     private readonly operations: OperationsService,
     private readonly siteDomains: SiteDomainsService,
   ) {}
@@ -2335,6 +2330,9 @@ export class BackupsService {
         site: { select: { userId: true, name: true } },
         differentials: { select: { id: true } },
         storageLocation: true,
+        config: {
+          select: { storageType: true, storageConfig: true },
+        },
       },
     });
 
@@ -2351,42 +2349,12 @@ export class BackupsService {
       });
     }
 
-    // --- Restic: удалить снапшот из репы ---
-    if (backup.engine === BackupEngine.RESTIC && backup.resticSnapshotId && backup.storageLocation) {
-      try {
-        const loc = await this.storageLocations.getFullConfigForAgent(backup.storageLocation.id);
-        if (loc.resticPassword) {
-          await this.agentRelay.emitToAgent('restic:delete-snapshot', {
-            siteName: backup.site.name,
-            snapshotId: backup.resticSnapshotId,
-            storage: { type: loc.type, config: loc.config, password: loc.resticPassword },
-          }, 300_000);
-        }
-      } catch (err) {
-        this.logger.warn(`Failed to delete restic snapshot: ${(err as Error).message}`);
-      }
-    }
-
-    // --- TAR: удалить файл локально ---
-    if (
-      backup.engine !== BackupEngine.RESTIC &&
-      backup.filePath && backup.storageType === 'LOCAL' &&
-      this.agentRelay.isAgentConnected()
-    ) {
-      try {
-        await this.agentRelay.emitToAgent('backup:delete-file', { filePath: backup.filePath });
-      } catch (err) {
-        this.logger.warn(`Failed to delete backup file: ${(err as Error).message}`);
-      }
-    }
-
-    // Чистим S3-объекты экспортов ДО cascade-удаления записей BackupExport.
-    // Иначе SQL-каскад снесёт записи, а S3-объекты останутся «навсегда».
-    try {
-      await this.backupExports.cleanupArtifactsForBackup(backupId);
-    } catch (err) {
-      this.logger.warn(`Failed to cleanup export artifacts for backup ${backupId}: ${(err as Error).message}`);
-    }
+    await this.backupArtifacts.cleanupBackupArtifacts(backup, backup.site.name, {
+      removeLocal: true,
+      removeRestic: true,
+      removeRemote: true,
+      strict: false,
+    });
 
     await this.prisma.backup.delete({ where: { id: backupId } });
 
