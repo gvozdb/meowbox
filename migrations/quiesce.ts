@@ -26,6 +26,14 @@ interface MaintenanceMarker {
   readonly createdAt: string;
 }
 
+interface ReleaseJournal {
+  readonly version: 1;
+  readonly transactionId: string;
+  readonly phase: string;
+  readonly committed: boolean;
+  readonly snapshotDir: unknown;
+}
+
 interface Pm2Process {
   readonly name?: unknown;
   readonly pm2_env?: { readonly status?: unknown };
@@ -59,10 +67,40 @@ async function readMarker(file: string): Promise<MaintenanceMarker | null> {
     throw error;
   }
   const decoded = JSON.parse(encoded.toString('utf8')) as Partial<MaintenanceMarker>;
-  if (decoded.version !== 1 || typeof decoded.transactionId !== 'string' || typeof decoded.createdAt !== 'string') {
+  if (decoded.version !== 1
+    || typeof decoded.transactionId !== 'string'
+    || !TRANSACTION_RE.test(decoded.transactionId)
+    || typeof decoded.createdAt !== 'string') {
     throw new Error('release maintenance marker is invalid');
   }
   return decoded as MaintenanceMarker;
+}
+
+async function assertSafeStaleJournal(
+  transactionRoot: string,
+  marker: MaintenanceMarker,
+): Promise<void> {
+  const canonicalRoot = await fs.realpath(transactionRoot);
+  const rootMetadata = await fs.stat(canonicalRoot);
+  if (!rootMetadata.isDirectory()) throw new Error('--transaction-root must be a directory');
+  const transactionDirectory = path.join(canonicalRoot, marker.transactionId);
+  const transactionMetadata = await fs.lstat(transactionDirectory);
+  if (!transactionMetadata.isDirectory() || transactionMetadata.isSymbolicLink()) {
+    throw new Error('stale release transaction directory is unsafe');
+  }
+  const journalFile = path.join(transactionDirectory, 'journal.json');
+  const journalMetadata = await fs.lstat(journalFile);
+  if (!journalMetadata.isFile() || journalMetadata.isSymbolicLink() || journalMetadata.size > 64 * 1024) {
+    throw new Error('stale release transaction journal is unsafe');
+  }
+  const decoded = JSON.parse(await fs.readFile(journalFile, 'utf8')) as Partial<ReleaseJournal>;
+  if (decoded.version !== 1
+    || decoded.transactionId !== marker.transactionId
+    || decoded.phase !== 'quiesce'
+    || decoded.committed !== false
+    || decoded.snapshotDir !== null) {
+    throw new Error('stale maintenance gate is not proven safe to recover automatically');
+  }
 }
 
 async function writeMarker(file: string, transactionId: string): Promise<void> {
@@ -183,6 +221,52 @@ async function removeMarker(file: string, transactionId: string): Promise<void> 
   await fs.unlink(file);
 }
 
+async function assertInheritedReleaseLock(lockFile: string): Promise<void> {
+  if (process.env.MEOWBOX_RELEASE_LOCK_HELD !== '1') {
+    throw new Error('stale maintenance recovery requires the release lock');
+  }
+  if (process.env.MEOWBOX_RELEASE_LOCK_FILE !== lockFile) {
+    throw new Error('release lock environment does not match --lock-file');
+  }
+  // update.sh acquires flock on descriptor 9 before spawning hooks. Match its
+  // inherited open file description to the configured lock inode.
+  let lockMetadata;
+  let inheritedMetadata;
+  try {
+    [lockMetadata, inheritedMetadata] = await Promise.all([
+      fs.stat(lockFile),
+      fs.stat('/proc/self/fd/9'),
+    ]);
+  } catch {
+    throw new Error('inherited release lock descriptor is unavailable');
+  }
+  if (!lockMetadata.isFile()
+    || lockMetadata.dev !== inheritedMetadata.dev
+    || lockMetadata.ino !== inheritedMetadata.ino) {
+    throw new Error('inherited release lock descriptor does not match --lock-file');
+  }
+}
+
+async function recoverStaleMarker(
+  file: string,
+  lockFile: string,
+  transactionRoot: string,
+): Promise<void> {
+  await assertInheritedReleaseLock(lockFile);
+  const stale = await readMarker(file);
+  if (!stale) return;
+  await assertSafeStaleJournal(transactionRoot, stale);
+  await ensurePanelProcessesOnline();
+  const current = await readMarker(file);
+  if (!current
+    || current.transactionId !== stale.transactionId
+    || current.createdAt !== stale.createdAt) {
+    throw new Error('release maintenance marker changed during stale recovery');
+  }
+  await fs.unlink(file);
+  process.stdout.write('[quiesce] recovered stale maintenance gate\n');
+}
+
 export async function main(argv = process.argv.slice(2)): Promise<number> {
   try {
     const arguments_ = parseHookArguments(argv, true);
@@ -207,8 +291,12 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
     } else if (arguments_.command === 'resume') {
       await ensurePanelProcessesOnline();
       await removeMarker(file, transactionId);
+    } else if (arguments_.command === 'recover-stale') {
+      const lockFile = requiredAbsolutePath(arguments_, 'lock-file');
+      const transactionRoot = requiredAbsolutePath(arguments_, 'transaction-root');
+      await recoverStaleMarker(file, lockFile, transactionRoot);
     } else {
-      throw new Error('quiesce command must be check, quiesce or resume');
+      throw new Error('quiesce command must be check, quiesce, resume or recover-stale');
     }
 
     process.stdout.write(`[quiesce] ${arguments_.command} complete\n`);

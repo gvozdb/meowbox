@@ -892,6 +892,13 @@ run_dry_run() {
   legacy_config_before="$(mb_hash_path_file "$legacy_paths")"
   check_release_capacity "$DRY_DIR"
   preflight_serving_health
+  if ! $DRY_RUN; then
+    QUIESCE_HOOK="$(resolve_release_hook "$QUIESCE_HOOK" quiesce.js "quiesce")"
+    export MEOWBOX_QUIESCE_HOOK="$QUIESCE_HOOK"
+    run_hook "$QUIESCE_HOOK" recover-stale --transaction "$TRANSACTION_ID" \
+      --candidate "$CANDIDATE_DIR" --database "$DB_FILE" --lock-file "$LOCK_FILE" \
+      --transaction-root "$TRANSACTION_ROOT"
+  fi
   mb_sqlite_backup "$DB_FILE" "$clone_db"
   local clone_health_before clone_health_after
   clone_health_before="$(sqlite_hash_inputs "$clone_db")"

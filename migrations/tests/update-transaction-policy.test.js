@@ -99,6 +99,16 @@ test('dry-run isolates candidate hooks from a concurrently writable live SQLite 
   const dryRun = source.slice(start, end);
 
   assert.match(dryRun, /mb_sqlite_backup "\$DB_FILE" "\$clone_db"/);
+  assert.match(
+    dryRun,
+    /run_hook "\$QUIESCE_HOOK" recover-stale[^\n]+--transaction "\$TRANSACTION_ID"/,
+  );
+  assert.match(dryRun, /--database "\$DB_FILE" --lock-file "\$LOCK_FILE"/);
+  assert.match(dryRun, /--transaction-root "\$TRANSACTION_ROOT"/);
+  assert.ok(
+    dryRun.indexOf('recover-stale') < dryRun.indexOf('mb_sqlite_backup'),
+    'stale live maintenance gates must be recovered before the isolated dry-run',
+  );
   assert.match(dryRun, /prepare_release_health_hooks "\$clone_db"/);
   assert.match(
     dryRun,
