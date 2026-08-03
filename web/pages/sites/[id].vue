@@ -2121,54 +2121,14 @@ php_value[max_execution_time] = 300"
 
     <!-- Delete confirmation modal -->
     <Teleport to="body">
-      <div v-if="showDeleteModal" class="modal-overlay" @mousedown.self="showDeleteModal = false">
+      <div v-if="showDeleteModal" class="modal-overlay" @mousedown.self="!deleting && (showDeleteModal = false)">
         <div class="modal modal--wide">
           <h3 class="modal__title">Удалить сайт?</h3>
           <p class="modal__text">
-            Отметьте, что удалить, а что оставить. По умолчанию удаляется всё.
+            Будут безвозвратно удалены файлы, базы данных, SSL, Nginx/PHP-конфигурация и Linux-пользователь сайта.
           </p>
-          <div class="delete-opts">
-            <label class="delete-opts__row">
-              <input type="checkbox" v-model="deleteOpts.removeFiles" />
-              <span class="delete-opts__label">Файлы сайта</span>
-              <span class="delete-opts__hint">{{ site?.rootPath }}</span>
-            </label>
-            <label class="delete-opts__row">
-              <input type="checkbox" v-model="deleteOpts.removeDatabases" />
-              <span class="delete-opts__label">Базы данных</span>
-              <span class="delete-opts__hint">{{ site?.databases?.length || 0 }} шт.</span>
-            </label>
-            <label class="delete-opts__row">
-              <input type="checkbox" v-model="deleteOpts.removeSslCertificate" />
-              <span class="delete-opts__label">SSL-сертификат (Let's Encrypt)</span>
-              <span class="delete-opts__hint">revoke + delete</span>
-            </label>
-            <label class="delete-opts__row">
-              <input type="checkbox" v-model="deleteOpts.removeBackupsLocal" />
-              <span class="delete-opts__label">Локальные бэкапы (TAR)</span>
-            </label>
-            <label class="delete-opts__row">
-              <input type="checkbox" v-model="deleteOpts.removeBackupsRestic" />
-              <span class="delete-opts__label">Restic-снапшоты</span>
-            </label>
-            <label class="delete-opts__row">
-              <input type="checkbox" v-model="deleteOpts.removeBackupsRemote" />
-              <span class="delete-opts__label">Удалённые бэкапы</span>
-              <span class="delete-opts__hint">Яндекс.Диск / Mail.ru</span>
-            </label>
-            <label class="delete-opts__row">
-              <input type="checkbox" v-model="deleteOpts.removeNginxConfig" />
-              <span class="delete-opts__label">Nginx-конфиг</span>
-            </label>
-            <label class="delete-opts__row">
-              <input type="checkbox" v-model="deleteOpts.removePhpPool" />
-              <span class="delete-opts__label">PHP-FPM пул</span>
-            </label>
-            <label class="delete-opts__row">
-              <input type="checkbox" v-model="deleteOpts.removeSystemUser" />
-              <span class="delete-opts__label">Linux-пользователь</span>
-              <span class="delete-opts__hint">{{ site?.systemUser }}</span>
-            </label>
+          <div class="delete-warning">
+            Перед удалением Meowbox создаст внутренний аварийный снимок. Существующие пользовательские бэкапы нужно удалить отдельно.
           </div>
           <p class="modal__text" style="margin-top:0.75rem;">
             Введите <strong class="modal__confirm-name">{{ site?.name }}</strong> для подтверждения.
@@ -2180,8 +2140,9 @@ php_value[max_execution_time] = 300"
             :placeholder="site?.name"
             autocomplete="off"
           />
+          <p v-if="deleteError" class="delete-error">{{ deleteError }}</p>
           <div class="modal__actions">
-            <button class="modal__btn modal__btn--cancel" @click="showDeleteModal = false">Отмена</button>
+            <button class="modal__btn modal__btn--cancel" :disabled="deleting" @click="showDeleteModal = false">Отмена</button>
             <button
               class="modal__btn modal__btn--delete"
               :disabled="deleteConfirmInput !== site?.name || deleting"
@@ -2731,6 +2692,8 @@ const phpPoolDirty = computed(() => phpPoolCustom.value !== phpPoolCustomOrigina
 const deleting = ref(false);
 const showDeleteModal = ref(false);
 const deleteConfirmInput = ref('');
+const deleteError = ref('');
+const deleteIdempotencyKey = ref('');
 const sshPassword = ref<string | null>(null);
 const sshPasswordVisible = ref(false);
 const cmsPassword = ref<string | null>(null);
@@ -5915,29 +5878,32 @@ function closeMigrateModal() {
 
 function confirmDelete() {
   deleteConfirmInput.value = '';
+  deleteError.value = '';
+  deleteIdempotencyKey.value = domainMutationKey('site-delete');
   showDeleteModal.value = true;
 }
-
-// Флаги удаления — по умолчанию всё true (полная зачистка).
-const deleteOpts = ref({
-  removeFiles: true,
-  removeDatabases: true,
-  removeSslCertificate: true,
-  removeBackupsLocal: true,
-  removeBackupsRestic: true,
-  removeBackupsRemote: true,
-  removeNginxConfig: true,
-  removePhpPool: true,
-  removeSystemUser: true,
-});
 
 async function deleteSite() {
   if (!site.value || deleteConfirmInput.value !== site.value.name) return;
   deleting.value = true;
+  deleteError.value = '';
   try {
-    await api.del(`/sites/${siteId}`, { ...deleteOpts.value });
+    await api.del(
+      `/sites/${siteId}`,
+      {
+        confirmSiteName: site.value.name,
+        confirmDataDeletion: true,
+      },
+      {
+        headers: {
+          'Idempotency-Key': deleteIdempotencyKey.value || domainMutationKey('site-delete'),
+        },
+      },
+    );
     await router.push('/sites');
-  } catch {
+  } catch (error) {
+    deleteError.value = (error as Error).message || 'Не удалось удалить сайт';
+  } finally {
     deleting.value = false;
   }
 }
@@ -7510,43 +7476,23 @@ html.theme-light .domain-modal__cmd {
   width: 100%;
 }
 
-.delete-opts {
-  display: flex;
-  flex-direction: column;
-  gap: 0.4rem;
+.delete-warning {
   margin: 0.75rem 0;
   padding: 0.75rem;
-  background: var(--bg-surface);
-  border: 1px solid var(--border-secondary);
+  color: var(--text-secondary);
+  background: rgba(245, 158, 11, 0.08);
+  border: 1px solid rgba(245, 158, 11, 0.24);
   border-radius: 10px;
+  font-size: 0.8rem;
+  line-height: 1.45;
 }
 
-.delete-opts__row {
-  display: flex;
-  align-items: center;
-  gap: 0.5rem;
-  font-size: 0.85rem;
-  cursor: pointer;
-  padding: 0.2rem 0;
-}
-
-.delete-opts__row input[type="checkbox"] {
-  width: 16px;
-  height: 16px;
-  margin: 0;
-  cursor: pointer;
-  accent-color: var(--primary, #10b981);
-}
-
-.delete-opts__label {
-  flex: 1;
-  color: var(--text-primary);
-}
-
-.delete-opts__hint {
-  font-size: 0.72rem;
-  color: var(--text-muted);
-  font-family: 'JetBrains Mono', monospace;
+.delete-error {
+  margin: 0.75rem 0 0;
+  color: #f87171;
+  font-size: 0.8rem;
+  line-height: 1.4;
+  white-space: pre-wrap;
 }
 
 .config-view__loading {

@@ -155,14 +155,7 @@ export class DuplicateSiteDto {
   databaseMappings?: DuplicateDatabaseMappingDto[];
 }
 
-/**
- * Опции удаления сайта. По-умолчанию всё true — сайт сносится полностью.
- * Флаги пускают пользователя "оставить" отдельные артефакты при удалении,
- * например — сохранить бэкапы, но убить сайт целиком.
- *
- * До этого в контроллере был inline-объект без валидации — class-validator
- * не проверял типы, и теоретически можно было передать "removeFiles": "'true' OR 1=1".
- */
+/** Явное подтверждение полного необратимого удаления сайта. */
 export class DeleteSiteOptionsDto {
   @IsString()
   @IsNotEmpty()

@@ -64,3 +64,17 @@ test('application subtab strip has a complete top edge', () => {
   assert.match(block, /border-radius:\s*10px/);
   assert.doesNotMatch(block, /border-top:\s*0/);
 });
+
+test('site deletion matches the hardened irreversible-deletion API contract', () => {
+  const start = sitePage.indexOf('async function deleteSite()');
+  const end = sitePage.indexOf('\nonMounted(', start);
+  assert.notEqual(start, -1);
+  assert.notEqual(end, -1);
+  const deletion = sitePage.slice(start, end);
+
+  assert.match(deletion, /confirmSiteName: site\.value\.name/);
+  assert.match(deletion, /confirmDataDeletion: true/);
+  assert.match(deletion, /'Idempotency-Key'/);
+  assert.match(deletion, /deleteError\.value = \(error as Error\)\.message/);
+  assert.doesNotMatch(sitePage, /deleteOpts|removeFiles|removeDatabases/);
+});
