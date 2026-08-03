@@ -108,6 +108,23 @@ test('dry-run isolates candidate hooks from a concurrently writable live SQLite 
   assert.doesNotMatch(dryRun, /dry-run changed live SQLite/);
 });
 
+test('release preflight recovers stopped PM2 processes before health verification', () => {
+  const source = fs.readFileSync(updater, 'utf8');
+  const start = source.indexOf('preflight_serving_health()');
+  const end = source.indexOf('\nruntime_schema_required()', start);
+  assert.notEqual(start, -1);
+  assert.notEqual(end, -1);
+  const preflight = source.slice(start, end);
+
+  assert.match(preflight, /for process_name in meowbox-api meowbox-agent meowbox-web/);
+  assert.match(preflight, /pm2 start "\$process_name"/);
+  assert.match(preflight, /ecosystem\.config\.js" --only "\$process_name" --update-env/);
+  assert.ok(
+    preflight.indexOf('pm2 start') < preflight.indexOf('healthcheck.sh'),
+    'PM2 recovery must happen before strict health verification',
+  );
+});
+
 test('quiesce precedes the matched snapshot and unarmed failures resume without DB rollback', () => {
   const source = fs.readFileSync(updater, 'utf8');
   const quiesce = source.indexOf('stage U03-quiesce');

@@ -49,6 +49,15 @@ interface DbListOptions {
   perPage?: number;
 }
 
+interface GlobalDbListOptions {
+  userId: string;
+  role: string;
+  type?: string;
+  search?: string;
+  page?: number;
+  perPage?: number;
+}
+
 @Injectable()
 export class DatabasesService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger('DatabasesService');
@@ -76,6 +85,32 @@ export class DatabasesService implements OnModuleInit, OnModuleDestroy {
 
   onModuleDestroy(): void {
     if (this.exportCleanupTimer) clearInterval(this.exportCleanupTimer);
+  }
+
+  private listPagination(page = 1, perPage = 20) {
+    const safePage = Number.isInteger(page) && page > 0 ? page : 1;
+    const take = Number.isInteger(perPage)
+      ? Math.min(Math.max(perPage, 1), 100)
+      : 20;
+    return { page: safePage, take, skip: (safePage - 1) * take };
+  }
+
+  private buildListWhere(options: {
+    type?: string;
+    search?: string;
+    siteDomainId?: string;
+    ownerUserId?: string;
+  }): Record<string, unknown> {
+    const where: Record<string, unknown> = {};
+    if (options.siteDomainId) where.siteDomainId = options.siteDomainId;
+    if (options.ownerUserId) where.site = { userId: options.ownerUserId };
+    if (options.type) {
+      const types = options.type.split(',').map((value) => value.trim()).filter(Boolean);
+      if (types.length === 1) where.type = types[0];
+      else if (types.length > 1) where.type = { in: types };
+    }
+    if (options.search) where.name = { contains: options.search };
+    return where;
   }
 
   /**
@@ -130,29 +165,15 @@ export class DatabasesService implements OnModuleInit, OnModuleDestroy {
       userId,
       role,
     );
-    const take = Math.min(perPage, 100);
-    const skip = (page - 1) * take;
-
-    const where: Record<string, unknown> = {};
-
-    where.siteDomainId = domainId;
-    if (type) {
-      // Поддерживаем CSV ('MARIADB,MYSQL') — нужно UI-фильтру «MySQL / MariaDB»,
-      // объединяющему оба исторических типа в один пункт.
-      const types = type.split(',').map((s) => s.trim()).filter(Boolean);
-      if (types.length === 1) where.type = types[0];
-      else if (types.length > 1) where.type = { in: types };
-    }
-    if (search) {
-      where.name = { contains: search };
-    }
+    const pagination = this.listPagination(page, perPage);
+    const where = this.buildListWhere({ type, search, siteDomainId: domainId });
 
     const [databases, total] = await Promise.all([
       this.prisma.database.findMany({
         where,
         orderBy: { createdAt: 'desc' },
-        take,
-        skip,
+        take: pagination.take,
+        skip: pagination.skip,
         include: {
           site: { select: { id: true, name: true } },
           siteDomain: {
@@ -165,7 +186,55 @@ export class DatabasesService implements OnModuleInit, OnModuleDestroy {
 
     return {
       databases,
-      meta: { page, perPage: take, total, totalPages: Math.ceil(total / take) },
+      meta: {
+        page: pagination.page,
+        perPage: pagination.take,
+        total,
+        totalPages: Math.ceil(total / pagination.take),
+      },
+    };
+  }
+
+  async findAllAcrossSites(options: GlobalDbListOptions) {
+    const {
+      userId,
+      role,
+      type,
+      search,
+      page = 1,
+      perPage = 20,
+    } = options;
+    const pagination = this.listPagination(page, perPage);
+    const where = this.buildListWhere({
+      type,
+      search,
+      ownerUserId: role === 'ADMIN' ? undefined : userId,
+    });
+
+    const [databases, total] = await Promise.all([
+      this.prisma.database.findMany({
+        where,
+        orderBy: { createdAt: 'desc' },
+        take: pagination.take,
+        skip: pagination.skip,
+        include: {
+          site: { select: { id: true, name: true } },
+          siteDomain: {
+            select: { id: true, domain: true, preset: true },
+          },
+        },
+      }),
+      this.prisma.database.count({ where }),
+    ]);
+
+    return {
+      databases,
+      meta: {
+        page: pagination.page,
+        perPage: pagination.take,
+        total,
+        totalPages: Math.ceil(total / pagination.take),
+      },
     };
   }
 

@@ -7,8 +7,16 @@
 # =============================================================================
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PANEL_DIR="${MEOWBOX_PANEL_DIR:-$(dirname "$SCRIPT_DIR")}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+PANEL_DIR="${MEOWBOX_PANEL_DIR:-}"
+if [[ -z "$PANEL_DIR" ]]; then
+  SCRIPT_ROOT="$(dirname "$SCRIPT_DIR")"
+  if [[ -f "$SCRIPT_ROOT/VERSION" && "$(basename "$(dirname "$SCRIPT_ROOT")")" == "releases" ]]; then
+    PANEL_DIR="$(dirname "$(dirname "$SCRIPT_ROOT")")"
+  else
+    PANEL_DIR="$SCRIPT_ROOT"
+  fi
+fi
 [[ "$PANEL_DIR" == /* && -d "$PANEL_DIR" ]] || {
   echo "[healthcheck] ✗ MEOWBOX_PANEL_DIR must be an existing absolute directory" >&2
   exit 1

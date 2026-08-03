@@ -5,7 +5,7 @@
         <h1 class="databases__title">Databases</h1>
         <p class="databases__subtitle">Manage databases across your servers</p>
       </div>
-      <button class="btn btn--primary" @click="showCreateModal = true">
+      <button class="btn btn--primary" @click="openCreateModal">
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="12" y1="5" x2="12" y2="19" /><line x1="5" y1="12" x2="19" y2="12" /></svg>
         Create Database
       </button>
@@ -125,17 +125,26 @@
               <input v-model="createForm.dbUser" type="text" class="form-input" placeholder="Auto-generated if empty" />
             </div>
             <div class="form-group">
-              <label class="form-label">Link to Site (optional)</label>
+              <label class="form-label">Site</label>
               <select v-model="createForm.siteId" class="form-input">
-                <option value="">None</option>
+                <option value="" disabled>Select site</option>
                 <option v-for="s in sites" :key="s.id" :value="s.id">{{ s.name }}</option>
+              </select>
+            </div>
+            <div class="form-group">
+              <label class="form-label">Application</label>
+              <select v-model="createForm.domainId" class="form-input" :disabled="!createForm.siteId">
+                <option value="" disabled>Select application</option>
+                <option v-for="domain in selectedSiteDomains" :key="domain.id" :value="domain.id">
+                  {{ domain.domain }}{{ domain.isPrimary ? ' (primary)' : '' }}
+                </option>
               </select>
             </div>
           </div>
           <div v-if="createError" class="modal__error">{{ createError }}</div>
           <div class="modal__actions">
             <button class="btn btn--ghost" @click="showCreateModal = false">Cancel</button>
-            <button class="btn btn--primary" :disabled="!createForm.name || !createForm.type || creating" @click="createDatabase">
+            <button class="btn btn--primary" :disabled="!createForm.name || !createForm.type || !createForm.siteId || !createForm.domainId || creating" @click="createDatabase">
               {{ creating ? 'Creating...' : 'Create' }}
             </button>
           </div>
@@ -207,15 +216,28 @@ definePageMeta({ middleware: 'auth' });
 
 interface DbItem {
   id: string;
+  siteId: string;
+  siteDomainId: string;
   name: string;
   type: string;
   dbUser?: string;
   sizeBytes?: number;
   site?: { id: string; name: string };
+  siteDomain?: { id: string; domain: string; preset: string };
   createdAt: string;
 }
 
-interface SiteItem { id: string; name: string; }
+interface SiteDomainItem {
+  id: string;
+  domain: string;
+  isPrimary: boolean;
+}
+
+interface SiteItem {
+  id: string;
+  name: string;
+  domains: SiteDomainItem[];
+}
 
 const api = useApi();
 const databases = ref<DbItem[]>([]);
@@ -227,7 +249,19 @@ const typeFilter = ref('');
 const showCreateModal = ref(false);
 const creating = ref(false);
 const createError = ref('');
-const createForm = reactive({ name: '', type: 'MARIADB', dbUser: '', siteId: '' });
+const createForm = reactive({ name: '', type: 'MARIADB', dbUser: '', siteId: '', domainId: '' });
+const selectedSiteDomains = computed(
+  () => sites.value.find((site) => site.id === createForm.siteId)?.domains || [],
+);
+
+watch(
+  () => createForm.siteId,
+  () => {
+    const domains = selectedSiteDomains.value;
+    if (domains.some((domain) => domain.id === createForm.domainId)) return;
+    createForm.domainId = domains.find((domain) => domain.isPrimary)?.id || domains[0]?.id || '';
+  },
+);
 
 /**
  * Снимок установленных DB-сервисов (mariadb / postgresql).
@@ -302,10 +336,11 @@ async function loadDatabases() {
     const params = new URLSearchParams();
     if (search.value) params.set('search', search.value);
     if (typeFilter.value) params.set('type', typeFilter.value);
+    params.set('perPage', '100');
     const query = params.toString();
     databases.value = await api.get<DbItem[]>(`/databases${query ? '?' + query : ''}`);
-  } catch {
-    showToast('Failed to load databases', true);
+  } catch (error) {
+    showToast((error as Error).message || 'Failed to load databases', true);
   } finally {
     loading.value = false;
   }
@@ -315,6 +350,15 @@ async function loadSites() {
   try {
     sites.value = await api.get<SiteItem[]>('/sites');
   } catch { /* ignore */ }
+}
+
+function openCreateModal() {
+  if (!createForm.siteId && sites.value[0]) createForm.siteId = sites.value[0].id;
+  showCreateModal.value = true;
+}
+
+function databaseApi(db: DbItem): string {
+  return `/sites/${db.siteId}/domains/${db.siteDomainId}/databases/${db.id}`;
 }
 
 async function loadInstalledEngines() {
@@ -344,16 +388,17 @@ async function createDatabase() {
   try {
     const body: Record<string, string> = { name: createForm.name, type: createForm.type };
     if (createForm.dbUser) body.dbUser = createForm.dbUser;
-    if (createForm.siteId) body.siteId = createForm.siteId;
-    await api.post('/databases', body);
+    await api.post(
+      `/sites/${createForm.siteId}/domains/${createForm.domainId}/databases`,
+      body,
+    );
     showCreateModal.value = false;
     createForm.name = '';
     createForm.dbUser = '';
-    createForm.siteId = '';
     showToast('Database created');
     await loadDatabases();
-  } catch {
-    createError.value = 'Failed to create database';
+  } catch (error) {
+    createError.value = (error as Error).message || 'Failed to create database';
   } finally {
     creating.value = false;
   }
@@ -367,12 +412,14 @@ async function doDelete() {
   if (!deleteTarget.value) return;
   deleting.value = true;
   try {
-    await api.del(`/databases/${deleteTarget.value.id}`);
+    await api.del(databaseApi(deleteTarget.value), undefined, {
+      headers: { 'Idempotency-Key': `database-delete-${crypto.randomUUID()}` },
+    });
     showToast('Database deleted');
     deleteTarget.value = null;
     await loadDatabases();
-  } catch {
-    showToast('Failed to delete database', true);
+  } catch (error) {
+    showToast((error as Error).message || 'Failed to delete database', true);
   } finally {
     deleting.value = false;
   }
@@ -380,7 +427,7 @@ async function doDelete() {
 
 async function resetPassword(db: DbItem) {
   try {
-    const data = await api.post<{ plainPassword: string }>(`/databases/${db.id}/reset-password`);
+    const data = await api.post<{ plainPassword: string }>(`${databaseApi(db)}/reset-password`);
     newPassword.value = data.plainPassword;
     passwordDbName.value = db.name;
     passwordDbUser.value = db.dbUser || '';
@@ -395,7 +442,7 @@ async function revealPassword(db: DbItem) {
   revealing.value = db.id;
   try {
     const data = await api.post<{ password: string; dbUser: string; name: string }>(
-      `/databases/${db.id}/reveal-password`,
+      `${databaseApi(db)}/reveal-password`,
     );
     if (!data?.password) {
       showToast('Пароль пуст или не сохранён', true);
@@ -430,7 +477,7 @@ async function openAdminer(db: DbItem) {
   // Window.open в обработчике клика разрешён, потом подменим location.
   const win = window.open('about:blank', '_blank');
   try {
-    const data = await api.post<{ url: string }>(`/databases/${db.id}/adminer-ticket`);
+    const data = await api.post<{ url: string }>(`${databaseApi(db)}/adminer-ticket`);
     if (!data?.url) throw new Error('No SSO url');
     if (win) {
       win.location.href = data.url;
@@ -454,14 +501,14 @@ async function exportDb(db: DbItem) {
   exporting.value = db.id;
   try {
     // Trigger export on server
-    const data = await api.post<{ filePath: string }>(`/databases/${db.id}/export`);
+    const data = await api.post<{ filePath: string }>(`${databaseApi(db)}/export`);
     if (!data.filePath) {
       showToast('Экспорт не вернул путь к файлу', true);
       return;
     }
     // Download the exported file
     const filename = data.filePath.split('/').pop() || `${db.name}.sql`;
-    await api.download(`/databases/${db.id}/download?filePath=${encodeURIComponent(data.filePath)}`, filename);
+    await api.download(`${databaseApi(db)}/download?filePath=${encodeURIComponent(data.filePath)}`, filename);
     showToast('Дамп скачан');
   } catch (err: unknown) {
     showToast((err as Error).message || 'Ошибка экспорта', true);
@@ -482,7 +529,12 @@ async function importFile(event: Event, db: DbItem) {
   if (!file) return;
   try {
     showToast(`Импорт ${file.name}...`);
-    await api.upload(`/databases/${db.id}/import-upload`, file);
+    await api.upload(
+      `${databaseApi(db)}/import-upload`,
+      file,
+      undefined,
+      { headers: { 'Idempotency-Key': `database-import-${crypto.randomUUID()}` } },
+    );
     showToast('Импорт завершён');
     await loadDatabases();
   } catch (err: unknown) {

@@ -413,6 +413,26 @@ check_release_capacity() {
 preflight_serving_health() {
   nginx -t >/dev/null || die "current Nginx configuration does not validate"
   systemctl is-active --quiet nginx || die "Nginx service is not active"
+  local process_name status
+  for process_name in meowbox-api meowbox-agent meowbox-web; do
+    status="$(pm2 jlist 2>/dev/null | python3 -c '
+import json
+import sys
+name = sys.argv[1]
+try:
+    processes = json.load(sys.stdin)
+except json.JSONDecodeError:
+    processes = []
+print(next((str(item.get("pm2_env", {}).get("status", "missing")) for item in processes if item.get("name") == name), "missing"))
+' "$process_name")"
+    if [[ "$status" == "missing" ]]; then
+      say "recovering missing PM2 process before release preflight: $process_name"
+      pm2 start "$PANEL_DIR/ecosystem.config.js" --only "$process_name" --update-env >/dev/null
+    elif [[ "$status" != "online" ]]; then
+      say "recovering $status PM2 process before release preflight: $process_name"
+      pm2 start "$process_name" >/dev/null
+    fi
+  done
   bash "$SCRIPT_DIR/healthcheck.sh" --strict --release-dir "$CURRENT_RELEASE"
 }
 

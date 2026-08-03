@@ -17,6 +17,7 @@
     "test:domain-contracts": "TS_NODE_TRANSPILE_ONLY=1 node --test -r ts-node/register -r ../tools/register-shared-source.js test/domain-contracts.test.js",
     "test:operations-locks": "TS_NODE_TRANSPILE_ONLY=1 node --test -r ts-node/register -r ../tools/register-shared-source.js test/operations-locks.test.js",
     "test:database-mutation-rollback": "TS_NODE_TRANSPILE_ONLY=1 node --test -r ts-node/register -r ../tools/register-shared-source.js test/database-mutation-rollback.test.js",
+    "test:database-catalog": "TS_NODE_TRANSPILE_ONLY=1 node --test -r ts-node/register -r ../tools/register-shared-source.js test/database-catalog.test.js",
     "test:deploy-operations": "TS_NODE_TRANSPILE_ONLY=1 node --test -r ts-node/register -r ../tools/register-shared-source.js test/deploy-operations.test.js",
     "test:runtime-settings-rollback": "TS_NODE_TRANSPILE_ONLY=1 node --test -r ts-node/register -r ../tools/register-shared-source.js test/runtime-settings-rollback.test.js",
     "test:file-path-safety": "TS_NODE_TRANSPILE_ONLY=1 node --test -r ts-node/register -r ../tools/register-shared-source.js test/file-path-safety.test.js",

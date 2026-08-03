@@ -63,6 +63,7 @@ jobs:
           npx prisma generate
           npm run build
           npm run test:site-deletion-options
+          npm run test:database-catalog
           npm run test:restic-retention
 
       - name: Install + build web

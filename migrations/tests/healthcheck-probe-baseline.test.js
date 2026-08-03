@@ -169,3 +169,50 @@ exec /usr/bin/curl "$@"
     fs.rmSync(temp, { recursive: true, force: true });
   }
 });
+
+test('strict healthcheck resolves the panel root through the current release symlink', async () => {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'meowbox-health-release-layout-'));
+  const panel = path.join(temp, 'panel');
+  const release = path.join(panel, 'releases', 'v1.2.3');
+  const releaseTools = path.join(release, 'tools');
+  const fakeBin = path.join(temp, 'bin');
+  const server = http.createServer((_request, response) => {
+    response.statusCode = 200;
+    response.end('test');
+  });
+
+  try {
+    const port = await listen(server);
+    fs.mkdirSync(path.join(panel, 'state'), { recursive: true });
+    fs.mkdirSync(path.join(release, 'web', '.output', 'server'), { recursive: true });
+    fs.mkdirSync(releaseTools, { recursive: true });
+    fs.mkdirSync(fakeBin);
+    fs.writeFileSync(path.join(panel, 'state', '.env'), `API_PORT=${port}\nWEB_PORT=${port}\n`);
+    fs.writeFileSync(path.join(release, 'VERSION'), 'v1.2.3\n');
+    fs.writeFileSync(path.join(release, 'web', '.output', 'server', 'index.mjs'), 'export {};\n');
+    fs.copyFileSync(healthcheck, path.join(releaseTools, 'healthcheck.sh'));
+    fs.symlinkSync(release, path.join(panel, 'current'));
+    fs.writeFileSync(
+      path.join(fakeBin, 'nginx'),
+      '#!/usr/bin/env bash\nexit 0\n',
+      { mode: 0o755 },
+    );
+
+    const passed = await execFileAsync(
+      'bash',
+      [path.join(panel, 'current', 'tools', 'healthcheck.sh'), '--strict', '--skip-pm2'],
+      {
+        env: {
+          ...process.env,
+          PATH: `${fakeBin}:${process.env.PATH}`,
+          HEALTHCHECK_TIMEOUT: '2',
+        },
+      },
+    );
+    assert.match(passed.stdout, /nginx -t/);
+    assert.match(passed.stdout, /OK/);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+    fs.rmSync(temp, { recursive: true, force: true });
+  }
+});
