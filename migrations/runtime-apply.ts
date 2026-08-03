@@ -1,8 +1,7 @@
 #!/usr/bin/env node
 import { execFile } from 'node:child_process';
-import { createHash, randomUUID } from 'node:crypto';
+import { createHash } from 'node:crypto';
 import { promises as fs } from 'node:fs';
-import * as path from 'node:path';
 import { promisify } from 'node:util';
 
 import {
@@ -10,8 +9,10 @@ import {
   requiredAbsolutePath,
 } from './hooks/cli';
 import { safeErrorMessage } from './release/redaction';
+import { atomicWriteManagedFile } from './release/atomic-file';
 import {
   loadRuntimeManifest,
+  readStagedRuntimeArtifact,
   type RuntimeArtifact,
   type ValidatedRuntimeManifest,
 } from './runtime-manifest';
@@ -48,7 +49,48 @@ async function assertCommittedArtifacts(runtime: ValidatedRuntimeManifest): Prom
     if (digest !== artifact.sha256) {
       throw new Error(`committed runtime artifact checksum mismatch: ${artifact.target}`);
     }
+    if ((artifact.mode !== undefined && (metadata.mode & 0o7777) !== artifact.mode)
+      || (artifact.uid !== undefined && metadata.uid !== artifact.uid)
+      || (artifact.gid !== undefined && metadata.gid !== artifact.gid)) {
+      throw new Error(`committed runtime artifact metadata mismatch: ${artifact.target}`);
+    }
   }
+}
+
+export async function commitRuntimeArtifacts(runtime: ValidatedRuntimeManifest): Promise<number> {
+  let committed = 0;
+  for (const artifact of runtime.manifest.artifacts) {
+    if (artifact.action === 'delete') continue;
+    const content = await readStagedRuntimeArtifact(artifact);
+    const metadata = await fs.lstat(artifact.target).catch((error: NodeJS.ErrnoException) => {
+      if (error.code === 'ENOENT') return null;
+      throw error;
+    });
+    if (metadata && (!metadata.isFile() || metadata.isSymbolicLink())) {
+      throw new Error(`managed runtime target is missing or unsafe: ${artifact.target}`);
+    }
+    const current = metadata ? await fs.readFile(artifact.target) : null;
+    const contentMatches = current?.equals(content) === true;
+    const metadataMatches = metadata !== null
+      && (artifact.mode === undefined || (metadata.mode & 0o7777) === artifact.mode)
+      && (artifact.uid === undefined || metadata.uid === artifact.uid)
+      && (artifact.gid === undefined || metadata.gid === artifact.gid);
+    if (contentMatches && metadataMatches) continue;
+    if (!metadata && artifact.action === 'replace'
+      && (artifact.mode === undefined || artifact.uid === undefined || artifact.gid === undefined)) {
+      throw new Error(`missing replace target has no complete metadata: ${artifact.target}`);
+    }
+    await atomicWriteManagedFile(
+      artifact.target,
+      content,
+      artifact.mode,
+      artifact.uid === undefined || artifact.gid === undefined
+        ? undefined
+        : { uid: artifact.uid, gid: artifact.gid },
+    );
+    committed += 1;
+  }
+  return committed;
 }
 
 function touchedPhpServices(artifacts: readonly RuntimeArtifact[]): string[] {
@@ -93,22 +135,12 @@ async function waitForSockets(sockets: readonly string[], timeoutMs = 30_000): P
 }
 
 async function atomicRestore(removed: RemovedArtifact): Promise<void> {
-  await fs.mkdir(path.dirname(removed.target), { recursive: true });
-  const temporary = `${removed.target}.meowbox-restore-${process.pid}-${randomUUID()}`;
-  try {
-    const handle = await fs.open(temporary, 'wx', removed.mode);
-    try {
-      await handle.writeFile(removed.content);
-      await handle.sync();
-      await handle.chmod(removed.mode);
-      await handle.chown(removed.uid, removed.gid);
-    } finally {
-      await handle.close();
-    }
-    await fs.rename(temporary, removed.target);
-  } finally {
-    await fs.unlink(temporary).catch(() => undefined);
-  }
+  await atomicWriteManagedFile(
+    removed.target,
+    removed.content,
+    removed.mode,
+    { uid: removed.uid, gid: removed.gid },
+  );
 }
 
 async function removeDeferredArtifacts(runtime: ValidatedRuntimeManifest): Promise<RemovedArtifact[]> {
@@ -146,6 +178,7 @@ async function restoreRemoved(removed: readonly RemovedArtifact[]): Promise<void
 }
 
 async function switchRuntime(runtime: ValidatedRuntimeManifest): Promise<void> {
+  await commitRuntimeArtifacts(runtime);
   await assertCommittedArtifacts(runtime);
   const writes = runtime.manifest.artifacts.filter((artifact) => artifact.action !== 'delete');
   const phpServices = touchedPhpServices(writes);

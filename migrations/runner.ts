@@ -10,13 +10,14 @@
  * Применяется автоматически в make update после prisma migrate deploy.
  */
 import { execFile, spawnSync } from 'node:child_process';
-import { createHash, randomUUID } from 'node:crypto';
+import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, promises as fs } from 'node:fs';
 import * as path from 'node:path';
 import { promisify } from 'node:util';
 
 import { PrismaClient } from '@prisma/client';
 
+import { atomicWriteManagedFile } from './release/atomic-file';
 import { applySystemMigrationWithCompatibility } from './system-apply-compat';
 import { planLegacySystemMigration } from './system-plan-compat';
 import { assessSystemMigrationHistory } from './system-history';
@@ -97,84 +98,6 @@ function ensureReleaseFlock(readOnly: boolean): void {
     throw new Error(`Cannot acquire release flock (${lockFile}): ${child.error.message}`);
   }
   process.exit(child.status ?? 1);
-}
-
-async function assertNoSymlinkPathComponents(destination: string): Promise<void> {
-  const absolute = path.resolve(destination);
-  const parsed = path.parse(absolute);
-  const components = absolute.slice(parsed.root.length).split(path.sep).filter(Boolean);
-  let current = parsed.root;
-  for (const component of components) {
-    current = path.join(current, component);
-    try {
-      const metadata = await fs.lstat(current);
-      if (metadata.isSymbolicLink()) {
-        throw new Error(`Refusing managed write through symlink path component: ${current}`);
-      }
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return;
-      throw error;
-    }
-  }
-}
-
-/** Atomic write with fsync and preserved owner/mode for managed config files. */
-async function atomicWriteText(
-  destination: string,
-  content: string,
-  mode?: number,
-  ownership?: { uid: number; gid: number },
-): Promise<void> {
-  // A managed config target must be a real file.  Following a pre-existing
-  // symlink would let a permitted /etc path redirect an atomic write to an
-  // unrelated file (for example /etc/passwd).  Replacing a symlink is also
-  // not an implicit supported operation: the renderer must model symlinks via
-  // its own explicit, validated runtime integration.
-  await assertNoSymlinkPathComponents(destination);
-  const destinationMetadata = await fs.lstat(destination).catch((error: NodeJS.ErrnoException) => {
-    if (error.code === 'ENOENT') return null;
-    throw error;
-  });
-  if (destinationMetadata?.isSymbolicLink()) {
-    throw new Error(`Refusing to write managed config through symlink: ${destination}`);
-  }
-  const writePath = destination;
-  const dir = path.dirname(writePath);
-  await fs.mkdir(dir, { recursive: true, mode: 0o700 });
-  await assertNoSymlinkPathComponents(destination);
-  const existing = await fs.stat(writePath).catch(() => null);
-  const finalMode = mode ?? (existing ? existing.mode & 0o7777 : undefined);
-  const temporary = path.join(
-    dir,
-    `.${path.basename(writePath)}.meowbox-migration-${process.pid}-${randomUUID()}`,
-  );
-  try {
-    const handle = await fs.open(temporary, 'wx', finalMode);
-    try {
-      await handle.writeFile(content, 'utf8');
-      await handle.sync();
-    } finally {
-      await handle.close();
-    }
-    if (ownership) {
-      await fs.chown(temporary, ownership.uid, ownership.gid);
-    } else if (existing) {
-      await fs.chown(temporary, existing.uid, existing.gid);
-    }
-    if (finalMode !== undefined) await fs.chmod(temporary, finalMode);
-    await fs.rename(temporary, writePath);
-    const directory = await fs.open(dir, 'r').catch(() => null);
-    if (directory) {
-      try {
-        await directory.sync().catch(() => {});
-      } finally {
-        await directory.close();
-      }
-    }
-  } catch (error) {
-    await fs.unlink(temporary).catch(() => {});
-    throw error;
-  }
 }
 
 /**
@@ -729,7 +652,7 @@ class MigrationsRunner {
       },
       async writeFile(p: string, content: string, mode?: number, ownership?: { uid: number; gid: number }) {
         if (readOnly) throw new Error(`File write is forbidden in a read-only migration plan: ${p}`);
-        await atomicWriteText(p, content, mode, ownership);
+        await atomicWriteManagedFile(p, content, mode, ownership);
       },
       checkpoints: {
         async read<T>(migrationId: string): Promise<T | null> {
@@ -744,7 +667,7 @@ class MigrationsRunner {
         async write<T>(migrationId: string, value: T): Promise<void> {
           if (readOnly) throw new Error(`Checkpoint write is forbidden in a read-only migration plan: ${migrationId}`);
           const file = checkpointPath(migrationId);
-          await atomicWriteText(file, `${JSON.stringify(value, null, 2)}\n`, 0o600);
+          await atomicWriteManagedFile(file, `${JSON.stringify(value, null, 2)}\n`, 0o600);
         },
         async remove(migrationId: string): Promise<void> {
           if (readOnly) throw new Error(`Checkpoint removal is forbidden in a read-only migration plan: ${migrationId}`);

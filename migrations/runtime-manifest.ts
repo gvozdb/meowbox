@@ -54,6 +54,7 @@ export interface ValidatedRuntimeManifest {
 }
 
 const SHA256_RE = /^[a-f0-9]{64}$/;
+const MAX_CONFIG_BYTES = 2 * 1024 * 1024;
 const SERVICE_RE = /^php\d+\.\d+-fpm$/;
 const SOCKET_RE = /^\/var\/run\/php\/php\d+\.\d+-fpm-[a-z][a-z0-9._-]{0,63}\.sock$/;
 // A release owns only generated Site config files, never arbitrary host
@@ -252,6 +253,26 @@ async function resolvedStagedPath(stageRoot: string, stagedPath: string): Promis
   return resolved;
 }
 
+export async function readStagedRuntimeArtifact(artifact: RuntimeArtifact): Promise<Buffer> {
+  if (artifact.action === 'delete' || !artifact.stagedPath || !artifact.sha256) {
+    throw new Error(`runtime artifact has no staged content: ${artifact.target}`);
+  }
+  const metadata = await fs.lstat(artifact.stagedPath);
+  if (!metadata.isFile() || metadata.isSymbolicLink() || metadata.size > MAX_CONFIG_BYTES) {
+    throw new Error(`staged runtime artifact is unsafe: ${artifact.target}`);
+  }
+  const content = await fs.readFile(artifact.stagedPath);
+  const actual = createHash('sha256').update(content).digest('hex');
+  if (actual !== artifact.sha256) {
+    throw new Error(`staged runtime artifact checksum mismatch: ${artifact.target}`);
+  }
+  const text = content.toString('utf8');
+  if (content.includes(0) || !Buffer.from(text, 'utf8').equals(content)) {
+    throw new Error(`runtime config is not safe UTF-8 text: ${artifact.target}`);
+  }
+  return content;
+}
+
 export async function loadRuntimeManifest(manifestPath: string, stageRoot: string): Promise<ValidatedRuntimeManifest> {
   const raw = JSON.parse(await fs.readFile(manifestPath, 'utf8')) as unknown;
   const manifest = parseManifest(raw);
@@ -262,12 +283,7 @@ export async function loadRuntimeManifest(manifestPath: string, stageRoot: strin
       continue;
     }
     const stagedPath = await resolvedStagedPath(stageRoot, artifact.stagedPath!);
-    const content = await fs.readFile(stagedPath);
-    const actual = createHash('sha256').update(content).digest('hex');
-    if (actual !== artifact.sha256) {
-      throw new Error(`staged runtime artifact checksum mismatch: ${artifact.target}`);
-    }
-    if (content.includes(0)) throw new Error(`runtime config contains NUL: ${artifact.target}`);
+    await readStagedRuntimeArtifact({ ...artifact, stagedPath });
     // Keep the resolved regular-file path so the commit phase cannot follow a
     // staging symlink that is later retargeted after validation.
     artifacts.push({ ...artifact, stagedPath });
