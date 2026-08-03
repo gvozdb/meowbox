@@ -46,7 +46,7 @@ export class PanelUpdateController {
     return { success: true, data };
   }
 
-  /** POST /api/admin/update — запускает tools/update.sh в фоне. body: { version?: 'v1.4.2' | null }. */
+  /** POST /api/admin/update — запускает проверенный target updater в фоне. body: { version?: 'v1.4.2' | null }. */
   @Post()
   @Roles(UserRole.ADMIN)
   async trigger(

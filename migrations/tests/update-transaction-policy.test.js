@@ -13,6 +13,7 @@ const bootstrapUpdater = path.join(root, 'tools', 'bootstrap-release-update.sh')
 const releaseRecovery = path.join(root, 'tools', 'recover-missing-release.sh');
 const releaseWorkflow = path.join(root, '.github', 'workflows', 'release.yml');
 const apiPackage = path.join(root, 'api', 'package.json');
+const panelUpdateService = path.join(root, 'api', 'src', 'panel-update', 'panel-update.service.ts');
 const prismaBridge = path.join(root, 'api', 'scripts', 'prisma-legacy-bridge.cjs');
 
 function action(armed, committed, journalState) {
@@ -154,6 +155,21 @@ test('legacy bootstrap verifies the artifact and bypasses prisma db push', () =>
   assert.match(source, /bash "\$CANDIDATE\/tools\/update\.sh" "\$TARGET"/);
   assert.doesNotMatch(source, /npx\s+prisma\s+db\s+push/);
   assert.match(source, /panel current release target is missing/);
+});
+
+test('panel update hands off to the checksum-verified target updater', () => {
+  const source = fs.readFileSync(panelUpdateService, 'utf8');
+  const start = source.indexOf('async triggerUpdate(');
+  const end = source.indexOf('\n  // ---------------------------------------------------------------------------', start);
+  assert.notEqual(start, -1);
+  assert.notEqual(end, -1);
+  const trigger = source.slice(start, end);
+
+  assert.match(trigger, /bootstrap-release-update\.sh/);
+  assert.match(trigger, /const args: string\[\] = \[bootstrapScript\]/);
+  assert.match(trigger, /if \(toVersion !== 'latest'\) args\.push\(toVersion\)/);
+  assert.doesNotMatch(trigger, /path\.join\(panelDir, 'tools', 'update\.sh'\)/);
+  assert.match(trigger, /MEOWBOX_TRIGGERED_BY: `user:\$\{userId\}`/);
 });
 
 test('detached transactional tools share an explicit production panel root', () => {

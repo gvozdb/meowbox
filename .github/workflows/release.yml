@@ -137,6 +137,7 @@ jobs:
           test -f "$STAGE/migrations/dist/system-apply-compat.js"
           test -f "$STAGE/api/prisma/legacy-panel-update-bridge.json"
           test -f "$STAGE/api/scripts/prisma-legacy-bridge.cjs"
+          grep -q 'bootstrap-release-update.sh' "$STAGE/api/dist/panel-update/panel-update.service.js"
 
           # Архив
           mkdir -p dist

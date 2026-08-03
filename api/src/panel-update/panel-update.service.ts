@@ -1,7 +1,9 @@
 /**
  * Panel-update — серверная часть страницы /admin/updates.
  *
- * Запускает `tools/update.sh` через spawn, парсит stdout (`[stage:NAME] ...`),
+ * Запускает `tools/bootstrap-release-update.sh` через spawn. Bootstrap
+ * проверяет целевой релиз и передаёт управление его `tools/update.sh`, после
+ * чего сервис парсит stdout (`[stage:NAME] ...`),
  * обновляет `PanelUpdateState` в БД (поле `currentStage` + tail логов).
  * UI делает polling `/api/admin/update/status` раз в 1 сек.
  *
@@ -389,9 +391,11 @@ export class PanelUpdateService implements OnModuleInit {
     }
 
     const panelDir = this.getPanelDir();
-    const updateScript = path.join(panelDir, 'tools', 'update.sh');
-    if (!fs.existsSync(updateScript)) {
-      throw new InternalServerErrorException(`tools/update.sh не найден по пути ${updateScript}`);
+    const bootstrapScript = path.join(panelDir, 'tools', 'bootstrap-release-update.sh');
+    if (!fs.existsSync(bootstrapScript)) {
+      throw new InternalServerErrorException(
+        `tools/bootstrap-release-update.sh не найден по пути ${bootstrapScript}`,
+      );
     }
 
     const fromVersion = this.readCurrentVersion();
@@ -446,9 +450,11 @@ export class PanelUpdateService implements OnModuleInit {
 
     const logFd = fs.openSync(logFilePath, 'a');
 
-    const args: string[] = [updateScript];
-    if (targetVersion) args.push(targetVersion);
-    args.push(`--triggered-by=user:${userId}`);
+    // Всегда входим через bootstrap текущего релиза: он проверяет SHA256
+    // целевого tarball и запускает updater ИЗ целевого релиза. Иначе старая
+    // панель скачает новый код, но продолжит обновление старым update.sh.
+    const args: string[] = [bootstrapScript];
+    if (toVersion !== 'latest') args.push(toVersion);
 
     const child = spawn('bash', args, {
       cwd: panelDir,

@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
-# One-time entry point for releases whose bundled updater still runs
-# `prisma db push`. The target release is verified first, then its transactional
-# updater migrates a clone, snapshots live state and performs the real cutover.
+# Stable entry point for release updates. The target release is verified first,
+# then its own transactional updater migrates a clone, snapshots live state and
+# performs the cutover. This prevents an older panel from driving a newer
+# release with outdated transaction logic.
 set -Eeuo pipefail
 
 say() { echo "[bootstrap-update] $*"; }
