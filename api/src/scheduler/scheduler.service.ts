@@ -16,6 +16,7 @@ import { SiteStatus, BackupStatus, DeployStatus } from '../common/enums';
 import { PanelSettingsService } from '../panel-settings/panel-settings.service';
 import { DnsService } from '../dns/dns.service';
 import { CountryBlockService } from '../country-block/country-block.service';
+import { failStaleBackupRuns } from '../backups/backup-run-recovery';
 
 // Thresholds for high load alerts (avoid alert storms with cooldown).
 // Все пороги конфигурируются через env, т.к. оператор регулярно их подстраивает
@@ -80,6 +81,7 @@ export class SchedulerService implements OnModuleInit {
 
   async onModuleInit() {
     await this.loadDiskAlertState();
+    await this.recoverStaleBackups();
   }
 
   // Подтягиваем последний уровень/время disk-алёрта из БД на старте.
@@ -698,31 +700,7 @@ export class SchedulerService implements OnModuleInit {
   // =========================================================================
   @Cron('*/15 * * * *')
   async handleStuckOperationsWatchdog() {
-    // Stuck backups (4 hours — large backups can take a while)
-    try {
-      const backupCutoff = new Date(Date.now() - WATCHDOG_BACKUP_TIMEOUT_MS);
-      const stuckBackups = await this.prisma.backup.findMany({
-        where: {
-          status: { in: [BackupStatus.PENDING, BackupStatus.IN_PROGRESS] },
-          createdAt: { lt: backupCutoff },
-        },
-        select: { id: true },
-      });
-
-      if (stuckBackups.length > 0) {
-        await this.prisma.backup.updateMany({
-          where: { id: { in: stuckBackups.map((b) => b.id) } },
-          data: {
-            status: BackupStatus.FAILED,
-            errorMessage: 'Операция зависла (превышен лимит 4 часа)',
-            completedAt: new Date(),
-          },
-        });
-        this.logger.warn(`Marked ${stuckBackups.length} stuck backup(s) as FAILED`);
-      }
-    } catch (err) {
-      this.logger.error(`Stuck backup watchdog failed: ${(err as Error).message}`);
-    }
+    await this.recoverStaleBackups();
 
     // Stuck deploys (1 hour)
     try {
@@ -755,6 +733,22 @@ export class SchedulerService implements OnModuleInit {
       }
     } catch (err) {
       this.logger.error(`Stuck deploy watchdog failed: ${(err as Error).message}`);
+    }
+  }
+
+  private async recoverStaleBackups() {
+    try {
+      const backupCutoff = new Date(Date.now() - WATCHDOG_BACKUP_TIMEOUT_MS);
+      const recovered = await failStaleBackupRuns(this.prisma, backupCutoff);
+      const total = recovered.site + recovered.serverPath + recovered.panelData;
+      if (total > 0) {
+        this.logger.warn(
+          `Marked ${total} stuck backup(s) as FAILED ` +
+          `(site=${recovered.site}, server-path=${recovered.serverPath}, panel-data=${recovered.panelData})`,
+        );
+      }
+    } catch (err) {
+      this.logger.error(`Stuck backup watchdog failed: ${(err as Error).message}`);
     }
   }
 

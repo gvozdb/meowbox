@@ -1095,6 +1095,14 @@ export class AgentService {
       cb({ success: r.success, data: { snapshots: r.snapshots || [] }, error: r.error });
     });
 
+    this.safeOn(s, 'restic:repository-snapshots', async (params: {
+      repoName: string;
+      storage: ResticStorage;
+    }, cb: Callback) => {
+      const r = await this.restic.listRepositorySnapshots(params.repoName, params.storage);
+      cb({ success: r.success, data: { snapshots: r.snapshots || [] }, error: r.error });
+    });
+
     // Листинг первого уровня rootPath в снапшоте — для UI selective restore.
     this.safeOn(s, 'restic:list-tree', async (params: {
       siteName: string;
@@ -1158,7 +1166,16 @@ export class AgentService {
     }, cb: Callback) => {
       const r = await this.restic.forget(params.siteName, params.storage, params.policy);
       cb({ success: r.success, error: r.error });
-    });
+    }, TIMEOUTS.RESTIC);
+
+    this.safeOn(s, 'restic:forget-repository', async (params: {
+      repoName: string;
+      storage: ResticStorage;
+      policy: RetentionPolicy;
+    }, cb: Callback) => {
+      const r = await this.restic.forgetRepository(params.repoName, params.storage, params.policy);
+      cb({ success: r.success, error: r.error });
+    }, TIMEOUTS.RESTIC);
 
     this.safeOn(s, 'restic:delete-snapshot', async (params: {
       siteName: string;

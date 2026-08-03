@@ -21,6 +21,7 @@
     "test:runtime-settings-rollback": "TS_NODE_TRANSPILE_ONLY=1 node --test -r ts-node/register -r ../tools/register-shared-source.js test/runtime-settings-rollback.test.js",
     "test:file-path-safety": "TS_NODE_TRANSPILE_ONLY=1 node --test -r ts-node/register -r ../tools/register-shared-source.js test/file-path-safety.test.js",
     "test:site-deletion-options": "TS_NODE_TRANSPILE_ONLY=1 node --test -r ts-node/register -r ../tools/register-shared-source.js test/site-deletion-options.test.js",
+    "test:restic-retention": "TS_NODE_TRANSPILE_ONLY=1 node --test -r ts-node/register -r ../tools/register-shared-source.js test/restic-repository-retention.test.js",
     "db:migrate": "npx prisma migrate deploy",
     "db:migrate:dev": "npx prisma migrate dev",
     "db:generate": "npx prisma generate",

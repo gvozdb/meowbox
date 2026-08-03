@@ -9,6 +9,7 @@ import {
   S3_DEFAULTS,
   BACKUP_S3,
   RESTIC_OPS,
+  TIMEOUTS,
   isUnderAllowedSiteRoot,
 } from '../config';
 import { childProcessRegistry } from '../process-registry';
@@ -650,6 +651,27 @@ export class ResticExecutor {
     }
   }
 
+  async listRepositorySnapshots(
+    repoName: string,
+    storage: ResticStorage,
+  ): Promise<{ success: boolean; snapshots?: ResticSnapshot[]; error?: string }> {
+    try {
+      const base = this.buildResticBaseArgs(repoName, storage);
+      const env = this.buildEnv(storage);
+      const r = await this.executor.execute(
+        'restic',
+        [...base, 'snapshots', '--json', '--tag', `repo:${repoName}`],
+        { env, timeout: 60_000, allowFailure: true },
+      );
+      if (r.exitCode !== 0) {
+        return { success: false, error: r.stderr.substring(0, 500) };
+      }
+      return { success: true, snapshots: JSON.parse(r.stdout) as ResticSnapshot[] };
+    } catch (err) {
+      return { success: false, error: (err as Error).message };
+    }
+  }
+
   // ---------------------------------------------------------------------------
   // Restore
   // ---------------------------------------------------------------------------
@@ -1224,9 +1246,51 @@ export class ResticExecutor {
         return { success: true };
       }
 
-      const r = await this.executor.execute('restic', args, { env, timeout: 600_000, allowFailure: true });
+      const r = await this.executor.execute('restic', args, {
+        env,
+        timeout: TIMEOUTS.RESTIC,
+        allowFailure: true,
+      });
       if (r.exitCode !== 0) {
         return { success: false, error: r.stderr.substring(0, 500) };
+      }
+      return { success: true };
+    } catch (err) {
+      return { success: false, error: (err as Error).message };
+    }
+  }
+
+  async forgetRepository(
+    repoName: string,
+    storage: ResticStorage,
+    policy: RetentionPolicy,
+  ): Promise<{ success: boolean; error?: string }> {
+    try {
+      const base = this.buildResticBaseArgs(repoName, storage);
+      const env = this.buildEnv(storage);
+      const args = [
+        ...base,
+        'forget',
+        '--tag',
+        `repo:${repoName}`,
+        '--group-by',
+        'tags',
+        '--prune',
+      ];
+      const beforeKeepLen = args.length;
+      if (policy.keepDaily) args.push('--keep-daily', String(policy.keepDaily));
+      if (policy.keepWeekly) args.push('--keep-weekly', String(policy.keepWeekly));
+      if (policy.keepMonthly) args.push('--keep-monthly', String(policy.keepMonthly));
+      if (policy.keepYearly) args.push('--keep-yearly', String(policy.keepYearly));
+      if (args.length === beforeKeepLen) return { success: true };
+
+      const result = await this.executor.execute('restic', args, {
+        env,
+        timeout: TIMEOUTS.RESTIC,
+        allowFailure: true,
+      });
+      if (result.exitCode !== 0) {
+        return { success: false, error: result.stderr.substring(0, 500) };
       }
       return { success: true };
     } catch (err) {

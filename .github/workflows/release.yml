@@ -54,7 +54,7 @@ jobs:
 
       - name: Install + build agent
         working-directory: agent
-        run: npm ci && npm run build
+        run: npm ci && npm run build && npm run test:restic-retention
 
       - name: Install + build api
         working-directory: api
@@ -63,6 +63,7 @@ jobs:
           npx prisma generate
           npm run build
           npm run test:site-deletion-options
+          npm run test:restic-retention
 
       - name: Install + build web
         working-directory: web

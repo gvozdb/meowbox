@@ -13,6 +13,7 @@ import { StorageLocationsModule } from '../storage-locations/storage-locations.m
 import { PanelSettingsModule } from '../panel-settings/panel-settings.module';
 import { SitesModule } from '../sites/sites.module';
 import { BackupArtifactsModule } from './backup-artifacts.module';
+import { ResticRepositoryRetentionService } from './restic-repository-retention.service';
 
 @Module({
   imports: [
@@ -33,6 +34,7 @@ import { BackupArtifactsModule } from './backup-artifacts.module';
     ResticCheckService,
     ServerPathBackupService,
     PanelDataBackupService,
+    ResticRepositoryRetentionService,
     SiteBackupScheduleService,
   ],
   exports: [

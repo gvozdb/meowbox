@@ -1,0 +1,1 @@
+export const RESTIC_RETENTION_TIMEOUT_MS = 1_800_000;

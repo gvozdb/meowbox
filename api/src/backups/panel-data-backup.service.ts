@@ -19,6 +19,8 @@ import {
   UpdatePanelDataBackupDto,
 } from './server-path-backup.dto';
 import { parseStringArray, stringifyStringArray, parseJsonObject } from '../common/json-array';
+import { ResticRepositoryRetentionService } from './restic-repository-retention.service';
+import { resticRepositoryName } from './restic-repository-name';
 
 const execFileP = promisify(execFile);
 
@@ -65,6 +67,7 @@ export class PanelDataBackupService {
     private readonly agentRelay: AgentRelayService,
     private readonly notifier: NotificationDispatcherService,
     private readonly digest: NotificationDigestService,
+    private readonly resticRetention: ResticRepositoryRetentionService,
   ) {}
 
   // ===========================================================================
@@ -218,6 +221,11 @@ export class PanelDataBackupService {
     try {
       await execFileP('sqlite3', [dbFile, `VACUUM INTO '${dbSnapshotPath}'`]);
     } catch (e) {
+      try {
+        if (fs.existsSync(dbSnapshotPath)) fs.unlinkSync(dbSnapshotPath);
+      } catch (cleanupError) {
+        this.logger.warn(`Failed to remove incomplete DB snapshot: ${(cleanupError as Error).message}`);
+      }
       throw new InternalServerErrorException(
         `VACUUM INTO failed: ${(e as Error).message}`,
       );
@@ -303,7 +311,7 @@ export class PanelDataBackupService {
       this.agentRelay.emitToAgentAsync('restic:backup-paths', {
         backupId,
         scope: 'PANEL_DATA',
-        repoName: this.slugify(configName),
+        repoName: resticRepositoryName(configName, 'panel-data'),
         paths,
         excludePaths: [],
         storage: {
@@ -319,16 +327,12 @@ export class PanelDataBackupService {
     this.agentRelay.emitToAgentAsync('backup:execute-paths', {
       backupId,
       scope: 'PANEL_DATA',
-      archiveName: this.slugify(configName),
+      archiveName: resticRepositoryName(configName, 'panel-data'),
       paths,
       excludePaths: [],
       storageType: location.type,
       storageConfig: location.config,
     });
-  }
-
-  private slugify(name: string): string {
-    return name.toLowerCase().replace(/[^a-z0-9-_]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 60) || 'panel-data';
   }
 
   // ===========================================================================
@@ -375,6 +379,12 @@ export class PanelDataBackupService {
         progress: success ? 100 : 0,
       },
     });
+
+    if (success) {
+      await this.resticRetention.applyForPanelBackup(backupId).catch((err) =>
+        this.logger.warn(`Restic retention failed for ${backupId}: ${(err as Error).message}`),
+      );
+    }
 
     // Cleanup DB snapshot файла (regex выводим из filePath, если был передан, иначе ищем самый свежий)
     try {

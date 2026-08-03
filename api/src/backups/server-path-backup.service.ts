@@ -10,13 +10,14 @@ import { PrismaService } from '../common/prisma.service';
 import { AgentRelayService } from '../gateway/agent-relay.service';
 import { NotificationDispatcherService } from '../notifications/notification-dispatcher.service';
 import { NotificationDigestService, DigestNotificationMode } from '../notifications/notification-digest.service';
-import { StorageLocationsService } from '../storage-locations/storage-locations.service';
 import {
   CreateServerPathBackupDto,
   UpdateServerPathBackupDto,
 } from './server-path-backup.dto';
 import { parseStringArray, stringifyStringArray, parseJsonObject } from '../common/json-array';
 import { assertValidPath, checkPathWarnings } from './warnlist';
+import { ResticRepositoryRetentionService } from './restic-repository-retention.service';
+import { resticRepositoryName } from './restic-repository-name';
 
 const RESTIC_COMPATIBLE = new Set(['LOCAL', 'S3']);
 
@@ -29,7 +30,7 @@ export class ServerPathBackupService {
     private readonly agentRelay: AgentRelayService,
     private readonly notifier: NotificationDispatcherService,
     private readonly digest: NotificationDigestService,
-    private readonly storageLocations: StorageLocationsService,
+    private readonly resticRetention: ResticRepositoryRetentionService,
   ) {}
 
   // ===========================================================================
@@ -234,12 +235,6 @@ export class ServerPathBackupService {
           config: parseJsonObject<Record<string, string>>(loc.config, {}),
           resticPassword: loc.resticPassword,
         },
-        retention: {
-          keepDaily: config.keepDaily,
-          keepWeekly: config.keepWeekly,
-          keepMonthly: config.keepMonthly,
-          keepYearly: config.keepYearly,
-        },
       }).catch((err) => {
         this.logger.error(`Dispatch failed for ${backup.id}: ${(err as Error).message}`);
         this.prisma.serverPathBackup
@@ -277,7 +272,6 @@ export class ServerPathBackupService {
       config: Record<string, string>;
       resticPassword: string | null;
     };
-    retention: { keepDaily: number; keepWeekly: number; keepMonthly: number; keepYearly: number };
   }): Promise<void> {
     const { backupId, configName, path, engine, excludePaths, location } = params;
 
@@ -288,7 +282,7 @@ export class ServerPathBackupService {
       this.agentRelay.emitToAgentAsync('restic:backup-paths', {
         backupId,
         scope: 'SERVER_PATH',
-        repoName: this.slugifyForRepo(configName),
+        repoName: resticRepositoryName(configName, 'server-path'),
         paths: [path],
         excludePaths,
         storage: {
@@ -304,16 +298,12 @@ export class ServerPathBackupService {
     this.agentRelay.emitToAgentAsync('backup:execute-paths', {
       backupId,
       scope: 'SERVER_PATH',
-      archiveName: this.slugifyForRepo(configName),
+      archiveName: resticRepositoryName(configName, 'server-path'),
       paths: [path],
       excludePaths,
       storageType: location.type,
       storageConfig: location.config,
     });
-  }
-
-  private slugifyForRepo(name: string): string {
-    return name.toLowerCase().replace(/[^a-z0-9-_]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 60) || 'server-path';
   }
 
   // ===========================================================================
@@ -360,6 +350,12 @@ export class ServerPathBackupService {
         progress: success ? 100 : 0,
       },
     });
+
+    if (success) {
+      await this.resticRetention.applyForServerPathBackup(backupId).catch((err) =>
+        this.logger.warn(`Restic retention failed for ${backupId}: ${(err as Error).message}`),
+      );
+    }
 
     const mode = (backup.config.notificationMode || 'INSTANT') as DigestNotificationMode;
     this.digest

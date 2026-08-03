@@ -54,6 +54,7 @@ import {
   safeErrorMessage,
 } from '@meowbox/shared';
 import { createHash, randomUUID } from 'crypto';
+import { RESTIC_RETENTION_TIMEOUT_MS } from './restic-retention.constants';
 
 export interface UnifiedBackupRow {
   id: string;
@@ -862,7 +863,7 @@ export class BackupsService {
         storage: { type: loc.type, config: loc.config, password: loc.resticPassword },
         policy,
       },
-      600_000,
+      RESTIC_RETENTION_TIMEOUT_MS,
     );
     if (!res.success) {
       this.logger.warn(`restic:forget failed: ${res.error}`);
