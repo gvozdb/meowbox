@@ -54,7 +54,7 @@ jobs:
 
       - name: Install + build agent
         working-directory: agent
-        run: npm ci && npm run build && npm run test:restic-retention && npm run test:redis-executor && npm run test:application-root-preflight
+        run: npm ci && npm run build && npm run test:restic-retention && npm run test:redis-executor && npm run test:application-root-preflight && npm run test:xray-port-reservation
 
       - name: Install + build api
         working-directory: api
@@ -67,6 +67,7 @@ jobs:
           npm run test:restic-retention
           npm run test:panel-update-runner
           npm run test:domain-mutation-rollback
+          npm run test:vpn-port-reservation
 
       - name: Install + build web
         working-directory: web

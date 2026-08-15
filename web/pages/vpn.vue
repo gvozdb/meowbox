@@ -346,6 +346,9 @@
             <span class="field__label">Порт</span>
             <input v-model.number="form.port" type="number" min="1" max="65535" class="field__input" />
           </label>
+          <p v-if="form.protocol === 'VLESS_REALITY'" class="field__hint">
+            TCP-порты 80 и 443 заняты HTTP/HTTPS сайтами; используй другой порт.
+          </p>
           <label class="field">
             <span class="field__label">Имя сервиса (опционально)</span>
             <input v-model="form.label" maxlength="64" class="field__input" placeholder="Например: Reality main" />
@@ -638,6 +641,9 @@
 
 <script setup lang="ts">
 import { ref, reactive, computed, onMounted } from 'vue';
+import * as meowboxShared from '@meowbox/shared';
+
+const { DEFAULT_VPN_PORTS } = meowboxShared;
 
 definePageMeta({ middleware: 'auth' });
 
@@ -730,7 +736,7 @@ const accessTab = ref<string>('sub');
 
 const form = reactive({
   protocol: 'VLESS_REALITY',
-  port: 443,
+  port: DEFAULT_VPN_PORTS.VLESS_REALITY,
   label: '',
   sniMask: 'www.google.com',
   sniMaskCustom: '',
@@ -889,7 +895,9 @@ function openCreateService() {
   const defaultProto = installStatus.value.xray.installed ? 'VLESS_REALITY' : 'AMNEZIA_WG';
   Object.assign(form, {
     protocol: defaultProto,
-    port: defaultProto === 'VLESS_REALITY' ? 443 : 51820,
+    port: defaultProto === 'VLESS_REALITY'
+      ? DEFAULT_VPN_PORTS.VLESS_REALITY
+      : DEFAULT_VPN_PORTS.AMNEZIA_WG,
     label: '',
     sniMask: 'www.google.com',
     sniMaskCustom: '',

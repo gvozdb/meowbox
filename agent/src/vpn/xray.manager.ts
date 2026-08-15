@@ -35,6 +35,7 @@ import {
   XRAY_BINARY_PATH,
   XRAY_SYSTEMD_PREFIX,
   DEFAULT_REALITY_FINGERPRINT,
+  isVpnPortReserved,
   VpnProtocol,
 } from '@meowbox/shared';
 import type { SniValidationResult } from '@meowbox/shared';
@@ -199,6 +200,12 @@ export class XrayManager {
   /** install: создать сервис на машине. Идемпотентно по serviceId (если уже есть — сбросит конфиг). */
   async install(params: XrayInstallParams): Promise<XrayInstallResult> {
     return withLock(params.serviceId, async () => {
+      if (isVpnPortReserved(VpnProtocol.VLESS_REALITY, params.port)) {
+        throw new Error(
+          `TCP-порт ${params.port} зарезервирован для HTTP/HTTPS сайтов Meowbox. Выбери другой порт, например 8443.`,
+        );
+      }
+
       // 1) Validate SNI.
       const sniResult = await this.validateSni(params.sniMask);
       if (!sniResult.ok) {
@@ -262,7 +269,9 @@ export class XrayManager {
       }
       const dir = path.join(VPN_STATE_DIR, serviceId);
       await this.cmd.execute('rm', ['-rf', dir]);
-      await this.closeFirewall(port, 'tcp');
+      if (!isVpnPortReserved(VpnProtocol.VLESS_REALITY, port)) {
+        await this.closeFirewall(port, 'tcp');
+      }
     });
   }
 

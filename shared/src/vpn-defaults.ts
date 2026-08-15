@@ -27,9 +27,19 @@ export const DEFAULT_SNI_MASKS: readonly string[] = [
 ];
 
 export const DEFAULT_VPN_PORTS: Record<VpnProtocol, number> = {
-  [VpnProtocol.VLESS_REALITY]: 443,
+  [VpnProtocol.VLESS_REALITY]: 8443,
   [VpnProtocol.AMNEZIA_WG]: 51820,
 };
+
+/**
+ * Эти TCP-порты принадлежат веб-стеку панели. VLESS+Reality на них заберёт
+ * HTTP/HTTPS у Nginx и превратит обычный TLS-запрос в fallback SNI-маски.
+ */
+export const RESERVED_WEB_TCP_PORTS: readonly number[] = [80, 443];
+
+export function isVpnPortReserved(protocol: VpnProtocol, port: number): boolean {
+  return protocol === VpnProtocol.VLESS_REALITY && RESERVED_WEB_TCP_PORTS.includes(port);
+}
 
 export const DEFAULT_AMNEZIA_NETWORK = '10.13.13.0/24';
 export const DEFAULT_AMNEZIA_DNS: readonly string[] = ['1.1.1.1', '8.8.8.8'];

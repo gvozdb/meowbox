@@ -16,6 +16,7 @@ import {
   DEFAULT_AMNEZIA_NETWORK,
   DEFAULT_AMNEZIA_DNS,
   DEFAULT_AMNEZIA_MTU,
+  isVpnPortReserved,
   SniValidationResult,
 } from '@meowbox/shared';
 import { PrismaService } from '../common/prisma.service';
@@ -186,6 +187,8 @@ export class VpnService implements OnModuleInit {
   }
 
   async createService(dto: CreateServiceDto) {
+    this.assertPortIsAvailableForProtocol(dto.protocol, dto.port);
+
     if (!this.relay.isAgentConnected()) {
       throw new BadRequestException('Агент не подключён');
     }
@@ -295,6 +298,7 @@ export class VpnService implements OnModuleInit {
   async startService(id: string): Promise<void> {
     const s = await this.prisma.vpnService.findUnique({ where: { id } });
     if (!s) throw new NotFoundException();
+    this.assertPortIsAvailableForProtocol(s.protocol as VpnProtocol, s.port);
     const provider = this.registry.get(s.protocol);
     await provider.start(s.id);
     await this.prisma.vpnService.update({
@@ -312,6 +316,13 @@ export class VpnService implements OnModuleInit {
       where: { id },
       data: { status: VpnServiceStatus.STOPPED },
     });
+  }
+
+  private assertPortIsAvailableForProtocol(protocol: VpnProtocol, port: number): void {
+    if (!isVpnPortReserved(protocol, port)) return;
+    throw new BadRequestException(
+      `TCP-порт ${port} зарезервирован для HTTP/HTTPS сайтов Meowbox. Выбери другой порт, например 8443.`,
+    );
   }
 
   async validateSni(sniMask: string): Promise<SniValidationResult> {
