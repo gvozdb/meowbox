@@ -84,6 +84,7 @@ const APPLICATION_WITH_ROOT_SHARERS = {
         select: {
           id: true,
           filesRelPath: true,
+          appStatus: true,
         },
       },
     },
@@ -150,6 +151,11 @@ export class SiteDomainsService {
     const preset = dto.preset;
     const isModx = preset === 'MODX_REVO' || preset === 'MODX_3';
     const phpVersion = isModx ? dto.phpVersion || '8.2' : dto.phpVersion || null;
+    const reusesExistingRoot = this.hasRunningSharedApplicationRoot(
+      site.domains,
+      filesRelPath,
+    );
+    this.assertSharedRootPreset(preset, reusesExistingRoot);
 
     if (isModx && dto.dbType === 'POSTGRESQL') {
       throw new BadRequestException('MODX requires MariaDB or MySQL');
@@ -1830,12 +1836,12 @@ export class SiteDomainsService {
     });
     if (!application) throw new NotFoundException('Domain application not found');
 
-    const applicationPath = this.applicationPath(application.filesRelPath);
-    const reusesExistingRoot = application.site.domains.some(
-      (domain) =>
-        domain.id !== domainId &&
-        this.applicationPath(domain.filesRelPath) === applicationPath,
+    const reusesExistingRoot = this.hasRunningSharedApplicationRoot(
+      application.site.domains,
+      application.filesRelPath,
+      domainId,
     );
+    this.assertSharedRootPreset(application.preset, reusesExistingRoot);
 
     const isModx =
       application.preset === 'MODX_REVO' || application.preset === 'MODX_3';
@@ -2238,7 +2244,7 @@ export class SiteDomainsService {
           .catch(() => undefined);
       }
 
-      if (rootMutationStarted && operationId) {
+      if (rootMutationStarted && operationId && !reusesExistingRoot) {
         await this.agentRelay
           .emitToAgent('application:delete-files', {
             operationId,
@@ -2312,6 +2318,35 @@ export class SiteDomainsService {
       return normalizeFilesRelPath(value);
     } catch {
       throw new BadRequestException('Invalid application files path');
+    }
+  }
+
+  private hasRunningSharedApplicationRoot(
+    domains: Array<{
+      id: string;
+      filesRelPath: string;
+      appStatus: string;
+    }>,
+    filesRelPath: string,
+    excludeDomainId?: string,
+  ): boolean {
+    const targetPath = this.applicationPath(filesRelPath);
+    return domains.some(
+      (domain) =>
+        domain.id !== excludeDomainId &&
+        domain.appStatus === 'RUNNING' &&
+        this.applicationPath(domain.filesRelPath) === targetPath,
+    );
+  }
+
+  private assertSharedRootPreset(
+    preset: string,
+    reusesExistingRoot: boolean,
+  ): void {
+    if (reusesExistingRoot && preset !== 'CUSTOM') {
+      throw new ConflictException(
+        'MODX applications require a dedicated empty application root',
+      );
     }
   }
 

@@ -312,12 +312,14 @@ path_policy:
     - additional rows require an explicit directory field
   add_domain:
     - directory is required in the same form as domain and preset
-    - MODX target must be absent or empty before installation
-    - CUSTOM may use an existing directory without type discovery
+    - MODX target must be absent or empty before installation; it never shares a running application root
+    - CUSTOM may reuse a non-empty directory only when a RUNNING SiteDomain of the same Site references the same normalized path
+    - reused CUSTOM roots skip installation and keep independent domain runtime/nginx configuration
   destructive_actions:
     - compare canonical real paths against Site.rootPath
     - refuse removal when another SiteDomain references same canonical path
     - never remove a pre-existing non-empty directory during failed provisioning
+    - never remove a root during failed provisioning when it was marked as shared
 
 preset_contracts:
   MODX_REVO:

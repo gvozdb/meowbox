@@ -309,6 +309,7 @@ test('shared application roots are reused without reinstalling files', async () 
     position: 0,
     filesRelPath: 'apps/monorepo',
     phpVersion: null,
+    appStatus: 'RUNNING',
   });
   const target = domain({
     filesRelPath: 'apps/monorepo',
@@ -374,6 +375,123 @@ test('shared application roots are reused without reinstalling files', async () 
     appStatus: 'RUNNING',
     appErrorMessage: null,
   });
+});
+
+test('shared-root provisioning failure never trashes a peer root', async () => {
+  const log = [];
+  const existing = domain({
+    id: 'domain-existing',
+    domain: 'www.example.test',
+    isPrimary: true,
+    position: 0,
+    filesRelPath: 'apps/monorepo',
+    phpVersion: null,
+    appStatus: 'RUNNING',
+  });
+  const target = domain({
+    filesRelPath: 'apps/monorepo',
+    phpVersion: null,
+  });
+  const agentEvents = [];
+  const service = new SiteDomainsService(
+    {
+      siteDomain: {
+        findFirst: async () => ({
+          ...target,
+          site: site([existing, target]),
+          databases: [],
+        }),
+      },
+    },
+    {
+      isAgentConnected: () => true,
+      emitToAgent: async (event, payload) => {
+        agentEvents.push([event, payload]);
+        if (event === 'application:preflight-create-root') {
+          return {
+            success: true,
+            data: { exists: false, isNonEmpty: false },
+          };
+        }
+        if (event === 'site:install') {
+          return {
+            success: false,
+            error: 'root changed while install was running',
+            data: { mutationStarted: true },
+          };
+        }
+        return { success: true };
+      },
+    },
+    operations(log),
+  );
+  service.regenerateNginx = async () => undefined;
+
+  await assert.rejects(
+    () =>
+      service.provisionDomainApplication(
+        'site-id',
+        target.id,
+        undefined,
+        'operation-id',
+      ),
+    /root changed while install/i,
+  );
+
+  assert.equal(
+    agentEvents.some(([event]) => event === 'application:delete-files'),
+    false,
+  );
+});
+
+test('MODX cannot reuse a running application root', async () => {
+  const log = [];
+  const existing = domain({
+    id: 'domain-existing',
+    domain: 'www.example.test',
+    isPrimary: true,
+    position: 0,
+    filesRelPath: 'apps/monorepo',
+    phpVersion: null,
+    appStatus: 'RUNNING',
+  });
+  const target = domain({
+    preset: 'MODX_3',
+    filesRelPath: 'apps/monorepo',
+    phpVersion: '8.2',
+  });
+  const agentEvents = [];
+  const service = new SiteDomainsService(
+    {
+      siteDomain: {
+        findFirst: async () => ({
+          ...target,
+          site: site([existing, target]),
+          databases: [],
+        }),
+      },
+    },
+    {
+      isAgentConnected: () => true,
+      emitToAgent: async (event, payload) => {
+        agentEvents.push([event, payload]);
+        return { success: true };
+      },
+    },
+    operations(log),
+  );
+
+  await assert.rejects(
+    () =>
+      service.provisionDomainApplication(
+        'site-id',
+        target.id,
+        undefined,
+        'operation-id',
+      ),
+    /require a dedicated empty application root/i,
+  );
+  assert.equal(agentEvents.length, 0);
 });
 
 test('destructive deletion restores databases, files, pool and route before commit', async () => {
