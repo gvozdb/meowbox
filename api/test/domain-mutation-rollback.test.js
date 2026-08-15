@@ -300,6 +300,82 @@ test('installer preflight race never trashes a root it did not mutate', async ()
   );
 });
 
+test('shared application roots are reused without reinstalling files', async () => {
+  const log = [];
+  const existing = domain({
+    id: 'domain-existing',
+    domain: 'www.example.test',
+    isPrimary: true,
+    position: 0,
+    filesRelPath: 'apps/monorepo',
+    phpVersion: null,
+  });
+  const target = domain({
+    filesRelPath: 'apps/monorepo',
+    phpVersion: null,
+  });
+  const agentEvents = [];
+  const statusWrites = [];
+  const service = new SiteDomainsService(
+    {
+      siteDomain: {
+        findFirst: async () => ({
+          ...target,
+          site: site([existing, target]),
+          databases: [],
+        }),
+        update: async (query) => statusWrites.push(query),
+      },
+    },
+    {
+      isAgentConnected: () => true,
+      emitToAgent: async (event, payload) => {
+        agentEvents.push([event, payload]);
+        if (event === 'application:preflight-create-root') {
+          return {
+            success: true,
+            data: { exists: true, isNonEmpty: true },
+          };
+        }
+        if (event === 'site:install') {
+          return { success: true, data: { mutationStarted: false } };
+        }
+        if (event === 'site:health-check') {
+          return {
+            success: true,
+            data: { reachable: true, statusCode: 200 },
+          };
+        }
+        return { success: true };
+      },
+    },
+    operations(log),
+  );
+  service.regenerateNginx = async () => undefined;
+
+  await service.provisionDomainApplication(
+    'site-id',
+    target.id,
+    undefined,
+    'operation-id',
+  );
+
+  const preflight = agentEvents.find(
+    ([event]) => event === 'application:preflight-create-root',
+  );
+  const install = agentEvents.find(([event]) => event === 'site:install');
+  assert.equal(preflight[1].allowExistingRoot, true);
+  assert.equal(install[1].reuseExistingRoot, true);
+  assert.equal(
+    agentEvents.some(([event]) => event === 'application:delete-files'),
+    false,
+  );
+  assert.deepEqual(statusWrites.at(-1).data, {
+    appStatus: 'RUNNING',
+    appErrorMessage: null,
+  });
+});
+
 test('destructive deletion restores databases, files, pool and route before commit', async () => {
   const log = [];
   const primary = domain({

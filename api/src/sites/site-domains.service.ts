@@ -76,6 +76,22 @@ const DOMAINS_WITH_SSL = {
   },
 } satisfies Prisma.SiteInclude;
 
+/** Application plus the Site roots needed to detect an intentional shared root. */
+const APPLICATION_WITH_ROOT_SHARERS = {
+  site: {
+    include: {
+      domains: {
+        select: {
+          id: true,
+          filesRelPath: true,
+        },
+      },
+    },
+  },
+  sslCertificate: true,
+  databases: true,
+} satisfies Prisma.SiteDomainInclude;
+
 @Injectable()
 export class SiteDomainsService {
   private readonly logger = new Logger('SiteDomainsService');
@@ -1810,13 +1826,16 @@ export class SiteDomainsService {
 
     let application = await this.prisma.siteDomain.findFirst({
       where: { id: domainId, siteId },
-      include: {
-        site: true,
-        sslCertificate: true,
-        databases: true,
-      },
+      include: APPLICATION_WITH_ROOT_SHARERS,
     });
     if (!application) throw new NotFoundException('Domain application not found');
+
+    const applicationPath = this.applicationPath(application.filesRelPath);
+    const reusesExistingRoot = application.site.domains.some(
+      (domain) =>
+        domain.id !== domainId &&
+        this.applicationPath(domain.filesRelPath) === applicationPath,
+    );
 
     const isModx =
       application.preset === 'MODX_REVO' || application.preset === 'MODX_3';
@@ -1847,6 +1866,7 @@ export class SiteDomainsService {
             siteDomainId: domainId,
             rootPath: application.site.rootPath,
             filesRelPath: application.filesRelPath,
+            allowExistingRoot: reusesExistingRoot,
           },
         );
         if (!preflight.success) {
@@ -1997,11 +2017,7 @@ export class SiteDomainsService {
         });
         application = await this.prisma.siteDomain.findFirstOrThrow({
           where: { id: domainId },
-          include: {
-            site: true,
-            sslCertificate: true,
-            databases: true,
-          },
+          include: APPLICATION_WITH_ROOT_SHARERS,
         });
       }
 
@@ -2020,6 +2036,7 @@ export class SiteDomainsService {
             preset: application.preset,
             rootPath: application.site.rootPath,
             filesRelPath: application.filesRelPath,
+            reuseExistingRoot: reusesExistingRoot,
             domain: application.domain,
             phpVersion: application.phpVersion || undefined,
             modxVersion:

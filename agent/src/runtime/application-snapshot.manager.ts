@@ -56,10 +56,12 @@ export class ApplicationSnapshotManager {
   async preflightCreateRoot(params: {
     rootPath: string;
     filesRelPath: string;
+    allowExistingRoot?: boolean;
   }): Promise<{
     success: boolean;
     applicationRoot?: string;
     exists?: boolean;
+    isNonEmpty?: boolean;
     error?: string;
   }> {
     try {
@@ -111,7 +113,8 @@ export class ApplicationSnapshotManager {
       ) {
         throw new Error('Application root escapes Site root through a symlink');
       }
-      if ((await fsp.readdir(realApplicationRoot)).length > 0) {
+      const isNonEmpty = (await fsp.readdir(realApplicationRoot)).length > 0;
+      if (isNonEmpty && !params.allowExistingRoot) {
         throw new Error('Application root already exists and is not empty');
       }
 
@@ -119,6 +122,7 @@ export class ApplicationSnapshotManager {
         success: true,
         applicationRoot: realApplicationRoot,
         exists: true,
+        isNonEmpty,
       };
     } catch (error) {
       return { success: false, error: (error as Error).message };

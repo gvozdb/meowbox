@@ -85,6 +85,12 @@ export interface AgentInstallPayload {
   readonly preset: string;
   readonly rootPath: string;
   readonly filesRelPath: string;
+  /**
+   * API only sets this after proving another application of the same Site
+   * already owns the same normalized files path. The agent still validates the
+   * root and skips installation only when it is non-empty.
+   */
+  readonly reuseExistingRoot?: boolean;
   readonly domain: string;
   readonly phpVersion?: string | null;
   readonly runtimeKey: string;

@@ -2087,7 +2087,11 @@ export class AgentService {
       s,
       'application:preflight-create-root',
       async (
-        params: { rootPath: string; filesRelPath: string },
+        params: {
+          rootPath: string;
+          filesRelPath: string;
+          allowExistingRoot?: boolean;
+        },
         cb: Callback,
       ) => {
         const result =
@@ -2099,6 +2103,7 @@ export class AgentService {
             ? {
                 applicationRoot: result.applicationRoot,
                 exists: result.exists,
+                isNonEmpty: result.isNonEmpty,
               }
             : undefined,
         });
@@ -2239,6 +2244,7 @@ export class AgentService {
         const preflight = await this.applicationSnapshots.preflightCreateRoot({
           rootPath: params.rootPath,
           filesRelPath: params.filesRelPath,
+          allowExistingRoot: params.reuseExistingRoot === true,
         });
         if (!preflight.success) {
           throw new Error(
@@ -2246,6 +2252,20 @@ export class AgentService {
               preflight.error || 'root is unavailable'
             }`,
           );
+        }
+
+        if (
+          params.reuseExistingRoot === true &&
+          preflight.exists === true &&
+          preflight.isNonEmpty === true
+        ) {
+          cb({
+            success: true,
+            data: { mutationStarted: false },
+            siteDomainId,
+            operationId: params.operationId,
+          });
+          return;
         }
 
         rootMutationStarted = true;
