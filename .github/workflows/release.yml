@@ -65,6 +65,7 @@ jobs:
           npm run test:site-deletion-options
           npm run test:database-catalog
           npm run test:restic-retention
+          npm run test:panel-update-runner
 
       - name: Install + build web
         working-directory: web

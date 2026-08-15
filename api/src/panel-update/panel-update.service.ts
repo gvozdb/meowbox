@@ -13,7 +13,6 @@
  * История: после завершения update.sh пишется запись в `PanelUpdateHistory`.
  */
 
-import { spawn } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as fsp from 'node:fs/promises';
 import * as path from 'node:path';
@@ -29,6 +28,7 @@ import {
 import { ConfigService } from '@nestjs/config';
 
 import { PrismaService } from '../common/prisma.service';
+import { launchReparentedUpdateRunner } from './update-runner';
 
 const STAGE_ORDER = [
   'preflight',
@@ -448,53 +448,51 @@ export class PanelUpdateService implements OnModuleInit {
       data: { logTail: '' },
     });
 
-    const logFd = fs.openSync(logFilePath, 'a');
-
     // Всегда входим через bootstrap текущего релиза: он проверяет SHA256
     // целевого tarball и запускает updater ИЗ целевого релиза. Иначе старая
     // панель скачает новый код, но продолжит обновление старым update.sh.
     const args: string[] = [bootstrapScript];
     if (toVersion !== 'latest') args.push(toVersion);
 
-    const child = spawn('bash', args, {
-      cwd: panelDir,
-      env: {
-        ...process.env,
-        MEOWBOX_TRIGGERED_BY: `user:${userId}`,
-        MEOWBOX_UPDATE_LOG: logFilePath,
-      },
-      // КРИТИЧНО: stdin=ignore, stdout/stderr → файл (не pipe).
-      // detached:true заставляет Node вызвать setsid() в child — bash уходит в
-      // отдельную session/process group и переживает kill api. Pipe рвётся
-      // при kill api → нельзя использовать (SIGPIPE убьёт update.sh).
-      // Реальная защита от зависания pm2 reload — в самом update.sh:
-      // там каждый pm2-вызов под `timeout 30s`, api рестартим последним.
-      stdio: ['ignore', logFd, logFd],
-      detached: true,
-    });
-
-    // fd закрываем в parent — child сохранил свою копию.
-    fs.closeSync(logFd);
-
-    if (!child.pid) {
-      throw new InternalServerErrorException('spawn failed');
+    let runnerPid: number;
+    try {
+      runnerPid = await launchReparentedUpdateRunner({
+        command: 'bash',
+        args,
+        cwd: panelDir,
+        env: {
+          ...process.env,
+          MEOWBOX_TRIGGERED_BY: `user:${userId}`,
+          MEOWBOX_UPDATE_LOG: logFilePath,
+        },
+        logFilePath,
+        pidFilePath: path.join(logsDir, 'panel-update-runner.pid'),
+      });
+    } catch (error) {
+      const message = `Не удалось запустить updater: ${(error as Error).message}`;
+      await this.prisma.panelUpdateState.update({
+        where: { id: 'current' },
+        data: {
+          status: 'failed',
+          finishedAt: new Date(),
+          errorMessage: message,
+        },
+      }).catch(() => undefined);
+      throw new InternalServerErrorException(message);
     }
 
     await this.prisma.panelUpdateState.update({
       where: { id: 'current' },
-      data: { pid: child.pid },
+      data: { pid: runnerPid },
     });
 
     // Watcher логов: файл-based, поэтому переживает reload API.
     // Новый API-инстанс при getStatus() видит state.status=running и
     // продолжает читать тот же файл с offset=0 (хвост уже в БД через flushDb).
-    this.attachLogWatcher(logFilePath, fromVersion, toVersion, userId, child.pid);
+    this.attachLogWatcher(logFilePath, fromVersion, toVersion, userId, runnerPid);
 
-    // detached + unref → процесс полностью отвязан от родителя.
-    child.unref();
-
-    this.logger.log(`Update started: pid=${child.pid}, ${fromVersion} → ${toVersion}, by user ${userId}`);
-    return { ok: true, pid: child.pid };
+    this.logger.log(`Update started: pid=${runnerPid}, ${fromVersion} → ${toVersion}, by user ${userId}`);
+    return { ok: true, pid: runnerPid };
   }
 
   // ---------------------------------------------------------------------------
