@@ -54,7 +54,7 @@ jobs:
 
       - name: Install + build agent
         working-directory: agent
-        run: npm ci && npm run build && npm run test:restic-retention
+        run: npm ci && npm run build && npm run test:restic-retention && npm run test:redis-executor
 
       - name: Install + build api
         working-directory: api

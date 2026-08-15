@@ -143,6 +143,7 @@ export class RedisExecutor {
     const configPath = path.join(dataDir, 'redis.conf');
 
     await this.cmd.execute('mkdir', ['-p', dataDir]);
+    await this.ensureDataBaseTraversal();
     await this.cmd.execute('chown', [`${p.systemUser}:${p.systemUser}`, dataDir]);
     await this.cmd.execute('chmod', ['750', dataDir]);
 
@@ -382,6 +383,23 @@ export class RedisExecutor {
     if (existing.trim() === content.trim()) return;
     await fs.writeFile(TEMPLATE_UNIT_PATH, content, { mode: 0o644 });
     await this.cmd.execute('systemctl', ['daemon-reload']);
+  }
+
+  /**
+   * Debian's redis-server package creates /var/lib/redis as 0750 redis:redis.
+   * Per-site instances run as their site user, so they need traversal of the
+   * shared parent but must not be able to list it. Keep child directories
+   * private (0750); add only the missing execute bit on the parent.
+   */
+  private async ensureDataBaseTraversal(): Promise<void> {
+    const stat = await fs.lstat(DATA_BASE);
+    if (stat.isSymbolicLink() || !stat.isDirectory()) {
+      throw new Error(`Redis data base must be a real directory: ${DATA_BASE}`);
+    }
+
+    const mode = stat.mode & 0o777;
+    if ((mode & 0o001) !== 0) return;
+    await fs.chmod(DATA_BASE, mode | 0o001);
   }
 
   private async writeSiteOverride(siteName: string, memoryMaxMb: number): Promise<void> {

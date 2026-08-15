@@ -14,6 +14,7 @@
     "test:restic-snapshot-validation": "TS_NODE_TRANSPILE_ONLY=1 node --test -r ts-node/register -r ../tools/register-shared-source.js test/restic-snapshot-validation.test.js",
     "test:restic-restore-safety": "TS_NODE_TRANSPILE_ONLY=1 node --test -r ts-node/register -r ../tools/register-shared-source.js test/restic-restore-safety.test.js",
     "test:restic-retention": "TS_NODE_TRANSPILE_ONLY=1 node --test -r ts-node/register -r ../tools/register-shared-source.js test/restic-retention.test.js",
+    "test:redis-executor": "TS_NODE_TRANSPILE_ONLY=1 node --test -r ts-node/register -r ../tools/register-shared-source.js test/redis-executor.test.js",
     "test:restore-validation": "TS_NODE_TRANSPILE_ONLY=1 node --test -r ts-node/register -r ../tools/register-shared-source.js test/restore-validation.test.js",
     "test:installer-fail-closed": "TS_NODE_TRANSPILE_ONLY=1 node --test -r ts-node/register -r ../tools/register-shared-source.js test/site-installer-fail-closed.test.js"
   },
