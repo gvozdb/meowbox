@@ -641,22 +641,9 @@
 
 <script setup lang="ts">
 import { ref, reactive, computed, onMounted } from 'vue';
-import * as meowboxShared from '@meowbox/shared';
-
-const { DEFAULT_VPN_PORTS } = meowboxShared;
+import { DEFAULT_SNI_MASKS, DEFAULT_VPN_PORTS } from '~/utils/shared-constants';
 
 definePageMeta({ middleware: 'auth' });
-
-const DEFAULT_SNI_MASKS = [
-  'www.google.com',
-  'www.microsoft.com',
-  'www.cloudflare.com',
-  'addons.mozilla.org',
-  'discord.com',
-  'www.apple.com',
-  'www.lovelive-anime.jp',
-  'www.amazon.com',
-];
 
 interface VpnServiceListItem {
   id: string;

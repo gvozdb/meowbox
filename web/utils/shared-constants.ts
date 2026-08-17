@@ -1,5 +1,5 @@
 /**
- * Источник истины: /opt/meowbox/shared/src/constants.ts
+ * Источник истины: /opt/meowbox/shared/src/constants.ts и vpn-defaults.ts
  *
  * Nuxt/Vite не подхватывают shared без дополнительных alias-конфигов, поэтому
  * держим здесь синхронизированную копию. При изменении констант в shared —
@@ -35,3 +35,19 @@ export const SAFE_IDENT_REGEX = /^[a-zA-Z0-9_-]+$/;
 
 /** DNS-имя домена. */
 export const DOMAIN_REGEX = /^([a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)+[a-zA-Z]{2,}$/;
+
+export const DEFAULT_SNI_MASKS = [
+  'www.google.com',
+  'www.microsoft.com',
+  'www.cloudflare.com',
+  'addons.mozilla.org',
+  'discord.com',
+  'www.apple.com',
+  'www.lovelive-anime.jp',
+  'www.amazon.com',
+] as const;
+
+export const DEFAULT_VPN_PORTS = {
+  VLESS_REALITY: 8443,
+  AMNEZIA_WG: 51820,
+} as const;
