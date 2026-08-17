@@ -26,8 +26,9 @@ import type {
  *   - Все PM2/node/npm/make операции выполняются от имени системного юзера
  *     сайта (`sudo -u <user> -H ...`). `-H` выставляет HOME → PM2 использует
  *     `$HOME/.pm2` как PM2_HOME (изоляция per-site, как у php-fpm пулов).
- *   - Автозагрузка — systemd-шаблон `pm2@<user>.service` (ставится системной
- *     миграцией). Тумблер = `systemctl enable/disable` + `pm2 save`.
+ *   - Автозагрузка — systemd-шаблон `pm2@<user>.service` (ставится installer'ом
+ *     и поддерживается системной миграцией). Тумблер = `systemctl enable/disable`
+ *     + `pm2 save`.
  */
 export class NodeAppManager {
   private executor: CommandExecutor;

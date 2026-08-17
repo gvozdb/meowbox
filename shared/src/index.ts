@@ -54,6 +54,13 @@ export {
   minioSystemdUnitContent,
 } from './minio';
 
+export {
+  PM2_SITE_AUTOSTART_UNIT,
+  PM2_SITE_AUTOSTART_UNIT_PATH,
+  PM2_SITE_AUTOSTART_PM2_CANDIDATES,
+  pm2SiteAutostartUnitContent,
+} from './pm2-site-autostart';
+
 // Artifact helpers (anchor for nginx/PHP-FPM/socket paths).
 export {
   artifactAnchor,

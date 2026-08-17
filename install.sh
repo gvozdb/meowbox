@@ -1149,6 +1149,35 @@ pm2 start ecosystem.config.js >> "$LOG_FILE" 2>&1 || pm2 restart ecosystem.confi
 pm2 save >> "$LOG_FILE" 2>&1
 
 PM2_BIN="$(command -v pm2 || echo /usr/local/bin/pm2)"
+
+# baseline-fresh-install намеренно не проигрывает старые системные миграции.
+# Поэтому обязательный для fresh install template `pm2@.service` создаём здесь
+# вместе с panel PM2 unit. Содержимое рендерится из shared helper — та же
+# каноническая форма используется repair-миграцией для уже установленных VPS.
+PM2_SITE_UNIT_PATH="/etc/systemd/system/pm2@.service"
+PM2_SITE_BASE_PATH="$(sed -n -E 's/^SITES_BASE_PATH="?([^"[:space:]]+)"?$/\1/p' "${ENV_FILE}" | tail -n 1)"
+PM2_SITE_BASE_PATH="${PM2_SITE_BASE_PATH:-/var/www}"
+PM2_SITE_UNIT_TMP="$(mktemp "${PM2_SITE_UNIT_PATH}.tmp.XXXXXX")"
+if ! PM2_BIN="${PM2_BIN}" SITES_BASE_PATH="${PM2_SITE_BASE_PATH}" \
+  MEOWBOX_SHARED_DIST="${CODE_DIR}/shared/dist" \
+  node - <<'NODE' > "${PM2_SITE_UNIT_TMP}"
+const { pm2SiteAutostartUnitContent } = require(process.env.MEOWBOX_SHARED_DIST);
+process.stdout.write(
+  pm2SiteAutostartUnitContent(process.env.PM2_BIN || '', process.env.SITES_BASE_PATH || ''),
+);
+NODE
+then
+  rm -f "${PM2_SITE_UNIT_TMP}"
+  error "failed to render PM2 site autostart systemd template"
+fi
+chmod 0644 "${PM2_SITE_UNIT_TMP}"
+if ! cmp -s "${PM2_SITE_UNIT_TMP}" "${PM2_SITE_UNIT_PATH}"; then
+  mv -f "${PM2_SITE_UNIT_TMP}" "${PM2_SITE_UNIT_PATH}"
+  log "Installed PM2 site autostart template (${PM2_SITE_BASE_PATH})"
+else
+  rm -f "${PM2_SITE_UNIT_TMP}"
+fi
+
 cat > /etc/systemd/system/meowbox-panel-pm2.service <<SERVICE
 # Managed by Meowbox — autostart панели.
 [Unit]
