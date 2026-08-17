@@ -27,6 +27,7 @@ import { LogReader } from './logs/log.reader';
 import { LogTailManager } from './logs/log.tail';
 import { ManticoreExecutor } from './services/manticore.executor';
 import { RedisExecutor } from './services/redis.executor';
+import { MinioExecutor } from './services/minio.executor';
 import { MariadbEngineExecutor, PostgresqlEngineExecutor } from './database/db-engine.executor';
 import { ServerConfigExecutor } from './services/server-config.executor';
 import { SshExecutor } from './services/ssh.executor';
@@ -129,6 +130,7 @@ export class AgentService {
   private cmdExec: CommandExecutor;
   private manticore: ManticoreExecutor;
   private redisSvc: RedisExecutor;
+  private minioSvc: MinioExecutor;
   private mariadbEngine: MariadbEngineExecutor;
   private postgresqlEngine: PostgresqlEngineExecutor;
   private serverConfig: ServerConfigExecutor;
@@ -178,6 +180,7 @@ export class AgentService {
     this.siteMetrics = new SiteMetricsCollector(this.cmdExec);
     this.manticore = new ManticoreExecutor(this.cmdExec);
     this.redisSvc = new RedisExecutor(this.cmdExec);
+    this.minioSvc = new MinioExecutor(this.cmdExec);
     this.mariadbEngine = new MariadbEngineExecutor(this.cmdExec);
     this.postgresqlEngine = new PostgresqlEngineExecutor(this.cmdExec);
     this.serverConfig = new ServerConfigExecutor();
@@ -3154,6 +3157,83 @@ export class AgentService {
       try {
         await this.redisSvc.siteReconfigure(params.siteName, params.memoryMaxMb);
         cb({ success: true });
+      } catch (err) {
+        cb({ success: false, error: (err as Error).message });
+      }
+    });
+
+    // -- Services: MinIO (shared daemon, per-site tenants) --
+    this.safeOn(s, 'minio:server-status', async (_params: unknown, cb: Callback) => {
+      try {
+        cb({ success: true, data: await this.minioSvc.serverStatus() });
+      } catch (err) {
+        cb({ success: false, error: (err as Error).message });
+      }
+    });
+
+    this.safeOn(s, 'minio:server-install', async (_params: unknown, cb: Callback) => {
+      try {
+        cb({ success: true, data: await this.minioSvc.serverInstall() });
+      } catch (err) {
+        cb({ success: false, error: (err as Error).message });
+      }
+    }, 600_000);
+
+    this.safeOn(s, 'minio:server-uninstall', async (_params: unknown, cb: Callback) => {
+      try {
+        await this.minioSvc.serverUninstall();
+        cb({ success: true });
+      } catch (err) {
+        cb({ success: false, error: (err as Error).message });
+      }
+    }, 300_000);
+
+    this.safeOn(s, 'minio:site-enable', async (params: {
+      siteId: string;
+      siteName: string;
+      systemUser: string;
+      rootPath: string;
+    }, cb: Callback) => {
+      try {
+        await this.minioSvc.siteEnable(params);
+        cb({ success: true });
+      } catch (err) {
+        cb({ success: false, error: (err as Error).message });
+      }
+    }, 180_000);
+
+    this.safeOn(s, 'minio:site-disable', async (params: {
+      siteId: string;
+      siteName: string;
+      rootPath?: string;
+    }, cb: Callback) => {
+      try {
+        await this.minioSvc.siteDisable(params);
+        cb({ success: true });
+      } catch (err) {
+        cb({ success: false, error: (err as Error).message });
+      }
+    }, 300_000);
+
+    this.safeOn(s, 'minio:site-status', async (_params: unknown, cb: Callback) => {
+      try {
+        cb({ success: true, data: await this.minioSvc.siteStatus() });
+      } catch (err) {
+        cb({ success: false, error: (err as Error).message });
+      }
+    });
+
+    this.safeOn(s, 'minio:site-metrics', async (params: { siteId: string; siteName: string }, cb: Callback) => {
+      try {
+        cb({ success: true, data: await this.minioSvc.siteMetrics(params) });
+      } catch (err) {
+        cb({ success: false, error: (err as Error).message });
+      }
+    });
+
+    this.safeOn(s, 'minio:site-logs', async (params: { lines?: number }, cb: Callback) => {
+      try {
+        cb({ success: true, data: await this.minioSvc.siteLogs(params.lines || 200) });
       } catch (err) {
         cb({ success: false, error: (err as Error).message });
       }

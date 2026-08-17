@@ -46,6 +46,20 @@ export const SERVICE_CATALOG: readonly ServiceCatalogEntry[] = [
     scope: 'per-site',
   },
   {
+    key: 'minio',
+    name: 'MinIO',
+    description:
+      'S3-совместимое объектное хранилище. Один внутренний демон; каждому сайту выдаются отдельные bucket, IAM-пользователь и credentials.',
+    category: 'storage',
+    icon: 'storage',
+    scope: 'per-site',
+    siteLifecycle: false,
+    siteActivationHint:
+      'Активация создаст изолированные bucket и IAM-доступы этого сайта. Credentials появятся в .meowbox/minio/.env; MinIO доступен только локально на сервере.',
+    siteDisableWarning:
+      'Будут безвозвратно удалены bucket этого сайта со всеми объектами и его MinIO credentials.',
+  },
+  {
     key: 'ssh',
     name: 'SSH (sshd)',
     description:

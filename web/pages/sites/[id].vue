@@ -2144,6 +2144,13 @@ php_value[max_execution_time] = 300"
                   <span class="delete-plan__hint">{{ site?.databases?.length || 0 }} шт.</span>
                 </span>
               </label>
+              <label class="delete-plan__row">
+                <input v-model="deleteOpts.removeMinioData" type="checkbox" :disabled="deleting" @change="deleteSelectionChanged" />
+                <span class="delete-plan__body">
+                  <span class="delete-plan__label">MinIO bucket и IAM-доступы</span>
+                  <span class="delete-plan__hint">Если снять: данные останутся вне управления панели; при удалении файлов сохрани .meowbox/minio/.env заранее</span>
+                </span>
+              </label>
             </div>
 
             <div class="delete-plan__section">
@@ -2771,6 +2778,7 @@ const deleteError = ref('');
 const deleteIdempotencyKey = ref('');
 const defaultDeleteOptions = () => ({
   removeFiles: true,
+  removeMinioData: true,
   removeDatabases: true,
   removeSslCertificate: true,
   removeBackupsLocal: true,

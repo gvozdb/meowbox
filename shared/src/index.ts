@@ -33,6 +33,27 @@ export {
   normalizeRestoreIncludePaths,
 } from './backup-restore';
 
+export {
+  MINIO_SERVICE_KEY,
+  MINIO_SERVICE_USER,
+  MINIO_SYSTEMD_UNIT,
+  MINIO_SYSTEMD_UNIT_PATH,
+  MINIO_RUNTIME_DIR,
+  MINIO_SERVER_BINARY,
+  MINIO_CLIENT_BINARY,
+  MINIO_DATA_DIR,
+  MINIO_HOME_DIR,
+  MINIO_CONFIG_DIR,
+  MINIO_ROOT_CREDENTIALS_PATH,
+  MINIO_API_HOST,
+  MINIO_API_PORT,
+  MINIO_API_ENDPOINT,
+  MINIO_CONSOLE_HOST,
+  MINIO_CONSOLE_PORT,
+  MINIO_DEFAULT_REGION,
+  minioSystemdUnitContent,
+} from './minio';
+
 // Artifact helpers (anchor for nginx/PHP-FPM/socket paths).
 export {
   artifactAnchor,

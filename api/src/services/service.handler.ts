@@ -13,6 +13,11 @@ import {
  */
 export interface ServiceHandler {
   readonly key: string;
+  /**
+   * Для сервисов с удалённым/destructive teardown не теряем запись SiteService
+   * при ошибке деактивации: статус ERROR оставляет оператору возможность retry.
+   */
+  readonly preserveRecordOnDisableFailure?: boolean;
 
   // ---- Server level ----
   /** Установлен ли пакет/демон на сервере. */

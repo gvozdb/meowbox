@@ -26,6 +26,12 @@
                 <polyline points="2 17 12 22 22 17" />
                 <polyline points="2 12 12 17 22 12" />
               </svg>
+              <svg v-else-if="item.catalog.icon === 'storage'" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <rect x="3" y="4" width="18" height="16" rx="2" />
+                <path d="M3 10h18" />
+                <circle cx="8" cy="15" r="1" fill="currentColor" stroke="none" />
+                <circle cx="12" cy="15" r="1" fill="currentColor" stroke="none" />
+              </svg>
               <svg v-else width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10" /></svg>
             </div>
             <div class="ssvc__title-block">
@@ -120,7 +126,7 @@
               </button>
               <button class="btn btn--ghost btn--sm" :disabled="busy[item.key] === 'logs'" @click="openLogs(item)">Логи</button>
               <button
-                v-if="item.status === 'RUNNING'"
+                v-if="item.catalog.siteLifecycle !== false && item.status === 'RUNNING'"
                 class="btn btn--ghost btn--sm"
                 :disabled="busy[item.key] === 'stop'"
                 @click="stopService(item)"
@@ -128,7 +134,7 @@
                 {{ busy[item.key] === 'stop' ? 'Останавливаю…' : 'Выкл' }}
               </button>
               <button
-                v-else
+                v-else-if="item.catalog.siteLifecycle !== false"
                 class="btn btn--ghost btn--sm"
                 :disabled="busy[item.key] === 'start'"
                 @click="startService(item)"
@@ -149,8 +155,7 @@
               <NuxtLink to="/services" class="ssvc__link">Сервисы</NuxtLink>.
             </p>
             <p v-else class="ssvc__hint">
-              Активация поднимет per-site инстанс под изолированным юзером сайта.
-              Конфиг таблиц/индексов задаёт код сайта — панель только обеспечивает доступ.
+              {{ item.catalog.siteActivationHint || 'Активация поднимет per-site инстанс под изолированным юзером сайта. Конфиг таблиц/индексов задаёт код сайта — панель только обеспечивает доступ.' }}
             </p>
 
             <!-- Лимит памяти при активации (per-service) -->
@@ -212,6 +217,9 @@ interface CatalogEntry {
   description: string;
   category: string;
   icon: string;
+  siteLifecycle?: boolean;
+  siteDisableWarning?: string;
+  siteActivationHint?: string;
 }
 interface SvcItem {
   key: string;
@@ -328,7 +336,9 @@ async function enableService(item: SvcItem) {
 }
 
 async function disableService(item: SvcItem) {
-  if (!confirm(`Отключить «${item.catalog.name}»? Будут удалены данные сервиса для этого сайта (data_dir, env-файлы).`)) return;
+  const warning = item.catalog.siteDisableWarning
+    || 'Будут удалены данные сервиса для этого сайта (data_dir, env-файлы).';
+  if (!confirm(`Отключить «${item.catalog.name}»? ${warning}`)) return;
   busy[item.key] = 'disable';
   try {
     await api.del(`/sites/${props.siteId}/services/${item.key}`);
@@ -529,6 +539,7 @@ function dotClass(s: string): string {
 }
 .ssvc__icon--search { background: rgba(var(--primary-rgb), 0.13); color: var(--primary-light); }
 .ssvc__icon--cache { background: rgba(16, 185, 129, 0.13); color: rgb(52, 211, 153); }
+.ssvc__icon--storage { background: rgba(14, 165, 233, 0.13); color: rgb(56, 189, 248); }
 .ssvc__icon--queue { background: rgba(168, 85, 247, 0.13); color: rgb(192, 132, 252); }
 .ssvc__icon--database { background: rgba(59, 130, 246, 0.13); color: rgb(96, 165, 250); }
 

@@ -188,6 +188,10 @@ export class DeleteSiteOptionsDto {
   @IsBoolean()
   removeFiles!: boolean;
 
+  /** Удаляет bucket и IAM-доступы MinIO сайта, если сервис был активирован. */
+  @IsBoolean()
+  removeMinioData!: boolean;
+
   @IsBoolean()
   removeSystemUser!: boolean;
 

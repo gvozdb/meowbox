@@ -20,6 +20,7 @@ const cleanupFlags = {
   removeBackupsRemote: true,
   removeDatabases: false,
   removeFiles: true,
+  removeMinioData: false,
   removeSystemUser: false,
   removeNginxConfig: false,
   removePhpPool: false,
@@ -86,6 +87,11 @@ test('site deletion executes only selected runtime artifacts', async () => {
       deleteMany: async ({ where }) => {
         deletedMetadata.push(['databases', where.siteId]);
         return { count: 1 };
+      },
+    },
+    siteService: {
+      findUnique: async () => {
+        throw new Error('MinIO cleanup must not run when removeMinioData is false');
       },
     },
   };
@@ -161,6 +167,43 @@ test('site deletion executes only selected runtime artifacts', async () => {
     ['databases', site.id],
     ['site', site.id],
   ]);
+});
+
+test('MinIO tenant cleanup is called only by an explicit removal choice', async () => {
+  const events = [];
+  const prisma = {
+    siteService: {
+      findUnique: async () => ({ id: 'minio-site-service' }),
+    },
+  };
+  const agentRelay = {
+    emitToAgent: async (event, payload) => {
+      events.push([event, payload]);
+      return { success: true };
+    },
+  };
+  const service = new SitesService(
+    prisma,
+    agentRelay,
+    {},
+    {},
+    {},
+    {},
+    {},
+    {},
+    {},
+  );
+
+  await service.cleanupMinioTenantBeforeSiteRemoval({
+    id: 'site-1',
+    name: 'demo',
+    rootPath: '/var/www/demo',
+  });
+
+  assert.deepEqual(events, [[
+    'minio:site-disable',
+    { siteId: 'site-1', siteName: 'demo', rootPath: '/var/www/demo' },
+  ]]);
 });
 
 test('backup cleanup removes selected artifact classes and preserves unchecked Restic', async () => {

@@ -88,6 +88,7 @@ test('site deletion exposes and submits the explicit artifact cleanup plan', () 
     'removeNginxConfig',
     'removePhpPool',
     'removeSystemUser',
+    'removeMinioData',
   ]) {
     assert.match(sitePage, new RegExp(`v-model="deleteOpts\\.${option}"`));
     assert.match(sitePage, new RegExp(`${option}: true`));

@@ -14,6 +14,7 @@ import { SERVICE_CATALOG, findServiceEntry, getServiceScope } from './service.re
 import { ServiceHandler } from './service.handler';
 import { ManticoreServiceHandler } from './handlers/manticore.handler';
 import { RedisServiceHandler } from './handlers/redis.handler';
+import { MinioServiceHandler } from './handlers/minio.handler';
 import { MariadbServiceHandler } from './handlers/mariadb.handler';
 import { PostgresqlServiceHandler } from './handlers/postgresql.handler';
 import { SshServiceHandler } from './handlers/ssh.handler';
@@ -47,6 +48,7 @@ export class ServicesService implements OnModuleInit {
   ) {
     this.registerHandler(new ManticoreServiceHandler(agent));
     this.registerHandler(new RedisServiceHandler(agent));
+    this.registerHandler(new MinioServiceHandler(agent));
     this.registerHandler(new MariadbServiceHandler(agent));
     this.registerHandler(new PostgresqlServiceHandler(agent));
     this.registerHandler(new SshServiceHandler(agent));
@@ -790,16 +792,25 @@ export class ServicesService implements OnModuleInit {
     try {
       await handler.disableForSite(this.toCtx(site));
     } catch (err) {
-      // Деактивация — фиксируем ошибку в БД, но запись удаляем всё равно
-      // (иначе сайт «застрянет» с битым стейтом и переактивировать нельзя).
-      this.logger.error(`Service ${key} disable for site ${site.name} failed: ${(err as Error).message}`);
-    } finally {
-      await this.prisma.siteService.delete({ where: { id: rec.id } });
+      const msg = (err as Error).message;
+      this.logger.error(`Service ${key} disable for site ${site.name} failed: ${msg}`);
+      if (handler.preserveRecordOnDisableFailure) {
+        await this.prisma.siteService.update({
+          where: { id: rec.id },
+          data: { status: 'ERROR', lastError: msg },
+        });
+        throw new BadRequestException(`Деактивация сервиса провалилась: ${msg}`);
+      }
     }
+    await this.prisma.siteService.delete({ where: { id: rec.id } });
   }
 
   async startSiteService(siteId: string, key: string) {
     const site = await this.requireSite(siteId);
+    const catalog = findServiceEntry(key);
+    if (catalog?.siteLifecycle === false) {
+      throw new ConflictException(`«${catalog.name}» — общий сервис; его нельзя запускать с одного сайта`);
+    }
     const rec = await this.requireRecord(siteId, key);
     const handler = this.getHandler(key);
     try {
@@ -822,6 +833,10 @@ export class ServicesService implements OnModuleInit {
 
   async stopSiteService(siteId: string, key: string) {
     const site = await this.requireSite(siteId);
+    const catalog = findServiceEntry(key);
+    if (catalog?.siteLifecycle === false) {
+      throw new ConflictException(`«${catalog.name}» — общий сервис; его нельзя останавливать с одного сайта`);
+    }
     const rec = await this.requireRecord(siteId, key);
     const handler = this.getHandler(key);
     try {

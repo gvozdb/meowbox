@@ -4,8 +4,8 @@
       <div>
         <h1 class="services__title">Сервисы</h1>
         <p class="services__subtitle">
-          Глобальные демоны (БД, поиск, кэш, очереди), которыми пользуются сайты.
-          Базы данных подключаются ко всем сайтам сразу, остальные — per-site.
+          Серверные сервисы для сайтов: установи сервис здесь, затем активируй его на вкладке сайта.
+          Базы данных подключаются через отдельный раздел.
         </p>
       </div>
       <button
@@ -39,6 +39,12 @@
               <polygon points="12 2 2 7 12 12 22 7 12 2" />
               <polyline points="2 17 12 22 22 17" />
               <polyline points="2 12 12 17 22 12" />
+            </svg>
+            <svg v-else-if="item.catalog.icon === 'storage'" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <rect x="3" y="4" width="18" height="16" rx="2" />
+              <path d="M3 10h18" />
+              <circle cx="8" cy="15" r="1" fill="currentColor" stroke="none" />
+              <circle cx="12" cy="15" r="1" fill="currentColor" stroke="none" />
             </svg>
             <svg v-else-if="item.catalog.icon === 'database'" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
               <ellipse cx="12" cy="5" rx="9" ry="3" />
@@ -462,7 +468,7 @@ interface ServerSvc {
     description: string;
     category: string;
     icon: string;
-    /** 'per-site' — Redis/Manticore (per-site инстанс), 'global' — MariaDB/PostgreSQL */
+    /** 'per-site' — отдельный инстанс или tenant, 'global' — один сервис на сервер */
     scope?: 'per-site' | 'global';
     /** Если false — кнопка «Удалить» в UI должна быть заблокирована (SSH). */
     uninstallable?: boolean;
@@ -1026,7 +1032,7 @@ async function refreshService(item: ServerSvc) {
 }
 
 async function installService(item: ServerSvc) {
-  if (!confirm(`Установить «${item.catalog.name}» на сервер? Это поставит apt-пакет и подготовит template-unit.`)) return;
+  if (!confirm(`Установить «${item.catalog.name}» на сервер? Панель подготовит управляемый runtime и systemd-сервис.`)) return;
   busy[item.key] = 'install';
   try {
     const updated = await api.post<ServerSvc>(`/services/${item.key}/install`);
@@ -1040,7 +1046,7 @@ async function installService(item: ServerSvc) {
 }
 
 async function uninstallService(item: ServerSvc) {
-  if (!confirm(`Удалить «${item.catalog.name}» с сервера?\n\nДанные сайтов в /var/lib/${item.key}/* НЕ удаляются автоматически — отключи сервис у каждого сайта заранее.`)) return;
+  if (!confirm(`Удалить «${item.catalog.name}» с сервера?\n\nДанные сайтов НЕ удаляются автоматически — отключи сервис у каждого сайта заранее.`)) return;
   busy[item.key] = 'uninstall';
   try {
     await api.del(`/services/${item.key}`);
@@ -1061,6 +1067,7 @@ function categoryLabel(c: string): string {
     case 'cache': return 'Кэш';
     case 'queue': return 'Очереди';
     case 'database': return 'База данных';
+    case 'storage': return 'Объектное хранилище';
     case 'security': return 'Безопасность';
     case 'mail': return 'Почта';
     default: return 'Сервис';
@@ -1160,6 +1167,10 @@ onMounted(loadAll);
 .svc-card__icon--cache {
   background: rgba(16, 185, 129, 0.13);
   color: rgb(52, 211, 153);
+}
+.svc-card__icon--storage {
+  background: rgba(14, 165, 233, 0.13);
+  color: rgb(56, 189, 248);
 }
 .svc-card__icon--queue {
   background: rgba(168, 85, 247, 0.13);

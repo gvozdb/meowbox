@@ -22,6 +22,7 @@
     "test:runtime-settings-rollback": "TS_NODE_TRANSPILE_ONLY=1 node --test -r ts-node/register -r ../tools/register-shared-source.js test/runtime-settings-rollback.test.js",
     "test:file-path-safety": "TS_NODE_TRANSPILE_ONLY=1 node --test -r ts-node/register -r ../tools/register-shared-source.js test/file-path-safety.test.js",
     "test:site-deletion-options": "TS_NODE_TRANSPILE_ONLY=1 node --test -r ts-node/register -r ../tools/register-shared-source.js test/site-deletion-options.test.js",
+    "test:minio-service": "TS_NODE_TRANSPILE_ONLY=1 node --test -r ts-node/register -r ../tools/register-shared-source.js test/minio-service-handler.test.js",
     "test:restic-retention": "TS_NODE_TRANSPILE_ONLY=1 node --test -r ts-node/register -r ../tools/register-shared-source.js test/restic-repository-retention.test.js",
     "test:panel-update-runner": "TS_NODE_TRANSPILE_ONLY=1 node --test -r ts-node/register -r ../tools/register-shared-source.js test/panel-update-runner.test.js",
     "test:vpn-port-reservation": "TS_NODE_TRANSPILE_ONLY=1 node --test -r ts-node/register -r ../tools/register-shared-source.js test/vpn-port-reservation.test.js",

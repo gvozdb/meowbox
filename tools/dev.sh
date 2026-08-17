@@ -47,6 +47,15 @@ stage guard "проверка .dev-mode"
 [[ -f "$PANEL_DIR/.dev-mode" ]] || abort \
   "Этот скрипт только для dev-серверов (нет $PANEL_DIR/.dev-mode). Для прода используй 'make update'."
 
+# Runtime-конфиг хранится вне git workspace. Он нужен не только PM2, но и
+# Prisma/system migrations, которые dev workflow запускает напрямую.
+STATE_ENV="$PANEL_DIR/state/.env"
+[[ -r "$STATE_ENV" ]] || abort "Не найден или недоступен $STATE_ENV"
+set -a
+# shellcheck disable=SC1090
+source "$STATE_ENV"
+set +a
+
 # ----- Pull -----
 OLD_HEAD="$(git rev-parse HEAD 2>/dev/null || echo none)"
 if $DO_PULL; then
@@ -144,6 +153,13 @@ if ! $SKIP_MIGRATE && ($NEED_MIGRATE || $FORCE); then
   (cd "$PANEL_DIR/api" && npx prisma migrate deploy) || abort "prisma migrate deploy failed"
   if [[ -d "$PANEL_DIR/migrations/system" ]]; then
     stage migrate "system migrations"
+    # The migrations package declares Prisma only as a type shim. Match the
+    # release layout before running its compiled runtime code.
+    [[ -d "$PANEL_DIR/api/node_modules/@prisma/client" ]] \
+      || abort "@prisma/client не найден в api/node_modules"
+    mkdir -p "$PANEL_DIR/migrations/node_modules/@prisma"
+    ln -sfn "../../../api/node_modules/@prisma/client" \
+      "$PANEL_DIR/migrations/node_modules/@prisma/client"
     # `up` обязателен: без аргумента runner.js дефолтит в `status` и ничего не применяет.
     (cd "$PANEL_DIR/migrations" && npx tsc && node dist/runner.js up) \
       || say "⚠ system migrations упали — проверь логи"

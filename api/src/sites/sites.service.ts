@@ -1226,6 +1226,7 @@ export class SitesService implements OnModuleInit {
         removeBackupsRemote: opts.removeBackupsRemote,
         removeDatabases: opts.removeDatabases,
         removeFiles: opts.removeFiles,
+        removeMinioData: opts.removeMinioData,
         removeSystemUser: opts.removeSystemUser,
         removeNginxConfig: opts.removeNginxConfig,
         removePhpPool: opts.removePhpPool,
@@ -1290,6 +1291,9 @@ export class SitesService implements OnModuleInit {
       );
 
       await this.operations.step(operation.id, 'remove-runtime', 45);
+      if (opts.removeMinioData) {
+        await this.cleanupMinioTenantBeforeSiteRemoval(site);
+      }
       if (opts.removeSslCertificate) {
         for (const domain of site.domains) {
           if (
@@ -1409,6 +1413,32 @@ export class SitesService implements OnModuleInit {
         .catch(() => undefined);
       await this.operations.fail(operation.id, error);
       throw new InternalServerErrorException(message);
+    }
+  }
+
+  /**
+   * MinIO stores site data outside the site filesystem. Remove its tenant
+   * before the SiteService row cascades away, otherwise a deleted site could
+   * leave a live IAM key and bucket behind.
+   */
+  private async cleanupMinioTenantBeforeSiteRemoval(site: {
+    id: string;
+    name: string;
+    rootPath: string;
+  }): Promise<void> {
+    const minio = await this.prisma.siteService.findUnique({
+      where: { siteId_serviceKey: { siteId: site.id, serviceKey: 'minio' } },
+      select: { id: true },
+    });
+    if (!minio) return;
+
+    const cleanup = await this.agentRelay.emitToAgent(
+      'minio:site-disable',
+      { siteId: site.id, siteName: site.name, rootPath: site.rootPath },
+      300_000,
+    );
+    if (!cleanup.success) {
+      throw new Error(`MinIO cleanup failed: ${cleanup.error || 'agent did not confirm cleanup'}`);
     }
   }
 

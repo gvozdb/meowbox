@@ -17,8 +17,9 @@ export type SiteServiceStatus = 'STARTING' | 'RUNNING' | 'STOPPED' | 'ERROR';
 
 /**
  * Область применения сервиса:
- *   - `per-site`  — есть отдельный инстанс на каждый сайт (Redis, Manticore).
- *                   Активируется/деактивируется на вкладке сайта «Сервисы».
+ *   - `per-site`  — есть отдельный инстанс или tenant-ресурс на каждый сайт
+ *                   (Redis, Manticore, MinIO). Активируется/деактивируется
+ *                   на вкладке сайта «Сервисы».
  *   - `global`    — один общий демон на сервер для всех сайтов (MariaDB, PostgreSQL).
  *                   На вкладке сайта НЕ показывается. На странице /services есть
  *                   только Установить/Удалить, без per-site-конфига.
@@ -35,7 +36,7 @@ export interface ServiceCatalogEntry {
   /** Краткое описание для UI. */
   description: string;
   /** Категория (для группировки в UI). */
-  category: 'search' | 'cache' | 'queue' | 'database' | 'security' | 'mail' | 'other';
+  category: 'search' | 'cache' | 'queue' | 'database' | 'storage' | 'security' | 'mail' | 'other';
   /** Иконка (имя SVG из набора). */
   icon: string;
   /**
@@ -60,6 +61,16 @@ export interface ServiceCatalogEntry {
    * Управляем только конфигом + restart.
    */
   systemCore?: boolean;
+  /**
+   * Некоторые per-site сервисы используют общий демон и изолируют сайты
+   * tenant-ресурсами (bucket/user/policy). Их нельзя останавливать с одного
+   * сайта: это погасило бы сервис для всех остальных.
+   */
+  siteLifecycle?: boolean;
+  /** Текст подтверждения для destructive site-disable, если нужен точнее generic. */
+  siteDisableWarning?: string;
+  /** Подсказка перед активацией на вкладке сайта. */
+  siteActivationHint?: string;
 }
 
 export interface ServerServiceState {

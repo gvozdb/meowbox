@@ -129,6 +129,9 @@ export class CommandExecutor {
     'phpdismod',
     'redis-server',
     'redis-cli',
+    // Managed S3-compatible object storage.
+    'minio',
+    'mc',
     'ps',
     'du',
     'wc',
