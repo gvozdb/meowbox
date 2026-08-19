@@ -3099,7 +3099,6 @@ function appStatusLabel(status?: SiteDomainDetail['appStatus']): string {
 
 const applicationTabs = computed(() => [
   { id: 'overview', label: 'Обзор' },
-  { id: 'domains', label: 'Домены' },
   { id: 'dns', label: 'DNS' },
   { id: 'ssl', label: 'SSL' },
   { id: 'nginx', label: 'Nginx' },
@@ -3111,6 +3110,7 @@ const applicationTabs = computed(() => [
 
 const siteTabs = computed(() => [
   { id: 'sites', label: 'Сайты' },
+  { id: 'domains', label: 'Домены' },
   { id: 'backups', label: 'Бэкапы', count: site.value?._count?.backups || 0 },
   { id: 'cron', label: 'Крон', count: site.value?._count?.cronJobs || 0 },
   { id: 'services', label: 'Сервисы' },

@@ -17,7 +17,7 @@ test('DNS tab uses the selected domain endpoint', () => {
 });
 
 test('site and application navigation stay separated', () => {
-  const siteOrder = ['Сайты', 'Бэкапы', 'Крон', 'Сервисы', 'Логи', 'Опасная зона'];
+  const siteOrder = ['Сайты', 'Домены', 'Бэкапы', 'Крон', 'Сервисы', 'Логи', 'Опасная зона'];
   let offset = sitePage.indexOf('const siteTabs = computed');
   assert.notEqual(offset, -1);
   for (const label of siteOrder) {
@@ -31,7 +31,7 @@ test('site and application navigation stay separated', () => {
       sitePage.indexOf('const applicationTabs = computed'),
       sitePage.indexOf('const siteTabs = computed'),
     ),
-    /label: '(ENV|Деплой|Бэкапы|Крон|Сервисы|Логи|Опасная зона)'/,
+    /label: '(Домены|ENV|Деплой|Бэкапы|Крон|Сервисы|Логи|Опасная зона)'/,
   );
 });
 
