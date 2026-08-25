@@ -28,11 +28,12 @@ test('T-REL-001 implementation release gate is machine-readable and passes sourc
   assert.ok(Object.values(result.data.activationStatuses).every((status) => status === 'UNRUN'));
 });
 
-test('T-CAN-001 activation stays fail-closed on dev-mode and unrun external evidence', () => {
+test('T-CAN-001 activation stays fail-closed without signed external evidence', () => {
   const result = run('activation');
   assert.equal(result.status, 1);
   assert.equal(result.data.activationReady, false);
-  assert.equal(result.data.devMode, true);
+  assert.equal(result.data.devMode, fs.existsSync(path.join(root, '.dev-mode')));
+  assert.equal(result.data.activationEvidence.pass, false);
   assert.equal(result.data.activationStatuses['T-CAN-24H'], 'UNRUN');
 });
 
