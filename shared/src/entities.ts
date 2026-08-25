@@ -388,11 +388,14 @@ export interface NetworkMetrics {
 
 export interface SystemMetrics {
   cpuUsagePercent: number;
+  cpuCores?: number;
+  hostname?: string;
+  loadAverage?: [number, number, number];
   memoryTotalBytes: number;
   memoryUsedBytes: number;
   memoryUsagePercent: number;
   disks: DiskMetrics[];
-  network: NetworkMetrics;
+  network: NetworkMetrics | null;
   uptimeSeconds: number;
   collectedAt: string;
 }

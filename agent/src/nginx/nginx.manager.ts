@@ -23,7 +23,7 @@
 
 import * as fs from 'fs/promises';
 import * as path from 'path';
-import { randomUUID } from 'crypto';
+import { createHash, randomUUID } from 'crypto';
 
 import { CommandExecutor } from '../command-executor';
 import {
@@ -47,6 +47,7 @@ import {
 
 const ZONES_PATH = '/etc/nginx/conf.d/meowbox-zones.conf';
 const SYSTEM_CA_BUNDLE = '/etc/ssl/certs/ca-certificates.crt';
+const MAX_DIAGNOSTIC_FILES = 500;
 
 function stoppedServerNames(domain: string, aliases: NginxDomainAlias[] | undefined): string {
   const names = new Set<string>();
@@ -591,6 +592,118 @@ export class NginxManager {
       if (m) version = m[1];
     }
     return { running, version };
+  }
+
+  async diagnoseManagedConfigs(input: {
+    sites: Array<NginxSiteParams & { siteId: string; stopped?: boolean }>;
+    zones?: Array<{ zoneName: string; rps: number; enabled: boolean }>;
+  }): Promise<{
+    files: Array<{
+      id: string;
+      siteId: string | null;
+      label: string;
+      exists: boolean;
+      actualSha256: string | null;
+      expectedSha256: string;
+      matches: boolean;
+    }>;
+    partial: boolean;
+  }> {
+    const sites = Array.isArray(input.sites) ? input.sites.slice(0, 20) : [];
+    let filesTruncated = false;
+    const files: Array<{
+      id: string;
+      siteId: string | null;
+      label: string;
+      exists: boolean;
+      actualSha256: string | null;
+      expectedSha256: string;
+      matches: boolean;
+    }> = [];
+
+    const inspect = async (
+      id: string,
+      siteId: string | null,
+      label: string,
+      filePath: string,
+      expectedContent: string,
+    ) => {
+      if (files.length >= MAX_DIAGNOSTIC_FILES) {
+        filesTruncated = true;
+        return;
+      }
+      const expectedSha256 = createHash('sha256').update(expectedContent).digest('hex');
+      let actualSha256: string | null = null;
+      try {
+        const actual = await fs.readFile(filePath);
+        actualSha256 = createHash('sha256').update(actual).digest('hex');
+      } catch {
+        // Missing and unreadable are both reported without exposing path/content.
+      }
+      files.push({
+        id,
+        siteId,
+        label,
+        exists: actualSha256 !== null,
+        actualSha256,
+        expectedSha256,
+        matches: actualSha256 === expectedSha256,
+      });
+    };
+
+    for (const rawSite of sites) {
+      if (!/^[a-z0-9_-]{1,32}$/.test(rawSite.siteName)) continue;
+      if (!/^[A-Za-z0-9_-]{1,128}$/.test(rawSite.siteId)) continue;
+      const site = await this.withTrustedSslChains(rawSite);
+      if (rawSite.stopped) {
+        await inspect(
+          `${rawSite.siteId}:main`,
+          rawSite.siteId,
+          `${rawSite.siteName}.conf`,
+          this.mainConfigPath(rawSite.siteName),
+          renderStoppedNginxSite(site),
+        );
+        continue;
+      }
+      const rendered = renderNginxSite(site);
+      await inspect(
+        `${rawSite.siteId}:main`,
+        rawSite.siteId,
+        `${rawSite.siteName}.conf`,
+        this.mainConfigPath(rawSite.siteName),
+        rendered.mainConfig,
+      );
+      for (const domain of rendered.domains) {
+        if (!/^[A-Za-z0-9_-]{1,128}$/.test(domain.domainId)) continue;
+        for (const [filename, content] of Object.entries(domain.chunks)) {
+          await inspect(
+            `${rawSite.siteId}:${domain.domainId}:${filename}`,
+            rawSite.siteId,
+            `${rawSite.siteName}/${domain.domainId}/${filename}`,
+            path.join(this.domainDir(rawSite.siteName, domain.domainId), filename),
+            content,
+          );
+        }
+      }
+    }
+
+    if (Array.isArray(input.zones) && input.zones.length <= 500) {
+      const legacyZoneRefs = await this.collectLegacyZoneRefs().catch(() => new Set<string>());
+      await inspect(
+        'global:zones',
+        null,
+        'meowbox-zones.conf',
+        ZONES_PATH,
+        renderNginxZones(input.zones, legacyZoneRefs),
+      );
+    }
+
+    return {
+      files,
+      partial:
+        filesTruncated ||
+        (Array.isArray(input.sites) && input.sites.length > sites.length),
+    };
   }
 
   // ---------------------------------------------------------------------------

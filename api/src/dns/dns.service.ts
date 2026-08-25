@@ -23,6 +23,10 @@ import {
   getMailTemplate, MailTemplate, MailTemplateExtras,
 } from './templates/mail-templates';
 import { parseSiteAliases } from '../common/json-array';
+import {
+  preserveManagedDnsMarker,
+  withManagedDnsMarker,
+} from './dns-managed-record';
 
 export interface MaskedProviderView {
   id: string;
@@ -91,6 +95,7 @@ function redactSecrets(s: string): string {
 @Injectable()
 export class DnsService {
   private readonly logger = new Logger(DnsService.name);
+  private readonly syncBackoff = new Map<string, { failures: number; nextAt: number }>();
 
   constructor(private readonly prisma: PrismaService) {}
 
@@ -202,15 +207,37 @@ export class DnsService {
       where: { status: { in: ['ACTIVE', 'ERROR'] } }, // UNAUTHORIZED — не пробуем, нет смысла
       select: { id: true },
     });
+    const now = Date.now();
+    const pending = accs.filter((account) => {
+      const state = this.syncBackoff.get(account.id);
+      return !state || state.nextAt <= now;
+    });
     const out: { accountId: string; ok: boolean; error?: string }[] = [];
-    for (const a of accs) {
-      try {
-        await this.syncProviderFull(a.id);
-        out.push({ accountId: a.id, ok: true });
-      } catch (err) {
-        out.push({ accountId: a.id, ok: false, error: (err as Error).message });
+    let cursor = 0;
+    const worker = async () => {
+      while (cursor < pending.length) {
+        const account = pending[cursor++];
+        try {
+          const result = await this.syncProviderFull(account.id);
+          if (result && result.recordsFailed > 0) {
+            throw new Error(`${result.recordsFailed} DNS zone refreshes failed`);
+          }
+          this.syncBackoff.delete(account.id);
+          out.push({ accountId: account.id, ok: true });
+        } catch (err) {
+          const previous = this.syncBackoff.get(account.id)?.failures ?? 0;
+          const failures = Math.min(previous + 1, 8);
+          const delayMs = Math.min(60 * 60_000, 10 * 60_000 * 2 ** (failures - 1));
+          this.syncBackoff.set(account.id, { failures, nextAt: Date.now() + delayMs });
+          out.push({
+            accountId: account.id,
+            ok: false,
+            error: redactSecrets((err as Error).message),
+          });
+        }
       }
-    }
+    };
+    await Promise.all(Array.from({ length: Math.min(3, pending.length) }, () => worker()));
     return out;
   }
 
@@ -700,14 +727,25 @@ export class DnsService {
 
     const existing = await this.prisma.dnsRecord.findMany({
       where: { zoneId },
-      select: { id: true, externalId: true },
+      select: {
+        id: true,
+        externalId: true,
+        type: true,
+        name: true,
+        content: true,
+        ttl: true,
+        priority: true,
+        proxied: true,
+        comment: true,
+      },
     });
+    const existingByExternalId = new Map(
+      existing.map((record) => [record.externalId, record]),
+    );
     const remoteIds = new Set(records.map((r) => r.externalId));
 
     for (const r of records) {
-      const found = await this.prisma.dnsRecord.findUnique({
-        where: { zoneId_externalId: { zoneId, externalId: r.externalId } },
-      });
+      const found = existingByExternalId.get(r.externalId);
       const data = {
         zoneId,
         externalId: r.externalId,
@@ -717,10 +755,20 @@ export class DnsService {
         ttl: r.ttl,
         priority: r.priority ?? null,
         proxied: r.proxied ?? null,
-        comment: r.comment ?? null,
+        comment: preserveManagedDnsMarker(found?.comment, r.comment),
       };
       if (found) {
-        await this.prisma.dnsRecord.update({ where: { id: found.id }, data });
+        const unchanged =
+          found.type === data.type &&
+          found.name === data.name &&
+          found.content === data.content &&
+          found.ttl === data.ttl &&
+          found.priority === data.priority &&
+          (found.proxied ?? false) === (data.proxied ?? false) &&
+          found.comment === data.comment;
+        if (!unchanged) {
+          await this.prisma.dnsRecord.update({ where: { id: found.id }, data });
+        }
       } else {
         await this.prisma.dnsRecord.create({ data });
       }
@@ -731,15 +779,15 @@ export class DnsService {
       await this.prisma.dnsRecord.deleteMany({ where: { id: { in: toRemove.map((r) => r.id) } } });
     }
 
-    const total = await this.prisma.dnsRecord.count({ where: { zoneId } });
     await this.prisma.dnsZone.update({
       where: { id: zoneId },
-      data: { recordsCount: total, recordsCachedAt: new Date() },
+      data: { recordsCount: records.length, recordsCachedAt: new Date() },
     });
   }
 
   async createRecord(zoneId: string, dto: CreateRecordDto): Promise<{ id: string; externalId: string }> {
     this.validateRecordDto(dto);
+    const managedDto = withManagedDnsMarker(dto);
     const zone = await this.prisma.dnsZone.findUnique({
       where: { id: zoneId },
       include: { account: true },
@@ -750,7 +798,7 @@ export class DnsService {
 
     let remote;
     try {
-      remote = await provider.createRecord(ctx, zone.externalId, dto);
+      remote = await provider.createRecord(ctx, zone.externalId, managedDto);
     } catch (err) {
       throw new BadGatewayException(`Не удалось создать запись: ${redactSecrets((err as Error).message)}`);
     }
@@ -769,7 +817,7 @@ export class DnsService {
           ttl: remote.ttl,
           priority: remote.priority ?? null,
           proxied: remote.proxied ?? null,
-          comment: remote.comment ?? null,
+          comment: preserveManagedDnsMarker(managedDto.comment, remote.comment),
         },
       });
       // recordsCount не меняем — запись уже существовала
@@ -784,7 +832,7 @@ export class DnsService {
           ttl: remote.ttl,
           priority: remote.priority ?? null,
           proxied: remote.proxied ?? null,
-          comment: remote.comment ?? null,
+          comment: preserveManagedDnsMarker(managedDto.comment, remote.comment),
         },
       });
       await this.prisma.dnsZone.update({
@@ -797,6 +845,7 @@ export class DnsService {
 
   async updateRecord(zoneId: string, recordId: string, dto: UpdateRecordDto): Promise<void> {
     this.validateRecordDto(dto);
+    const managedDto = withManagedDnsMarker(dto);
     const zone = await this.prisma.dnsZone.findUnique({
       where: { id: zoneId },
       include: { account: true },
@@ -809,7 +858,7 @@ export class DnsService {
     const provider = getProvider(zone.account.type);
     let remote;
     try {
-      remote = await provider.updateRecord(ctx, zone.externalId, rec.externalId, dto);
+      remote = await provider.updateRecord(ctx, zone.externalId, rec.externalId, managedDto);
     } catch (err) {
       throw new BadGatewayException(`Не удалось обновить запись: ${redactSecrets((err as Error).message)}`);
     }
@@ -824,7 +873,7 @@ export class DnsService {
         ttl: remote.ttl,
         priority: remote.priority ?? null,
         proxied: remote.proxied ?? null,
-        comment: remote.comment ?? null,
+        comment: preserveManagedDnsMarker(managedDto.comment, remote.comment),
       },
     });
   }
@@ -901,19 +950,20 @@ export class DnsService {
         continue;
       }
       try {
-        const remote = await provider.createRecord(ctx, zone.externalId, rec);
+        const managedRecord = withManagedDnsMarker(rec);
+        const remote = await provider.createRecord(ctx, zone.externalId, managedRecord);
         await this.prisma.dnsRecord.upsert({
           where: { zoneId_externalId: { zoneId, externalId: remote.externalId } },
           create: {
             zoneId, externalId: remote.externalId, type: remote.type, name: remote.name,
             content: remote.content, ttl: remote.ttl,
             priority: remote.priority ?? null, proxied: remote.proxied ?? null,
-            comment: remote.comment ?? null,
+            comment: preserveManagedDnsMarker(managedRecord.comment, remote.comment),
           },
           update: {
             type: remote.type, name: remote.name, content: remote.content, ttl: remote.ttl,
             priority: remote.priority ?? null, proxied: remote.proxied ?? null,
-            comment: remote.comment ?? null,
+            comment: preserveManagedDnsMarker(managedRecord.comment, remote.comment),
           },
         });
         created.push({ type: rec.type, name: rec.name });

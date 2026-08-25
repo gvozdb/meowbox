@@ -1,0 +1,1436 @@
+plan
+meta:
+  id: system-overview-dashboard
+  title: Operations-first System Overview dashboard with Problems Inbox
+  project: meowbox
+  status: implementation-ready
+  date: 2026-08-23
+  owner: operator
+  target_surface: web/pages/index.vue
+  release_strategy: additive read-only contract, staged diagnostics, no database migration in first release
+
+terms:
+  SystemOverview: main dashboard for the currently selected Meowbox server
+  ProblemsInbox: prioritized list of concrete operational problems requiring attention
+  Problem: deterministic, evidence-backed current condition; never an inferred guess
+  Pulse: compact top-level server identity, health, uptime, version and freshness strip
+  Snapshot: one bounded API response used to render the dashboard consistently
+  DataSource: database, Agent, cached diagnostics or another authoritative provider
+  Unknown: source has no trustworthy value yet
+  Unavailable: source failed or cannot currently be reached
+  Stale: source value exists but is older than its freshness budget
+  Coverage: whether a diagnostic is supported, current and trustworthy
+  Remediation: operator action intended to resolve a Problem
+  LegacyServer: selected remote Meowbox server without DashboardOverview contract v1
+
+goal:
+  summary: >
+    Replace the scattered card wall on System Overview with a high-signal operations
+    workspace that answers, in order: which server is selected, whether it is healthy,
+    what requires action, whether resources are safe, what workloads are affected,
+    and where the operator should go next.
+  outcomes:
+    - uptime, selected server, Agent state, version and data freshness are visible at the top
+    - Problems Inbox is the primary dashboard surface immediately below server pulse
+    - critical and warning conditions are sorted consistently and link to the exact resolution context
+    - resource, site, runtime, protection, security and activity data have explicit hierarchy
+    - empty, unknown, stale and unavailable states are never confused
+    - ADMIN and MANAGER receive correctly scoped data enforced by API authorization
+    - selected older remote servers degrade explicitly instead of showing false zeroes
+    - dashboard reads remain bounded as site, domain, backup and activity tables grow
+    - first release is reversible because it adds no persistent state and performs no remediation mutations
+
+success_metrics:
+  product:
+    - an operator can identify the highest-severity active problem without scrolling
+    - an operator can reach the relevant site, backup, SSL, monitoring, service, DNS or update screen in one action
+    - healthy state is understandable in one glance and occupies less height than active-problem state
+    - uptime is visible in the first viewport on desktop and mobile reference layouts
+    - no dashboard section renders a healthy or zero value when its source is unavailable
+  reliability:
+    - GET dashboard overview has no write, command, notification or external-provider side effects
+    - one failed DataSource does not fail unrelated dashboard sections
+    - page polling never overlaps and stops while the tab is hidden
+    - old selected servers show an explicit compatibility state
+  performance:
+    - database query count is constant with respect to site and domain count
+    - initial response contains bounded lists and stays at or below 128 KiB JSON
+    - API local p95 is at or below 750 ms on the reference production-like fixture
+    - proxied selected-server p95 is at or below 1500 ms excluding an offline server timeout
+    - no synchronous systemctl, PM2, Nginx or DNS command runs in the HTTP request path
+
+fixed_decisions:
+  D01:
+    rule: dashboard is selected-server scope
+    detail: Fleet aggregation remains on /servers and is not mixed into System Overview.
+  D02:
+    rule: information order is fixed by operational urgency
+    order:
+      - server pulse
+      - Problems Inbox
+      - resource strip
+      - sites and runtime
+      - protection and security
+      - recent activity
+  D03:
+    rule: Problems Inbox is not a generic equal-weight card
+    detail: It spans the content width, has a severity rail and becomes compact only when healthy.
+  D04:
+    rule: overview is one consistent snapshot
+    detail: Web does not independently join several responses into contradictory states when v1 is available.
+  D05:
+    rule: first release is read-only
+    detail: Problem actions navigate to an allowlisted resolution context; they do not mutate infrastructure.
+  D06:
+    rule: backend never sends arbitrary URLs or HTTP methods as actions
+    detail: Backend sends an action target enum and entity ID; Web maps them through a local allowlist.
+  D07:
+    rule: no Problems Inbox persistence in first release
+    detail: No acknowledgement, snooze, assignment or dismissal tables. Active problems are recomputed deterministically.
+  D08:
+    rule: unknown is not healthy
+    detail: Missing pings, metrics, diagnostics or unsupported server capabilities render Unknown or Unavailable.
+  D09:
+    rule: STOPPED is not automatically a problem
+    detail: Intentionally stopped sites and optional services are not flagged; ERROR and violated expected-state contracts are flagged.
+  D10:
+    rule: instantaneous CPU, memory and load do not create Problems
+    detail: They remain visible metrics until a reliable sustained-window policy exists.
+  D11:
+    rule: every detector is pure and deterministic
+    detail: A detector receives a normalized Snapshot input and returns zero or more Problems without I/O.
+  D12:
+    rule: every source has availability and freshness metadata
+    values: [OK, STALE, UNAVAILABLE, UNSUPPORTED]
+  D13:
+    rule: no N+1 query or per-entity Agent call
+  D14:
+    rule: diagnostics are collected outside the dashboard HTTP request
+    detail: Cached bounded probes use single-flight execution, timeouts and backoff.
+  D15:
+    rule: current theme and navigation remain intact
+    detail: Keep Meowbox dark/light tokens, DM Sans, JetBrains Mono, sidebar and server selector.
+  D16:
+    rule: visual direction is an operations control room
+    detail: Dense but calm, strong hierarchy, precise status language, no decorative charting or generic card mosaic.
+  D17:
+    rule: charts require real time-series data
+    detail: Do not reuse simulated uptime segments or fabricate sparklines from aggregate percentages.
+  D18:
+    rule: full backup lists do not render on dashboard
+    detail: Render summary counts and only the most relevant exceptions; history stays on backup pages.
+  D19:
+    rule: MANAGER authorization is server-enforced
+    detail: Hiding ADMIN content in Vue is not considered authorization.
+  D20:
+    rule: older selected servers degrade explicitly
+    detail: A compatibility adapter may render trusted legacy data but must label unsupported diagnostics.
+  D21:
+    rule: dashboard work does not repair updater internals
+    detail: Failed update state may be shown; UPDATE_BLOCKED requires a separate authoritative readiness contract.
+  D22:
+    rule: no database or system migration in first dashboard release
+    detail: Use current tables and in-memory cached diagnostics; add an index only after query-plan evidence and in a separate Prisma migration.
+  D23:
+    rule: no layout customization in first release
+    detail: One carefully designed hierarchy prevents per-user layouts from hiding urgent information.
+  D24:
+    rule: all issue text is safe for UI
+    detail: Sanitize, redact and truncate source errors; never expose secrets, raw logs, commands or credential-bearing URLs.
+  D25:
+    rule: diagnostics coverage is visible
+    detail: Unsupported Nginx drift, DNS drift or update readiness is shown as unsupported capability, not silently omitted or fabricated.
+  D26:
+    rule: existing page remains rollback fallback during rollout
+    detail: Replace it only after contract, role, compatibility and visual acceptance tests pass.
+
+non_goals:
+  - fleet-wide aggregation across master and all slave servers
+  - replacing /monitoring, /backups, /ssl, /services, /activity or /servers detail pages
+  - arbitrary drag-and-drop dashboard configuration
+  - alert acknowledgement, assignment, snooze or incident management workflow
+  - executing destructive or restart actions directly from the first Problems Inbox release
+  - using dashboard GET requests to probe external DNS providers
+  - using dashboard GET requests to run systemctl, pm2, nginx or filesystem scans
+  - redesigning the full Meowbox navigation or global design system
+  - migration-updater hardening or changing update transaction semantics
+  - claiming HTTP uptime from aggregate values without real HealthCheckPing samples
+  - treating manually managed files outside Meowbox ownership as configuration drift
+
+current_state:
+  page:
+    file: web/pages/index.vue
+    problems:
+      - monolithic page combines template, data orchestration and styling
+      - every section has similar visual weight
+      - uptime is buried in the last system card
+      - quick actions consume prime space without problem context
+      - backup rows grow with every site
+      - fetch failures are swallowed and appear as empty data
+      - metrics, summary and sites requests may represent different moments
+  backend:
+    endpoint: GET /dashboard/summary
+    limitations:
+      - ADMIN-only despite site pages supporting MANAGER scope
+      - latest backup lookup performs one query per site
+      - service status runs system commands in request path
+      - missing and stopped services are not reliably distinguished
+      - no source availability or freshness contract
+      - no endpoint contract tests
+  metrics:
+    findings:
+      - /system/metrics does not return the disk and network shape expected by current page
+      - Agent monitoring already receives richer CPU, memory, disk and network values
+      - latest monitoring normalization currently drops useful hostname, uptime, load and multi-disk fields
+      - health page uses generated visual segments that are not real samples
+  operations:
+    findings:
+      - Operation is durable and contains status, type, progress, step, timestamps and error
+      - API exposes operation by ID but not a bounded scoped recent list for dashboard
+  compatibility:
+    finding: Web may proxy dashboard calls to a selected remote server running an older Meowbox version.
+
+information_architecture:
+  desktop_grid:
+    columns: 12
+    max_width: preserve current 1400px content maximum
+    gap: use existing spacing scale with 16px compact section gaps
+    rows:
+      R01:
+        component: ServerPulse
+        span: 12
+      R02:
+        component: ProblemsInbox
+        span: 12
+      R03:
+        component: ResourceStrip
+        span: 12
+      R04:
+        left:
+          component: SitesPanel
+          span: 8
+        right:
+          component: RuntimePanel
+          span: 4
+      R05:
+        left:
+          component: ProtectionPanel
+          span: 8
+        right:
+          component: SecurityPanel
+          span: 4
+      R06:
+        component: ActivityPanel
+        span: 12
+  tablet_grid:
+    columns: 8
+    rules:
+      - pulse, inbox and resources span 8
+      - sites and protection span 8
+      - runtime and security each span 4 when width permits
+      - activity spans 8
+  mobile_grid:
+    columns: 1
+    order: same as operational hierarchy
+    rules:
+      - pulse is compact but uptime remains visible
+      - Problems Inbox precedes resource metrics
+      - resources use two columns at 360px or wider and one below 360px
+      - tables become semantic stacked rows, not horizontal-scroll desktop tables
+      - primary tap targets are at least 44px
+
+visual_language:
+  direction: industrial utilitarian operations control room
+  surfaces:
+    - use existing background and border tokens
+    - use one base panel treatment; hierarchy comes from structure, spacing and status rail
+    - avoid nested cards for every scalar value
+    - avoid gradients, glass effects, decorative shadows and oversized rounded pills
+  typography:
+    labels: DM Sans
+    metrics: JetBrains Mono with tabular numerals
+    hierarchy:
+      - one page title
+      - compact section headings with counts and one contextual action
+      - metric value first, unit and interpretation second
+  status_encoding:
+    rules:
+      - color is never the only signal
+      - every state has icon, text label and accessible name
+      - red is reserved for current critical conditions
+      - amber is reserved for actionable warnings
+      - neutral gray means unknown, unsupported or intentionally inactive
+      - green appears only when a source positively confirms healthy state
+  motion:
+    duration_ms: 120..180
+    allowed:
+      - metric value transition without count-up animation
+      - inbox expand and collapse
+      - refresh indicator
+    forbidden:
+      - looping status animation
+      - pulsing healthy badges
+      - animated decorative charts
+    reduced_motion: disable non-essential transitions under prefers-reduced-motion
+
+components:
+  ServerPulse:
+    content_order:
+      - selected server display name and connection state
+      - overall state label derived from active Problems and source coverage
+      - uptime
+      - Agent state and last seen
+      - installed Meowbox version and update state for ADMIN
+      - last successful dashboard refresh
+    actions:
+      primary: Create site for roles allowed by existing site-creation policy
+      secondary: manual refresh
+    behavior:
+      - server switching keeps old content visually marked stale until new server snapshot succeeds
+      - never relabel previous server data as belonging to newly selected server
+      - offline selected server replaces all server data with explicit offline state
+
+  ProblemsInbox:
+    active_state:
+      summary: severity counts plus total active Problems
+      initial_items: 6
+      maximum_response_items: 100
+      overflow: open an accessible dialog containing the bounded complete response list
+      grouping: no grouping in initial list; optional category filters exist only in dialog
+      sort: severity rank ascending, occurredAt descending with null last, code ascending, id ascending
+    healthy_state:
+      height: compact one-row confirmation
+      required_text: No confirmed problems
+      caveat: show stale, unavailable or unsupported source count beside healthy text
+    item_layout:
+      - severity icon and label
+      - concise title
+      - one-line sanitized summary
+      - entity label and observed time
+      - one contextual action
+    interaction:
+      - entire row is not a hidden button
+      - action uses an explicit link label such as Open SSL or Open backup
+      - keyboard focus order follows visual order
+      - opening and closing dialog restores focus
+
+  ResourceStrip:
+    primary_metrics:
+      - CPU utilization
+      - memory used and total
+      - root disk used and free
+      - load average normalized by CPU core count
+    secondary_metrics:
+      - network receive and transmit rate
+      - additional mounted disks summarized as worst utilization plus count
+    rules:
+      - current value includes collectedAt age
+      - progress bars use clamped 0..100 display values but preserve validation errors as Unknown
+      - sparkline appears only when real history contains at least two samples
+      - no Problem is generated from one CPU, memory or load sample
+
+  SitesPanel:
+    header:
+      - total sites
+      - running count
+      - error count
+      - deploying count
+      - total managed domains
+    rows:
+      priority: error, active operation, deploying, recently changed
+      maximum: 8
+      content:
+        - site display name and primary domain
+        - site state plus affected domain count
+        - real availability percentage only when samples exist
+        - direct link to site
+    empty_state: Create the first site when role permits; otherwise No sites assigned.
+    forbidden:
+      - treating no health pings as 100 percent uptime
+      - listing every healthy site
+
+  RuntimePanel:
+    active_operations:
+      maximum: 5
+      content: operation type, target, progress, current step, elapsed time
+      rules:
+        - active operations are context, not Problems by default
+        - recently failed operations become Problems through detector rules
+    services:
+      scope: ADMIN core server services and site services relevant to selected rows
+      maximum: 8
+      content: installed state, expected state, actual state, last checked
+      rules:
+        - not installed is distinct from stopped
+        - optional not-installed database engines are neutral
+        - only expected-running but inactive or ERROR services generate Problems
+
+  ProtectionPanel:
+    backup_block:
+      - protected site count versus eligible site count
+      - most recent successful backup time
+      - failed backup count in last 24 hours
+      - overdue schedule count
+      - active backup count
+      - last Restic integrity-check state when configured
+    ssl_block:
+      - valid certificate count
+      - expiring certificate count
+      - expired or error count
+      - nearest expiry domain and days remaining
+    rules:
+      - show summaries and exceptions only
+      - full histories remain on dedicated pages
+
+  SecurityPanel:
+    visibility: ADMIN only
+    content:
+      - failed login count in last 24 hours
+      - active session count
+      - last successful login time and actor when safe
+      - firewall or allowlist summary only if an authoritative current source exists
+    rules:
+      - one failed login is not automatically a Problem
+      - no IP address, token, raw user agent or sensitive audit payload is exposed in compact dashboard rows
+
+  ActivityPanel:
+    maximum: 8
+    content:
+      - timestamp
+      - safe actor label
+      - action label
+      - target label
+      - result state when available
+    rules:
+      - full audit details remain on /activity
+      - no raw metadata JSON
+
+shared_contract:
+  location: shared/src/dashboard.ts
+  export_from: shared/src/index.ts
+  DashboardOverview:
+    fields:
+      contractVersion: literal 1
+      generatedAt: ISO-8601 UTC string
+      role: ADMIN or MANAGER
+      server: DashboardServerPulse
+      overall: DashboardOverallState
+      problems: DashboardProblemCollection
+      resources: DashboardResourceSection
+      sites: DashboardSitesSection
+      runtime: DashboardRuntimeSection
+      protection: DashboardProtectionSection
+      security: DashboardSecuritySection or null
+      activity: DashboardActivitySection
+      capabilities: DashboardCapabilities
+  DashboardSourceState:
+    fields:
+      availability: OK or STALE or UNAVAILABLE or UNSUPPORTED
+      observedAt: ISO-8601 UTC string or null
+      staleAfterSeconds: non-negative integer or null
+      message: safe user-facing string or null
+  DashboardOverallState:
+    fields:
+      state: HEALTHY or ATTENTION or CRITICAL or UNKNOWN
+      criticalCount: non-negative integer
+      warningCount: non-negative integer
+      infoCount: non-negative integer
+      degradedSourceCount: non-negative integer
+    derivation:
+      CRITICAL: at least one critical Problem
+      ATTENTION: no critical Problem and at least one warning Problem
+      HEALTHY: no critical or warning Problem and all required sources are OK
+      UNKNOWN: no critical or warning Problem but at least one required source is not OK
+  DashboardProblem:
+    fields:
+      id: deterministic string from code, entity kind and stable entity ID
+      code: DashboardProblemCode
+      severity: CRITICAL or WARNING or INFO
+      category: SYSTEM or AGENT or SITE or SERVICE or BACKUP or SSL or OPERATION or SECURITY or UPDATE or DNS
+      title: safe string, maximum 100 characters
+      summary: safe string, maximum 240 characters
+      entity:
+        kind: SERVER or SITE or DOMAIN or SERVICE or BACKUP or CERTIFICATE or OPERATION or DNS_PROVIDER
+        id: stable entity ID or null for server singleton
+        label: safe string, maximum 120 characters
+      occurredAt: ISO-8601 UTC string or null
+      observedAt: ISO-8601 UTC string
+      action: DashboardProblemAction or null
+  DashboardProblemAction:
+    fields:
+      kind: NAVIGATE
+      target: MONITORING or SITES or SITE or SERVICES or BACKUPS or SSL or DNS or UPDATES or ACTIVITY
+      entityId: stable ID or null
+      label: safe localized label key
+  DashboardProblemCollection:
+    fields:
+      total: non-negative integer
+      critical: non-negative integer
+      warning: non-negative integer
+      info: non-negative integer
+      truncated: boolean
+      items: DashboardProblem array with maximum 100
+  DashboardCapabilities:
+    fields:
+      overviewV1: boolean
+      nginxValidation: SUPPORTED or UNSUPPORTED
+      nginxDrift: SUPPORTED or UNSUPPORTED
+      dnsDrift: SUPPORTED or UNSUPPORTED
+      pm2Diagnostics: SUPPORTED or UNSUPPORTED
+      updateReadiness: SUPPORTED or UNSUPPORTED
+  section_contract:
+    rule: every section starts with source DashboardSourceState and contains bounded summary plus bounded items
+  validation:
+    - API constructs the shared types without any casts to unknown response shapes
+    - Web treats response as untrusted and validates contractVersion and required discriminants
+    - invalid section data degrades only that section to UNAVAILABLE
+
+role_scope:
+  ADMIN:
+    data:
+      - full server pulse, Agent, resources and core services
+      - all sites and domains on selected server
+      - all backup, SSL, operations, security, DNS and update summaries
+    actions:
+      - all allowlisted navigation targets
+  MANAGER:
+    data:
+      - owned sites and their domains
+      - owned-site availability, application state, SSL and activity
+      - owned-site operations visible under existing ownership rules
+      - backup data only if existing product permissions explicitly permit it
+    hidden:
+      - host resource values
+      - Agent diagnostics
+      - core service state
+      - other users and sites
+      - global security, DNS provider credentials/state and panel update state
+    actions:
+      - only destinations already authorized for that manager
+  enforcement:
+    - remove controller-wide ADMIN restriction from the new endpoint only
+    - read user ID and role from authenticated principal
+    - apply ownership predicates inside each scoped query
+    - do not fetch ADMIN-only data and discard it after serialization
+    - contract tests prove absence, not merely nulling, of unauthorized entity data
+
+problem_detection:
+  pipeline:
+    - collect normalized bounded source snapshot
+    - validate source freshness and availability
+    - run independent pure detectors
+    - sanitize and truncate generated text
+    - deduplicate by deterministic ID
+    - sort by fixed severity and time rules
+    - count complete result before applying response cap
+  isolation:
+    - one detector exception becomes DATA_SOURCE_UNAVAILABLE for its source
+    - detector exceptions are logged once with correlation ID and no secrets
+    - other detectors continue
+  no_side_effects:
+    - no notification dispatch
+    - no audit mutation
+    - no status repair
+    - no backup or SSL launch
+    - no process or service restart
+
+problem_codes:
+  agent:
+    AGENT_OFFLINE:
+      condition: Agent has no active connection after disconnect grace period
+      severity: CRITICAL after 120 seconds, WARNING from 30 through 119 seconds
+      action: MONITORING
+    METRICS_STALE:
+      condition: latest Agent metrics age exceeds freshness threshold while Agent is connected
+      severity: WARNING after 45 seconds, CRITICAL after 120 seconds
+      action: MONITORING
+  system:
+    DISK_USAGE_WARNING:
+      condition: managed filesystem usage is at least 80 percent or available bytes are at most 5 GiB
+      severity: WARNING
+      action: MONITORING
+    DISK_USAGE_CRITICAL:
+      condition: managed filesystem usage is at least 95 percent or available bytes are at most 2 GiB
+      severity: CRITICAL
+      action: MONITORING
+    NGINX_CONFIG_INVALID:
+      condition: latest cached nginx -t result is confirmed failed
+      severity: CRITICAL
+      action: SERVICES
+    NGINX_MANAGED_CONFIG_DRIFT:
+      condition: at least one Meowbox-owned expected file is missing or its SHA-256 differs from canonical rendered content
+      severity: WARNING when nginx -t passes, CRITICAL when nginx -t also fails
+      action: SERVICES
+  service:
+    CORE_SERVICE_INACTIVE:
+      condition: installed service declared expected-running is inactive or failed
+      severity: CRITICAL for Nginx and active database dependency, WARNING for other expected services
+      action: SERVICES
+    PM2_PROCESS_UNHEALTHY:
+      condition: expected managed process exists but PM2 reports errored, stopped or unknown outside an active operation grace period
+      severity: CRITICAL for Meowbox API or Agent, WARNING for site process
+      action: SERVICES or SITE according to entity
+    PM2_PROCESS_MISSING:
+      condition: a configured expected process is absent from the relevant PM2 daemon outside deployment grace period
+      severity: WARNING
+      action: SITE
+  site:
+    SITE_ERROR:
+      condition: Site.status equals ERROR
+      severity: CRITICAL
+      action: SITE
+    DOMAIN_APPLICATION_ERROR:
+      condition: SiteDomain.appStatus equals ERROR
+      severity: CRITICAL
+      action: SITE
+    SITE_UNAVAILABLE:
+      condition: real recent HealthCheckPing samples satisfy existing outage policy
+      severity: CRITICAL
+      action: SITE
+      guard: zero samples yields Unknown, never SITE_UNAVAILABLE and never healthy
+  backup:
+    BACKUP_LATEST_FAILED:
+      condition: latest completed attempt for an enabled protection target failed
+      severity: CRITICAL when no later success exists inside expected window, otherwise WARNING
+      action: BACKUPS
+    BACKUP_COVERAGE_GAP:
+      condition: one or more eligible sites have neither enabled per-site config nor applicable enabled global schedule
+      severity: WARNING
+      aggregation: one Problem with affected count, not one row per site
+      action: BACKUPS
+    BACKUP_OVERDUE:
+      condition: latest success is later than computed next expected schedule plus grace
+      severity: WARNING, CRITICAL after two missed expected executions
+      action: BACKUPS
+      schedule_rules:
+        - use an explicit direct cron library dependency, not an undeclared transitive package
+        - use server timezone consistently with scheduler
+        - invalid schedule is a separate configuration warning
+        - grace is max of 15 minutes or 25 percent of expected interval
+    BACKUP_REPOSITORY_CHECK_FAILED:
+      condition: latest configured ResticCheck is complete and success is false
+      severity: WARNING
+      action: BACKUPS
+  ssl:
+    SSL_ERROR:
+      condition: certificate status is an explicit error state
+      severity: CRITICAL
+      action: SSL
+    SSL_EXPIRED:
+      condition: expiresAt is earlier than generatedAt or explicit status is expired
+      severity: CRITICAL
+      action: SSL
+    SSL_EXPIRING_CRITICAL:
+      condition: daysRemaining is from 0 through 3
+      severity: CRITICAL
+      action: SSL
+    SSL_EXPIRING_WARNING:
+      condition: daysRemaining is from 4 through 14
+      severity: WARNING
+      action: SSL
+    SSL_EXPECTED_BUT_UNKNOWN:
+      condition: HTTPS is expected but certificate state or expiry is absent
+      severity: WARNING
+      action: SSL
+  operation:
+    OPERATION_RECENTLY_FAILED:
+      condition: latest terminal operation for an entity failed within 24 hours and no later successful equivalent operation exists
+      severity: WARNING, CRITICAL when affected entity remains ERROR
+      action: SITE or ACTIVITY according to operation scope
+    OPERATION_STALE:
+      condition: operation exceeds the authoritative timeout policy used by operation recovery
+      severity: WARNING
+      action: ACTIVITY
+      guard: do not invent a generic timeout when operation type has no policy
+  dns:
+    DNS_PROVIDER_ERROR:
+      condition: configured provider has persisted ERROR state
+      severity: WARNING
+      action: DNS
+    DNS_RECORD_DRIFT:
+      condition: background checker confirms mismatch for a Meowbox-managed record in two consecutive checks
+      severity: WARNING
+      action: DNS
+      guard: timeout, rate limit or provider outage yields source UNAVAILABLE, not drift
+  update:
+    UPDATE_FAILED:
+      condition: latest panel update attempt is terminal failed and no later successful attempt exists
+      severity: WARNING when panel is operational, CRITICAL when maintenance or health state remains degraded
+      action: UPDATES
+    UPDATE_BLOCKED:
+      condition: authoritative update-readiness contract reports blocked with a safe reason code
+      severity: WARNING
+      action: UPDATES
+      guard: disabled until updater reliability work exposes a stable readiness contract
+  source:
+    DATA_SOURCE_UNAVAILABLE:
+      condition: a required source cannot be read and no fresh cached value exists
+      severity: WARNING, CRITICAL only when the unavailable source is required to establish basic server safety
+      action: relevant destination or null
+
+diagnostics:
+  architecture:
+    service: DashboardDiagnosticsService
+    behavior:
+      - refreshes diagnostics on scheduler ticks, never during dashboard request
+      - one in-flight refresh per selected local server process
+      - retains last successful value with observedAt and error state
+      - clears stale values only after preserving explicit last-known timestamp
+      - starts with Unknown after API restart until the first refresh
+  budgets:
+    core_services:
+      interval_seconds: 30
+      timeout_seconds: 5
+    nginx_validation:
+      interval_seconds: 60
+      timeout_seconds: 10
+    nginx_drift:
+      interval_seconds: 300
+      timeout_seconds: 30
+    pm2:
+      interval_seconds: 60
+      timeout_seconds: 20
+    dns:
+      interval_seconds: 600
+      timeout_seconds_per_provider: 10
+      max_concurrency: 3
+      backoff: exponential, capped at 60 minutes
+  nginx_drift:
+    expected_manifest:
+      - refactor current config generators into pure render functions before comparing
+      - manifest contains allowlisted absolute path, SHA-256 and owning entity ID
+      - include only files whose lifecycle Meowbox owns
+      - include custom user configuration only as input to canonical rendered managed files
+    agent_response:
+      - path identifier
+      - exists boolean
+      - actual SHA-256 or null
+      - no file contents
+    safety:
+      - Agent rejects paths outside explicit managed config roots
+      - comparison never rewrites a file
+      - unknown extra files are ignored in first release
+  dns_drift:
+    scope:
+      - only enabled configured providers
+      - only records explicitly managed by Meowbox
+      - compare canonicalized record name, type, value, priority and proxied state where supported
+    consistency:
+      - require two consecutive mismatches to avoid provider propagation false positives
+      - honor provider TTL and rate limits
+      - cache safe reason codes, never provider response bodies
+  pm2:
+    scope:
+      - root Meowbox processes
+      - configured site Node processes only
+    scaling:
+      - add one bounded Agent diagnostic request instead of one request per site
+      - inspect only users/domains with an expected PM2 process contract
+      - concurrency is at most 2 per-site PM2 daemon reads
+      - large inventories are processed across ticks and report partial coverage
+    grace:
+      - suppress missing or stopped warnings while related deploy/start/stop operation is active
+      - use operation timestamps and type-specific recovery policy
+
+api:
+  endpoint:
+    method: GET
+    path: /dashboard/overview
+    auth: authenticated ADMIN or MANAGER
+    response: DashboardOverview contractVersion 1
+  old_endpoint:
+    path: /dashboard/summary
+    policy: keep unchanged for one compatibility release
+    removal: only after supported remote-server upgrade floor guarantees overview v1
+  request_behavior:
+    - create one correlation ID
+    - read current user ID and role
+    - execute independent source loaders with Promise.allSettled
+    - normalize each source into a typed section
+    - compute Problems after all available source results settle
+    - return partial snapshot with per-section source state
+  error_behavior:
+    - 401 for unauthenticated requests
+    - 403 only when role is unsupported, not for a MANAGER with zero sites
+    - 200 with partial source states for recoverable section failures
+    - 500 only when the top-level response cannot be formed safely
+  headers:
+    Cache-Control: private, no-store
+    X-Dashboard-Contract: 1
+  limits:
+    problems: 100
+    sites: 8
+    activeOperations: 5
+    services: 8
+    activity: 8
+    recentFailureLookbackHours: 24
+
+backend_design:
+  DashboardOverviewService:
+    responsibility:
+      - orchestrate bounded source loaders
+      - enforce user scope
+      - produce one generatedAt timestamp
+      - call problem detector registry
+      - serialize shared contract
+    forbidden:
+      - system commands
+      - external network access
+      - state mutation
+  DashboardQueryService:
+    responsibility:
+      - aggregate sites, domains, certificates, backups, operations, sessions and activity
+      - use set-based queries with limits and selected fields
+      - keep all role predicates explicit
+    query_rules:
+      - do not load full backup histories
+      - use grouped counts and latest-per-entity queries
+      - avoid Promise.all over entity collections
+      - select no encrypted credential, command, raw output or metadata payload fields
+      - use one generatedAt cutoff consistently across queries
+  DashboardProblemDetectorRegistry:
+    responsibility:
+      - register pure detectors by source category
+      - isolate detector exceptions
+      - enforce deterministic IDs and sorting
+      - sanitize all messages through shared safeErrorMessage policy
+  DashboardDiagnosticsService:
+    responsibility:
+      - own cached command and external-provider diagnostic state
+      - expose snapshots synchronously to overview service
+      - publish freshness and support capability
+  MonitoringService_changes:
+    - preserve latest Agent collectedAt, uptime, hostname, load, CPU count, all disks and normalized network rates
+    - reject non-finite and negative values according to metric semantics
+    - retain a bounded ring buffer only for real sparklines if existing history query is insufficient
+  operation_changes:
+    - add bounded internal query for recent and active operations scoped by user
+    - do not create an unrestricted public list endpoint unless another screen needs it
+  status_provider_changes:
+    - distinguish installed, expected-running, stopped, failed and unavailable
+    - cache command results outside request path
+    - never mark an absent optional database engine as failed
+
+database_query_plan:
+  required_patterns:
+    sites:
+      - grouped counts by Site.status under role scope
+      - bounded priority list ordered by error and updatedAt
+    domains:
+      - grouped appStatus counts and domain totals
+      - bounded error rows joined to owned sites
+    health:
+      - aggregate recent HealthCheckPing per domain in the database
+      - return sampled count with percentage
+      - no samples maps to Unknown
+    backups:
+      - union or separately aggregate Backup, ServerPathBackup and PanelDataBackup
+      - latest-per-target query is set-based
+      - coverage query joins enabled per-site configs and applicable global schedules
+    ssl:
+      - aggregate explicit status and expiresAt thresholds
+      - select only nearest expirations and errors
+    operations:
+      - query active states plus bounded recent terminal failures
+    activity:
+      - select last eight safe fields only
+    security:
+      - count failed logins in a bounded timestamp range
+      - count active sessions without loading session rows
+  index_gate:
+    - capture EXPLAIN QUERY PLAN for production-like fixture
+    - use existing status, site, domain and timestamp indexes first
+    - if a full scan remains material, add the narrowest index through prisma migrate dev
+    - never use db push
+    - index migration must be isolated, reversible and benchmarked for write cost
+
+frontend_design:
+  page_shell:
+    file: web/pages/index.vue
+    responsibility:
+      - page title and selected-server context
+      - compose dashboard components
+      - no detector or API-shape business logic
+  composable:
+    file: web/composables/useDashboardOverview.ts
+    responsibility:
+      - fetch selected-server overview
+      - validate contract version
+      - preserve last successful snapshot during refresh
+      - abort request when server changes or component unmounts
+      - prevent overlapping polls
+      - pause polling while document.hidden
+      - refresh immediately on visibility restore and selected-server change
+      - expose initialLoading, refreshing, lastSuccessAt and top-level error
+    polling_seconds: 30
+  socket_metrics:
+    rule: apply a newer Agent metrics event only when it belongs to the same selected server and passes validation
+    fallback: overview resource snapshot remains authoritative when socket is unavailable
+  component_boundaries:
+    - web/components/dashboard/DashboardServerPulse.vue
+    - web/components/dashboard/DashboardProblemsInbox.vue
+    - web/components/dashboard/DashboardResourceStrip.vue
+    - web/components/dashboard/DashboardSitesPanel.vue
+    - web/components/dashboard/DashboardRuntimePanel.vue
+    - web/components/dashboard/DashboardProtectionPanel.vue
+    - web/components/dashboard/DashboardSecurityPanel.vue
+    - web/components/dashboard/DashboardActivityPanel.vue
+    - web/components/dashboard/DashboardSectionState.vue
+  boundary_rule: create cohesive operational panels, not one component per number or icon
+  navigation_registry:
+    responsibility: map DashboardProblemAction.target and entityId to existing internal routes
+    security:
+      - exhaustive switch over action target enum
+      - reject unknown target
+      - validate entity ID as opaque route param
+      - never evaluate server-provided path or URL
+
+data_states:
+  initial_loading:
+    - render structural skeletons matching final panel geometry
+    - do not render zero counters
+  background_refresh:
+    - keep existing data visible
+    - mark refresh in pulse without blocking interaction
+    - apply response only if request server key still equals selected server key
+  partial_failure:
+    - render healthy sections normally
+    - render failed section with Unavailable label, safe message and retry through global refresh
+    - create source Problem only when source is required
+  total_failure:
+    - keep last successful snapshot marked Stale if it belongs to same selected server
+    - otherwise render selected-server offline or unavailable state
+  empty:
+    - zero owned sites is a real empty state
+    - zero Problems is healthy only when required coverage is OK
+  stale:
+    - display data age
+    - do not advance uptime locally past the last observed value without marking it derived
+
+multi_server_compatibility:
+  server_switch:
+    - key all cached snapshots by selected server ID
+    - never reuse one server snapshot for another server
+    - cancel old request and socket association before applying new data
+  capability_detection:
+    preferred: GET /dashboard/overview returns X-Dashboard-Contract 1
+    legacy: 404 or unsupported contract marks overviewV1 false
+    forbidden: treat 401, 403, timeout or 500 as legacy support failure
+  legacy_adapter:
+    inputs:
+      - GET /dashboard/summary
+      - GET /system/metrics
+      - GET /sites
+    outputs:
+      - only fields whose legacy meaning is trustworthy
+      - all unsupported Problems and diagnostics explicitly marked UNSUPPORTED
+      - compatibility notice with action to open server updates for ADMIN
+    restrictions:
+      - no fake disks or network values from absent fields
+      - no synthesis of healthy state from empty legacy arrays
+      - no manager data if legacy endpoint returns 403
+    lifespan: remove after one documented minimum-version compatibility window
+
+security:
+  response_minimization:
+    - exclude encrypted fields, provider configs, tokens, passwords, command text and raw outputs
+    - exclude absolute filesystem paths from Problems and compact activity
+    - use safe labels rather than database metadata blobs
+  errors:
+    - pass source failures through safeErrorMessage with 240-character maximum
+    - redact URL credentials, query secrets, bearer tokens and provider response bodies
+    - log detailed server-side correlation separately without returning it
+  authorization:
+    - enforce role and ownership on every query
+    - test mixed-owner data fixtures
+    - action availability follows destination authorization
+  request_safety:
+    - GET is side-effect free and private no-store
+    - polling rate remains below configured throttling budget
+    - diagnostic scheduler applies timeouts, backoff and concurrency caps
+  future_remediation_contract:
+    prerequisite: separate approved implementation after read-only inbox proves detector quality
+    requirements:
+      - server-side allowlisted action ID, never arbitrary command
+      - POST endpoint with role and ownership check
+      - explicit preflight and human-readable impact
+      - confirmation for restart, reissue, retry or config regeneration
+      - idempotency key
+      - Operation row and audit log
+      - bounded timeout and rollback or safe retry semantics
+      - action disabled while conflicting Operation is active
+
+accessibility:
+  semantic_structure:
+    - one h1 and ordered h2 section headings
+    - Problems use a list; activity and site summaries use semantic list or table according to viewport
+    - links remain links and buttons remain buttons
+  keyboard:
+    - every action reachable in logical order
+    - visible focus uses existing high-contrast focus token
+    - dialog traps focus, closes with Escape and restores trigger focus
+  screen_reader:
+    - icons are decorative when adjacent text exists
+    - progress bars expose name, current value, minimum and maximum
+    - status changes are not announced on every 30-second poll
+    - manual refresh result and newly increased critical count use a polite live region
+  contrast:
+    - meet WCAG AA for text and controls in dark and light themes
+    - status text remains readable without relying on low-opacity color
+  localization:
+    - user-visible strings remain Russian in current product language
+    - date, duration, bytes and rate formatting use shared formatters
+    - machine error strings are not exposed untranslated
+
+performance_and_scale:
+  response_caps:
+    problems: 100
+    sites: 8
+    operations: 5
+    services: 8
+    activity: 8
+    metric_history_points_per_series: 60
+  database:
+    - query count must not increase when fixture grows from 10 to 10000 sites
+    - select only serialized fields
+    - use timestamp cutoffs and indexed order before limit
+    - parse JSON only for bounded selected rows
+  diagnostics:
+    - never scan arbitrary filesystem trees
+    - compare a bounded expected manifest
+    - spread large PM2 inventories over scheduler ticks
+    - use single-flight refresh to prevent thundering herds
+  web:
+    - one overview request per active visible tab per 30 seconds
+    - no concurrent refresh from timer, focus and manual action
+    - no expensive deep watcher over full snapshot
+    - list keys use deterministic IDs
+    - real sparklines render bounded SVG points without chart dependency
+
+observability:
+  api_metrics:
+    - dashboard_overview_duration_ms by role and local_or_proxy
+    - dashboard_overview_partial_failure_total by source
+    - dashboard_problem_count by code and severity without entity labels
+    - dashboard_diagnostic_duration_ms by diagnostic
+    - dashboard_diagnostic_failure_total by diagnostic and safe reason code
+  logs:
+    - one structured completion line with correlation ID, duration, role, section states and problem counts
+    - no per-site success log
+    - detector failure includes detector code and correlation ID
+  web_telemetry:
+    - contract unsupported
+    - full refresh failure
+    - section unavailable
+    - no metric values or entity names in client telemetry
+
+implementation_phases:
+  P00_contract_and_fixture:
+    objective: freeze semantics before visual rewrite
+    tasks:
+      - add shared DashboardOverview v1 types and enums
+      - create representative ADMIN and MANAGER fixtures
+      - include healthy, critical, partial-source, empty and legacy fixtures
+      - add response-size assertion
+    exit:
+      - shared package builds
+      - fixtures compile against shared contract
+      - action target mapping is exhaustive
+
+  P01_query_and_snapshot:
+    objective: replace current N+1 summary with bounded consistent read model
+    tasks:
+      - add DashboardQueryService
+      - implement role-scoped aggregate queries
+      - aggregate real HealthCheckPing samples and preserve Unknown
+      - add active and recent operation internal query
+      - normalize monitoring source without losing disk, network, uptime or load fields
+      - expose GET /dashboard/overview
+      - keep old summary endpoint unchanged
+    exit:
+      - no query loop depends on site count
+      - MANAGER cannot observe another owner data
+      - partial source failure returns valid contract
+
+  P02_core_problem_detectors:
+    objective: ship trusted Problems Inbox coverage from existing authoritative state
+    codes:
+      - AGENT_OFFLINE
+      - METRICS_STALE
+      - DISK_USAGE_WARNING
+      - DISK_USAGE_CRITICAL
+      - SITE_ERROR
+      - DOMAIN_APPLICATION_ERROR
+      - SITE_UNAVAILABLE
+      - BACKUP_LATEST_FAILED
+      - BACKUP_COVERAGE_GAP
+      - BACKUP_OVERDUE
+      - BACKUP_REPOSITORY_CHECK_FAILED
+      - SSL_ERROR
+      - SSL_EXPIRED
+      - SSL_EXPIRING_CRITICAL
+      - SSL_EXPIRING_WARNING
+      - SSL_EXPECTED_BUT_UNKNOWN
+      - OPERATION_RECENTLY_FAILED
+      - OPERATION_STALE
+      - DNS_PROVIDER_ERROR
+      - UPDATE_FAILED
+    tasks:
+      - implement pure detector registry
+      - centralize thresholds and schedule grace rules
+      - sanitize every summary
+      - add deterministic sorting and deduplication
+    exit:
+      - each detector has positive, negative, boundary and unavailable-source tests
+      - zero-source input cannot report HEALTHY
+
+  P03_dashboard_ui:
+    objective: replace current card wall with operations-first layout
+    tasks:
+      - implement useDashboardOverview composable
+      - implement pulse, inbox, resources and operational panels
+      - remove standalone quick-actions card
+      - place create-site action in pulse and contextual links in panels
+      - add loading, stale, unavailable, unsupported and empty states
+      - add legacy selected-server adapter and compatibility notice
+      - replace fake or absent metrics with authoritative fields only
+      - split index.vue into cohesive components
+    exit:
+      - uptime and Problems Inbox are above fold in reference viewports
+      - no unbounded list renders
+      - server switch cannot display mislabeled stale data
+
+  P04_cached_system_diagnostics:
+    objective: add reliable service, PM2 and Nginx coverage without slowing GET
+    tasks:
+      - add DashboardDiagnosticsService scheduler cache
+      - move service status commands out of dashboard request path
+      - add installed and expected-state semantics
+      - add bounded PM2 diagnostic Agent contract
+      - refactor Nginx managed renderers to pure output where required
+      - add Nginx validation and managed-file checksum comparison
+      - enable CORE_SERVICE_INACTIVE, PM2_PROCESS_UNHEALTHY, PM2_PROCESS_MISSING, NGINX_CONFIG_INVALID and NGINX_MANAGED_CONFIG_DRIFT
+    exit:
+      - dashboard GET runs zero commands
+      - diagnostic timeout preserves partial overview
+      - drift test compares hashes without returning file content
+
+  P05_cached_dns_diagnostics:
+    objective: add low-noise DNS drift coverage
+    tasks:
+      - define canonical managed-record comparison
+      - run provider probes in background with rate limits and backoff
+      - require two consecutive mismatches
+      - expose coverage and source freshness
+      - enable DNS_RECORD_DRIFT
+    exit:
+      - provider outage never becomes drift
+      - dashboard request performs no provider call
+      - no provider secret or raw response is stored in diagnostic cache
+
+  P06_quality_and_rollout:
+    objective: prove behavior under production-like conditions
+    tasks:
+      - run accessibility keyboard and screen-reader checks
+      - run dark, light, desktop, tablet and mobile visual review
+      - run 10000-site query-count and response-size fixture
+      - test selected current, legacy, offline and permission-denied remote servers
+      - measure local and proxied latency budgets
+      - deploy through dev-mode workflow without make update
+      - observe one full diagnostics interval before release decision
+    exit:
+      - all acceptance criteria pass
+      - rollback remains code-only
+      - operator signs off information hierarchy and issue wording
+
+  P07_safe_remediation_followup:
+    objective: convert selected navigation actions into audited safe operations
+    status: separate task after detector false-positive audit
+    candidate_actions:
+      - retry failed backup
+      - open certificate reissue confirmation
+      - restart an expected-running failed service
+      - regenerate confirmed drifted managed Nginx config after diff preview
+    forbidden_initial_actions:
+      - automatic disk cleanup
+      - arbitrary shell command
+      - automatic DNS overwrite
+      - panel update start
+      - bulk restart
+
+file_plan:
+  create:
+    - shared/src/dashboard.ts
+    - api/src/dashboard/dashboard-overview.service.ts
+    - api/src/dashboard/dashboard-query.service.ts
+    - api/src/dashboard/dashboard-problems.ts
+    - api/src/dashboard/dashboard-diagnostics.service.ts
+    - api/test/dashboard-overview.test.js
+    - api/test/dashboard-problems.test.js
+    - web/composables/useDashboardOverview.ts
+    - web/components/dashboard/DashboardServerPulse.vue
+    - web/components/dashboard/DashboardProblemsInbox.vue
+    - web/components/dashboard/DashboardResourceStrip.vue
+    - web/components/dashboard/DashboardSitesPanel.vue
+    - web/components/dashboard/DashboardRuntimePanel.vue
+    - web/components/dashboard/DashboardProtectionPanel.vue
+    - web/components/dashboard/DashboardSecurityPanel.vue
+    - web/components/dashboard/DashboardActivityPanel.vue
+    - web/components/dashboard/DashboardSectionState.vue
+    - web/tests/dashboard-overview-contract.test.js
+  modify:
+    - shared/src/index.ts
+    - api/src/dashboard/dashboard.controller.ts
+    - api/src/dashboard/dashboard.module.ts
+    - api/src/dashboard/dashboard.service.ts
+    - api/src/monitoring/monitoring.service.ts
+    - web/pages/index.vue
+    - web/assets/global.css only for reusable dashboard tokens missing from current system
+  conditional:
+    - api/src/agent/agent-relay service files for bounded diagnostics events
+    - agent/src/agent.service.ts for Nginx, PM2 and checksum diagnostic handlers
+    - api/package.json and api/package-lock.json for direct cron dependency
+    - shared Agent event types when diagnostics contract is added
+  decomposition_rule:
+    - do not keep old and new business logic duplicated
+    - keep legacy response adapter isolated and deletion-ready
+    - do not split trivial presentation into shallow one-use helpers
+
+testing:
+  shared:
+    - TypeScript build verifies discriminated unions and exhaustive actions
+  backend_contract:
+    - ADMIN full snapshot
+    - MANAGER owned-site snapshot
+    - MANAGER with zero sites
+    - mixed-owner leakage regression
+    - partial DataSource failure
+    - invalid metric normalization
+    - response list and byte caps
+    - no write call during GET
+  detector_matrix:
+    - exact threshold minus one, exact threshold and threshold plus one
+    - stale and unavailable source
+    - deterministic ID and sort
+    - duplicate source record
+    - safe truncation and secret redaction
+    - active operation suppression
+    - zero HealthCheckPing samples
+    - intentionally stopped site and optional service
+    - backup schedule timezone, invalid cron and grace
+    - DNS first mismatch, second mismatch and provider failure
+  query_scale:
+    - compare query count for 10 and 10000 sites
+    - verify latest backup query does not grow per site
+    - inspect query plans for status and timestamp filters
+    - assert bounded selected columns exclude secret fields
+  diagnostics:
+    - single-flight under simultaneous ticks
+    - timeout and stale cache behavior
+    - Agent disconnect during probe
+    - Nginx allowlisted path rejection
+    - hash mismatch without file-content transfer
+    - PM2 large inventory partial coverage
+    - DNS rate limit and exponential backoff
+  web_contract:
+    - v1 response renders all source states
+    - unknown contract version fails closed
+    - 404 triggers legacy adapter; 401, 403 and 500 do not
+    - selected-server race discards old response
+    - polling pauses hidden and never overlaps
+    - previous same-server data remains visible during refresh
+    - action target registry rejects unknown values
+  web_accessibility:
+    - keyboard order and visible focus
+    - dialog focus restoration
+    - status has text independent of color
+    - progress values expose accessible labels
+    - reduced motion
+  visual_matrix:
+    widths: [320, 390, 768, 1024, 1440]
+    themes: [dark, light]
+    data_states: [healthy, critical, many_problems, partial, loading, empty, legacy, offline]
+  verification_commands:
+    - cd shared && npm run build
+    - cd api && npm run build
+    - cd api && TS_NODE_TRANSPILE_ONLY=1 node --test -r ts-node/register -r ../tools/register-shared-source.js test/dashboard-overview.test.js test/dashboard-problems.test.js
+    - cd web && npm run test:contracts
+    - cd web && npx nuxi typecheck
+    - cd web && npm run build
+    - cd agent && npm run build when Agent diagnostics change
+
+acceptance:
+  AC01:
+    given: ADMIN opens current selected server at 1440x900
+    then: selected server, overall state, uptime, Agent, version, refresh age and Problems Inbox are visible without scrolling
+  AC02:
+    given: mobile viewport 390x844
+    then: server identity, overall state, uptime and Problems Inbox entry point are visible in first viewport without horizontal scroll
+  AC03:
+    given: at least one critical and one warning Problem
+    then: critical appears first and every item shows severity text, entity, safe summary, age and allowlisted action
+  AC04:
+    given: zero confirmed Problems and all required sources OK
+    then: inbox renders compact No confirmed problems state
+  AC05:
+    given: zero Problems and one required source unavailable
+    then: overall state is UNKNOWN and UI does not claim the server is healthy
+  AC06:
+    given: metrics source lacks disk or network
+    then: UI renders Unknown or Unsupported and never zero percent or zero bytes as fact
+  AC07:
+    given: a domain has zero real HealthCheckPing samples
+    then: availability is Unknown and not 100 percent
+  AC08:
+    given: one dashboard source throws
+    then: endpoint returns valid partial overview and unrelated sections remain usable
+  AC09:
+    given: 10000 sites and 50000 domains fixture
+    then: response lists respect caps, payload is at most 128 KiB and query count is unchanged from small fixture
+  AC10:
+    given: MANAGER owns one of two users sites
+    then: response contains only owned entities and no ADMIN-only infrastructure, security, DNS or update data
+  AC11:
+    given: user selects another server while request is in flight
+    then: old response is discarded and never rendered under new server name
+  AC12:
+    given: selected server returns overview 404
+    then: trusted legacy sections render with compatibility notice and unsupported diagnostics are explicit
+  AC13:
+    given: selected server returns 401, 403 or 500
+    then: Web does not misclassify it as a LegacyServer
+  AC14:
+    given: tab is hidden for five minutes
+    then: no polling occurs while hidden and one non-overlapping refresh occurs after visibility returns
+  AC15:
+    given: dashboard GET is called repeatedly
+    then: no DB write, system command, Agent diagnostic request, provider request or notification dispatch occurs in request path
+  AC16:
+    given: optional PostgreSQL or MariaDB is not installed and not required
+    then: it is neutral and does not produce CORE_SERVICE_INACTIVE
+  AC17:
+    given: site is intentionally STOPPED
+    then: STOPPED alone does not produce a Problem
+  AC18:
+    given: expected service or PM2 process is inactive during matching active operation grace
+    then: detector suppresses transient Problem until grace expires
+  AC19:
+    given: Nginx managed file hash differs
+    then: Problem appears from cached diagnostic without transferring content or changing the file
+  AC20:
+    given: external DNS provider times out
+    then: DNS source becomes unavailable and DNS_RECORD_DRIFT is not emitted
+  AC21:
+    given: first confirmed DNS mismatch
+    then: no drift Problem appears until a second consecutive check confirms it
+  AC22:
+    given: source error includes credential-bearing URL or token-like value
+    then: response contains only redacted summary at or below 240 characters
+  AC23:
+    given: keyboard-only user
+    then: all dashboard actions and Problems dialog work with visible focus and logical order
+  AC24:
+    given: prefers-reduced-motion
+    then: non-essential dashboard motion is disabled
+  AC25:
+    given: first dashboard release is rolled back
+    then: old Web and API continue because no schema, env, filesystem-layout or OS-state migration was required
+
+rollout:
+  pre_implementation:
+    - preserve unrelated dirty worktree changes
+    - capture current dashboard screenshots in dark and light themes for comparison
+    - record current overview request count, payload and latency baseline
+  development:
+    - implement phases in order; do not begin mutating remediation work
+    - verify each phase against fixtures before wiring the next
+    - use current VPS dev-mode workflow and preserve /opt/meowbox/.dev-mode
+    - never run make update on current VPS
+  release_candidate:
+    - test one current local server
+    - test one current selected remote server
+    - test one LegacyServer
+    - test offline selected server
+    - observe diagnostic scheduler CPU, memory, command duration and provider rate limits
+  release:
+    - bump VERSION before commit, tag and release
+    - ship overview contract and compatibility adapter together
+    - keep legacy endpoint for one compatibility window
+    - monitor partial failures, latency and Problem code distribution
+  rollback:
+    - roll back code release only
+    - leave no dashboard-owned persistent rows
+    - retain old summary endpoint until rollback window closes
+
+migration_gate:
+  planned_answers:
+    prisma_schema_changed: false
+    nginx_php_fpm_logrotate_cron_systemd_templates_changed: false in P00 through P03
+    server_files_or_directories_moved: false
+    new_env_variable: false
+    operating_system_state_changed: false
+  consequence: no migration required for first dashboard release
+  diagnostics_note: >
+    P04 refactors read-only rendering and adds Agent diagnostics but must not regenerate
+    existing configs or alter OS state. If implementation changes a managed template or
+    installed unit, it becomes a separate system migration with idempotent regeneration.
+  index_note: >
+    Any Prisma index added after query-plan evidence requires prisma migrate dev and an
+    isolated reversible migration. Never use db push.
+
+risks:
+  R01:
+    risk: too many detectors create noise and destroy trust
+    mitigation: ship core evidence-backed detectors first; audit false positives before enabling diagnostics extensions
+  R02:
+    risk: dashboard probes overload Agent, PM2 or DNS providers
+    mitigation: out-of-request scheduler, cache, single-flight, concurrency caps, backoff and partial coverage
+  R03:
+    risk: source outage is shown as healthy
+    mitigation: explicit source state and UNKNOWN overall derivation
+  R04:
+    risk: MANAGER receives global data
+    mitigation: role-scoped loaders, mixed-owner tests and no fetch-then-filter behavior
+  R05:
+    risk: new Web breaks older selected servers
+    mitigation: contract header, strict legacy classification and temporary adapter
+  R06:
+    risk: Nginx drift comparison reports user-managed files
+    mitigation: compare only canonical Meowbox-owned manifest paths and ignore unknown extras
+  R07:
+    risk: DNS propagation causes false drift
+    mitigation: canonicalization, TTL awareness and two consecutive mismatches
+  R08:
+    risk: status polling creates command storm
+    mitigation: cached diagnostics and zero commands in GET path
+  R09:
+    risk: backup overdue calculation disagrees with scheduler timezone
+    mitigation: one explicit cron helper and the same server timezone contract used by scheduler and detector
+  R10:
+    risk: dashboard redesign hides useful current data
+    mitigation: current-state inventory, fixture matrix and operator visual sign-off before replacement
+  R11:
+    risk: one-click fixes make incidents worse
+    mitigation: first release navigation-only; mutating remediation requires separate audited Operation contract
+  R12:
+    risk: plan becomes coupled to updater migration refactor
+    mitigation: show UPDATE_FAILED now; keep UPDATE_BLOCKED unsupported until authoritative updater readiness exists
+
+delivery_definition:
+  complete_when:
+    - P00 through P06 are implemented and all acceptance criteria pass
+    - operator approves desktop and mobile information hierarchy
+    - dashboard endpoint is bounded, role-safe and side-effect free
+    - Problems Inbox reports core and supported cached diagnostics without false healthy states
+    - current and legacy selected-server flows are verified
+    - production release and rollback notes are prepared
+  not_complete_when:
+    - only CSS and card order changed
+    - Problems are hardcoded in Vue
+    - metrics silently fall back to zero
+    - dashboard still performs per-site backup queries
+    - dashboard GET triggers system or provider probes
+    - ADMIN-only response is reused for MANAGER
+    - unsafe remediation mutations are added without Operation, audit, preflight and idempotency
+
+open_questions: []

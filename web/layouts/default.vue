@@ -2,7 +2,14 @@
   <div class="app-layout">
     <!-- Mobile header -->
     <header class="mobile-header">
-      <button class="mobile-header__toggle" @click="sidebarOpen = !sidebarOpen">
+      <button
+        class="mobile-header__toggle"
+        type="button"
+        :aria-label="sidebarOpen ? 'Закрыть меню' : 'Открыть меню'"
+        :aria-expanded="sidebarOpen"
+        aria-controls="main-sidebar"
+        @click="sidebarOpen = !sidebarOpen"
+      >
         <svg v-if="!sidebarOpen" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="3" y1="6" x2="21" y2="6" /><line x1="3" y1="12" x2="21" y2="12" /><line x1="3" y1="18" x2="21" y2="18" /></svg>
         <svg v-else width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" /></svg>
       </button>
@@ -10,7 +17,7 @@
         <CatMascot :size="24" mood="happy" />
         <span class="mobile-header__name">Meowbox</span>
       </div>
-      <button class="mobile-header__theme" @click="themeToggle">
+      <button class="mobile-header__theme" type="button" aria-label="Переключить тему" @click="themeToggle">
         <svg v-if="isDark" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
           <circle cx="12" cy="12" r="5" /><line x1="12" y1="1" x2="12" y2="3" /><line x1="12" y1="21" x2="12" y2="23" /><line x1="4.22" y1="4.22" x2="5.64" y2="5.64" /><line x1="18.36" y1="18.36" x2="19.78" y2="19.78" /><line x1="1" y1="12" x2="3" y2="12" /><line x1="21" y1="12" x2="23" y2="12" /><line x1="4.22" y1="19.78" x2="5.64" y2="18.36" /><line x1="18.36" y1="5.64" x2="19.78" y2="4.22" />
         </svg>
@@ -26,7 +33,7 @@
     </Transition>
 
     <!-- Sidebar -->
-    <aside class="sidebar" :class="{ 'sidebar--open': sidebarOpen }">
+    <aside id="main-sidebar" class="sidebar" :class="{ 'sidebar--open': sidebarOpen }">
       <!-- Logo -->
       <div class="sidebar__brand">
         <CatMascot :size="36" mood="happy" />
@@ -349,6 +356,10 @@ onUnmounted(() => {
 }
 
 .mobile-header__toggle {
+  width: 44px;
+  height: 44px;
+  align-items: center;
+  justify-content: center;
   background: none;
   border: none;
   color: var(--text-tertiary);
@@ -373,12 +384,22 @@ onUnmounted(() => {
 }
 
 .mobile-header__theme {
+  width: 44px;
+  height: 44px;
+  align-items: center;
+  justify-content: center;
   background: none;
   border: none;
   color: var(--text-tertiary);
   cursor: pointer;
   padding: 0.3rem;
   display: flex;
+}
+
+.mobile-header__toggle:focus-visible,
+.mobile-header__theme:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: 2px;
 }
 
 /* ---- Sidebar overlay ---- */
@@ -790,13 +811,17 @@ onUnmounted(() => {
   }
 
   .sidebar {
+    visibility: hidden;
     transform: translateX(-100%);
     z-index: 60;
     top: 0;
+    transition: transform 0.3s cubic-bezier(0.16, 1, 0.3, 1), visibility 0s linear 0.3s;
   }
 
   .sidebar--open {
+    visibility: visible;
     transform: translateX(0);
+    transition-delay: 0s;
   }
 
   .main {

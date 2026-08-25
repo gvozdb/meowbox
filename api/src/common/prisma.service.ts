@@ -1,6 +1,8 @@
 import { Injectable, OnModuleInit, OnModuleDestroy } from '@nestjs/common';
 import { PrismaClient } from '@prisma/client';
 
+import { resolvePrismaLogLevels } from './prisma-logging';
+
 @Injectable()
 export class PrismaService
   extends PrismaClient
@@ -8,10 +10,7 @@ export class PrismaService
 {
   constructor() {
     super({
-      log:
-        process.env.NODE_ENV === 'production'
-          ? ['error']
-          : ['query', 'error', 'warn'],
+      log: resolvePrismaLogLevels(),
     });
   }
 

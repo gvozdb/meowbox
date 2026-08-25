@@ -68,6 +68,7 @@ jobs:
           npm run test:panel-update-runner
           npm run test:domain-mutation-rollback
           npm run test:vpn-port-reservation
+          npm run test:prisma-logging
 
       - name: Install + build web
         working-directory: web

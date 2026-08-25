@@ -498,6 +498,10 @@ PANEL_DOMAIN="${PANEL_DOMAIN:-localhost}"
 
 NODE_ENV="production"
 
+# SQL query logging writes every Prisma statement to API stdout. Enable only
+# for short diagnostics; keep disabled on running panels.
+PRISMA_LOG_QUERIES=false
+
 # Site storage base path (per-site user home directories created here)
 SITES_BASE_PATH="/var/www"
 

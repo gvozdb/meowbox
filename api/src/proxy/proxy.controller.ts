@@ -19,6 +19,7 @@ import { Request, Response as ExpressResponse } from 'express';
 import { Readable } from 'stream';
 import { Roles } from '../common/decorators/roles.decorator';
 import { CurrentUser } from '../common/decorators/current-user.decorator';
+import { dashboardOverviewMetricSamples } from '../common/dashboard-observability';
 import { ProxyService } from './proxy.service';
 import { ProvisionService } from './provision.service';
 import { ProxyAuditService } from './proxy-audit.service';
@@ -32,6 +33,19 @@ import {
 interface AuthCtx {
   id: string;
   role: string;
+}
+
+const DASHBOARD_PROXY_READ_PATHS = new Set([
+  '/dashboard/overview',
+  '/dashboard/summary',
+  '/system/metrics',
+  '/sites',
+]);
+
+export function shouldAuditProxyRequest(method: string, path: string): boolean {
+  const normalizedMethod = method.toUpperCase();
+  const isRead = normalizedMethod === 'GET' || normalizedMethod === 'HEAD';
+  return !isRead || !DASHBOARD_PROXY_READ_PATHS.has(path);
 }
 
 /**
@@ -280,6 +294,7 @@ export class ProxyController {
       ? fullUrl.slice(prefix.length) || '/'
       : fullUrl;
     const targetPath = targetPathWithQuery.split('?')[0] || '/';
+    const shouldAudit = shouldAuditProxyRequest(req.method, targetPath);
 
     const ip = (req.ip ?? 'unknown') as string;
     const ua = (req.headers['user-agent'] as string | undefined) ?? null;
@@ -318,18 +333,33 @@ export class ProxyController {
     } catch (err) {
       const msg = (err as Error).message;
       this.logger.error(`Proxy to ${server.name} failed: ${msg}`);
-      await this.audit.logOut({
-        userId: user.id,
-        serverId: server.id,
-        serverName: server.name,
-        method: req.method,
-        path: targetPath,
-        statusCode: null,
-        durationMs: Date.now() - t0,
-        ipAddress: ip,
-        userAgent: ua,
-        errorMsg: msg,
-      });
+      if (targetPath === '/dashboard/overview') {
+        this.logger.log(JSON.stringify({
+          event: 'dashboard_overview_proxy_complete',
+          durationMs: Date.now() - t0,
+          role: user.role,
+          statusCode: 502,
+          metrics: dashboardOverviewMetricSamples({
+            durationMs: Date.now() - t0,
+            role: user.role === 'MANAGER' ? 'MANAGER' : 'ADMIN',
+            localOrProxy: 'proxy',
+          }),
+        }));
+      }
+      if (shouldAudit) {
+        await this.audit.logOut({
+          userId: user.id,
+          serverId: server.id,
+          serverName: server.name,
+          method: req.method,
+          path: targetPath,
+          statusCode: null,
+          durationMs: Date.now() - t0,
+          ipAddress: ip,
+          userAgent: ua,
+          errorMsg: msg,
+        });
+      }
       res.status(502).json({
         success: false,
         error: { code: 'PROXY_UPSTREAM_FAILED', message: `Failed to reach server "${server.name}": ${msg}` },
@@ -353,17 +383,34 @@ export class ProxyController {
     });
     res.status(upstream.status);
 
-    await this.audit.logOut({
-      userId: user.id,
-      serverId: server.id,
-      serverName: server.name,
-      method: req.method,
-      path: targetPath,
-      statusCode: upstream.status,
-      durationMs: Date.now() - t0,
-      ipAddress: ip,
-      userAgent: ua,
-    });
+    if (targetPath === '/dashboard/overview') {
+      const durationMs = Date.now() - t0;
+      this.logger.log(JSON.stringify({
+        event: 'dashboard_overview_proxy_complete',
+        durationMs,
+        role: user.role,
+        statusCode: upstream.status,
+        metrics: dashboardOverviewMetricSamples({
+          durationMs,
+          role: user.role === 'MANAGER' ? 'MANAGER' : 'ADMIN',
+          localOrProxy: 'proxy',
+        }),
+      }));
+    }
+
+    if (shouldAudit) {
+      await this.audit.logOut({
+        userId: user.id,
+        serverId: server.id,
+        serverName: server.name,
+        method: req.method,
+        path: targetPath,
+        statusCode: upstream.status,
+        durationMs: Date.now() - t0,
+        ipAddress: ip,
+        userAgent: ua,
+      });
+    }
 
     if (!upstream.body) {
       res.end();

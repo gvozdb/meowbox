@@ -3,6 +3,7 @@ interface ApiOptions {
   body?: unknown;
   requireAuth?: boolean;
   headers?: Record<string, string>;
+  signal?: AbortSignal;
   /**
    * Принудительно бить только в локальный мастер-API, игнорируя выбранный
    * в сайдбаре slave. Нужно для master-only ресурсов (например, палитры
@@ -115,6 +116,7 @@ export function useApi() {
       body,
       requireAuth = true,
       noProxy = false,
+      signal,
       headers: customHeaders,
     } = options;
 
@@ -140,6 +142,7 @@ export function useApi() {
         method,
         body: body ? JSON.stringify(body) : undefined,
         headers,
+        signal,
       });
 
       return response.data;
@@ -159,6 +162,7 @@ export function useApi() {
             method,
             body: body ? JSON.stringify(body) : undefined,
             headers,
+            signal,
           });
           return retryResponse.data;
         } else {
@@ -172,7 +176,11 @@ export function useApi() {
       // GlobalExceptionFilter returns: { success: false, error: { code, message } }
       const apiMessage = fetchErr.data?.error?.message;
       if (apiMessage) {
-        throw new Error(Array.isArray(apiMessage) ? apiMessage.join(', ') : apiMessage);
+        const apiError = new Error(
+          Array.isArray(apiMessage) ? apiMessage.join(', ') : apiMessage,
+        ) as Error & { status?: number };
+        apiError.status = status;
+        throw apiError;
       }
       throw err;
     }
@@ -406,8 +414,12 @@ export function useApi() {
   return {
     get: <T>(
       endpoint: string,
-      opts?: { noProxy?: boolean; headers?: Record<string, string> },
-    ) => request<T>(endpoint, { noProxy: opts?.noProxy, headers: opts?.headers }),
+      opts?: { noProxy?: boolean; headers?: Record<string, string>; signal?: AbortSignal },
+    ) => request<T>(endpoint, {
+      noProxy: opts?.noProxy,
+      headers: opts?.headers,
+      signal: opts?.signal,
+    }),
     post: <T>(
       endpoint: string,
       body?: unknown,

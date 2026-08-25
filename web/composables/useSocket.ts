@@ -1,15 +1,8 @@
 import { io, Socket } from 'socket.io-client';
 
-interface SystemMetrics {
-  cpuPercent: number;
-  memoryPercent: number;
-  memoryUsed: number;
-  memoryTotal: number;
-  diskPercent: number;
-  diskUsed: number;
-  diskTotal: number;
-  networkRx: number;
-  networkTx: number;
+interface SystemMetricsEnvelope {
+  serverId: string;
+  data: unknown;
 }
 
 interface SiteStatusPayload {
@@ -73,7 +66,7 @@ function registerListener(event: string, callback: Function): () => void {
 
 export function useSocket() {
   const config = useRuntimeConfig();
-  const metrics = useState<SystemMetrics | null>('ws-metrics', () => null);
+  const metrics = useState<SystemMetricsEnvelope | null>('ws-metrics', () => null);
   const connected = useState<boolean>('ws-connected', () => false);
 
   function isRemoteServer(): boolean {
@@ -154,8 +147,9 @@ export function useSocket() {
 
     // System metrics stream (every 10s) — на remote мастер ретранслирует метрики slave'а
     // (после WS-прокси), на local — приходят от агента мастера.
-    socket.on('system:metrics', (data: SystemMetrics) => {
-      metrics.value = data;
+    const eventServerId = targetServerId || 'main';
+    socket.on('system:metrics', (data: unknown) => {
+      metrics.value = { serverId: eventServerId, data };
     });
   }
 

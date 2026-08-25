@@ -2,6 +2,7 @@
   "name": "@meowbox/shared",
   "version": "0.1.0",
   "description": "Shared TypeScript types for Meowbox server management panel",
+  "type": "commonjs",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "scripts": {

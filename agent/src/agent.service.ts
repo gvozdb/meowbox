@@ -71,7 +71,7 @@ import {
   isUnderBackupStorage,
   TIMEOUTS,
 } from './config';
-import { DEFAULT_PHP_VERSION } from '@meowbox/shared';
+import { DASHBOARD_LIMITS, DEFAULT_PHP_VERSION, SiteType } from '@meowbox/shared';
 
 type Callback = (result: unknown) => void;
 
@@ -2540,6 +2540,178 @@ export class AgentService {
       if (typeof cb === 'function') {
         cb({ success: true, data: await this.metrics.collect() });
       }
+    });
+
+    this.safeOn(s, 'dashboard:diagnostics', async (
+      params: {
+        services?: Array<{
+          id: string;
+          unit: string;
+          name: string;
+          expectedState: 'RUNNING' | 'STOPPED' | 'OPTIONAL';
+          siteId?: string | null;
+        }>;
+        rootProcesses?: Array<{ name: string; label: string }>;
+        sites?: Array<AgentNginxConfigPayload & {
+          siteId: string;
+          stopped?: boolean;
+        }>;
+        zones?: Array<{ zoneName: string; rps: number; enabled: boolean }>;
+        includeSiteProcesses?: boolean;
+        validateNginx?: boolean;
+        compareNginx?: boolean;
+      },
+      cb: Callback,
+    ) => {
+      const observedAt = new Date().toISOString();
+      const requestedServices = Array.isArray(params?.services)
+        ? params.services.slice(0, 16)
+        : [];
+      const services = await Promise.all(requestedServices.map(async (service) => {
+        if (!/^[A-Za-z0-9@_.:-]{1,128}$/.test(service.unit)) {
+          return {
+            id: service.id,
+            name: service.name,
+            siteId: service.siteId ?? null,
+            installed: null,
+            expectedState: service.expectedState,
+            actualState: 'UNKNOWN',
+            checkedAt: observedAt,
+          };
+        }
+        const result = await this.cmdExec.execute(
+          'systemctl',
+          ['show', service.unit, '--property=LoadState', '--property=ActiveState', '--value'],
+          { allowFailure: true, timeout: 5_000 },
+        );
+        if (result.exitCode !== 0) {
+          return {
+            id: service.id,
+            name: service.name,
+            siteId: service.siteId ?? null,
+            installed: null,
+            expectedState: service.expectedState,
+            actualState: 'UNKNOWN',
+            checkedAt: observedAt,
+          };
+        }
+        const [loadState = '', activeState = ''] = result.stdout.trim().split(/\r?\n/);
+        const installed = loadState !== 'not-found' && loadState !== '';
+        const actualState = !installed
+          ? 'MISSING'
+          : activeState === 'active'
+            ? 'RUNNING'
+            : activeState === 'failed'
+              ? 'FAILED'
+              : activeState
+                ? 'STOPPED'
+                : 'UNKNOWN';
+        return {
+          id: service.id,
+          name: service.name,
+          siteId: service.siteId ?? null,
+          installed,
+          expectedState: service.expectedState,
+          actualState,
+          checkedAt: observedAt,
+        };
+      }));
+
+      const rootProcesses = Array.isArray(params?.rootProcesses)
+        ? params.rootProcesses.slice(0, 16)
+        : [];
+      if (rootProcesses.length > 0) {
+        const snapshot = await this.pm2.getProcessSnapshot();
+        for (const expected of rootProcesses) {
+          const process = snapshot.processes.find((item) => item.name === expected.name);
+          services.push({
+            id: `pm2:${expected.name}`,
+            name: expected.label,
+            siteId: null,
+            installed: snapshot.available ? process !== undefined : null,
+            expectedState: 'RUNNING',
+            actualState: !snapshot.available
+              ? 'UNKNOWN'
+              : !process
+              ? 'MISSING'
+              : process.status === 'online'
+                ? 'RUNNING'
+                : process.status === 'errored'
+                  ? 'FAILED'
+                  : 'STOPPED',
+            checkedAt: observedAt,
+          });
+        }
+      }
+
+      const siteLimit = params?.compareNginx === true && params?.includeSiteProcesses === false
+        ? DASHBOARD_LIMITS.nginxDiagnosticSites
+        : DASHBOARD_LIMITS.pm2DiagnosticSites;
+      const requestedSites = Array.isArray(params?.sites)
+        ? params.sites.slice(0, siteLimit)
+        : [];
+      if (params?.includeSiteProcesses !== false) {
+        for (const site of requestedSites) {
+          if (!/^[a-z0-9_-]{1,32}$/.test(site.systemUser || site.siteName)) continue;
+          const roots = (site.domains || []).slice(0, 32).map((domain, index) => ({
+            domainId: domain.domainId,
+            domain: domain.domain,
+            filesRelPath: domain.filesRelPath,
+            preset: Object.values(SiteType).includes(domain.preset as SiteType)
+              ? (domain.preset as SiteType)
+              : SiteType.CUSTOM,
+            isPrimary: domain.isPrimary,
+            position: index,
+          }));
+          const result = await this.nodeApp.getProcesses(site.systemUser || site.siteName, roots);
+          for (const group of result.groups.slice(0, 16)) {
+            for (const process of group.processes.slice(0, 16)) {
+              if (!process.defined) continue;
+              services.push({
+                id: `pm2:${site.siteId}:${process.name}`,
+                name: process.name,
+                siteId: site.siteId,
+                installed: process.loaded,
+                expectedState: 'RUNNING',
+                actualState: !process.loaded
+                  ? 'MISSING'
+                  : process.runtime?.status === 'online'
+                    ? 'RUNNING'
+                    : process.runtime?.status === 'errored'
+                      ? 'FAILED'
+                      : 'STOPPED',
+                checkedAt: observedAt,
+              });
+            }
+          }
+        }
+      }
+
+      const [nginxTest, nginxFiles] = await Promise.all([
+        params?.validateNginx === false
+          ? Promise.resolve(null)
+          : this.nginx.testConfig(),
+        params?.compareNginx === false
+          ? Promise.resolve({ files: [], partial: false })
+          : this.nginx.diagnoseManagedConfigs({
+              sites: requestedSites,
+              zones: Array.isArray(params?.zones) ? params.zones.slice(0, 500) : undefined,
+            }),
+      ]);
+
+      cb({
+        success: true,
+        data: {
+          observedAt,
+          services: services.slice(0, 100),
+          nginx: {
+            valid: nginxTest ? nginxTest.success : null,
+            error: !nginxTest || nginxTest.success ? null : nginxTest.error || 'nginx -t failed',
+            files: nginxFiles.files,
+            partial: nginxFiles.partial || (params?.sites?.length || 0) > requestedSites.length,
+          },
+        },
+      });
     });
 
     // -- Updates --

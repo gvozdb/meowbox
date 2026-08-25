@@ -19,11 +19,14 @@ interface NetworkInfo {
 
 export interface SystemMetricsData {
   cpuUsagePercent: number;
+  cpuCores: number;
+  hostname: string;
+  loadAverage: [number, number, number];
   memoryTotalBytes: number;
   memoryUsedBytes: number;
   memoryUsagePercent: number;
   disks: DiskInfo[];
-  network: NetworkInfo;
+  network: NetworkInfo | null;
   uptimeSeconds: number;
   collectedAt: string;
 }
@@ -69,6 +72,9 @@ export class MetricsCollector {
 
     return {
       cpuUsagePercent,
+      cpuCores: os.cpus().length,
+      hostname: os.hostname(),
+      loadAverage: os.loadavg() as [number, number, number],
       memoryTotalBytes: totalMem,
       memoryUsedBytes: usedMem,
       memoryUsagePercent: Math.round((usedMem / totalMem) * 100 * 10) / 10,
@@ -117,26 +123,35 @@ export class MetricsCollector {
       .map((line) => {
         const parts = line.trim().split(/\s+/);
         if (parts.length < 6) return null;
+        const totalBytes = Number.parseInt(parts[2], 10);
+        const usedBytes = Number.parseInt(parts[3], 10);
+        const availableBytes = Number.parseInt(parts[4], 10);
+        const usagePercent = Number.parseInt(parts[5], 10);
+        if (
+          !Number.isFinite(totalBytes) || totalBytes <= 0 ||
+          !Number.isFinite(usedBytes) || usedBytes < 0 ||
+          !Number.isFinite(availableBytes) || availableBytes < 0 ||
+          !Number.isFinite(usagePercent) || usagePercent < 0 || usagePercent > 100
+        ) return null;
         return {
           mountPoint: parts[0],
           device: parts[1],
-          totalBytes: parseInt(parts[2], 10) || 0,
-          usedBytes: parseInt(parts[3], 10) || 0,
-          availableBytes: parseInt(parts[4], 10) || 0,
-          usagePercent: parseInt(parts[5], 10) || 0,
+          totalBytes,
+          usedBytes,
+          availableBytes,
+          usagePercent,
         };
       })
       .filter((d): d is DiskInfo => d !== null);
   }
 
-  private async getNetworkTraffic(): Promise<NetworkInfo> {
+  private async getNetworkTraffic(): Promise<NetworkInfo | null> {
     const result = await this.executor.execute('cat', ['/proc/net/dev']);
-    if (result.exitCode !== 0) {
-      return { rxBytes: 0, txBytes: 0, rxBytesPerSec: 0, txBytesPerSec: 0 };
-    }
+    if (result.exitCode !== 0) return null;
 
     let rxTotal = 0;
     let txTotal = 0;
+    let interfaceCount = 0;
     const lines = result.stdout.trim().split('\n').slice(2); // Skip headers
 
     for (const line of lines) {
@@ -145,21 +160,35 @@ export class MetricsCollector {
       const iface = parts[0];
       // Skip loopback
       if (iface === 'lo') continue;
-      rxTotal += parseInt(parts[1], 10) || 0;
-      txTotal += parseInt(parts[9], 10) || 0;
+      const rxBytes = Number.parseInt(parts[1], 10);
+      const txBytes = Number.parseInt(parts[9], 10);
+      if (!Number.isFinite(rxBytes) || rxBytes < 0 || !Number.isFinite(txBytes) || txBytes < 0) {
+        continue;
+      }
+      rxTotal += rxBytes;
+      txTotal += txBytes;
+      interfaceCount += 1;
     }
+    if (interfaceCount === 0) return null;
 
     const now = Date.now();
-    const elapsed = (now - this.lastNetworkTime) / 1000 || 1;
+    if (this.lastNetworkTime === 0) {
+      this.lastNetworkRx = rxTotal;
+      this.lastNetworkTx = txTotal;
+      this.lastNetworkTime = now;
+      return null;
+    }
+    if (rxTotal < this.lastNetworkRx || txTotal < this.lastNetworkTx) {
+      this.lastNetworkRx = rxTotal;
+      this.lastNetworkTx = txTotal;
+      this.lastNetworkTime = now;
+      return null;
+    }
+    const elapsed = (now - this.lastNetworkTime) / 1000;
+    if (!Number.isFinite(elapsed) || elapsed <= 0) return null;
 
-    const rxPerSec =
-      this.lastNetworkTime > 0
-        ? Math.max(0, (rxTotal - this.lastNetworkRx) / elapsed)
-        : 0;
-    const txPerSec =
-      this.lastNetworkTime > 0
-        ? Math.max(0, (txTotal - this.lastNetworkTx) / elapsed)
-        : 0;
+    const rxPerSec = Math.max(0, (rxTotal - this.lastNetworkRx) / elapsed);
+    const txPerSec = Math.max(0, (txTotal - this.lastNetworkTx) / elapsed);
 
     this.lastNetworkRx = rxTotal;
     this.lastNetworkTx = txTotal;

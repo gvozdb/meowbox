@@ -161,15 +161,15 @@ export class SchedulerService implements OnModuleInit {
   }
 
   // =========================================================================
-  // DNS sync — каждый час полный sync zones+records у всех ACTIVE/ERROR провайдеров.
+  // DNS sync — каждые 10 минут, с per-provider exponential backoff внутри DnsService.
   // ERROR пробуем тоже, чтобы транзиентные сбои сами восстанавливались.
   // UNAUTHORIZED не трогаем — токен надо пересоздавать руками, нет смысла бомбить API.
   //
   // Расчёт лимитов: для Y360 бесплатного тарифа лимит ~1000 запросов/сутки на орг.
   // 1 sync = 1 list domains + N×(list dns + ?) — для 1 домена + 30 записей это ~5
-  // запросов. Час × 24 = 120 запросов/сутки на провайдера. Сильно в рамках.
+  // запросов. 10 минут × 144 = около 720 запросов/сутки на провайдера.
   // =========================================================================
-  @Cron('17 * * * *')
+  @Cron('*/10 * * * *')
   async handleDnsSync() {
     try {
       const results = await this.dnsService.syncAllProvidersCron();
@@ -624,10 +624,10 @@ export class SchedulerService implements OnModuleInit {
 
     const alerts: string[] = [];
 
-    if (metrics.cpuPercent >= HIGH_LOAD_CPU_THRESHOLD) {
+    if (metrics.cpuPercent !== null && metrics.cpuPercent >= HIGH_LOAD_CPU_THRESHOLD) {
       alerts.push(`CPU at ${Math.round(metrics.cpuPercent)}%`);
     }
-    if (metrics.memoryPercent >= HIGH_LOAD_MEM_THRESHOLD) {
+    if (metrics.memoryPercent !== null && metrics.memoryPercent >= HIGH_LOAD_MEM_THRESHOLD) {
       alerts.push(`Memory at ${Math.round(metrics.memoryPercent)}%`);
     }
 
@@ -649,9 +649,10 @@ export class SchedulerService implements OnModuleInit {
     //   • уровень повысился (ok→high, ok→critical, high→critical), либо
     //   • уровень не изменился, но прошло >= reminder-окна (24ч / 6ч).
     // Это убирает спам каждые 30 минут пока диск стабильно держится выше порога.
+    const diskPercent = metrics.diskPercent;
     const level: 'ok' | 'high' | 'critical' =
-      metrics.diskPercent >= DISK_ALERT_CRITICAL_THRESHOLD ? 'critical'
-      : metrics.diskPercent >= DISK_ALERT_HIGH_THRESHOLD ? 'high'
+      diskPercent !== null && diskPercent >= DISK_ALERT_CRITICAL_THRESHOLD ? 'critical'
+      : diskPercent !== null && diskPercent >= DISK_ALERT_HIGH_THRESHOLD ? 'high'
       : 'ok';
 
     // Если в БД не подтянулось состояние (init ещё не отработал) — пропускаем
@@ -667,6 +668,7 @@ export class SchedulerService implements OnModuleInit {
       this.lastDiskAlertAt = 0;
       if (changed) await this.persistDiskAlertState();
     } else {
+      const confirmedDiskPercent = diskPercent as number;
       const escalated =
         this.lastDiskLevel === 'ok' ||
         (this.lastDiskLevel === 'high' && level === 'critical');
@@ -681,11 +683,11 @@ export class SchedulerService implements OnModuleInit {
         this.notifier.dispatch({
           event: 'DISK_FULL',
           title: level === 'critical' ? 'Disk Almost Full' : 'Disk Usage High',
-          message: `Disk usage at ${Math.round(metrics.diskPercent)}%`,
+          message: `Disk usage at ${Math.round(confirmedDiskPercent)}%`,
           timestamp: new Date(),
         }).catch((err) => this.logger.error(`Notification failed: ${(err as Error).message}`));
 
-        this.logger.warn(`Disk usage ${level}: ${Math.round(metrics.diskPercent)}%`);
+        this.logger.warn(`Disk usage ${level}: ${Math.round(confirmedDiskPercent)}%`);
       } else if (this.lastDiskLevel !== level) {
         // Уровень держится в alarm-зоне, но это не эскалация (например, перешли
         // critical→high — уже уведомляли). Запоминаем без отправки.

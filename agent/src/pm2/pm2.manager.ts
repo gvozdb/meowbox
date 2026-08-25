@@ -1,6 +1,6 @@
 import { CommandExecutor } from '../command-executor';
 
-interface Pm2Process {
+export interface Pm2Process {
   name: string;
   pid: number;
   status: string;
@@ -145,13 +145,19 @@ export class Pm2Manager {
   /**
    * Get all PM2 processes.
    */
-  async listProcesses(): Promise<Pm2Process[]> {
+  async getProcessSnapshot(): Promise<{
+    available: boolean;
+    processes: Pm2Process[];
+  }> {
     const result = await this.executor.execute('pm2', ['jlist']);
-    if (result.exitCode !== 0) return [];
+    if (result.exitCode !== 0) return { available: false, processes: [] };
 
     try {
       const processes = JSON.parse(result.stdout);
-      return processes.map(
+      if (!Array.isArray(processes)) {
+        return { available: false, processes: [] };
+      }
+      return { available: true, processes: processes.map(
         (proc: {
           name: string;
           pid: number;
@@ -170,10 +176,14 @@ export class Pm2Manager {
           uptime: proc.pm2_env?.pm_uptime || 0,
           restarts: proc.pm2_env?.restart_time || 0,
         }),
-      );
+      ) };
     } catch {
-      return [];
+      return { available: false, processes: [] };
     }
+  }
+
+  async listProcesses(): Promise<Pm2Process[]> {
+    return (await this.getProcessSnapshot()).processes;
   }
 
   /**

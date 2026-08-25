@@ -28,6 +28,52 @@ export {
 } from './safe-error-message';
 
 export {
+  DASHBOARD_CONTRACT_VERSION,
+  DASHBOARD_LIMITS,
+} from './dashboard';
+export type {
+  DashboardActionTarget,
+  DashboardActivityItem,
+  DashboardActivitySection,
+  DashboardAvailability,
+  DashboardBackupSummary,
+  DashboardCapabilities,
+  DashboardCapabilityState,
+  DashboardDiskMetric,
+  DashboardEntityKind,
+  DashboardMetricHistoryPoint,
+  DashboardOperationItem,
+  DashboardOverallState,
+  DashboardOverallStatus,
+  DashboardOverview,
+  DashboardProblem,
+  DashboardProblemAction,
+  DashboardProblemCategory,
+  DashboardProblemCode,
+  DashboardProblemCollection,
+  DashboardProblemSeverity,
+  DashboardProtectionSection,
+  DashboardResourceSection,
+  DashboardRole,
+  DashboardRuntimeSection,
+  DashboardSecuritySection,
+  DashboardServerPulse,
+  DashboardServiceItem,
+  DashboardSiteItem,
+  DashboardSitesSection,
+  DashboardSourceState,
+  DashboardSslException,
+  DashboardSslSummary,
+} from './dashboard';
+export {
+  dashboardAdminHealthyFixture,
+  dashboardCriticalFixture,
+  dashboardLegacyFixture,
+  dashboardManagerEmptyFixture,
+  dashboardPartialFixture,
+} from './dashboard-fixtures';
+
+export {
   RESTORE_INCLUDE_PATH_LIMIT,
   RESTORE_INCLUDE_PATH_MAX_LENGTH,
   normalizeRestoreIncludePaths,
