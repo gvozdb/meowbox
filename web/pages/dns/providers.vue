@@ -205,6 +205,7 @@ interface Provider {
 }
 
 const api = useApi();
+const { waitForOperation } = useOperation();
 const toast = useMbToast();
 const confirm = useMbConfirm();
 
@@ -308,7 +309,10 @@ async function submit() {
     };
     if (form.value.scopeId.trim()) body.scopeId = form.value.scopeId.trim();
     if (form.value.apiBaseUrl.trim()) body.apiBaseUrl = form.value.apiBaseUrl.trim();
-    await api.post<Provider>('/dns/providers', body);
+    const accepted = await api.post<AcceptedOperation>('/dns/providers', body, {
+      headers: { 'Idempotency-Key': operationIdempotencyKey('dns-provider-create') },
+    });
+    await waitForOperation(accepted.operationId, { timeoutMs: 16 * 60_000 });
     toast.success('Провайдер подключён');
     modalOpen.value = false;
     await load();
@@ -322,7 +326,11 @@ async function submit() {
 async function testProvider(id: string) {
   busyId.value = id;
   try {
-    const res = await api.post<{ ok: boolean; error?: string }>(`/dns/providers/${id}/test`);
+    const accepted = await api.post<AcceptedOperation>(`/dns/providers/${id}/test`, {}, {
+      headers: { 'Idempotency-Key': operationIdempotencyKey('dns-provider-test') },
+    });
+    const operation = await waitForOperation(accepted.operationId, { timeoutMs: 6 * 60_000 });
+    const res = operation.result as { ok: boolean; error?: string };
     if (res.ok) toast.success('Проверка пройдена');
     else toast.error(res.error || 'Не удалось');
     await load();
@@ -334,8 +342,21 @@ async function testProvider(id: string) {
 async function syncProvider(id: string) {
   busyId.value = id;
   try {
-    const res = await api.post<{ added: number; removed: number; total: number }>(`/dns/providers/${id}/sync`);
-    toast.success(`Sync: +${res.added} −${res.removed} (всего ${res.total})`);
+    const accepted = await api.post<AcceptedOperation>(`/dns/providers/${id}/sync`, {}, {
+      headers: { 'Idempotency-Key': operationIdempotencyKey('dns-provider-sync') },
+    });
+    const operation = await waitForOperation(accepted.operationId, { timeoutMs: 16 * 60_000 });
+    const res = operation.result as {
+      zonesAdded: number;
+      zonesRemoved: number;
+      zonesTotal: number;
+      recordsRefreshed: number;
+      recordsFailed: number;
+    };
+    toast.success(
+      `Sync: зон +${res.zonesAdded} −${res.zonesRemoved}, записей ${res.recordsRefreshed}` +
+      (res.recordsFailed ? `, ошибок ${res.recordsFailed}` : ''),
+    );
     await load();
   } catch (e) {
     toast.error((e as Error).message);

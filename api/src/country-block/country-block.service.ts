@@ -1,8 +1,12 @@
 import {
   Injectable, NotFoundException, BadRequestException, ConflictException, Logger,
+  OnModuleDestroy, OnModuleInit,
 } from '@nestjs/common';
+import { safeErrorMessage } from '@meowbox/shared';
 import { PrismaService } from '../common/prisma.service';
 import { AgentRelayService } from '../gateway/agent-relay.service';
+import { OperationAdmissionService } from '../operations/operation-admission.service';
+import { OperationsWorkerService } from '../operations/operations-worker.service';
 import { PanelSettingsService } from '../panel-settings/panel-settings.service';
 import {
   CreateCountryBlockDto, UpdateCountryBlockDto, UpdateCountryBlockSettingsDto,
@@ -32,15 +36,125 @@ export interface AgentResult {
   iptablesActive?: boolean;
 }
 
+const COUNTRY_BLOCK_OPERATION_ACTIONS = {
+  SYNC: 'country.block.sync',
+  REFRESH_DB: 'country.block.refresh_db',
+} as const;
+
+const COUNTRY_BLOCK_AGENT_ACTIONS = {
+  APPLY: 'agent.country_block.apply',
+  REFRESH_DB: 'agent.country_block.refresh_db',
+} as const;
+
+interface CountryBlockRuleSnapshot {
+  country: string;
+  ports: string | null;
+  protocol: 'TCP' | 'UDP' | 'BOTH';
+  enabled: boolean;
+}
+
+function assertExactKeys(value: Record<string, unknown>, expected: readonly string[]): void {
+  if (Object.keys(value).sort().join(',') !== [...expected].sort().join(',')) {
+    throw new BadRequestException('Country block operation request is invalid');
+  }
+}
+
+function validateSources(value: unknown): CountrySource[] {
+  if (
+    !Array.isArray(value) ||
+    value.length !== 2 ||
+    new Set(value).size !== value.length ||
+    value.some((source) => source !== 'IPDENY' && source !== 'GITHUB_HERRBISCH')
+  ) throw new BadRequestException('Country block operation sources are invalid');
+  return value as CountrySource[];
+}
+
+function validateRuleSnapshots(value: unknown): CountryBlockRuleSnapshot[] {
+  if (!Array.isArray(value) || value.length > 4096) {
+    throw new BadRequestException('Country block operation rules are invalid');
+  }
+  return value.map((entry) => {
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) {
+      throw new BadRequestException('Country block operation rule is invalid');
+    }
+    const rule = entry as Record<string, unknown>;
+    assertExactKeys(rule, ['country', 'ports', 'protocol', 'enabled']);
+    if (
+      typeof rule.country !== 'string' ||
+      !/^[A-Z]{2}$/.test(rule.country) ||
+      (rule.ports !== null && (typeof rule.ports !== 'string' || rule.ports.length > 128)) ||
+      !['TCP', 'UDP', 'BOTH'].includes(String(rule.protocol)) ||
+      typeof rule.enabled !== 'boolean'
+    ) throw new BadRequestException('Country block operation rule is invalid');
+    return rule as unknown as CountryBlockRuleSnapshot;
+  });
+}
+
+function validateSyncRequest(request: unknown): {
+  rules: CountryBlockRuleSnapshot[];
+  sources: CountrySource[];
+} {
+  if (!request || typeof request !== 'object' || Array.isArray(request)) {
+    throw new BadRequestException('Country block operation request is invalid');
+  }
+  const value = request as Record<string, unknown>;
+  assertExactKeys(value, ['rules', 'sources']);
+  return {
+    rules: validateRuleSnapshots(value.rules),
+    sources: validateSources(value.sources),
+  };
+}
+
+function validateRefreshRequest(request: unknown): {
+  countries: string[];
+  sources: CountrySource[];
+} {
+  if (!request || typeof request !== 'object' || Array.isArray(request)) {
+    throw new BadRequestException('Country block operation request is invalid');
+  }
+  const value = request as Record<string, unknown>;
+  assertExactKeys(value, ['countries', 'sources']);
+  if (
+    !Array.isArray(value.countries) ||
+    value.countries.length > 249 ||
+    new Set(value.countries).size !== value.countries.length ||
+    value.countries.some((country) => typeof country !== 'string' || !/^[A-Z]{2}$/.test(country))
+  ) throw new BadRequestException('Country block operation countries are invalid');
+  return {
+    countries: value.countries as string[],
+    sources: validateSources(value.sources),
+  };
+}
+
 @Injectable()
-export class CountryBlockService {
+export class CountryBlockService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger('CountryBlockService');
+  private unregisterHandlers: Array<() => void> = [];
 
   constructor(
     private readonly prisma: PrismaService,
     private readonly agentRelay: AgentRelayService,
     private readonly panelSettings: PanelSettingsService,
+    private readonly admission: OperationAdmissionService,
+    private readonly worker: OperationsWorkerService,
   ) {}
+
+  onModuleInit(): void {
+    this.unregisterHandlers.push(
+      this.worker.registerHandler(
+        COUNTRY_BLOCK_OPERATION_ACTIONS.SYNC,
+        (request, context) => this.executeQueuedSync(request, context),
+      ),
+      this.worker.registerHandler(
+        COUNTRY_BLOCK_OPERATION_ACTIONS.REFRESH_DB,
+        (request, context) => this.executeQueuedRefresh(request, context),
+      ),
+    );
+  }
+
+  onModuleDestroy(): void {
+    for (const unregister of this.unregisterHandlers.splice(0)) unregister();
+  }
 
   // ---------------------------------------------------------------------------
   // CRUD на правилах
@@ -140,6 +254,27 @@ export class CountryBlockService {
     return this.applyToAgent();
   }
 
+  async enqueueSync(
+    actor: { userId: string; role: string },
+    idempotencyKey?: string,
+  ) {
+    const [rules, settings] = await Promise.all([
+      this.ruleSnapshots(),
+      this.getSettings(),
+    ]);
+    return this.admission.admit({
+      actionId: COUNTRY_BLOCK_OPERATION_ACTIONS.SYNC,
+      type: 'COUNTRY_BLOCK_SYNC',
+      idempotencyKey,
+      actor,
+      request: { rules, sources: this.buildSources(settings.primarySource) },
+      deadlineMs: 15 * 60_000,
+      recoveryPolicy: 'RECONCILE_ONLY',
+      retryable: false,
+      globalLockKey: 'country-block:runtime',
+    });
+  }
+
   /** Принудительное обновление CIDR-базы. */
   async refreshDb(countries?: string[]): Promise<AgentResult> {
     if (!this.agentRelay.isAgentConnected()) {
@@ -181,6 +316,28 @@ export class CountryBlockService {
     }
 
     return res;
+  }
+
+  async enqueueRefreshDb(
+    countries: string[] | undefined,
+    actor: { userId: string; role: string },
+    idempotencyKey?: string,
+  ) {
+    const [list, settings] = await Promise.all([
+      this.resolveRefreshCountries(countries),
+      this.getSettings(),
+    ]);
+    return this.admission.admit({
+      actionId: COUNTRY_BLOCK_OPERATION_ACTIONS.REFRESH_DB,
+      type: 'COUNTRY_BLOCK_REFRESH_DB',
+      idempotencyKey,
+      actor,
+      request: { countries: list, sources: this.buildSources(settings.primarySource) },
+      deadlineMs: 30 * 60_000,
+      recoveryPolicy: 'RECONCILE_ONLY',
+      retryable: false,
+      globalLockKey: 'country-block:runtime',
+    });
   }
 
   /** Текущее состояние с агента (ipset'ы, правила, даты обновления). */
@@ -228,6 +385,102 @@ export class CountryBlockService {
       })),
       sources,
     }, 600_000) as unknown as AgentResult;
+  }
+
+  private async ruleSnapshots(): Promise<CountryBlockRuleSnapshot[]> {
+    const rules = await this.prisma.countryBlock.findMany();
+    return rules.map((rule) => ({
+      country: rule.country.toUpperCase(),
+      ports: rule.ports,
+      protocol: rule.protocol as 'TCP' | 'UDP' | 'BOTH',
+      enabled: rule.enabled,
+    }));
+  }
+
+  private async resolveRefreshCountries(countries?: string[]): Promise<string[]> {
+    const requested = countries
+      ?.map((country) => country.toUpperCase())
+      .filter((country) => /^[A-Z]{2}$/.test(country));
+    if (requested && requested.length > 0) return [...new Set(requested)].sort();
+    const rules = await this.prisma.countryBlock.findMany({ select: { country: true } });
+    return [...new Set(rules.map((rule) => rule.country.toUpperCase()))].sort();
+  }
+
+  private async executeQueuedSync(
+    request: unknown,
+    context: {
+      operationId: string;
+      deadlineAt: Date;
+      isCancellationRequested(): Promise<boolean>;
+    },
+  ): Promise<unknown> {
+    const payload = validateSyncRequest(request);
+    return this.agentRelay.runAgentJob(
+      {
+        operationId: context.operationId,
+        actionId: COUNTRY_BLOCK_AGENT_ACTIONS.APPLY,
+        step: 'apply',
+        payload,
+        deadlineAt: context.deadlineAt,
+        cancelSafe: false,
+      },
+      () => context.isCancellationRequested(),
+    );
+  }
+
+  private async executeQueuedRefresh(
+    request: unknown,
+    context: {
+      operationId: string;
+      deadlineAt: Date;
+      isCancellationRequested(): Promise<boolean>;
+    },
+  ): Promise<unknown> {
+    const payload = validateRefreshRequest(request);
+    if (payload.countries.length === 0) return { info: 'NO_RULES', updated: [] };
+    try {
+      const result = await this.agentRelay.runAgentJob(
+        {
+          operationId: context.operationId,
+          actionId: COUNTRY_BLOCK_AGENT_ACTIONS.REFRESH_DB,
+          step: 'refresh-db',
+          payload,
+          deadlineAt: context.deadlineAt,
+          cancelSafe: false,
+        },
+        () => context.isCancellationRequested(),
+      );
+      const settings = await this.getSettings();
+      await this.panelSettings.set('country-block', {
+        ...settings,
+        lastUpdate: new Date().toISOString(),
+        lastUpdateError: null,
+      });
+      if (settings.enabled) {
+        await this.agentRelay.runAgentJob(
+          {
+            operationId: context.operationId,
+            actionId: COUNTRY_BLOCK_AGENT_ACTIONS.APPLY,
+            step: 'apply-refreshed-db',
+            payload: {
+              rules: await this.ruleSnapshots(),
+              sources: this.buildSources(settings.primarySource),
+            },
+            deadlineAt: context.deadlineAt,
+            cancelSafe: false,
+          },
+          () => context.isCancellationRequested(),
+        );
+      }
+      return result;
+    } catch (error) {
+      const settings = await this.getSettings();
+      await this.panelSettings.set('country-block', {
+        ...settings,
+        lastUpdateError: safeErrorMessage(error, 'Country block refresh failed'),
+      });
+      throw error;
+    }
   }
 
   private async clearOnAgent(): Promise<AgentResult> {

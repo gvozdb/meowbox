@@ -2,9 +2,6 @@ import {
   IsString,
   IsNotEmpty,
   IsOptional,
-  IsInt,
-  Min,
-  Max,
   MaxLength,
   MinLength,
   Matches,
@@ -15,14 +12,11 @@ import {
 } from 'class-validator';
 
 /**
- * URL ведомого сервера: HTTP или HTTPS, FQDN/IP-литерал.
- * Аутентификация — PROXY_TOKEN (HMAC server-to-server), а не TLS:
- * пользователь имеет право добавить slave по raw IP без сертификата.
- * Запрет 127.0.0.1 / private-net / AWS IMDS — на уровне runtime-проверки
- * `assertPublicHttpUrl` в сервисе (DNS-lookup + RFC1918-фильтр).
+ * Legacy-static-v0 accepts an exact public HTTPS origin only. TLS verification
+ * remains mandatory even though the narrow upgrade rail uses PROXY_TOKEN.
  */
 const REMOTE_URL_RULES = {
-  protocols: ['http', 'https'] as string[],
+  protocols: ['https'] as string[],
   require_tld: false,
   require_protocol: true,
 };
@@ -38,7 +32,7 @@ export class AddServerDto {
   @IsString()
   @IsNotEmpty()
   @MaxLength(256)
-  @IsUrl(REMOTE_URL_RULES, { message: 'URL must be http(s):// and a valid host' })
+  @IsUrl(REMOTE_URL_RULES, { message: 'URL must be an HTTPS origin with a valid host' })
   url!: string;
 
   // PROXY_TOKEN удалённого сервера — hex-строка openssl rand -hex 32 = 64 символа.
@@ -63,7 +57,7 @@ export class UpdateServerDto {
   @IsOptional()
   @IsString()
   @MaxLength(256)
-  @IsUrl(REMOTE_URL_RULES, { message: 'URL must be http(s):// and a valid host' })
+  @IsUrl(REMOTE_URL_RULES, { message: 'URL must be an HTTPS origin with a valid host' })
   url?: string;
 
   @IsOptional()
@@ -74,39 +68,6 @@ export class UpdateServerDto {
     message: 'Token contains unsupported characters',
   })
   token?: string;
-}
-
-export class ProvisionServerDto {
-  @IsString()
-  @IsNotEmpty()
-  @MinLength(2)
-  @MaxLength(64)
-  @Matches(/^[\w .-]+$/u, { message: 'Server name contains invalid characters' })
-  name!: string;
-
-  // Hostname или IPv4/IPv6-литерал. Дополнительная проверка `assertPublicHost`
-  // в сервисе провижнинга (блок 127.0.0.1, AWS IMDS, link-local).
-  @IsString()
-  @IsNotEmpty()
-  @MaxLength(253)
-  @Matches(/^[A-Za-z0-9.:_-]+$/, {
-    message: 'Host must be a hostname or IP literal',
-  })
-  host!: string;
-
-  @IsOptional()
-  @IsInt()
-  @Min(1)
-  @Max(65535)
-  port?: number;
-
-  // SSH root-пароль для первичного подключения. Не валидируем содержимое —
-  // пользователь мог настроить нестандартный пароль на своей стороне.
-  // Единственное ограничение — длина.
-  @IsString()
-  @IsNotEmpty()
-  @MaxLength(256)
-  password!: string;
 }
 
 /**

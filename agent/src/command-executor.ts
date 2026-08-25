@@ -1,8 +1,8 @@
-import { execFile, spawn } from 'child_process';
-import { promisify } from 'util';
+import { spawn } from 'child_process';
 import * as path from 'path';
-
-const execFileAsync = promisify(execFile);
+import type { Readable } from 'node:stream';
+import { pipeline } from 'node:stream/promises';
+import { childProcessRegistry } from './process-registry';
 
 /**
  * Ошибка от внешней команды: непустой `exitCode`, плюс stdout/stderr и
@@ -197,10 +197,10 @@ export class CommandExecutor {
 
   private static readonly DEFAULT_TIMEOUT =
     Number(process.env.COMMAND_DEFAULT_TIMEOUT_MS) || 60_000; // 60 seconds
-  // 30 минут — MODX 3 cli-install.php и composer install на слабых VPS
-  // могут легко занимать 10+ минут. Раньше ставили 10 мин — упирались в таймаут.
+  // Durable package operations can legitimately exceed 30 minutes. Every
+  // caller still supplies an action-specific timeout; this is only the ceiling.
   private static readonly MAX_TIMEOUT =
-    Number(process.env.COMMAND_MAX_TIMEOUT_MS) || 1_800_000; // 30 minutes
+    Number(process.env.COMMAND_MAX_TIMEOUT_MS) || 14_400_000; // 4 hours
 
   // Буфер stdout/stderr. 10 МБ — перекрывает dump БД среднего сайта.
   // Для больших дампов пользовать streaming-API, а не execFile.
@@ -219,6 +219,102 @@ export class CommandExecutor {
       if (!segments.includes(dir)) segments.push(dir);
     }
     return segments.join(':');
+  }
+
+  async executeWithInput(
+    command: string,
+    args: string[],
+    input: Readable,
+    options: {
+      cwd?: string;
+      timeout?: number;
+      env?: Record<string, string>;
+      allowFailure?: boolean;
+    } = {},
+  ): Promise<CommandResult> {
+    const basename = this.validateCommandInvocation(command, args);
+    const timeout = Math.min(
+      options.timeout || CommandExecutor.DEFAULT_TIMEOUT,
+      CommandExecutor.MAX_TIMEOUT,
+    );
+    const mergedEnv: NodeJS.ProcessEnv = {
+      ...process.env,
+      ...options.env,
+      LC_ALL: 'C',
+      LANG: 'C',
+    };
+    mergedEnv.PATH = CommandExecutor.buildPath(mergedEnv.PATH);
+    const child = spawn(command, args, {
+      cwd: options.cwd,
+      env: mergedEnv,
+      detached: true,
+      stdio: ['pipe', 'pipe', 'pipe'],
+    });
+    const handle = childProcessRegistry.track(
+      child,
+      `command-input:${basename}`,
+      { processGroup: true },
+    );
+    const stdoutChunks: Buffer[] = [];
+    const stderrChunks: Buffer[] = [];
+    let stdoutBytes = 0;
+    let stderrBytes = 0;
+    let overflow = false;
+    let timedOut = false;
+    let inputFailureName = '';
+    const collect = (chunk: Buffer, chunks: Buffer[], bytes: number): number => {
+      const remaining = CommandExecutor.MAX_BUFFER_BYTES - bytes;
+      if (remaining > 0) chunks.push(chunk.subarray(0, remaining));
+      if (chunk.length > remaining && !overflow) {
+        overflow = true;
+        void handle.terminate(5_000);
+      }
+      return Math.min(CommandExecutor.MAX_BUFFER_BYTES, bytes + chunk.length);
+    };
+    child.stdout.on('data', (chunk: Buffer) => {
+      stdoutBytes = collect(chunk, stdoutChunks, stdoutBytes);
+    });
+    child.stderr.on('data', (chunk: Buffer) => {
+      stderrBytes = collect(chunk, stderrChunks, stderrBytes);
+    });
+    const exit = new Promise<number>((resolve, reject) => {
+      child.once('error', reject);
+      child.once('close', (code) => resolve(typeof code === 'number' ? code : 1));
+    });
+    const inputDone = pipeline(input, child.stdin).catch((error: unknown) => {
+      inputFailureName = error instanceof Error ? error.name : 'Error';
+      void handle.terminate(5_000);
+    });
+    const timer = setTimeout(() => {
+      timedOut = true;
+      void handle.terminate(5_000);
+    }, timeout);
+    timer.unref();
+    try {
+      const [exitCode] = await Promise.all([exit, inputDone]);
+      const stdout = Buffer.concat(stdoutChunks, stdoutBytes).toString('utf8');
+      const stderr = Buffer.concat(stderrChunks, stderrBytes).toString('utf8');
+      const effectiveExitCode = timedOut ? 124 : exitCode;
+      if (effectiveExitCode !== 0 || overflow || inputFailureName) {
+        if (options.allowFailure && !overflow && !inputFailureName) {
+          return { stdout, stderr, exitCode: effectiveExitCode };
+        }
+        throw new CommandError({
+          command,
+          args,
+          exitCode: overflow ? 1 : effectiveExitCode,
+          stdout,
+          stderr: inputFailureName
+            ? `${stderr}${stderr ? '\n' : ''}input stream failed (${inputFailureName})`
+            : stderr,
+          timedOut,
+        });
+      }
+      return { stdout, stderr, exitCode: 0 };
+    } finally {
+      clearTimeout(timer);
+      handle.untrack();
+    }
   }
 
   /**
@@ -287,6 +383,28 @@ export class CommandExecutor {
     return null;
   }
 
+  private validateCommandInvocation(
+    command: string,
+    args: string[],
+    unsafeShellMetaArgs?: Set<number>,
+  ): string {
+    const basename = path.basename(command);
+    if (
+      !CommandExecutor.ALLOWED_COMMANDS.has(basename) &&
+      !CommandExecutor.VERSIONED_PATTERN.test(basename)
+    ) throw new Error(`Command not allowed: ${basename}`);
+    if (basename === 'sudo') {
+      const sudoTarget = this.resolveSudoTarget(args);
+      if (!sudoTarget) throw new Error('sudo: target binary not found in args');
+      if (
+        !CommandExecutor.ALLOWED_COMMANDS.has(sudoTarget) &&
+        !CommandExecutor.VERSIONED_PATTERN.test(sudoTarget)
+      ) throw new Error(`sudo target not allowed: ${sudoTarget}`);
+    }
+    this.validateArgs(args, unsafeShellMetaArgs);
+    return basename;
+  }
+
   /**
    * Execute a command safely using execFile (no shell interpretation).
    * The command must be in the allowlist.
@@ -315,40 +433,8 @@ export class CommandExecutor {
       allowFailure?: boolean;
     } = {},
   ): Promise<CommandResult> {
-    // Validate command against allowlist
-    const basename = path.basename(command);
-    if (
-      !CommandExecutor.ALLOWED_COMMANDS.has(basename) &&
-      !CommandExecutor.VERSIONED_PATTERN.test(basename)
-    ) {
-      throw new Error(`Command not allowed: ${basename}`);
-    }
-
-    // Sudo: реальный бинарь — это первый non-flag аргумент. Проверяем его
-    // против allowlist'а тоже — иначе sudo bash/sh/python/что-угодно бы пролез.
-    if (basename === 'sudo') {
-      const sudoTarget = this.resolveSudoTarget(args);
-      if (!sudoTarget) {
-        throw new Error('sudo: target binary not found in args');
-      }
-      if (
-        !CommandExecutor.ALLOWED_COMMANDS.has(sudoTarget) &&
-        !CommandExecutor.VERSIONED_PATTERN.test(sudoTarget)
-      ) {
-        throw new Error(`sudo target not allowed: ${sudoTarget}`);
-      }
-    }
-
-    // Sanitize arguments — reject shell metacharacters in non-SQL args.
-    // execFile bypasses shell so most characters are safe, но:
-    //   - \n/\r/\0 могут сломать инструменты, парсящие argv построчно
-    //     (crontab, визор,  сервисные скрипты вроде MODX cli-install) —
-    //     блокируем их всегда.
-    //   - shell-метасимволы (;&|`{}) блокируем как layered defense.
-    // SQL через -e/-c пропускаем — там SQL-синтаксис легитимен.
-    // unsafeShellMetaArgs пропускаем — это аргумент-команда для удалённого
-    // shell (sshpass+ssh), локальный exec её не интерпретирует.
-    this.validateArgs(
+    const basename = this.validateCommandInvocation(
+      command,
       args,
       options.unsafeShellMetaArgs ? new Set(options.unsafeShellMetaArgs) : undefined,
     );
@@ -358,57 +444,87 @@ export class CommandExecutor {
       CommandExecutor.MAX_TIMEOUT,
     );
 
-    try {
-      const mergedEnv: NodeJS.ProcessEnv = {
-        ...process.env,
-        ...options.env,
-        // Prevent locale-dependent output
-        LC_ALL: 'C',
-        LANG: 'C',
-      };
-      // Гарантируем, что useradd/usermod/userdel/groupadd (live в /usr/sbin)
-      // найдутся даже если PM2 запустил агент с урезанным PATH.
-      mergedEnv.PATH = CommandExecutor.buildPath(mergedEnv.PATH);
+    const mergedEnv: NodeJS.ProcessEnv = {
+      ...process.env,
+      ...options.env,
+      LC_ALL: 'C',
+      LANG: 'C',
+    };
+    mergedEnv.PATH = CommandExecutor.buildPath(mergedEnv.PATH);
 
-      const { stdout, stderr } = await execFileAsync(command, args, {
+    return new Promise<CommandResult>((resolve, reject) => {
+      const child = spawn(command, args, {
         cwd: options.cwd,
-        timeout,
-        maxBuffer: CommandExecutor.MAX_BUFFER_BYTES,
         env: mergedEnv,
+        detached: true,
+        stdio: ['ignore', 'pipe', 'pipe'],
       });
+      const handle = childProcessRegistry.track(
+        child,
+        `command:${basename}`,
+        { processGroup: true },
+      );
+      const stdoutChunks: Buffer[] = [];
+      const stderrChunks: Buffer[] = [];
+      let stdoutBytes = 0;
+      let stderrBytes = 0;
+      let overflow: 'stdout' | 'stderr' | null = null;
+      let timedOut = false;
+      let settled = false;
 
-      return { stdout, stderr, exitCode: 0 };
-    } catch (err: unknown) {
-      const error = err as {
-        stdout?: string;
-        stderr?: string;
-        code?: number | string;
-        killed?: boolean;
-        signal?: string;
-        message?: string;
+      const collect = (
+        chunk: Buffer,
+        chunks: Buffer[],
+        currentBytes: number,
+        stream: 'stdout' | 'stderr',
+      ): number => {
+        const remaining = CommandExecutor.MAX_BUFFER_BYTES - currentBytes;
+        if (remaining > 0) chunks.push(chunk.subarray(0, remaining));
+        if (chunk.length > remaining && !overflow) {
+          overflow = stream;
+          void handle.terminate(5_000);
+        }
+        return Math.min(CommandExecutor.MAX_BUFFER_BYTES, currentBytes + chunk.length);
       };
-      const stdout = error.stdout || '';
-      const stderr = error.stderr || error.message || '';
-      const exitCode =
-        typeof error.code === 'number'
-          ? error.code
-          : error.code === 'ETIMEDOUT' || error.killed
-            ? 124 // как у coreutils `timeout(1)`
-            : 1;
-      const timedOut = error.code === 'ETIMEDOUT' || error.signal === 'SIGTERM' || error.killed === true;
-
-      if (options.allowFailure) {
-        return { stdout, stderr, exitCode };
-      }
-      throw new CommandError({
-        command,
-        args,
-        exitCode,
-        stdout,
-        stderr,
-        timedOut,
+      child.stdout.on('data', (chunk: Buffer) => {
+        stdoutBytes = collect(chunk, stdoutChunks, stdoutBytes, 'stdout');
       });
-    }
+      child.stderr.on('data', (chunk: Buffer) => {
+        stderrBytes = collect(chunk, stderrChunks, stderrBytes, 'stderr');
+      });
+
+      const timer = setTimeout(() => {
+        timedOut = true;
+        void handle.terminate(5_000);
+      }, timeout);
+      timer.unref();
+
+      const finish = (code: number, errorMessage = '') => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        handle.untrack();
+        const stdout = Buffer.concat(stdoutChunks, stdoutBytes).toString('utf8');
+        let stderr = Buffer.concat(stderrChunks, stderrBytes).toString('utf8');
+        if (errorMessage && !stderr) stderr = errorMessage;
+        if (overflow) stderr = `${stderr}\n${overflow} exceeded command output limit`.trim();
+        const exitCode = timedOut ? 124 : overflow ? 1 : code;
+        if (exitCode === 0 || options.allowFailure) {
+          resolve({ stdout, stderr, exitCode });
+          return;
+        }
+        reject(new CommandError({
+          command,
+          args,
+          exitCode,
+          stdout,
+          stderr,
+          timedOut,
+        }));
+      };
+      child.once('error', (error) => finish(1, error.message));
+      child.once('close', (code) => finish(typeof code === 'number' ? code : 1));
+    });
   }
 
   /**
@@ -447,26 +563,7 @@ export class CommandExecutor {
       allowFailure?: boolean;
     } = {},
   ): Promise<CommandResult> {
-    const basename = path.basename(command);
-    if (
-      !CommandExecutor.ALLOWED_COMMANDS.has(basename) &&
-      !CommandExecutor.VERSIONED_PATTERN.test(basename)
-    ) {
-      throw new Error(`Command not allowed: ${basename}`);
-    }
-    if (basename === 'sudo') {
-      const sudoTarget = this.resolveSudoTarget(args);
-      if (!sudoTarget) {
-        throw new Error('sudo: target binary not found in args');
-      }
-      if (
-        !CommandExecutor.ALLOWED_COMMANDS.has(sudoTarget) &&
-        !CommandExecutor.VERSIONED_PATTERN.test(sudoTarget)
-      ) {
-        throw new Error(`sudo target not allowed: ${sudoTarget}`);
-      }
-    }
-    this.validateArgs(args);
+    const basename = this.validateCommandInvocation(command, args);
 
     const timeout = Math.min(
       options.timeout || CommandExecutor.DEFAULT_TIMEOUT,
@@ -491,9 +588,16 @@ export class CommandExecutor {
         cwd: options.cwd,
         stdio: [stdinMode, 'pipe', 'pipe'],
         env: mergedEnv,
+        detached: true,
       });
+      const processHandle = childProcessRegistry.track(
+        child,
+        `command-stream:${basename}`,
+        { processGroup: true },
+      );
 
       let stdoutBuf = '';
+      let stdoutBytes = 0;
       let stderrBuf = '';
       const discardBuf = options.discardOutputBuffer === true;
       // Частично набранные строки (последний кусок chunk'а без \n).
@@ -523,7 +627,12 @@ export class CommandExecutor {
       // nullable из-за общего типа spawn, но фактически здесь они всегда есть.
       child.stdout?.on('data', (chunk: Buffer) => {
         const s = chunk.toString('utf8');
-        if (!discardBuf) stdoutBuf += s;
+        if (!discardBuf && stdoutBytes < CommandExecutor.MAX_BUFFER_BYTES) {
+          const remaining = CommandExecutor.MAX_BUFFER_BYTES - stdoutBytes;
+          const accepted = chunk.subarray(0, remaining).toString('utf8');
+          stdoutBuf += accepted;
+          stdoutBytes += Buffer.byteLength(accepted, 'utf8');
+        }
         stdoutTail = flushChunk(s, stdoutTail, 'stdout');
       });
       child.stderr?.on('data', (chunk: Buffer) => {
@@ -537,13 +646,17 @@ export class CommandExecutor {
       let timedOut = false;
       const timer = setTimeout(() => {
         timedOut = true;
-        try { child.kill('SIGKILL'); } catch { /* ignore */ }
+        void processHandle.terminate(5_000);
       }, timeout);
 
+      let settled = false;
       const finish = (
         exitCode: number,
         extraStderr = '',
       ) => {
+        if (settled) return;
+        settled = true;
+        processHandle.untrack();
         const stderr = stderrBuf + extraStderr;
         if (exitCode === 0 || allowFailure) {
           resolve({ stdout: stdoutBuf, stderr, exitCode });

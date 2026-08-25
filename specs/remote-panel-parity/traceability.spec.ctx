@@ -1,0 +1,96 @@
+spec
+remote_panel_parity_traceability {
+  source: specs/remote-panel-parity/plan.md
+  status: IMPLEMENTED_ACTIVATION_GATED
+  invariant: every requirement maps to implementation tasks, executable tests, and a release or activation gate
+
+  failures {
+    req CF1 { tasks: [RPP-110,RPP-120,RPP-300]; tests: [api/test/federation-enrollment.test.js,api/test/federation-network.test.js,api/test/federation-registry.test.js]; gate: [T-DIAL-001,T-PROV-001,T-REG-001] }
+    req CF2 { tasks: [RPP-210,RPP-600]; tests: [web/tests/api-request-scope.test.js,web/tests/remote-context-epoch.test.js]; gate: [T-AUTH-001,T-BR-001] }
+    req CF3 { tasks: [RPP-210]; tests: [web/tests/api-request-scope.test.js]; gate: [T-AUTH-001] }
+    req CF4 { tasks: [RPP-200,RPP-230]; tests: [api/test/federation-principals.test.js,api/test/federation-audit.test.js]; gate: [T-AUTH-002,T-AUD-001] }
+    req CF5 { tasks: [RPP-220,RPP-560]; tests: [api/test/federated-socket-policy.test.js,api/test/federation-action-matrix.test.js]; gate: [T-AUTH-003,T-WS-002] }
+    req CF6 { tasks: [RPP-200,RPP-240,RPP-560]; tests: [api/test/federation-ai-ownership.test.js,api/test/federation-principals.test.js,api/test/federation-ws-channel-services.test.js,api/test/federated-socket-bridge.test.js,web/tests/page-capability-pass.test.js]; gate: [T-AUTH-002,T-WS-002] }
+    req CF7 { tasks: [RPP-500,RPP-510]; tests: [api/test/adminer-handoff.test.js,web/tests/public-delivery.test.js,migrations/tests/adminer-handoff-v2-runtime.test.js]; gate: [T-ADM-001,T-ADM-005] }
+    req CF8 { tasks: [RPP-500,RPP-520]; tests: [api/test/federated-vpn-subscription.test.js,web/tests/public-delivery.test.js]; gate: [T-VPN-001,T-VPN-003] }
+    req CF9 { tasks: [RPP-430,RPP-540]; tests: [api/test/backup-export-operations.test.js,api/test/transfer-sessions.test.js,web/tests/public-delivery.test.js]; gate: [T-XFER-001,T-XFER-004] }
+    req CF10 { tasks: [RPP-500,RPP-510,RPP-520,RPP-530,RPP-540,RPP-550]; tests: [api/test/webhook-federation.test.js,api/test/federated-vpn-subscription.test.js,api/test/transfer-sessions.test.js]; gate: [T-WEB-001,T-VPN-001,T-XFER-001] }
+    req CF11 { tasks: [RPP-230]; tests: [api/test/federation-audit.test.js,api/test/federation-delegation-verifier.test.js]; gate: [T-IP-001,T-AUD-001] }
+    req CF12 { tasks: [RPP-310,RPP-620]; tests: [api/test/federation-remote-context.test.js,web/tests/remote-capability.test.js]; gate: [T-BR-001] }
+    req CF13 { tasks: [RPP-440]; tests: [api/test/panel-access-cutover.test.js,api/test/panel-access-cutover-coordinator.test.js,agent/test/panel-access-cutover.test.js]; gate: [T-PA-001,T-PA-003] }
+    req CF14 { tasks: [RPP-610]; tests: [web/tests/remote-context-epoch.test.js]; gate: [T-BR-002] }
+    req CF15 { tasks: [RPP-560]; tests: [api/test/federated-socket-bridge.test.js,api/test/federation-ws-channel.test.js,web/tests/remote-context-epoch.test.js]; gate: [T-WS-001,T-WS-006] }
+    req CF16 { tasks: [RPP-010,RPP-400,RPP-420]; tests: [api/test/federation-action-matrix.test.js,api/test/operations-worker.test.js]; gate: [T-TRACE-001,T-OPS-001] }
+    req CF17 { tasks: [RPP-030,RPP-400,RPP-410,RPP-420]; tests: [api/test/operations-worker.test.js,api/test/agent-jobs.test.js,agent/test/process-ownership.test.js]; gate: [T-OPS-001,T-OPS-006] }
+    req CF18 { tasks: [RPP-430,RPP-540]; tests: [api/test/transfer-sessions.test.js,api/test/backup-transfer.test.js,e2e/remote-panel-parity/test/fixture-safety.test.mjs]; gate: [T-XFER-001,T-XFER-004] }
+    req CF19 { tasks: [RPP-100,RPP-130,RPP-150,RPP-640]; tests: [api/test/federation-compatibility.test.js,api/test/federation-manifest.test.js,web/tests/page-capability-pass.test.js]; gate: [T-SIG-001,T-LEG-001] }
+    req CF20 { tasks: [RPP-630]; tests: [api/test/federated-fleet-update.test.js,web/tests/api-request-scope.test.js]; gate: [T-LEG-002] }
+    req CF21 { tasks: [RPP-110,RPP-120,RPP-300,RPP-440]; tests: [api/test/federation-network.test.js,api/test/federation-enrollment.test.js,api/test/federation-key-lifecycle.test.js,api/test/panel-access-cutover.test.js]; gate: [T-DIAL-001,T-PROV-001,T-PA-001] }
+    req CF22 { tasks: [RPP-250,RPP-650]; tests: [api/test/federation-rate-limit.test.js,api/test/federation-audit.test.js,api/test/federation-dispatcher.test.js]; gate: [T-AUD-001,T-CAN-001] }
+  }
+
+  acceptance_requirements {
+    req A1 { tasks: [RPP-210,RPP-600]; tests: [web/tests/api-request-scope.test.js]; gate: [T-AUTH-001] }
+    req A2 { tasks: [RPP-200,RPP-240]; tests: [api/test/federation-ai-ownership.test.js,api/test/federation-principals.test.js,api/test/federation-ws-channel-services.test.js]; gate: [T-AUTH-002] }
+    req A3 { tasks: [RPP-220,RPP-560]; tests: [api/test/federation-action-matrix.test.js,api/test/federated-socket-policy.test.js]; gate: [T-AUTH-003,T-WS-002] }
+    req A4 { tasks: [RPP-230]; tests: [api/test/federation-audit.test.js]; gate: [T-AUD-001] }
+    req A5 { tasks: [RPP-300]; tests: [api/test/federation-enrollment.test.js,api/test/federation-enrollment-ssh.test.js]; gate: [T-PROV-001,T-PROV-003] }
+    req A6 { tasks: [RPP-230]; tests: [api/test/federation-delegation-verifier.test.js,api/test/federation-audit.test.js]; gate: [T-IP-001] }
+    req A7 { tasks: [RPP-510]; tests: [api/test/adminer-handoff.test.js,migrations/tests/adminer-handoff-v2-runtime.test.js]; gate: [T-ADM-001,T-ADM-005] }
+    req A8 { tasks: [RPP-520]; tests: [api/test/federated-vpn-subscription.test.js]; gate: [T-VPN-001,T-VPN-003] }
+    req A9 { tasks: [RPP-430,RPP-540]; tests: [api/test/transfer-sessions.test.js,api/test/backup-export-operations.test.js]; gate: [T-XFER-001,T-XFER-004] }
+    req A10 { tasks: [RPP-530]; tests: [api/test/webhook-federation.test.js,migrations/tests/webhook-runtime.test.js]; gate: [T-WEB-001,T-WEB-003] }
+    req A11 { tasks: [RPP-310,RPP-440]; tests: [api/test/federation-remote-context.test.js,api/test/panel-access-cutover.test.js]; gate: [T-PA-001,T-PA-003] }
+    req A12 { tasks: [RPP-600,RPP-610]; tests: [web/tests/remote-context-epoch.test.js]; gate: [T-BR-002] }
+    req A13 { tasks: [RPP-560]; tests: [api/test/federated-socket-bridge.test.js]; gate: [T-WS-001,T-WS-006] }
+    req A14 { tasks: [RPP-400,RPP-410,RPP-420]; tests: [api/test/operations-worker.test.js,api/test/agent-jobs.test.js]; gate: [T-OPS-001,T-OPS-006] }
+    req A15 { tasks: [RPP-430,RPP-540]; tests: [api/test/transfer-sessions.test.js]; gate: [T-XFER-001] }
+    req A16 { tasks: [RPP-130,RPP-150,RPP-640]; tests: [api/test/federation-compatibility.test.js,web/tests/page-capability-pass.test.js,e2e/remote-panel-parity/test/profiles.test.mjs]; gate: [T-LEG-001,T-BR-001] }
+    req A17 { tasks: [RPP-630]; tests: [api/test/federated-fleet-update.test.js,web/tests/api-request-scope.test.js]; gate: [T-LEG-002] }
+    req A18 { tasks: [RPP-000,RPP-640]; tests: [api/test/dashboard-overview.test.js,api/test/dashboard-proxy.test.js,web/tests/dashboard-overview-contract.test.js]; gate: [T-REL-001] }
+    req A19 { tasks: [RPP-010,RPP-640,RPP-710]; tests: [api/test/federation-action-matrix.test.js,api/test/remote-panel-traceability.test.js,web/tests/page-capability-pass.test.js]; gate: [T-TRACE-001] }
+    req A20 { tasks: [RPP-700,RPP-710,RPP-720,RPP-730,RPP-740]; tests: [migrations/tests/federation-rollout-policy.test.js,api/test/federation-rollout-policy.test.js,api/test/federation-key-lifecycle.test.js,api/test/federation-legacy-retirement.test.js,api/test/remote-panel-release-gate.test.js,e2e/remote-panel-parity/test/activation-evidence.test.mjs]; gate: [T-REL-001,T-CAN-001] }
+  }
+
+  preserved_behaviors {
+    req SP1 { tasks: [RPP-000,RPP-640]; tests: [api/test/dashboard-overview.test.js,api/test/dashboard-proxy.test.js,web/tests/dashboard-overview-contract.test.js]; gate: [T-REL-001] }
+    req SP2 { tasks: [RPP-010,RPP-140,RPP-220]; tests: [api/test/federation-action-matrix.test.js,api/test/federation-dispatcher.test.js]; gate: [T-TRACE-001,T-SIG-001] }
+    req SP3 { tasks: [RPP-400,RPP-420]; tests: [api/test/operations-worker.test.js,api/test/operations-locks.test.js]; gate: [T-OPS-001] }
+    req SP4 { tasks: [RPP-500,RPP-540]; tests: [web/tests/public-delivery.test.js,api/test/transfer-sessions.test.js]; gate: [T-XFER-001] }
+    req SP5 { tasks: [RPP-550]; tests: [api/test/modx-login-handoff.test.js,migrations/tests/modx-login-handoff-runtime.test.js]; gate: [T-BR-001] }
+    req SP6 { tasks: [RPP-560]; tests: [api/test/federated-socket-bridge.test.js,api/test/federation-ws-channel.test.js]; gate: [T-WS-001] }
+    req SP7 { tasks: [RPP-550]; tests: [api/test/federation-action-matrix.test.js,web/tests/page-capability-pass.test.js]; gate: [T-TRACE-001] }
+    req SP8 { tasks: [RPP-630]; tests: [api/test/federated-fleet-update.test.js,shared/test/semver.test.js]; gate: [T-LEG-002] }
+  }
+
+  immutable_ownership {
+    req IM1 { tasks: [RPP-120,RPP-300,RPP-630]; tests: [api/test/federation-registry.test.js,api/test/federated-fleet-update.test.js,api/test/federation-key-lifecycle.test.js]; gate: [T-REG-001] }
+    req IM2 { tasks: [RPP-210,RPP-630]; tests: [web/tests/api-request-scope.test.js,api/test/federation-action-matrix.test.js]; gate: [T-TRACE-001] }
+    req IM3 { tasks: [RPP-550]; tests: [api/test/federation-action-matrix.test.js]; gate: [T-TRACE-001] }
+    req IM4 { tasks: [RPP-210]; tests: [web/tests/api-request-scope.test.js]; gate: [T-AUTH-001] }
+    req IM5 { tasks: [RPP-210,RPP-620]; tests: [web/tests/api-request-scope.test.js]; gate: [T-AUTH-001] }
+    req IM6 { tasks: [RPP-120,RPP-630]; tests: [api/test/federation-registry.test.js,api/test/federated-fleet-update.test.js]; gate: [T-REG-001] }
+  }
+
+  baseline_notes {
+    req BN1 { tasks: [RPP-010,RPP-030]; tests: [api/test/federation-action-matrix.test.js]; gate: [T-TRACE-001] }
+    req BN2 { tasks: [RPP-030,RPP-530]; tests: [api/test/webhook-federation.test.js]; gate: [T-WEB-001] }
+    req BN3 { tasks: [RPP-030,RPP-440]; tests: [migrations/tests/federation-endpoint-defaults.test.js,migrations/tests/panel-access-federation-cutover-runtime.test.js]; gate: [T-PA-001] }
+  }
+
+  coverage {
+    action_matrix: specs/remote-panel-parity/action-matrix.yaml
+    route_and_event_test: api/test/federation-action-matrix.test.js
+    page_matrix_test: web/tests/page-capability-pass.test.js
+    expected_pages: 34
+  }
+}
+
+acceptance:
+  exact_requirement_sets: [CF1..CF22,A1..A20,SP1..SP8,IM1..IM6,BN1..BN3]
+  every_requirement_has: [tasks,tests,gate]
+  every_test_path_exists: true
+  every_remote_action_has_traceability_and_verification: true
+  activation_requires_all_external_gates_passed: true
+
+open_questions: []

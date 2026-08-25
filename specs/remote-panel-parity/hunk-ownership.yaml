@@ -1,0 +1,106 @@
+schema: meowbox.hunk-ownership/v1
+capturedAt: "2026-08-24T17:30:50+02:00"
+source:
+  path: /opt/meowbox
+  branch: main
+  head: 1b1dab8dd87aa281b1fcdaff129e17d540819bc6
+  version: v0.7.35
+  describe: v0.7.35-dirty
+  devMode: present
+  trackedPatchSha256: 7ddc262e7914ac757e5cfa31c04f2893d77ad2d6e1f768bb12bff92920e45d26
+  untrackedFileCountExcludingCodegraph: 41
+implementation:
+  path: /root/.fcklaw/workspace/meowbox-remote-panel-parity
+  branch: feature/remote-panel-parity
+  baselineHead: 1b1dab8dd87aa281b1fcdaff129e17d540819bc6
+  fixtureOnly: true
+  productionMutationAllowed: false
+owners:
+  system-overview:
+    rule: preserve baseline bytes and merge federation changes around them
+    trackedFiles:
+      - .env.example
+      - .github/workflows/release.yml
+      - agent/package.json
+      - agent/src/agent.service.ts
+      - agent/src/nginx/nginx.manager.ts
+      - agent/src/pm2/pm2.manager.ts
+      - agent/src/system/metrics.collector.ts
+      - api/package-lock.json
+      - api/package.json
+      - api/src/common/prisma.service.ts
+      - api/src/dashboard/dashboard.controller.ts
+      - api/src/dashboard/dashboard.module.ts
+      - api/src/dns/dns.service.ts
+      - api/src/monitoring/monitoring.service.ts
+      - api/src/proxy/proxy.controller.ts
+      - api/src/scheduler/scheduler.service.ts
+      - install.sh
+      - shared/package.json
+      - shared/src/entities.ts
+      - shared/src/index.ts
+      - web/assets/global.css
+      - web/composables/useApi.ts
+      - web/composables/useSocket.ts
+      - web/layouts/default.vue
+      - web/pages/index.vue
+    untrackedPaths:
+      - agent/test/dashboard-diagnostics.test.js
+      - api/src/common/dashboard-observability.ts
+      - api/src/common/prisma-logging.ts
+      - api/src/dashboard/
+      - api/src/dns/dns-managed-record.ts
+      - api/test/dashboard-*.test.js
+      - api/test/prisma-logging.test.js
+      - docs/runbook/system-overview-dashboard-release.md
+      - docs/specs/2026-08-23-system-overview-dashboard.plan.ctx
+      - migrations/system/2026-08-20-001-prisma-query-logging-default.ts
+      - migrations/tests/prisma-query-logging-default.test.js
+      - shared/src/dashboard-fixtures.ts
+      - shared/src/dashboard.ts
+      - web/components/dashboard/
+      - web/composables/useDashboardOverview.ts
+      - web/tests/dashboard-overview-contract.test.js
+      - web/utils/dashboard-*.ts
+  remote-panel-planning:
+    rule: immutable architecture input; implementation evidence may be added beside it
+    untrackedPaths:
+      - specs/remote-panel-parity/debate.md
+      - specs/remote-panel-parity/idea.md
+      - specs/remote-panel-parity/plan.md
+      - specs/remote-panel-parity/planner_prompt.md
+overlaps:
+  - path: .env.example
+    baselineHunks: ["+9,2"]
+  - path: .github/workflows/release.yml
+    baselineHunks: ["+71,1"]
+  - path: agent/package.json
+    baselineHunks: ["22"]
+  - path: agent/src/agent.service.ts
+    baselineHunks: ["74", "+2545,172"]
+  - path: api/package-lock.json
+    baselineHunks: ["+30,1", "+3811,12"]
+  - path: api/package.json
+    baselineHunks: ["+29,2", "+55,1"]
+  - path: api/src/proxy/proxy.controller.ts
+    baselineHunks: ["+22,1", "+38,13", "+297,1", "+336,27", "+386,28"]
+  - path: install.sh
+    baselineHunks: ["+501,4"]
+  - path: shared/package.json
+    baselineHunks: ["+5,1"]
+  - path: shared/src/index.ts
+    baselineHunks: ["+30,46"]
+  - path: web/composables/useApi.ts
+    baselineHunks: ["+6,1", "+119,1", "+145,1", "+165,1", "179,5", "+417,6"]
+  - path: web/composables/useSocket.ts
+    baselineHunks: ["3,10", "69", "150,3"]
+  - path: web/layouts/default.vue
+    baselineHunks: ["5,8", "20", "36", "+359,4", "+387,4", "+399,6", "+814,1", "+818,1", "+822,1", "+824,1"]
+  - path: web/pages/index.vue
+    baselineHunks: ["2,2", "5,21", "+9,1", "11", "13,3", "18,3", "23,5", "30,21", "53,3", "58,3", "66,14", "83,6", "90,2", "93,54"]
+guards:
+  - never change or remove /opt/meowbox/.dev-mode
+  - never run make update on this VPS
+  - never run live migrations or real-site fixtures
+  - never reset, stash, clean, or overwrite /opt/meowbox
+  - run federation tests only against explicit disposable fixture origins

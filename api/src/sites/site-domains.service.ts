@@ -2380,31 +2380,25 @@ export class SiteDomainsService {
     if (!this.agentRelay.isAgentConnected()) {
       throw new InternalServerErrorException('Агент не подключён');
     }
-    const sites = await this.prisma.site.findMany({ include: DOMAINS_WITH_SSL });
+    const sites = await this.prisma.site.findMany({
+      select: { id: true, name: true },
+      orderBy: { id: 'asc' },
+    });
     const details: Array<{ siteName: string; status: 'ok' | 'failed'; error?: string }> = [];
     let ok = 0;
     let failed = 0;
     for (const site of sites) {
       try {
-        const event = site.status === SiteStatus.STOPPED
-          ? 'nginx:create-stopped-config'
-          : 'nginx:create-config';
-        const r = await this.agentRelay.emitToAgent(
-          event,
-          buildMultiDomainNginxPayload(site as unknown as RawSiteForNginx, {
-            forceWriteCustom: site.domains.some((d) => !!d.nginxCustomConfig),
-          }),
-        );
-        if (r.success) {
-          ok++;
-          details.push({ siteName: site.name, status: 'ok' });
-        } else {
-          failed++;
-          details.push({ siteName: site.name, status: 'failed', error: r.error || 'unknown' });
-        }
+        await this.regenerateNginx(site.id, { forceWriteCustom: true });
+        ok++;
+        details.push({ siteName: site.name, status: 'ok' });
       } catch (e) {
         failed++;
-        details.push({ siteName: site.name, status: 'failed', error: (e as Error).message });
+        details.push({
+          siteName: site.name,
+          status: 'failed',
+          error: safeErrorMessage(e, 'unknown Nginx error', 800),
+        });
       }
     }
     // Глобальные zones — на основе всех доменов.

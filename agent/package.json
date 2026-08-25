@@ -20,7 +20,10 @@
     "test:application-root-preflight": "TS_NODE_TRANSPILE_ONLY=1 node --test -r ts-node/register -r ../tools/register-shared-source.js test/application-root-preflight.test.js",
     "test:installer-fail-closed": "TS_NODE_TRANSPILE_ONLY=1 node --test -r ts-node/register -r ../tools/register-shared-source.js test/site-installer-fail-closed.test.js",
     "test:xray-port-reservation": "TS_NODE_TRANSPILE_ONLY=1 node --test -r ts-node/register -r ../tools/register-shared-source.js test/xray-port-reservation.test.js",
-    "test:dashboard-diagnostics": "TS_NODE_TRANSPILE_ONLY=1 node --test -r ts-node/register -r ../tools/register-shared-source.js test/dashboard-diagnostics.test.js"
+    "test:dashboard-diagnostics": "TS_NODE_TRANSPILE_ONLY=1 node --test -r ts-node/register -r ../tools/register-shared-source.js test/dashboard-diagnostics.test.js",
+    "test:database-import": "TS_NODE_TRANSPILE_ONLY=1 node --test -r ts-node/register -r ../tools/register-shared-source.js test/database-import-stream.test.js",
+    "test:agent-jobs": "TS_NODE_TRANSPILE_ONLY=1 node --test -r ts-node/register -r ../tools/register-shared-source.js test/agent-job-runtime.test.js test/process-ownership.test.js test/ssl-manager-validation.test.js",
+    "test:federation": "npm run build && TS_NODE_TRANSPILE_ONLY=1 node --test -r ts-node/register -r ../tools/register-shared-source.js test/agent-job-runtime.test.js test/process-ownership.test.js test/ssl-manager-validation.test.js test/panel-access-cutover.test.js test/durable-agent-actions.test.js test/node-quick-command.test.js test/database-import-stream.test.js"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.1037.0",

@@ -22,13 +22,14 @@
 
 import {
   Injectable, Logger, NotFoundException, BadRequestException,
-  ForbiddenException, UnauthorizedException, ConflictException,
+  ForbiddenException, ConflictException, OnModuleInit, OnModuleDestroy,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { Cron, CronExpression } from '@nestjs/schedule';
-import { JwtService } from '@nestjs/jwt';
-import { spawn } from 'child_process';
+import { validatePublicDelivery, type ExternalProviderDelivery, type PublicDelivery } from '@meowbox/shared';
+import { spawn, type ChildProcess } from 'child_process';
 import { Response } from 'express';
+import { PassThrough, Readable } from 'node:stream';
 import { PrismaService } from '../common/prisma.service';
 import { StorageLocationsService } from '../storage-locations/storage-locations.service';
 import { AgentRelayService } from '../gateway/agent-relay.service';
@@ -41,6 +42,22 @@ import {
   S3Client, GetObjectCommand, DeleteObjectCommand,
 } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
+import { PanelIdentityService } from '../federation/panel-identity.service';
+import { TransferSessionService } from '../transfers/transfer-session.service';
+import { TransferArtifactService } from '../transfers/transfer-artifact.service';
+import { OperationAdmissionService } from '../operations/operation-admission.service';
+import {
+  OperationCancelledError,
+  type OperationExecutionContext,
+  OperationsWorkerService,
+} from '../operations/operations-worker.service';
+import { OperationNeedsAttentionError } from '../operations/operation-errors';
+import { OperationsService } from '../operations/operations.service';
+
+const STAGED_EXPORT_ACTION = 'http.post.backup-exports-staged';
+const DEFAULT_STAGED_MAX_BYTES = 50 * 1024 ** 3;
+const MIN_STAGED_RESERVATION_BYTES = 512 * 1024 ** 2;
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 // Короткий TTL для download-токена. Токен живёт минимально, чтобы:
 //   - не утечь в логи nginx надолго (replay window мал);
@@ -60,8 +77,16 @@ interface CreateExportInput {
   role: string;
 }
 
+interface CreateStagedExportInput {
+  backupId: string;
+  ttlHours: number;
+  userId: string;
+  role: string;
+  idempotencyKey: string | undefined;
+}
+
 @Injectable()
-export class BackupExportsService {
+export class BackupExportsService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger('BackupExportsService');
 
   // Лимиты TTL экспорта: от 1 часа до 30 дней.
@@ -82,10 +107,13 @@ export class BackupExportsService {
   // делаем until-empty loop (см. cleanupExpiredExports).
   private readonly cleanupBatchSize: number;
 
-  // TTL download-токена: НЕ привязан к TTL экспорта (см. C2 в audit).
-  // Хранение долгоживущего токена в БД = он становится альтернативой паролю,
-  // если попадёт в логи. Токен живёт минут, пользователь перезапрашивает.
-  private readonly downloadTokenTtlSec: number;
+  private readonly presignedTtlSec: number;
+  private readonly generatedStreamIdleMs: number;
+  private readonly stagedMaxBytes: number;
+  private unregisterTransferSource: (() => void) | null = null;
+  private unregisterOperationHandler: (() => void) | null = null;
+  private readonly streamProcesses = new Set<ChildProcess>();
+  private readonly killTimers = new Map<number, NodeJS.Timeout>();
 
   // Активные STREAM-сессии per-user (in-memory счётчик).
   private readonly activeStreams = new Map<string, number>();
@@ -105,8 +133,13 @@ export class BackupExportsService {
     private readonly prisma: PrismaService,
     private readonly storageLocations: StorageLocationsService,
     private readonly agentRelay: AgentRelayService,
-    private readonly jwt: JwtService,
     private readonly config: ConfigService,
+    private readonly transfers: TransferSessionService,
+    private readonly identity: PanelIdentityService,
+    private readonly artifacts: TransferArtifactService,
+    private readonly admission: OperationAdmissionService,
+    private readonly worker: OperationsWorkerService,
+    private readonly operations: OperationsService,
   ) {
     this.MIN_TTL_HOURS = readPositiveInt(config, 'BACKUP_EXPORT_MIN_TTL_HOURS', 1);
     this.MAX_TTL_HOURS = readPositiveInt(config, 'BACKUP_EXPORT_MAX_TTL_HOURS', 24 * 30);
@@ -120,66 +153,55 @@ export class BackupExportsService {
     this.cleanupBatchSize = readPositiveInt(
       config, 'BACKUP_EXPORT_CLEANUP_BATCH', 200,
     );
-    this.downloadTokenTtlSec = readPositiveInt(
-      config, 'BACKUP_EXPORT_DOWNLOAD_TOKEN_TTL_SEC', 600,
+    this.presignedTtlSec = Math.min(
+      readPositiveInt(config, 'BACKUP_EXPORT_PRESIGNED_TTL_SEC', 3600),
+      7 * 24 * 3600,
+    );
+    this.generatedStreamIdleMs = readPositiveInt(
+      config,
+      'TRANSFER_GENERATED_STREAM_IDLE_MS',
+      60_000,
+    );
+    this.stagedMaxBytes = Math.min(
+      readPositiveInt(config, 'BACKUP_EXPORT_STAGED_MAX_BYTES', DEFAULT_STAGED_MAX_BYTES),
+      DEFAULT_STAGED_MAX_BYTES,
     );
   }
 
-  // ---------------------------------------------------------------------------
-  // Download token (для STREAM-режима).
-  //
-  // Что важно:
-  //  - Токен подписывается с явным `scope: 'download:export'`. JwtStrategy
-  //    отвергает любой токен с непустым scope — это исключает использование
-  //    download-токена как обычного access-токена через Authorization: Bearer
-  //    (защита от scope-confusion).
-  //  - TTL токена короткий (BACKUP_EXPORT_DOWNLOAD_TOKEN_TTL_SEC, default 10 мин)
-  //    и НЕ совпадает с TTL экспорта. Долгоживущий токен в URL = риск утечки
-  //    в логи nginx/прокси.
-  //  - Токен НЕ хранится в БД и НЕ возвращается из getExport/listExports —
-  //    клиент перезапрашивает свежий через POST /backup-exports/:id/issue-token.
-  // ---------------------------------------------------------------------------
-
-  private signDownloadToken(
-    exportId: string, userId: string, role: string, ttlSec?: number,
-  ): string {
-    const ttl = Math.max(60, Math.min(this.downloadTokenTtlSec, ttlSec ?? this.downloadTokenTtlSec));
-    return this.jwt.sign(
-      { sub: userId, role, scope: 'download:export', exportId },
-      { expiresIn: ttl },
+  onModuleInit(): void {
+    this.unregisterTransferSource = this.transfers.registerGeneratedSource('BACKUP_EXPORT', {
+      stream: (resourceId, actor, response) => this.streamDownload(
+        resourceId,
+        actor.userId,
+        actor.role,
+        response,
+      ),
+    });
+    this.unregisterOperationHandler = this.worker.registerHandler(
+      STAGED_EXPORT_ACTION,
+      (request, context) => this.prepareStagedExport(request, context),
     );
   }
 
-  verifyDownloadToken(token: string, exportId: string): { userId: string; role: string } {
-    try {
-      const payload = this.jwt.verify<{
-        sub: string; role: string; scope?: string; exportId?: string;
-      }>(token);
-      if (payload.scope !== 'download:export') {
-        throw new UnauthorizedException('Invalid token scope');
-      }
-      if (payload.exportId !== exportId) {
-        throw new UnauthorizedException('Token does not match export');
-      }
-      return { userId: payload.sub, role: payload.role };
-    } catch (e) {
-      if (e instanceof UnauthorizedException) throw e;
-      throw new UnauthorizedException(`Invalid token: ${(e as Error).message}`);
-    }
+  onModuleDestroy(): void {
+    this.unregisterTransferSource?.();
+    this.unregisterTransferSource = null;
+    this.unregisterOperationHandler?.();
+    this.unregisterOperationHandler = null;
+    for (const process of this.streamProcesses) this.terminateProcess(process);
   }
 
-  // Выдать download-URL с СВЕЖИМ токеном для текущего юзера.
-  // Используется при createExport (первая выдача) и при /issue-token (повторная).
-  // Проверки прав делает caller; этот метод чисто формирует URL.
-  private buildDownloadUrl(exportId: string, userId: string, role: string): string {
-    const token = this.signDownloadToken(exportId, userId, role);
-    return `/backup-exports/${exportId}/download?token=${encodeURIComponent(token)}`;
-  }
-
-  async issueDownloadUrl(exportId: string, userId: string, role: string): Promise<string> {
+  async issueDelivery(exportId: string, userId: string, role: string): Promise<PublicDelivery> {
     const row = await this.prisma.backupExport.findUnique({
       where: { id: exportId },
-      include: { backup: { select: { site: { select: { userId: true } } } } },
+      include: {
+        backup: {
+          include: {
+            site: { select: { name: true, userId: true } },
+            storageLocation: true,
+          },
+        },
+      },
     });
     if (!row) throw new NotFoundException('Export not found');
     if (role !== 'ADMIN' && row.backup.site.userId !== userId) {
@@ -188,13 +210,67 @@ export class BackupExportsService {
     if (row.expiresAt.getTime() <= Date.now()) {
       throw new BadRequestException('Экспорт истёк');
     }
-    if (row.mode !== BackupExportMode.STREAM) {
-      throw new BadRequestException('Только для STREAM-экспортов; S3_PRESIGNED имеет свой URL');
-    }
     if (row.status !== BackupExportStatus.READY) {
       throw new BadRequestException(`Экспорт не готов (status=${row.status})`);
     }
-    return this.buildDownloadUrl(exportId, userId, role);
+    if (row.mode === BackupExportMode.STREAM) {
+      if (!row.backup.resticSnapshotId) throw new BadRequestException('У бэкапа нет snapshotId');
+      return this.transfers.issueGeneratedStream({
+        sourceKind: 'BACKUP_EXPORT',
+        resourceId: row.id,
+        actor: { userId, role },
+        filename: this.exportFilename(row.backup.site.name, row.backup.resticSnapshotId),
+        contentType: 'application/x-tar',
+        resourceExpiresAt: row.expiresAt,
+      });
+    }
+    if (row.mode === BackupExportMode.STAGED_ARTIFACT) {
+      if (!row.artifactId) throw new BadRequestException('Экспорт не имеет готового артефакта');
+      return this.transfers.issueStagedArtifact({
+        artifactId: row.artifactId,
+        actor: { userId, role },
+      });
+    }
+    if (
+      row.mode !== BackupExportMode.S3_PRESIGNED ||
+      !row.s3Key ||
+      !row.backup.storageLocation
+    ) {
+      throw new BadRequestException('Экспорт не имеет доступного артефакта');
+    }
+    const loc = await this.storageLocations.getFullConfigForAgent(row.backup.storageLocation.id);
+    if (loc.type !== BackupStorageType.S3) {
+      throw new BadRequestException('Экспорт не связан с S3-хранилищем');
+    }
+    const now = Date.now();
+    const deliveryExpiresAt = new Date(Math.min(
+      row.expiresAt.getTime(),
+      now + this.presignedTtlSec * 1000,
+    ));
+    if (deliveryExpiresAt.getTime() <= now + 1_000) {
+      throw new BadRequestException('Экспорт истёк');
+    }
+    const url = await this.generatePresignedUrl(loc.config, row.s3Key, deliveryExpiresAt);
+    const localIdentity = await this.identity.getLocalIdentity();
+    const delivery: ExternalProviderDelivery = {
+      kind: 'ExternalProvider',
+      purpose: 'DOWNLOAD',
+      targetInstallationId: localIdentity.installationId,
+      resource: { kind: 'BACKUP_EXPORT', id: row.id },
+      method: 'GET',
+      allowedHeaders: [],
+      cachePolicy: 'NO_STORE',
+      referrerPolicy: 'NO_REFERRER',
+      expiresAt: deliveryExpiresAt.toISOString(),
+      browserReachabilityRequired: false,
+      rangeSupported: true,
+      resumeSupported: true,
+      fallbackReason: null,
+      url,
+      reusable: true,
+      provider: 'S3',
+    };
+    return validatePublicDelivery(delivery);
   }
 
   // ---------------------------------------------------------------------------
@@ -204,7 +280,456 @@ export class BackupExportsService {
   async createExport(input: CreateExportInput) {
     const { backupId, userId, role } = input;
     const ttlHours = this.clampTtl(input.ttlHours);
+    const backup = await this.requireExportableBackup(backupId, userId, role);
 
+    // S3_PRESIGNED — только для S3-хранилищ. Иначе агенту некуда заливать.
+    const isS3Storage = backup.storageLocation!.type === BackupStorageType.S3;
+    if (input.mode === 'S3_PRESIGNED' && !isS3Storage) {
+      throw new BadRequestException(
+        'Режим S3_PRESIGNED доступен только для S3-хранилищ. Используй STREAM.',
+      );
+    }
+
+    // Дедуп: если уже есть активный экспорт того же режима для этого бэкапа,
+    // не создаём дубль. Delivery выдаётся отдельно короткоживущей сессией.
+    const existing = await this.prisma.backupExport.findFirst({
+      where: {
+        backupId,
+        mode: input.mode,
+        status: { in: [BackupExportStatus.PENDING, BackupExportStatus.PROCESSING, BackupExportStatus.READY] },
+        expiresAt: { gt: new Date() },
+      },
+      orderBy: { createdAt: 'desc' },
+    });
+    if (existing) {
+      return this.serializeExport(existing);
+    }
+
+    const expiresAt = new Date(Date.now() + ttlHours * 3600_000);
+
+    const exportRow = await this.prisma.backupExport.create({
+      data: {
+        backupId,
+        mode: input.mode,
+        status: input.mode === 'STREAM'
+          ? BackupExportStatus.READY  // STREAM готов сразу — стриминг идёт в момент GET /download
+          : BackupExportStatus.PENDING,
+        expiresAt,
+        createdByUserId: userId,
+      },
+    });
+
+    if (input.mode === 'STREAM') {
+      return this.serializeExport(exportRow);
+    }
+
+    // S3_PRESIGNED: запускаем фоновую задачу
+    this.startS3Export(exportRow.id).catch((err) => {
+      this.logger.error(`S3 export ${exportRow.id} failed: ${(err as Error).message}`);
+    });
+    return exportRow;
+  }
+
+  async createStagedExport(input: CreateStagedExportInput) {
+    const { backupId, userId, role } = input;
+    const ttlHours = this.clampTtl(input.ttlHours);
+    const backup = await this.requireExportableBackup(backupId, userId, role);
+
+    const existing = await this.prisma.backupExport.findFirst({
+      where: {
+        backupId,
+        mode: BackupExportMode.STAGED_ARTIFACT,
+        status: {
+          in: [
+            BackupExportStatus.PENDING,
+            BackupExportStatus.PROCESSING,
+            BackupExportStatus.READY,
+          ],
+        },
+        expiresAt: { gt: new Date() },
+        OR: [
+          { status: BackupExportStatus.READY },
+          { operationId: { not: null } },
+        ],
+      },
+      orderBy: { createdAt: 'desc' },
+    });
+    if (existing) {
+      const operation = existing.operationId
+        ? await this.prisma.operation.findUnique({
+            where: { id: existing.operationId },
+            select: { status: true },
+          })
+        : null;
+      if (existing.status !== BackupExportStatus.READY && !operation) {
+        await this.prisma.backupExport.update({
+          where: { id: existing.id },
+          data: {
+            status: BackupExportStatus.FAILED,
+            errorMessage: 'Операция подготовки экспорта потеряна',
+          },
+        });
+      } else {
+        return {
+          export: this.serializeExport(existing),
+          operation: existing.operationId && operation
+            ? {
+                operationId: existing.operationId,
+                state: operation.status,
+                replayed: true,
+                statusPath: `/api/operations/${existing.operationId}`,
+                retryAfterSeconds: 1,
+              }
+            : null,
+        };
+      }
+    }
+
+    const exportRow = await this.prisma.backupExport.create({
+      data: {
+        backupId,
+        mode: BackupExportMode.STAGED_ARTIFACT,
+        status: BackupExportStatus.PENDING,
+        expiresAt: new Date(Date.now() + ttlHours * 3600_000),
+        createdByUserId: userId,
+      },
+    });
+    try {
+      const operation = await this.admission.admit({
+        actionId: STAGED_EXPORT_ACTION,
+        type: 'BACKUP_EXPORT_STAGE',
+        idempotencyKey: input.idempotencyKey,
+        actor: { userId, role },
+        request: { exportId: exportRow.id },
+        deadlineMs: 24 * 60 * 60_000,
+        recoveryPolicy: 'RECONCILE_ONLY',
+        retryable: false,
+        globalLockKey: `backup-export:${backupId}`,
+        siteId: backup.siteId,
+      });
+      const linked = await this.prisma.backupExport.update({
+        where: { id: exportRow.id },
+        data: { operationId: operation.operationId },
+      });
+      return { export: this.serializeExport(linked), operation };
+    } catch (error) {
+      await this.prisma.backupExport.deleteMany({
+        where: { id: exportRow.id, operationId: null },
+      });
+      throw error;
+    }
+  }
+
+  private async prepareStagedExport(
+    request: unknown,
+    context: OperationExecutionContext,
+  ): Promise<unknown> {
+    const exportId = this.stagedExportId(request);
+    const row = await this.prisma.backupExport.findUnique({
+      where: { id: exportId },
+      include: {
+        backup: {
+          include: {
+            site: { select: { name: true, rootPath: true } },
+            storageLocation: true,
+          },
+        },
+      },
+    });
+    if (!row || row.mode !== BackupExportMode.STAGED_ARTIFACT) {
+      throw new OperationNeedsAttentionError('Staged backup export is unavailable');
+    }
+    if (
+      context.actor.kind !== 'OPERATOR' ||
+      !['ADMIN', 'MANAGER'].includes(context.actor.role) ||
+      context.actor.userId !== row.createdByUserId
+    ) {
+      throw new OperationNeedsAttentionError('Staged backup export actor binding mismatch');
+    }
+    if (row.operationId === null) {
+      const bound = await this.prisma.backupExport.updateMany({
+        where: {
+          id: row.id,
+          operationId: null,
+          createdByUserId: context.actor.userId,
+        },
+        data: { operationId: context.operationId },
+      });
+      if (bound.count !== 1) {
+        throw new OperationNeedsAttentionError('Staged backup export operation binding changed');
+      }
+      row.operationId = context.operationId;
+    }
+    if (row.operationId !== context.operationId) {
+      throw new OperationNeedsAttentionError('Staged backup export operation binding mismatch');
+    }
+    if (row.expiresAt.getTime() <= Date.now()) {
+      await this.prisma.backupExport.update({
+        where: { id: row.id },
+        data: { status: BackupExportStatus.EXPIRED, errorMessage: null },
+      });
+      throw new OperationNeedsAttentionError('Staged backup export expired before preparation');
+    }
+
+    if (row.artifactId) {
+      const artifact = await this.prisma.transferArtifact.findUnique({
+        where: { id: row.artifactId },
+      });
+      if (
+        artifact?.state === 'READY' &&
+        !artifact.deletedAt &&
+        artifact.sourceKind === 'BACKUP_EXPORT' &&
+        artifact.resourceId === row.id &&
+        artifact.createdByUserId === row.createdByUserId &&
+        artifact.expiresAt.getTime() > Date.now() &&
+        artifact.sizeBytes !== null &&
+        artifact.sha256
+      ) {
+        await this.prisma.backupExport.update({
+          where: { id: row.id },
+          data: {
+            status: BackupExportStatus.READY,
+            sizeBytes: artifact.sizeBytes,
+            errorMessage: null,
+          },
+        });
+        return {
+          exportId: row.id,
+          artifactId: artifact.id,
+          sizeBytes: Number(artifact.sizeBytes),
+          sha256: artifact.sha256,
+          reconciled: context.recovering,
+        };
+      }
+      await this.artifacts.revoke({
+        artifactId: row.artifactId,
+        sourceKind: 'BACKUP_EXPORT',
+        resourceId: row.id,
+        createdByUserId: row.createdByUserId,
+      });
+      await this.prisma.backupExport.update({
+        where: { id: row.id },
+        data: { artifactId: null },
+      });
+    }
+
+    if (context.recovering) {
+      await this.prisma.backupExport.update({
+        where: { id: row.id },
+        data: {
+          status: BackupExportStatus.FAILED,
+          errorMessage: 'Подготовка была прервана; требуется новый экспорт',
+        },
+      });
+      throw new OperationNeedsAttentionError(
+        'Interrupted staged export has no complete artifact and cannot be resumed',
+      );
+    }
+
+    if (!row.backup.storageLocation || !row.backup.resticSnapshotId) {
+      await this.failStagedExport(row.id, context.operationId, 'Хранилище или snapshot недоступны');
+      throw new OperationNeedsAttentionError('Backup storage or snapshot is unavailable');
+    }
+    let location: Awaited<ReturnType<StorageLocationsService['getFullConfigForAgent']>>;
+    try {
+      location = await this.storageLocations.getFullConfigForAgent(
+        row.backup.storageLocation.id,
+      );
+    } catch (error) {
+      await this.failStagedExport(row.id, context.operationId, 'Не удалось открыть хранилище');
+      throw error;
+    }
+    if (!location.resticPassword) {
+      await this.failStagedExport(row.id, context.operationId, 'У хранилища нет Restic-пароля');
+      throw new OperationNeedsAttentionError('Backup storage has no Restic password');
+    }
+    const expectedMaxBytes = this.expectedStagedBytes(row.backup.sizeBytes);
+    const repository = this.buildResticRepoUrl(
+      location.type,
+      location.config,
+      row.backup.site.name,
+    );
+    const resticArgs = [
+      '-r', repository,
+      ...(location.type === BackupStorageType.S3 ? ['-o', 's3.connections=32'] : []),
+      'dump', row.backup.resticSnapshotId,
+      row.backup.site.rootPath,
+      '--archive', 'tar',
+    ];
+    const child = spawn('restic', resticArgs, {
+      env: this.buildResticEnv(location.type, location.config, location.resticPassword),
+      detached: true,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    this.streamProcesses.add(child);
+    child.once('close', () => {
+      this.streamProcesses.delete(child);
+      this.clearKillTimer(child.pid);
+    });
+    // Drain stderr so Restic cannot block on a full pipe. Its contents may
+    // contain storage endpoints and never enter API logs or operation results.
+    child.stderr.resume();
+
+    let cancellationObserved = false;
+    let deadlineExceeded = false;
+    let cancellationCheckRunning = false;
+    const cancellationTimer = setInterval(() => {
+      if (cancellationCheckRunning || cancellationObserved) return;
+      cancellationCheckRunning = true;
+      void context.isCancellationRequested()
+        .then((requested) => {
+          if (requested) {
+            cancellationObserved = true;
+            this.terminateProcess(child);
+          }
+        })
+        .finally(() => { cancellationCheckRunning = false; });
+    }, 500);
+    cancellationTimer.unref();
+    const deadlineTimer = setTimeout(() => {
+      deadlineExceeded = true;
+      this.terminateProcess(child);
+    }, Math.max(1, context.deadlineAt.getTime() - Date.now()));
+    deadlineTimer.unref();
+
+    try {
+      await this.prisma.backupExport.update({
+        where: { id: row.id },
+        data: { status: BackupExportStatus.PROCESSING, errorMessage: null },
+      });
+      await context.heartbeat('stage_artifact', 1);
+      const staged = await this.artifacts.stage({
+        sourceKind: 'BACKUP_EXPORT',
+        resourceId: row.id,
+        actor: { userId: row.createdByUserId, role: context.actor.role },
+        filename: this.exportFilename(row.backup.site.name, row.backup.resticSnapshotId),
+        contentType: 'application/x-tar',
+        expiresAt: row.expiresAt,
+        expectedMaxBytes,
+        source: this.validatedResticOutput(child),
+        onArtifactCreated: async (artifactId) => {
+          const linked = await this.prisma.backupExport.updateMany({
+            where: {
+              id: row.id,
+              operationId: context.operationId,
+              artifactId: null,
+              status: BackupExportStatus.PROCESSING,
+            },
+            data: { artifactId },
+          });
+          if (linked.count !== 1) throw new Error('Backup export artifact link changed');
+        },
+        onProgress: async (sizeBytes) => {
+          const progress = Math.max(1, Math.min(95, Math.floor(
+            sizeBytes / Math.max(1, expectedMaxBytes) * 95,
+          )));
+          await context.heartbeat('stage_artifact', progress);
+        },
+      });
+      const finalized = await this.prisma.backupExport.updateMany({
+        where: {
+          id: row.id,
+          operationId: context.operationId,
+          artifactId: staged.artifactId,
+          status: BackupExportStatus.PROCESSING,
+        },
+        data: {
+          status: BackupExportStatus.READY,
+          sizeBytes: BigInt(staged.sizeBytes),
+          errorMessage: null,
+        },
+      });
+      if (finalized.count !== 1) throw new Error('Backup export finalization changed');
+      return {
+        exportId: row.id,
+        artifactId: staged.artifactId,
+        sizeBytes: staged.sizeBytes,
+        sha256: staged.sha256,
+        reconciled: false,
+      };
+    } catch (error) {
+      this.terminateProcess(child);
+      const cancelled = cancellationObserved || await context
+        .isCancellationRequested()
+        .catch(() => false);
+      const errorMessage = cancelled
+        ? 'Подготовка экспорта отменена'
+        : deadlineExceeded
+          ? 'Истёк срок подготовки экспорта'
+          : 'Не удалось подготовить экспорт';
+      await this.prisma.backupExport.updateMany({
+        where: { id: row.id, operationId: context.operationId },
+        data: { status: BackupExportStatus.FAILED, errorMessage },
+      });
+      if (cancelled) throw new OperationCancelledError();
+      throw error;
+    } finally {
+      clearInterval(cancellationTimer);
+      clearTimeout(deadlineTimer);
+    }
+  }
+
+  private stagedExportId(request: unknown): string {
+    if (!request || typeof request !== 'object' || Array.isArray(request)) {
+      throw new OperationNeedsAttentionError('Staged backup export request is invalid');
+    }
+    const record = request as Record<string, unknown>;
+    if (
+      Object.keys(record).length !== 1 ||
+      typeof record.exportId !== 'string' ||
+      !UUID.test(record.exportId)
+    ) {
+      throw new OperationNeedsAttentionError('Staged backup export request is invalid');
+    }
+    return record.exportId;
+  }
+
+  private async failStagedExport(
+    exportId: string,
+    operationId: string,
+    errorMessage: string,
+  ): Promise<void> {
+    await this.prisma.backupExport.updateMany({
+      where: { id: exportId, operationId },
+      data: {
+        status: BackupExportStatus.FAILED,
+        errorMessage: errorMessage.slice(0, 500),
+      },
+    });
+  }
+
+  private expectedStagedBytes(logicalBytes: bigint | null): number {
+    if (logicalBytes === null || logicalBytes <= 0n || logicalBytes > BigInt(Number.MAX_SAFE_INTEGER)) {
+      return this.stagedMaxBytes;
+    }
+    const logical = Number(logicalBytes);
+    return Math.min(
+      this.stagedMaxBytes,
+      Math.max(MIN_STAGED_RESERVATION_BYTES, logical * 2),
+    );
+  }
+
+  private validatedResticOutput(child: ChildProcess): Readable {
+    if (!child.stdout) throw new Error('Restic output pipe is unavailable');
+    const output = new PassThrough();
+    child.stdout.pipe(output, { end: false });
+    child.stdout.once('error', (error) => output.destroy(error));
+    child.once('error', (error) => output.destroy(error));
+    child.once('close', (code, signal) => {
+      if (code === 0) {
+        output.end();
+        return;
+      }
+      output.destroy(new Error(
+        signal
+          ? `Restic export process terminated by ${signal}`
+          : `Restic export process exited with code ${code ?? 'unknown'}`,
+      ));
+    });
+    return output;
+  }
+
+  private async requireExportableBackup(backupId: string, userId: string, role: string) {
     const backup = await this.prisma.backup.findUnique({
       where: { id: backupId },
       include: {
@@ -227,68 +752,7 @@ export class BackupExportsService {
     if (!backup.resticSnapshotId || !backup.storageLocation) {
       throw new BadRequestException('У этого бэкапа нет snapshotId или удалено хранилище');
     }
-
-    // S3_PRESIGNED — только для S3-хранилищ. Иначе агенту некуда заливать.
-    const isS3Storage = backup.storageLocation.type === BackupStorageType.S3;
-    if (input.mode === 'S3_PRESIGNED' && !isS3Storage) {
-      throw new BadRequestException(
-        'Режим S3_PRESIGNED доступен только для S3-хранилищ. Используй STREAM.',
-      );
-    }
-
-    // Дедуп: если уже есть активный экспорт того же режима для этого бэкапа,
-    // не создаём дубль (двойной клик / retry клиента → две задачи агенту →
-    // 2× S3-объекта = биллинг x2). Возвращаем существующий с свежим URL.
-    const existing = await this.prisma.backupExport.findFirst({
-      where: {
-        backupId,
-        mode: input.mode,
-        status: { in: [BackupExportStatus.PENDING, BackupExportStatus.PROCESSING, BackupExportStatus.READY] },
-        expiresAt: { gt: new Date() },
-      },
-      orderBy: { createdAt: 'desc' },
-    });
-    if (existing) {
-      // Если уже READY и STREAM — переподписываем токен под текущего юзера.
-      if (existing.mode === BackupExportMode.STREAM && existing.status === BackupExportStatus.READY) {
-        return { ...existing, downloadUrl: this.buildDownloadUrl(existing.id, userId, role) };
-      }
-      return this.serializeExport(existing);
-    }
-
-    const expiresAt = new Date(Date.now() + ttlHours * 3600_000);
-
-    const exportRow = await this.prisma.backupExport.create({
-      data: {
-        backupId,
-        mode: input.mode,
-        status: input.mode === 'STREAM'
-          ? BackupExportStatus.READY  // STREAM готов сразу — стриминг идёт в момент GET /download
-          : BackupExportStatus.PENDING,
-        expiresAt,
-        createdByUserId: userId,
-      },
-    });
-
-    if (input.mode === 'STREAM') {
-      // STREAM: возвращаем downloadUrl со свежим токеном, но в БД сохраняем
-      // только сам путь (без токена). Это исключает утечку долгоживущего
-      // токена через chitanie listExports/getExport. При повторном скачивании
-      // фронт зовёт POST /backup-exports/:id/issue-token и получает свежий.
-      const url = this.buildDownloadUrl(exportRow.id, userId, role);
-      const pathOnly = `/backup-exports/${exportRow.id}/download`;
-      await this.prisma.backupExport.update({
-        where: { id: exportRow.id },
-        data: { downloadUrl: pathOnly },
-      });
-      return { ...exportRow, downloadUrl: url };
-    }
-
-    // S3_PRESIGNED: запускаем фоновую задачу
-    this.startS3Export(exportRow.id).catch((err) => {
-      this.logger.error(`S3 export ${exportRow.id} failed: ${(err as Error).message}`);
-    });
-    return exportRow;
+    return backup;
   }
 
   private clampTtl(h: number): number {
@@ -418,19 +882,17 @@ export class BackupExportsService {
       return;
     }
     try {
-      const loc = await this.storageLocations.getFullConfigForAgent(row.backup.storageLocation.id);
-      const presigned = await this.generatePresignedUrl(loc.config, row.s3Key, row.expiresAt);
       await this.prisma.backupExport.update({
         where: { id: payload.exportId },
         data: {
           status: BackupExportStatus.READY,
-          downloadUrl: presigned,
+          downloadUrl: null,
           sizeBytes: payload.sizeBytes ? BigInt(payload.sizeBytes) : null,
         },
       });
       this.logger.log(`S3 export ${payload.exportId} ready (${payload.sizeBytes || '?'} bytes)`);
     } catch (err) {
-      await this.markFailed(payload.exportId, `presign failed: ${(err as Error).message}`);
+      await this.markFailed(payload.exportId, `finalize failed: ${(err as Error).message}`);
     }
   }
 
@@ -506,7 +968,7 @@ export class BackupExportsService {
       throw new BadRequestException('Экспорт истёк, создайте новый');
     }
     if (row.mode !== BackupExportMode.STREAM) {
-      throw new BadRequestException('Этот экспорт не в STREAM-режиме (используй downloadUrl)');
+      throw new BadRequestException('Этот экспорт не в STREAM-режиме');
     }
     if (row.status !== BackupExportStatus.READY) {
       throw new BadRequestException(`Экспорт не готов (status=${row.status})`);
@@ -553,42 +1015,69 @@ export class BackupExportsService {
       '--archive', 'tar',
     ];
 
-    const filename = `backup-${row.backup.site.name}-${row.backup.resticSnapshotId.slice(0, 8)}.tar`;
+    const filename = this.exportFilename(row.backup.site.name, row.backup.resticSnapshotId);
 
     this.logger.log(
-      `STREAM export ${exportId}: spawning restic (snap=${row.backup.resticSnapshotId.slice(0, 8)}, root=${row.backup.site.rootPath})`,
+      `STREAM export ${exportId}: spawning Restic source`,
     );
 
     // Сначала — спавним и буферизуем стартовое поведение, чтобы понять упал
     // restic или нет, ДО того как отправлять headers. Если стартовая ошибка
     // (типа repo unreachable / wrong password) — пользователь получит 500
     // c JSON-ошибкой, а не пустой tar-файл с status 200.
-    const proc = spawn('restic', args, { env, stdio: ['ignore', 'pipe', 'pipe'] });
-
-    let stderr = '';
-    let earlyExitFired = false;
-    proc.stderr.on('data', (d) => {
-      stderr += d.toString();
-      if (stderr.length > 8000) stderr = stderr.slice(-8000);
+    const proc = spawn('restic', args, {
+      env,
+      detached: true,
+      stdio: ['ignore', 'pipe', 'pipe'],
     });
+    this.streamProcesses.add(proc);
+
+    let earlyExitFired = false;
+    proc.stderr.resume();
 
     // Если клиент отменил скачивание — убиваем restic + освобождаем слот.
-    res.on('close', () => {
-      if (!proc.killed && proc.exitCode === null) {
-        try { proc.kill('SIGTERM'); } catch { /* ignore */ }
-      }
-    });
+    res.on('close', () => this.terminateProcess(proc));
     // Гарантированное освобождение слота при любом исходе.
     let slotReleased = false;
     const releaseOnce = () => { if (!slotReleased) { slotReleased = true; releaseSlot(); } };
-    proc.on('exit', releaseOnce);
-    proc.on('error', releaseOnce);
+    proc.on('exit', () => {
+      this.streamProcesses.delete(proc);
+      this.clearKillTimer(proc.pid);
+      releaseOnce();
+    });
+    proc.on('error', () => {
+      this.streamProcesses.delete(proc);
+      this.clearKillTimer(proc.pid);
+      releaseOnce();
+    });
     res.on('close', releaseOnce);
 
-    proc.on('error', (err) => {
-      this.logger.error(`restic dump spawn error for export ${exportId}: ${err.message}`);
+    let idleTimer: NodeJS.Timeout | null = null;
+    const resetIdleTimer = () => {
+      if (idleTimer) clearTimeout(idleTimer);
+      idleTimer = setTimeout(() => {
+        this.logger.warn(`STREAM export ${exportId}: idle timeout`);
+        res.locals.transferFailureCode = 'IDLE_TIMEOUT';
+        this.terminateProcess(proc);
+        if (!res.destroyed) res.destroy(new Error('Generated stream idle timeout'));
+      }, this.generatedStreamIdleMs);
+      idleTimer.unref();
+    };
+    resetIdleTimer();
+    proc.stdout.on('data', resetIdleTimer);
+    const clearIdleTimer = () => {
+      if (idleTimer) clearTimeout(idleTimer);
+      idleTimer = null;
+    };
+    proc.once('exit', clearIdleTimer);
+    proc.once('error', clearIdleTimer);
+    res.once('close', clearIdleTimer);
+
+    proc.on('error', () => {
+      this.logger.error(`STREAM export ${exportId}: Restic source failed to start`);
+      res.locals.transferFailureCode = 'SOURCE_FAILED';
       if (!res.headersSent) {
-        res.status(500).json({ success: false, error: `restic spawn failed: ${err.message}` });
+        res.status(500).json({ success: false, error: 'Backup export source failed to start' });
       }
     });
 
@@ -620,7 +1109,7 @@ export class BackupExportsService {
     proc.on('exit', (code) => {
       if (earlyExitFired) return;
       earlyExitFired = true;
-      this.logger.log(`STREAM export ${exportId}: restic exit code=${code}, stderr=${stderr.slice(0, 500)}`);
+      this.logger.log(`STREAM export ${exportId}: Restic source exit code=${code}`);
 
       if (code === 0) {
         // Если был exit=0 ДО первого chunk — значит вывода не было вообще
@@ -631,15 +1120,16 @@ export class BackupExportsService {
         }
         // Если pipe уже шёл — он сам завершил response через 'end' event
       } else {
+        res.locals.transferFailureCode = 'SOURCE_FAILED';
         if (!headersSent) {
           // Ничего ещё не отправили — можем отдать JSON-ошибку
           res.status(500).json({
             success: false,
-            error: `restic dump exit ${code}: ${stderr.slice(0, 500) || 'no stderr output'}`,
+            error: `Backup export source failed (exit ${code})`,
           });
         } else {
           // Стрим уже шёл — закрываем response с ошибкой
-          res.destroy(new Error(`restic exit ${code}: ${stderr.slice(0, 200)}`));
+          res.destroy(new Error(`Backup export source failed (exit ${code})`));
         }
       }
     });
@@ -681,6 +1171,41 @@ export class BackupExportsService {
     throw new Error(`Unsupported storage type for Restic: ${storageType}`);
   }
 
+  private terminateProcess(child: ChildProcess): void {
+    const pid = child.pid;
+    if (!pid || child.exitCode !== null || this.killTimers.has(pid)) return;
+    try {
+      process.kill(-pid, 'SIGTERM');
+    } catch {
+      try { child.kill('SIGTERM'); } catch { return; }
+    }
+    const timer = setTimeout(() => {
+      this.killTimers.delete(pid);
+      if (child.exitCode !== null) return;
+      try {
+        process.kill(-pid, 'SIGKILL');
+      } catch {
+        try { child.kill('SIGKILL'); } catch { /* already exited */ }
+      }
+    }, 5_000);
+    timer.unref();
+    this.killTimers.set(pid, timer);
+  }
+
+  private clearKillTimer(pid: number | undefined): void {
+    if (!pid) return;
+    const timer = this.killTimers.get(pid);
+    if (timer) clearTimeout(timer);
+    this.killTimers.delete(pid);
+  }
+
+  private exportFilename(siteName: string, snapshotId: string): string {
+    if (!/^[A-Za-z0-9_-]{1,64}$/.test(siteName) || !/^[A-Za-z0-9_-]{8,128}$/.test(snapshotId)) {
+      throw new BadRequestException('Некорректные метаданные бэкапа');
+    }
+    return `backup-${siteName}-${snapshotId.slice(0, 8)}.tar`;
+  }
+
   // Изолированный env для restic-процесса: НЕ пробрасываем весь process.env,
   // только PATH (чтобы найти restic) + специфичные креды. Это снижает риск
   // утечки секретов API-процесса в /proc/<pid>/environ дочернего restic'а.
@@ -712,15 +1237,12 @@ export class BackupExportsService {
   // Получение/удаление экспортов (для UI).
   // ---------------------------------------------------------------------------
 
-  // Сериализация для UI. Для STREAM из БД лежит только путь без токена —
-  // отдаём как есть; UI понимает что нужен токен и зовёт /issue-token при клике.
-  // Для S3_PRESIGNED downloadUrl это presigned URL, владение которым уже
-  // равносильно скачиванию — поэтому отдаём ТОЛЬКО создателю экспорта или
-  // ADMIN'у (это уже проверено через site.userId выше).
+  // Delivery URL никогда не попадает в list/get: он выдаётся отдельным
+  // короткоживущим типизированным контрактом после повторной авторизации.
   private serializeExport(r: {
     id: string; backupId: string; mode: string; status: string;
     downloadUrl: string | null; expiresAt: Date; sizeBytes: bigint | null;
-    errorMessage: string | null; createdAt: Date;
+    errorMessage: string | null; createdAt: Date; operationId?: string | null;
   }) {
     // Прогресс in-memory — отдаём только пока статус не финальный (PROCESSING/PENDING).
     // Для финальных статусов прогресс не имеет смысла + map уже очищена в handleAgentExportComplete.
@@ -731,11 +1253,13 @@ export class BackupExportsService {
       backupId: r.backupId,
       mode: r.mode,
       status: r.status,
-      downloadUrl: r.downloadUrl,
+      deliveryAvailable: r.status === BackupExportStatus.READY,
       expiresAt: r.expiresAt,
       sizeBytes: r.sizeBytes ? Number(r.sizeBytes) : null,
       errorMessage: r.errorMessage,
       createdAt: r.createdAt,
+      operationId: r.operationId ?? null,
+      operationStatusPath: r.operationId ? `/api/operations/${r.operationId}` : null,
       // Прогресс отдаём только если есть (нет тиков от агента / не активный экспорт = null).
       progressBytesRead: prog ? prog.bytesRead : null,
       progressBytesUploaded: prog ? prog.bytesUploaded : null,
@@ -770,6 +1294,7 @@ export class BackupExportsService {
     const rows = await this.prisma.backupExport.findMany({
       where: { backupId },
       orderBy: { createdAt: 'desc' },
+      take: 100,
     });
     return rows.map((r) => this.serializeExport(r));
   }
@@ -795,13 +1320,26 @@ export class BackupExportsService {
   }
 
   private async cleanupExportArtifacts(row: {
-    mode: string; s3Key: string | null;
+    id: string; mode: string; s3Key: string | null; artifactId: string | null;
+    operationId: string | null;
+    createdByUserId: string;
     backup: { storageLocation: { id: string; type: string } | null };
   }) {
+    await this.cancelExportOperation(row.operationId, row.createdByUserId);
+    if (row.mode === BackupExportMode.STAGED_ARTIFACT && row.artifactId) {
+      await this.artifacts.revoke({
+        artifactId: row.artifactId,
+        sourceKind: 'BACKUP_EXPORT',
+        resourceId: row.id,
+        createdByUserId: row.createdByUserId,
+      });
+    }
     if (row.mode === BackupExportMode.S3_PRESIGNED && row.s3Key && row.backup.storageLocation) {
       try {
         const loc = await this.storageLocations.getFullConfigForAgent(row.backup.storageLocation.id);
-        if (loc.type !== BackupStorageType.S3) return;
+        if (loc.type !== BackupStorageType.S3) {
+          throw new Error('S3 export storage type changed');
+        }
         const client = this.buildS3Client(loc.config);
         await client.send(new DeleteObjectCommand({
           Bucket: loc.config.bucket,
@@ -809,7 +1347,29 @@ export class BackupExportsService {
         }));
       } catch (err) {
         this.logger.warn(`S3 cleanup failed for ${row.s3Key}: ${(err as Error).message}`);
+        throw err;
       }
+    }
+  }
+
+  private async cancelExportOperation(
+    operationId: string | null,
+    createdByUserId: string,
+  ): Promise<void> {
+    if (!operationId) return;
+    const operation = await this.prisma.operation.findUnique({
+      where: { id: operationId },
+      select: { status: true },
+    });
+    if (!operation) return;
+    if ([
+      'PENDING', 'QUEUED', 'CLAIMED', 'RUNNING', 'RECOVERING', 'CANCEL_REQUESTED',
+    ].includes(operation.status)) {
+      await this.operations.requestCancellation(operationId, createdByUserId, 'ADMIN');
+      return;
+    }
+    if (['UNKNOWN_RECOVERY_REQUIRED', 'NEEDS_ATTENTION'].includes(operation.status)) {
+      throw new ConflictException('Сначала разрешите состояние связанной операции');
     }
   }
 
@@ -827,8 +1387,10 @@ export class BackupExportsService {
     const rows = await this.prisma.backupExport.findMany({
       where: {
         backupId: { in: backupIds },
-        mode: BackupExportMode.S3_PRESIGNED,
-        s3Key: { not: null },
+        OR: [
+          { mode: BackupExportMode.S3_PRESIGNED, s3Key: { not: null } },
+          { mode: BackupExportMode.STAGED_ARTIFACT },
+        ],
       },
       include: { backup: { include: { storageLocation: true } } },
     });
@@ -842,8 +1404,10 @@ export class BackupExportsService {
     const rows = await this.prisma.backupExport.findMany({
       where: {
         createdByUserId: userId,
-        mode: BackupExportMode.S3_PRESIGNED,
-        s3Key: { not: null },
+        OR: [
+          { mode: BackupExportMode.S3_PRESIGNED, s3Key: { not: null } },
+          { mode: BackupExportMode.STAGED_ARTIFACT },
+        ],
       },
       include: { backup: { include: { storageLocation: true } } },
     });

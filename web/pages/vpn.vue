@@ -497,6 +497,7 @@
           <div v-if="subQr" class="qr">
             <img :src="`data:image/png;base64,${subQr}`" alt="QR" />
           </div>
+          <p v-else-if="subscriptionLoading" class="field__hint">Готовим стабильный URL…</p>
           <input
             v-if="subscriptionUrl"
             readonly
@@ -532,7 +533,7 @@
           <div v-if="modalError" class="modal__error">{{ modalError }}</div>
           <div class="modal__actions">
             <button class="btn btn--ghost btn--sm" :disabled="!subscriptionUrl" @click="copyText(subscriptionUrl)">Скопировать URL</button>
-            <button class="btn btn--danger btn--sm" :disabled="creating" @click="regenerateSubToken">
+            <button class="btn btn--danger btn--sm" :disabled="creating || subscriptionLoading || !subscriptionDelivery" @click="regenerateSubToken">
               <span v-if="creating" class="btn__spinner" />
               Перегенерировать токен
             </button>
@@ -642,6 +643,10 @@
 <script setup lang="ts">
 import { ref, reactive, computed, onMounted } from 'vue';
 import { DEFAULT_SNI_MASKS, DEFAULT_VPN_PORTS } from '~/utils/shared-constants';
+import {
+  validateVpnSubscriptionDelivery,
+  type VpnSubscriptionDelivery,
+} from '~/utils/public-delivery';
 
 definePageMeta({ middleware: 'auth' });
 
@@ -684,6 +689,9 @@ interface InstallStatus {
 }
 
 const api = useApi();
+const { waitForOperation } = useOperation();
+const masterApi = useMasterApi();
+const serverStore = useServerStore();
 const toast = useMbToast();
 const confirm = useMbConfirm();
 
@@ -744,6 +752,8 @@ const newSniCustom = ref('');
 const addToServiceId = ref('');
 const subscriptionUrl = ref('');
 const subQr = ref('');
+const subscriptionDelivery = ref<VpnSubscriptionDelivery | null>(null);
+const subscriptionLoading = ref(false);
 
 const servicesByProto = computed(() => {
   const acc: {
@@ -831,7 +841,16 @@ async function installRuntime(protocol: 'VLESS_REALITY' | 'AMNEZIA_WG') {
   const flag = protocol === 'VLESS_REALITY' ? 'installXray' : 'installAmnezia';
   busy[flag] = true;
   try {
-    await api.post(`/vpn/install/${protocol}`);
+    const accepted = await api.post<AcceptedOperation>(
+      `/vpn/install/${protocol}`,
+      undefined,
+      {
+        headers: {
+          'Idempotency-Key': operationIdempotencyKey('vpn-runtime-install'),
+        },
+      },
+    );
+    await waitForOperation(accepted.operationId, { timeoutMs: 12 * 60_000 });
     toast.success(`${protocolLabel(protocol)} установлен`);
     await loadAll();
   } catch (err: unknown) {
@@ -852,7 +871,16 @@ async function uninstallRuntime(protocol: 'VLESS_REALITY' | 'AMNEZIA_WG') {
   const flag = protocol === 'VLESS_REALITY' ? 'uninstallXray' : 'uninstallAmnezia';
   busy[flag] = true;
   try {
-    await api.del(`/vpn/install/${protocol}`);
+    const accepted = await api.del<AcceptedOperation>(
+      `/vpn/install/${protocol}`,
+      undefined,
+      {
+        headers: {
+          'Idempotency-Key': operationIdempotencyKey('vpn-runtime-uninstall'),
+        },
+      },
+    );
+    await waitForOperation(accepted.operationId, { timeoutMs: 12 * 60_000 });
     toast.success('Удалено');
     await loadAll();
   } catch (err: unknown) {
@@ -874,6 +902,8 @@ function closeModal() {
   modalError.value = null;
   subscriptionUrl.value = '';
   subQr.value = '';
+  subscriptionDelivery.value = null;
+  subscriptionLoading.value = false;
   accessTab.value = 'sub';
 }
 
@@ -1099,11 +1129,11 @@ async function openAccess(u: VpnUserListItem, preselectServiceId?: string) {
   credsView.value = null;
   modalError.value = null;
 
-  // Предзагрузим subscription URL + QR — даже если юзер сразу откроет таб сервиса,
-  // переключение на «Подписка» не должно упираться в загрузку.
-  subscriptionUrl.value = `${window.location.origin}/api/vpn/sub/${u.subToken}`;
+  // Stable subscription всегда принадлежит master, независимо от выбранного target.
+  subscriptionUrl.value = '';
   subQr.value = '';
-  void renderSubQr();
+  subscriptionDelivery.value = null;
+  void loadFederatedSubscription(u.id);
 
   // Выбор активного таба.
   const hasVless = u.services.some((s) => s.protocol === 'VLESS_REALITY');
@@ -1139,6 +1169,7 @@ async function loadCredsForTab(serviceId: string) {
 }
 
 async function renderSubQr() {
+  if (!subscriptionUrl.value) return;
   try {
     const QRCode = (await import('qrcode')).default;
     const dataUrl = await QRCode.toDataURL(subscriptionUrl.value, {
@@ -1149,6 +1180,38 @@ async function renderSubQr() {
     subQr.value = dataUrl.split(',')[1] || '';
   } catch (err: unknown) {
     toast.error(`QR: ${(err as Error).message}`);
+  }
+}
+
+function assertVpnSubscriptionDelivery(value: unknown): VpnSubscriptionDelivery {
+  return validateVpnSubscriptionDelivery(value);
+}
+
+async function loadFederatedSubscription(vpnUserId: string) {
+  const serverId = serverStore.currentServerId;
+  subscriptionLoading.value = true;
+  modalError.value = null;
+  try {
+    const raw = await masterApi.post<VpnSubscriptionDelivery>(
+      `/servers/${encodeURIComponent(serverId)}/vpn-subscriptions`,
+      { vpnUserId },
+    );
+    if (modal.userId !== vpnUserId || serverStore.currentServerId !== serverId) return;
+    const delivery = assertVpnSubscriptionDelivery(raw);
+    subscriptionDelivery.value = delivery;
+    subscriptionUrl.value = delivery.url;
+    await renderSubQr();
+  } catch (error) {
+    if (modal.userId === vpnUserId && serverStore.currentServerId === serverId) {
+      subscriptionDelivery.value = null;
+      subscriptionUrl.value = '';
+      subQr.value = '';
+      modalError.value = (error as Error).message;
+    }
+  } finally {
+    if (modal.userId === vpnUserId && serverStore.currentServerId === serverId) {
+      subscriptionLoading.value = false;
+    }
   }
 }
 
@@ -1187,22 +1250,24 @@ async function copyText(t: string) {
   }
 }
 async function regenerateSubToken() {
-  if (!modal.userId) return;
+  if (!modal.userId || !subscriptionDelivery.value) return;
   const ok = await confirm.ask({
     title: 'Перегенерировать токен subscription?',
-    message: 'Старый URL перестанет работать. Юзеру нужно будет загрузить новый subscription в клиенте.',
+    message: 'Старый master URL сразу перестанет работать. Юзеру нужно будет загрузить новый subscription в клиенте.',
     confirmText: 'Перегенерировать',
     danger: true,
   });
   if (!ok) return;
   creating.value = true;
   try {
-    const r = await api.post<{ subToken: string }>(`/vpn/users/${modal.userId}/regenerate-sub-token`);
+    const raw = await masterApi.post<VpnSubscriptionDelivery>(
+      `/servers/vpn-subscriptions/${subscriptionDelivery.value.resource.id}/rotate`,
+    );
+    const delivery = assertVpnSubscriptionDelivery(raw);
     toast.success('Токен пересоздан');
-    // Обновим локально и перерисуем QR
-    const u = users.value.find((x) => x.id === modal.userId);
-    if (u) u.subToken = r.subToken;
-    subscriptionUrl.value = `${window.location.origin}/api/vpn/sub/${r.subToken}`;
+    subscriptionDelivery.value = delivery;
+    subscriptionUrl.value = delivery.url;
+    subQr.value = '';
     await renderSubQr();
   } catch (err: unknown) {
     toast.error((err as Error).message);

@@ -2,8 +2,8 @@
   <div class="users">
     <div class="users__header">
       <div>
-        <h1 class="users__title">Профиль администратора</h1>
-        <p class="users__subtitle">Панель однопользовательская — только один администратор</p>
+        <h1 class="users__title">{{ pageTitle }}</h1>
+        <p class="users__subtitle">{{ pageSubtitle }}</p>
       </div>
     </div>
 
@@ -34,7 +34,7 @@
     <Teleport to="body">
       <div v-if="showEditor" class="modal-overlay" @mousedown.self="showEditor = false">
         <div class="modal">
-          <h3 class="modal__title">Редактирование профиля</h3>
+          <h3 class="modal__title">{{ editorTitle }}</h3>
           <div class="modal__fields">
             <div class="form-group">
               <label class="form-label">Логин</label>
@@ -53,7 +53,7 @@
             <div class="form-group">
               <label class="form-label">Текущий пароль <span class="form-required">*</span></label>
               <input v-model="editorForm.currentPassword" type="password" class="form-input" placeholder="Для подтверждения изменений" autocomplete="current-password" />
-              <span class="form-hint">Обязательно для любого изменения профиля</span>
+              <span class="form-hint">{{ currentPasswordHint }}</span>
             </div>
           </div>
           <div v-if="editorError" class="modal__error">{{ editorError }}</div>
@@ -82,8 +82,21 @@ interface User {
 }
 
 const api = useApi();
+const serverStore = useServerStore();
 const admin = ref<User | null>(null);
 const loading = ref(true);
+const isRemote = computed(() => !serverStore.isLocal);
+const selectedServerName = computed(() => serverStore.currentServer?.name || 'выбранной цели');
+const pageTitle = computed(() => isRemote.value ? 'Пользователь целевого сервера' : 'Профиль администратора');
+const pageSubtitle = computed(() => isRemote.value
+  ? `Локальная учётная запись на «${selectedServerName.value}». Это не ваш профиль на главном сервере.`
+  : 'Учётная запись главного сервера и входа в панель');
+const editorTitle = computed(() => isRemote.value
+  ? 'Редактирование пользователя цели'
+  : 'Редактирование профиля');
+const currentPasswordHint = computed(() => isRemote.value
+  ? 'Нужен текущий пароль этой локальной учётной записи на целевом сервере'
+  : 'Обязательно для любого изменения профиля');
 
 const showEditor = ref(false);
 const editorForm = reactive({ username: '', email: '', password: '', currentPassword: '' });
@@ -157,7 +170,7 @@ async function saveUser() {
     };
     if (editorForm.password) payload.password = editorForm.password;
     await api.put(`/users/${admin.value.id}`, payload);
-    showToast('Профиль обновлён');
+    showToast(isRemote.value ? 'Пользователь целевого сервера обновлён' : 'Профиль обновлён');
     showEditor.value = false;
     await loadUsers();
   } catch (e: unknown) {

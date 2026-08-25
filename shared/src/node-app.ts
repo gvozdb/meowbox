@@ -8,6 +8,7 @@ import type { SiteType } from './enums';
 
 /** Допустимые источники команд/процессов. */
 export const NODE_COMMAND_SOURCES = ['npm', 'make'] as const;
+export const QUICK_COMMAND_OUTPUT_MAX_BYTES = 768 * 1024;
 export type NodeCommandSource = (typeof NODE_COMMAND_SOURCES)[number];
 
 /** Конвенциональные имена PM2 ecosystem-файлов. */
@@ -137,4 +138,5 @@ export interface QuickCommandRunResult {
   exitCode: number;
   output: string;
   durationMs: number;
+  truncated: boolean;
 }

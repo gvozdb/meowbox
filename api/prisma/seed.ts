@@ -25,7 +25,7 @@ function generatePassword(bytes = 24): string {
 
 async function main() {
   const existingAdmin = await prisma.user.findFirst({
-    where: { role: 'ADMIN' },
+    where: { role: 'ADMIN', identityKind: 'LOCAL' },
   });
 
   if (existingAdmin) {
@@ -62,6 +62,7 @@ async function main() {
       username,
       email,
       passwordHash,
+      identityKind: 'LOCAL',
       role: 'ADMIN',
     },
   });

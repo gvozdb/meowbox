@@ -1,5 +1,6 @@
 import { CommandExecutor } from '../command-executor';
 import { ACME_WEBROOT, LETSENCRYPT_LIVE_DIR, CUSTOM_SSL_DIR } from '../config';
+import { DOMAIN_REGEX } from '@meowbox/shared';
 import * as fsp from 'fs/promises';
 import * as path from 'path';
 
@@ -7,6 +8,41 @@ interface IssueSslParams {
   domain: string;
   domains: string[];
   email?: string;
+}
+
+function validateIssueSslParams(params: IssueSslParams): IssueSslParams {
+  if (!params || typeof params !== 'object' || Array.isArray(params)) {
+    throw new Error('Invalid SSL issuance request');
+  }
+  const domain = typeof params.domain === 'string'
+    ? params.domain.trim().toLowerCase()
+    : '';
+  const domains = Array.isArray(params.domains)
+    ? Array.from(new Set(params.domains.map((item) =>
+        typeof item === 'string' ? item.trim().toLowerCase() : '',
+      )))
+    : [];
+  if (
+    !DOMAIN_REGEX.test(domain) ||
+    domain.length > 253 ||
+    domains.length < 1 ||
+    domains.length > 65 ||
+    domains[0] !== domain ||
+    domains.some((item) => !DOMAIN_REGEX.test(item) || item.length > 253)
+  ) {
+    throw new Error('Invalid SSL certificate domain set');
+  }
+  if (params.email !== undefined && typeof params.email !== 'string') {
+    throw new Error('Invalid SSL account email');
+  }
+  const email = params.email?.trim();
+  if (
+    email !== undefined &&
+    (email.length < 3 || email.length > 254 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email))
+  ) {
+    throw new Error('Invalid SSL account email');
+  }
+  return { domain, domains, ...(email ? { email } : {}) };
 }
 
 interface SslResult {
@@ -21,6 +57,13 @@ interface SslResult {
    * для UI. Если парс не удался — поле undefined, API оставит старое значение.
    */
   domains?: string[];
+  error?: string;
+}
+
+interface RevokeSslResult {
+  success: boolean;
+  removed?: boolean;
+  revoked?: boolean;
   error?: string;
 }
 
@@ -61,7 +104,13 @@ export class SslManager {
    * Issue/renew SSL certificate using certbot webroot mode.
    */
   async issueCertificate(params: IssueSslParams): Promise<SslResult> {
-    const { domain, domains, email } = params;
+    let validated: IssueSslParams;
+    try {
+      validated = validateIssueSslParams(params);
+    } catch (error) {
+      return { success: false, error: (error as Error).message };
+    }
+    const { domain, domains, email } = validated;
     await fsp.mkdir(ACME_WEBROOT, { recursive: true, mode: 0o755 });
     await fsp.chmod(ACME_WEBROOT, 0o755);
 
@@ -199,16 +248,15 @@ export class SslManager {
    *
    * Идемпотентно: повторный вызов на уже снесённой папке — no-op.
    */
-  async revokeCertificate(domain: string): Promise<{ success: boolean }> {
-    // Базовый sanity-check на имя домена — не пускаем `..` и слеши, чтобы
-    // rm не ушёл по какому-то traversal.
-    if (!/^[A-Za-z0-9.-]+$/.test(domain) || domain.includes('..')) {
-      return { success: false };
+  async revokeCertificate(domain: string): Promise<RevokeSslResult> {
+    const normalizedDomain = typeof domain === 'string' ? domain.trim().toLowerCase() : '';
+    if (!DOMAIN_REGEX.test(normalizedDomain) || normalizedDomain.length > 253) {
+      return { success: false, error: 'Invalid domain name' };
     }
 
-    const live = `${LETSENCRYPT_LIVE_DIR}/${domain}`;
-    const archive = `/etc/letsencrypt/archive/${domain}`;
-    const renewal = `/etc/letsencrypt/renewal/${domain}.conf`;
+    const live = `${LETSENCRYPT_LIVE_DIR}/${normalizedDomain}`;
+    const archive = `/etc/letsencrypt/archive/${normalizedDomain}`;
+    const renewal = `/etc/letsencrypt/renewal/${normalizedDomain}.conf`;
     const certPath = `${live}/fullchain.pem`;
 
     // 1) Пытаемся отозвать через certbot. Падает на migrated/уже-revoked сертах —
@@ -230,11 +278,24 @@ export class SslManager {
     // 2) Force-cleanup LE-артефактов. Если certbot уже всё удалил — это no-op.
     // Если revoke фейлнулся — мы всё равно сносим папки, иначе следующая миграция
     // зафейлится на «уже существует на slave».
-    await fsp.rm(live, { recursive: true, force: true }).catch(() => {});
-    await fsp.rm(archive, { recursive: true, force: true }).catch(() => {});
-    await fsp.rm(renewal, { force: true }).catch(() => {});
+    const cleanup = await Promise.allSettled([
+      fsp.rm(live, { recursive: true, force: true }),
+      fsp.rm(archive, { recursive: true, force: true }),
+      fsp.rm(renewal, { force: true }),
+    ]);
+    if (cleanup.some((result) => result.status === 'rejected')) {
+      return { success: false, error: 'Failed to remove certificate artifacts' };
+    }
+    const remains = await Promise.all(
+      [live, archive, renewal].map((target) =>
+        fsp.stat(target).then(() => true).catch(() => false),
+      ),
+    );
+    if (remains.some(Boolean)) {
+      return { success: false, error: 'Certificate artifacts still exist after cleanup' };
+    }
 
-    return { success: revokeOk };
+    return { success: true, removed: true, revoked: revokeOk };
   }
 
   /**
@@ -439,17 +500,16 @@ export class SslManager {
   }
 
   private async getCertExpiry(certPath: string): Promise<string | undefined> {
-    // Use openssl to read the cert expiry
-    // openssl is not in the allowlist, so we use certbot certificates
-    const result = await this.executor.execute('certbot', [
-      'certificates',
-      '--cert-name', certPath.split('/')[4] || '',
+    const result = await this.executor.execute('openssl', [
+      'x509',
+      '-in', certPath,
+      '-noout',
+      '-enddate',
     ], { timeout: 30_000, allowFailure: true });
 
     if (result.exitCode !== 0) return undefined;
 
-    // Parse expiry from certbot output
-    const expiryMatch = result.stdout.match(/Expiry Date: (.+?)(?:\s|$)/);
+    const expiryMatch = result.stdout.match(/notAfter=(.+)/);
     if (expiryMatch) {
       try {
         return new Date(expiryMatch[1]).toISOString();

@@ -14,6 +14,10 @@ import { PanelSettingsModule } from '../panel-settings/panel-settings.module';
 import { SitesModule } from '../sites/sites.module';
 import { BackupArtifactsModule } from './backup-artifacts.module';
 import { ResticRepositoryRetentionService } from './restic-repository-retention.service';
+import { ResticQueryOperationsService } from './restic-query-operations.service';
+import { BackupDeleteOperationsService } from './backup-delete-operations.service';
+import { BackupTransferService } from './backup-transfer.service';
+import { TransfersModule } from '../transfers/transfers.module';
 
 @Module({
   imports: [
@@ -22,6 +26,7 @@ import { ResticRepositoryRetentionService } from './restic-repository-retention.
     PanelSettingsModule,
     SitesModule,
     BackupArtifactsModule,
+    TransfersModule,
   ],
   controllers: [
     BackupsController,
@@ -35,6 +40,9 @@ import { ResticRepositoryRetentionService } from './restic-repository-retention.
     ServerPathBackupService,
     PanelDataBackupService,
     ResticRepositoryRetentionService,
+    ResticQueryOperationsService,
+    BackupDeleteOperationsService,
+    BackupTransferService,
     SiteBackupScheduleService,
   ],
   exports: [

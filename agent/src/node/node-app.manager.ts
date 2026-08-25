@@ -4,7 +4,12 @@ import * as os from 'os';
 import * as path from 'path';
 import { CommandExecutor } from '../command-executor';
 import { SITES_BASE_PATH, isUnderAllowedSiteRoot, TIMEOUTS } from '../config';
-import { PM2_ECOSYSTEM_FILENAMES, SiteType } from '@meowbox/shared';
+import {
+  PM2_ECOSYSTEM_FILENAMES,
+  QUICK_COMMAND_OUTPUT_MAX_BYTES,
+  SiteType,
+  redactSensitiveText,
+} from '@meowbox/shared';
 import type {
   NodeAppDefinition,
   NodeDomainRef,
@@ -61,6 +66,7 @@ export class NodeAppManager {
   private static readonly MAX_COMMAND_FILES = 60;
   private static readonly MAX_PKG_JSON_BYTES = 512 * 1024;
   private static readonly MAX_MAKEFILE_BYTES = 256 * 1024;
+  private static readonly MAX_QUICK_COMMAND_OUTPUT_LINES = 5_000;
 
   private static readonly READER_SCRIPT = `'use strict';
 try {
@@ -679,6 +685,8 @@ try {
     const bin = source === 'npm' ? 'npm' : 'make';
     const args = source === 'npm' ? ['run', target] : [target];
     const lines: string[] = [];
+    let outputBytes = 0;
+    let truncated = false;
     const started = Date.now();
     const res = await this.executor.executeStreaming(
       'sudo',
@@ -688,15 +696,46 @@ try {
         timeout: TIMEOUTS.LONG,
         stdin: 'ignore',
         allowFailure: true,
+        discardOutputBuffer: true,
         onLine: (line) => {
-          if (lines.length < 5000) lines.push(line);
+          if (truncated) return;
+          const separatorBytes = lines.length === 0 ? 0 : 1;
+          const available =
+            QUICK_COMMAND_OUTPUT_MAX_BYTES -
+            outputBytes -
+            separatorBytes;
+          if (
+            lines.length >= NodeAppManager.MAX_QUICK_COMMAND_OUTPUT_LINES ||
+            available <= 0
+          ) {
+            truncated = true;
+            return;
+          }
+          const bytes = Buffer.from(line, 'utf8');
+          if (bytes.length > available) {
+            lines.push(bytes.subarray(0, available).toString('utf8'));
+            outputBytes = QUICK_COMMAND_OUTPUT_MAX_BYTES;
+            truncated = true;
+            return;
+          }
+          lines.push(line);
+          outputBytes += separatorBytes + bytes.length;
         },
       },
     );
+    const output = redactSensitiveText(
+      lines.join('\n'),
+      QUICK_COMMAND_OUTPUT_MAX_BYTES,
+    );
+    const outputBuffer = Buffer.from(output, 'utf8');
+    const boundedOutput = outputBuffer.length > QUICK_COMMAND_OUTPUT_MAX_BYTES
+      ? outputBuffer.subarray(0, QUICK_COMMAND_OUTPUT_MAX_BYTES).toString('utf8')
+      : output;
     return {
       exitCode: res.exitCode,
-      output: lines.join('\n'),
+      output: boundedOutput,
       durationMs: Date.now() - started,
+      truncated: truncated || outputBuffer.length > QUICK_COMMAND_OUTPUT_MAX_BYTES,
     };
   }
 }

@@ -10,7 +10,9 @@ import { SitesModule } from '../sites/sites.module';
 import { LogsModule } from '../logs/logs.module';
 import { AiModule } from '../ai/ai.module';
 import { MigrationHostpanelModule } from '../migration-hostpanel/migration-hostpanel.module';
-import { ProxyModule } from '../proxy/proxy.module';
+import { OperationsModule } from '../operations/operations.module';
+import { FederationModule } from '../federation/federation.module';
+import { FederatedSocketBridgeService } from './federated-socket-bridge.service';
 
 @Global()
 @Module({
@@ -29,9 +31,10 @@ import { ProxyModule } from '../proxy/proxy.module';
     forwardRef(() => LogsModule),
     forwardRef(() => AiModule),
     forwardRef(() => MigrationHostpanelModule),
-    forwardRef(() => ProxyModule),
+    OperationsModule,
+    FederationModule,
   ],
-  providers: [AgentGateway, AgentRelayService],
-  exports: [AgentRelayService, AgentGateway],
+  providers: [AgentGateway, AgentRelayService, FederatedSocketBridgeService],
+  exports: [AgentRelayService, AgentGateway, FederatedSocketBridgeService],
 })
 export class GatewayModule {}

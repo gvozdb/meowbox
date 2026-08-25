@@ -15,9 +15,14 @@
 </template>
 
 <script setup lang="ts">
+type OperationStatus =
+  | 'PENDING' | 'QUEUED' | 'CLAIMED' | 'RUNNING' | 'RECOVERING'
+  | 'CANCEL_REQUESTED' | 'CANCELLED' | 'SUCCEEDED' | 'FAILED'
+  | 'UNKNOWN_RECOVERY_REQUIRED' | 'NEEDS_ATTENTION';
+
 interface OperationState {
   id: string;
-  status: 'PENDING' | 'RUNNING' | 'SUCCEEDED' | 'FAILED';
+  status: OperationStatus;
   currentStep: string | null;
   progress: number;
   errorMessage: string | null;
@@ -31,23 +36,33 @@ const emit = defineEmits<{
   (event: 'finished', operation: OperationState): void;
 }>();
 
-const api = useApi();
+const api = useRemoteApi();
+const serverStore = useServerStore();
 const operation = ref<OperationState | null>(null);
 let timer: ReturnType<typeof setTimeout> | null = null;
 let generation = 0;
 
 const terminal = computed(
-  () => operation.value?.status === 'SUCCEEDED' || operation.value?.status === 'FAILED',
+  () => operation.value != null && [
+    'CANCELLED', 'SUCCEEDED', 'FAILED', 'UNKNOWN_RECOVERY_REQUIRED', 'NEEDS_ATTENTION',
+  ].includes(operation.value.status),
 );
 const tone = computed(() => {
-  if (operation.value?.status === 'FAILED') return 'error';
+  if (operation.value && [
+    'CANCELLED', 'FAILED', 'UNKNOWN_RECOVERY_REQUIRED', 'NEEDS_ATTENTION',
+  ].includes(operation.value.status)) return 'error';
   if (operation.value?.status === 'SUCCEEDED') return 'success';
   return 'running';
 });
 const statusLabel = computed(() => {
-  if (operation.value?.status === 'FAILED') return 'Операция завершилась с ошибкой';
+  if (operation.value && [
+    'FAILED', 'UNKNOWN_RECOVERY_REQUIRED', 'NEEDS_ATTENTION',
+  ].includes(operation.value.status)) return 'Операция требует внимания';
+  if (operation.value?.status === 'CANCELLED') return 'Операция отменена';
   if (operation.value?.status === 'SUCCEEDED') return 'Операция завершена';
-  if (operation.value?.status === 'PENDING') return 'Операция ожидает запуска';
+  if (operation.value?.status === 'PENDING' || operation.value?.status === 'QUEUED') return 'Операция ожидает запуска';
+  if (operation.value?.status === 'RECOVERING') return 'Операция восстанавливается';
+  if (operation.value?.status === 'CANCEL_REQUESTED') return 'Запрошена отмена';
   return 'Операция выполняется';
 });
 
@@ -74,8 +89,12 @@ function clearTimer(): void {
   timer = null;
 }
 
-async function poll(expectedGeneration: number): Promise<void> {
-  if (!props.operationId || expectedGeneration !== generation) return;
+async function poll(expectedGeneration: number, expectedContextEpoch: number): Promise<void> {
+  if (
+    !props.operationId ||
+    expectedGeneration !== generation ||
+    expectedContextEpoch !== serverStore.contextEpoch
+  ) return;
   try {
     operation.value = await api.get<OperationState>(`/operations/${props.operationId}`);
     if (terminal.value) {
@@ -85,8 +104,8 @@ async function poll(expectedGeneration: number): Promise<void> {
   } catch {
     // Temporary request failures are retried while the component stays mounted.
   }
-  if (expectedGeneration === generation) {
-    timer = setTimeout(() => void poll(expectedGeneration), 1500);
+  if (expectedGeneration === generation && expectedContextEpoch === serverStore.contextEpoch) {
+    timer = setTimeout(() => void poll(expectedGeneration, expectedContextEpoch), 1500);
   }
 }
 
@@ -96,9 +115,18 @@ watch(
     generation++;
     clearTimer();
     operation.value = null;
-    if (operationId) void poll(generation);
+    if (operationId) void poll(generation, serverStore.contextEpoch);
   },
   { immediate: true },
+);
+
+watch(
+  () => serverStore.contextEpoch,
+  () => {
+    generation++;
+    clearTimer();
+    operation.value = null;
+  },
 );
 
 onBeforeUnmount(() => {

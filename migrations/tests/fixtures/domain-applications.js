@@ -227,11 +227,25 @@ const runtimeEvidence = Object.freeze({
   },
 });
 
-const DOMAIN_RELEASE_MIGRATIONS = new Set([
-  'z20260731000000_domain_centric_applications',
-  'zz20260731102000_backup_manifest_v2',
-  'zz20260731103000_deploy_operations',
-  'zz20260731104000_backup_schema_alignment',
+const LEGACY_CORE_MIGRATIONS = new Set([
+  '0_init',
+  '10_backup_scopes',
+  '10_database_unique_name_per_type',
+  '10_site_cms_table_prefix',
+  '11_backup_config_storage_relations',
+  '12_site_backup_schedules_and_digest_queue',
+  '13_backup_schedule_id',
+  '14_site_multi_domain',
+  '15_site_quick_commands',
+  '1_system_migration_tables',
+  '2_site_nginx_settings',
+  '3_site_nginx_rate_limit',
+  '4_proxy_audit_logs',
+  '5_hostpanel_migration_phase1',
+  '6_hostpanel_migration_sources',
+  '7_vpn_management',
+  '8_country_blocks',
+  '9_site_encrypted_secrets',
 ]);
 
 const PRE_DOMAIN_PRISMA_SCHEMA_LINEAGES = Object.freeze({
@@ -254,9 +268,13 @@ async function createLegacyCoreFixture(dbPath, prismaMigrationsDir, runSqliteScr
   await writeFile(dbPath, '', { flag: 'wx', mode: 0o600 });
   const entries = await readdir(prismaMigrationsDir, { withFileTypes: true });
   const migrationNames = entries
-    .filter((entry) => entry.isDirectory() && !DOMAIN_RELEASE_MIGRATIONS.has(entry.name))
+    .filter((entry) => entry.isDirectory() && LEGACY_CORE_MIGRATIONS.has(entry.name))
     .map((entry) => entry.name)
     .sort();
+  const missing = [...LEGACY_CORE_MIGRATIONS].filter((name) => !migrationNames.includes(name));
+  if (missing.length > 0) {
+    throw new Error(`Legacy fixture migration artifacts are missing: ${missing.join(', ')}`);
+  }
 
   for (const migrationName of migrationNames) {
     const sql = await readFile(join(prismaMigrationsDir, migrationName, 'migration.sql'), 'utf8');

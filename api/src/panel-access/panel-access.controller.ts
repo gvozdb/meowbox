@@ -1,7 +1,25 @@
-import { Body, Controller, Delete, Get, Logger, Post, Put } from '@nestjs/common';
+import {
+  Body,
+  Controller,
+  Delete,
+  Get,
+  Headers,
+  Logger,
+  Param,
+  ParseUUIDPipe,
+  Post,
+  Put,
+} from '@nestjs/common';
 import { Roles } from '../common/decorators/roles.decorator';
+import { CurrentUser } from '../common/decorators/current-user.decorator';
 import { PanelAccessService } from './panel-access.service';
-import { IssueLeDto, SetDomainDto, UpdatePanelAccessDto } from './panel-access.dto';
+import {
+  IssueLeDto,
+  SetDomainDto,
+  StageFederatedPanelAccessCutoverDto,
+  UpdatePanelAccessDto,
+} from './panel-access.dto';
+import { PanelAccessCutoverTargetService } from './panel-access-cutover-target.service';
 
 /**
  * Управление доступом к панели:
@@ -20,7 +38,10 @@ import { IssueLeDto, SetDomainDto, UpdatePanelAccessDto } from './panel-access.d
 export class PanelAccessController {
   private readonly logger = new Logger('PanelAccessController');
 
-  constructor(private readonly service: PanelAccessService) {}
+  constructor(
+    private readonly service: PanelAccessService,
+    private readonly cutovers: PanelAccessCutoverTargetService,
+  ) {}
 
   /** Полный снапшот: настройки + live-данные (cert на диске, DNS, IP). */
   @Get()
@@ -40,7 +61,10 @@ export class PanelAccessController {
 
   // ── Behavior (redirect, deny-ip) ──────────────────────────────────────────
   @Put('behavior')
-  async updateBehavior(@Body() body: UpdatePanelAccessDto) {
+  async updateBehavior(
+    @Body() body: UpdatePanelAccessDto,
+    @Headers('idempotency-key') _idempotencyKey?: string,
+  ) {
     const data = await this.service.updateBehavior(body.httpsRedirect, body.denyIpAccess);
     return { success: true, data };
   }
@@ -64,5 +88,43 @@ export class PanelAccessController {
   async removeCert() {
     const data = await this.service.removeCert();
     return { success: true, data };
+  }
+
+  @Post('federation-cutovers')
+  async startFederationCutover(
+    @Body() body: StageFederatedPanelAccessCutoverDto,
+    @CurrentUser('sub') userId: string,
+    @CurrentUser('role') role: string,
+    @Headers('idempotency-key') idempotencyKey?: string,
+  ) {
+    const data = await this.cutovers.start(
+      body,
+      { userId, role },
+      idempotencyKey,
+    );
+    return { success: true, data };
+  }
+
+  @Get('federation-cutovers/:cutoverId')
+  async getFederationCutover(
+    @Param('cutoverId', ParseUUIDPipe) cutoverId: string,
+  ) {
+    return { success: true, data: await this.cutovers.status(cutoverId) };
+  }
+
+  @Post('federation-cutovers/:cutoverId/finalize')
+  async finalizeFederationCutover(
+    @Param('cutoverId', ParseUUIDPipe) cutoverId: string,
+    @Headers('idempotency-key') _idempotencyKey?: string,
+  ) {
+    return { success: true, data: await this.cutovers.finalize(cutoverId) };
+  }
+
+  @Post('federation-cutovers/:cutoverId/rollback')
+  async rollbackFederationCutover(
+    @Param('cutoverId', ParseUUIDPipe) cutoverId: string,
+    @Headers('idempotency-key') _idempotencyKey?: string,
+  ) {
+    return { success: true, data: await this.cutovers.rollback(cutoverId) };
   }
 }

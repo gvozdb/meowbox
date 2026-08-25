@@ -1,0 +1,36 @@
+spec
+remote_panel_parity_activation_gates {
+  protocol: 1
+  topology: PUBLIC_ONLY
+  activation: false
+  rule: activation stays false until every required gate is PASS with redacted evidence from an isolated non-production target
+
+  required_gates {
+    gate T-SIG-REAL { status: UNRUN; task: RPP-030; command: node tools/remote-panel-activation-evidence.mjs verify --gate T-SIG-REAL --evidence EVIDENCE_DIR --public-key OPERATOR_PUBLIC_KEY; evidence: exact Nginx_to_Express_to_Undici_to_Nginx_to_Nest path_query_header_body byte report; stop: any serialization drift or replay bypass }
+    gate T-DIAL-REAL { status: UNRUN; task: RPP-030; command: node tools/remote-panel-activation-evidence.mjs verify --gate T-DIAL-REAL --evidence EVIDENCE_DIR --public-key OPERATOR_PUBLIC_KEY; evidence: HTTP_and_Socket.IO selected-address TLS_CA_SPKI_DNS-rebinding report; stop: unpinned lookup redirect private-address or hostname-verification bypass }
+    gate T-ADM-REAL { status: UNRUN; task: RPP-030; command: node tools/remote-panel-activation-evidence.mjs verify --gate T-ADM-REAL --evidence EVIDENCE_DIR --public-key OPERATOR_PUBLIC_KEY; evidence: Node_to_Nginx_to_PHP-FPM AES-GCM cookie consume replay expiry and asset report; stop: key mismatch replay cookie leak or browser reachability failure }
+    gate T-OPS-REAL { status: UNRUN; task: RPP-030; command: node tools/remote-panel-activation-evidence.mjs verify --gate T-OPS-REAL --evidence EVIDENCE_DIR --public-key OPERATOR_PUBLIC_KEY; evidence: SQLite_WAL lease contention API_agent restart process-group cancel and reconcile report; stop: unowned child unsafe retry lost lock or ambiguous non-idempotent outcome }
+    gate T-PUBLIC-LOAD { status: UNRUN; task: RPP-710; command: node tools/remote-panel-activation-evidence.mjs verify --gate T-PUBLIC-LOAD --evidence EVIDENCE_DIR --public-key OPERATOR_PUBLIC_KEY; evidence: transfer_50GiB VPN_parser webhook_spool disk_memory_rate_abort_checksum report; stop: parser amplification checksum mismatch RSS_plus_128MiB or disk reserve breach }
+    gate T-PROV-PA-REAL { status: UNRUN; task: RPP-700; command: node tools/remote-panel-activation-evidence.mjs verify --gate T-PROV-PA-REAL --evidence EVIDENCE_DIR --public-key OPERATOR_PUBLIC_KEY; evidence: fresh_existing_custom-port enrollment registry projection and Panel_Access interruption rollback report; stop: active endpoint mismatch registry projection disagreement or SSH recovery failure }
+    gate T-REL-CLEAN { status: UNRUN; task: RPP-700; command: node tools/remote-panel-activation-evidence.mjs verify --gate T-REL-CLEAN --evidence EVIDENCE_DIR --public-key OPERATOR_PUBLIC_KEY; evidence: clean dependency install aggregate suites migration rehearsal packaged tarball contract and checksum report; stop: any failed suite missing runtime artifact dirty generated contract or incompatible rollback rehearsal }
+    gate T-CAN-24H { status: UNRUN; task: RPP-720; command: node tools/remote-panel-activation-evidence.mjs verify --gate T-CAN-24H --evidence EVIDENCE_DIR --public-key OPERATOR_PUBLIC_KEY; evidence: isolated_then_5pct_24h_then_25pct_24h signed metrics and zero stop thresholds; stop: any security stop or rolling threshold breach }
+  }
+
+  policy_boundaries {
+    TRUSTED_PRIVATE: DISABLED
+    ADMINER_BROWSER_UNREACHABLE: DISABLED
+    LARGE_MASTER_FALLBACK_GT_100_MIB: DISABLED
+    LEGACY_RETIREMENT: BLOCKED_UNTIL_MEASURABLE_GATE
+    CURRENT_DEV_MODE_VPS_ACTIVATION: FORBIDDEN
+  }
+}
+
+acceptance:
+  implementation_gate_may_pass_with_required_gates_UNRUN: true
+  activation_gate_requires_all_required_gates_PASS: true
+  activation_evidence_contains_no_secrets_tokens cookies raw_bodies credentials or private endpoints: true
+  every_PASS_report_is_canonical_content_addressed_and_Ed25519_signed: true
+  release_gate_binds_evidence_to_exact_VERSION_and_repository_commit: true
+  failed_or_unrun_gate_keeps_all_remote_capabilities_disabled: true
+
+open_questions: []

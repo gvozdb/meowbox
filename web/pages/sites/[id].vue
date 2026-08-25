@@ -1319,6 +1319,15 @@ sudo mv {{ selectedApplicationRoot }}/* {{ site?.rootPath }}/{{ editFilesRelPath
                     <span class="exp-mode-hint">restic dump → HTTP response. Без записи на диск VPS, без сокетов.</span>
                   </span>
                 </label>
+                <label class="restore-scope__opt">
+                  <input type="radio" v-model="exportDialog.form.mode" value="STAGED_ARTIFACT" />
+                  <span>
+                    <b>Подготовить с возобновлением</b>
+                    <span class="exp-mode-hint">
+                      Сначала создаётся фиксированный .tar на целевом сервере. После подготовки доступны Range и проверка SHA-256.
+                    </span>
+                  </span>
+                </label>
                 <label
                   class="restore-scope__opt"
                   :class="{ 'restore-scope__opt--disabled': !exportDialog.s3Available }"
@@ -1355,7 +1364,7 @@ sudo mv {{ selectedApplicationRoot }}/* {{ site?.rootPath }}/{{ editFilesRelPath
                 />
                 <p class="form-hint">
                   По умолчанию — 7 часов. Минимум 1, максимум 720 (30 дней).
-                  После истечения экспорт чистится автоматически (для S3 удаляется объект из bucket'а, для STREAM просто протухает запись).
+                  После истечения экспорт и его временный артефакт чистятся автоматически.
                 </p>
               </div>
 
@@ -1365,11 +1374,11 @@ sudo mv {{ selectedApplicationRoot }}/* {{ site?.rootPath }}/{{ editFilesRelPath
                 <div v-for="ex in exportDialog.list" :key="ex.id" class="exp-list__item">
                   <div class="exp-list__main">
                     <div class="exp-list__row">
-                      <span class="exp-list__mode">{{ ex.mode === 'STREAM' ? 'STREAM' : 'S3' }}</span>
+                      <span class="exp-list__mode">{{ exportModeLabel(ex.mode) }}</span>
                       <span class="exp-list__status" :class="`exp-list__status--${ex.status.toLowerCase()}`">{{ ex.status }}</span>
                       <span class="exp-list__expires">до {{ formatBackupDate(ex.expiresAt) }}</span>
                       <button
-                        v-if="ex.status === 'READY' && ex.downloadUrl"
+                        v-if="ex.status === 'READY' && ex.deliveryAvailable !== false"
                         class="btn btn--xs btn--primary"
                         type="button"
                         @click="downloadExportRow(ex)"
@@ -2597,6 +2606,12 @@ php_value[max_execution_time] = 300"
 
 <script setup lang="ts">
 import { copyToClipboard } from '~/utils/clipboard';
+import {
+  navigateAppHandoff,
+  navigateDownloadDelivery,
+  navigateModxHandoff,
+  publicDeliveryIdempotencyKey,
+} from '~/utils/public-delivery';
 
 definePageMeta({ middleware: 'auth' });
 
@@ -2703,6 +2718,9 @@ interface DomainApplicationDetail {
 const route = useRoute();
 const router = useRouter();
 const api = useApi();
+const { waitForOperation } = useOperation();
+const { downloadSiteFile, uploadSiteFile, downloadBackupFile } = useFileTransfer();
+const masterApi = useMasterApi();
 const serverStore = useServerStore();
 const { terminalOpen, terminalInput, terminalResize, terminalClose, onTerminalData, onBackupProgress, onBackupRestoreProgress } = useSocket();
 
@@ -3290,17 +3308,45 @@ async function submitModxUpdate() {
   modxUpdateSuccess.value = '';
   modxUpdating.value = true;
   try {
-    const res = await api.post<{ version: string; previousVersion: string | null }>(
+    const accepted = await api.post<AcceptedOperation>(
       `${selectedDomainApi.value}/modx/update`,
       { targetVersion: modxTargetVersion.value },
+      {
+        headers: {
+          'Idempotency-Key': domainMutationKey('modx-update'),
+        },
+      },
     );
-    modxUpdateSuccess.value = res?.version || modxTargetVersion.value;
-    selectedDomain.value.modxVersion = res?.version || modxTargetVersion.value;
+    const operation = await waitForOperation(accepted.operationId, {
+      timeoutMs: 46 * 60_000,
+    });
+    const result = requireModxUpdateResult(operation.result);
+    modxUpdateSuccess.value = result.version;
+    selectedDomain.value.modxVersion = result.version;
   } catch (e) {
     modxUpdateError.value = (e as Error)?.message || 'Не удалось обновить MODX';
   } finally {
     modxUpdating.value = false;
   }
+}
+
+function requireModxUpdateResult(value: unknown): {
+  version: string;
+  previousVersion: string | null;
+} {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new Error('Сервер вернул некорректный результат обновления MODX');
+  }
+  const result = value as Record<string, unknown>;
+  if (
+    typeof result.version !== 'string' ||
+    !/^\d+\.\d+\.\d+(?:-[a-z0-9]+)?$/.test(result.version) ||
+    (result.previousVersion !== null &&
+      typeof result.previousVersion !== 'string')
+  ) {
+    throw new Error('Сервер не подтвердил версию обновлённого MODX');
+  }
+  return result as { version: string; previousVersion: string | null };
 }
 
 // ─── Открытие БД в Adminer ────────────────────────────────────────────
@@ -3313,13 +3359,12 @@ async function openAdminer(dbId: string) {
   // Open blank tab synchronously, чтобы popup-blocker не зарезал.
   const win = window.open('about:blank', '_blank');
   try {
-    const data = await api.post<{ url: string }>(
+    const delivery = await api.post<unknown>(
       `${selectedDomainApi.value}/databases/${dbId}/adminer-ticket`,
       {},
+      { headers: { 'Idempotency-Key': publicDeliveryIdempotencyKey('ADMINER') } },
     );
-    if (!data?.url) throw new Error('SSO endpoint вернул пустой URL');
-    if (win) win.location.href = data.url;
-    else window.location.href = data.url;
+    await navigateAppHandoff(delivery, win, 'ADMINER');
   } catch (e) {
     if (win) win.close();
     useMbToast().error((e as Error)?.message || 'Не удалось открыть Adminer');
@@ -3356,7 +3401,7 @@ async function onNormalizePermissions() {
   normalizePermsResult.value = null;
   const toast = useMbToast();
   try {
-    const res = await api.post<{ steps: Array<{ cmd: string; ok: boolean; error?: string }>; modxCorePath?: string }>(
+    const accepted = await api.post<AcceptedOperation>(
       `${selectedDomainApi.value}/permissions/normalize`,
       {},
       {
@@ -3365,7 +3410,14 @@ async function onNormalizePermissions() {
         },
       },
     );
-    const stepCount = res?.steps?.length || 0;
+    const operation = await waitForOperation(accepted.operationId, {
+      timeoutMs: 11 * 60_000,
+    });
+    const result = operation.result as { stepCount?: unknown } | null;
+    const stepCount =
+      typeof result?.stepCount === 'number' && Number.isInteger(result.stepCount)
+        ? result.stepCount
+        : 0;
     normalizePermsResult.value = { stepCount };
     toast.success(`Нормализация завершена. Шагов выполнено: ${stepCount}.`);
   } catch (e) {
@@ -3419,8 +3471,19 @@ async function runDoctor() {
   doctorLoading.value = true;
   doctorError.value = '';
   try {
-    const res = await api.get<DoctorResult>(`${selectedDomainApi.value}/modx/doctor`);
-    doctorResult.value = res;
+    const accepted = await api.post<AcceptedOperation>(
+      `${selectedDomainApi.value}/modx/doctor/scan`,
+      undefined,
+      {
+        headers: {
+          'Idempotency-Key': domainMutationKey('modx-doctor'),
+        },
+      },
+    );
+    const operation = await waitForOperation(accepted.operationId, {
+      timeoutMs: 6 * 60_000,
+    });
+    doctorResult.value = requireDoctorResult(operation.result);
   } catch (e) {
     doctorError.value = (e as Error)?.message || 'Не удалось запустить диагностику';
   } finally {
@@ -3451,7 +3514,7 @@ async function runDoctorFix(issue: DoctorIssue) {
   doctorFixingId.value = issue.id;
   try {
     if (issue.fix === 'normalize-permissions') {
-      await api.post(
+      const accepted = await api.post<AcceptedOperation>(
         `${selectedDomainApi.value}/permissions/normalize`,
         {},
         {
@@ -3460,9 +3523,10 @@ async function runDoctorFix(issue: DoctorIssue) {
           },
         },
       );
+      await waitForOperation(accepted.operationId, { timeoutMs: 11 * 60_000 });
       toast.success('Права нормализованы.');
     } else if (issue.fix === 'cleanup-setup-dir') {
-      await api.post(
+      const accepted = await api.post<AcceptedOperation>(
         `${selectedDomainApi.value}/modx/cleanup-setup`,
         {},
         {
@@ -3471,6 +3535,7 @@ async function runDoctorFix(issue: DoctorIssue) {
           },
         },
       );
+      await waitForOperation(accepted.operationId, { timeoutMs: 6 * 60_000 });
       toast.success('Директория setup/ удалена.');
     }
     // Перезапускаем диагностику, чтобы пользователь увидел, что issue ушёл.
@@ -3482,6 +3547,17 @@ async function runDoctorFix(issue: DoctorIssue) {
   } finally {
     doctorFixingId.value = null;
   }
+}
+
+function requireDoctorResult(value: unknown): DoctorResult {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new Error('Сервер вернул некорректный результат диагностики');
+  }
+  const result = value as Partial<DoctorResult>;
+  if (typeof result.modxConfigOk !== 'boolean' || !Array.isArray(result.issues)) {
+    throw new Error('Сервер вернул некорректный результат диагностики');
+  }
+  return result as DoctorResult;
 }
 
 function doctorLevelLabel(level: 'critical' | 'warning' | 'info'): string {
@@ -3513,17 +3589,13 @@ async function openCmsAdmin() {
   if (target) target.opener = null;
   cmsAutoLoginBusy.value = true;
   try {
-    const handoff = await api.post<{ token: string }>(
+    const handoff = await api.post<unknown>(
       `${selectedDomainApi.value}/modx/admin-login`,
       {},
-    );
-    const html = await api.rawText(
-      `/domain-app-login/${encodeURIComponent(handoff.token)}`,
+      { headers: { 'Idempotency-Key': publicDeliveryIdempotencyKey('MODX_LOGIN') } },
     );
     if (!target) throw new Error('Браузер заблокировал новое окно');
-    target.document.open();
-    target.document.write(html);
-    target.document.close();
+    await navigateModxHandoff(handoff, target);
   } catch (error) {
     target?.close();
     useMbToast().error((error as Error).message || 'Не удалось открыть MODX');
@@ -4121,10 +4193,7 @@ async function fmDownloadFile(item: FmItem) {
   if (!site.value) return;
   fmDownloading.value = item.path;
   try {
-    await api.download(
-      `${selectedDomainApi.value}/files/download?path=${encodeURIComponent(item.path)}`,
-      item.name,
-    );
+    await downloadSiteFile(selectedDomainApi.value, item.path);
   } catch (err) {
     useMbToast().error((err as Error).message || 'Ошибка скачивания файла');
   } finally {
@@ -4141,13 +4210,15 @@ async function fmUploadFile(event: Event) {
   const file = input.files?.[0];
   if (!file || !selectedDomain.value) return;
   try {
-    await api.upload(
-      `${selectedDomainApi.value}/files/upload?path=${encodeURIComponent(fmCurrentPath.value)}`,
+    await uploadSiteFile(
+      selectedDomainApi.value,
+      selectedDomain.value.id,
+      fmCurrentPath.value,
       file,
     );
     fmLoad();
-  } catch {
-    // Upload failed
+  } catch (err) {
+    useMbToast().error((err as Error).message || 'Ошибка загрузки файла');
   } finally {
     input.value = ''; // Reset input
   }
@@ -4568,7 +4639,12 @@ async function loadRestoreTree() {
   if (restoreScope.value === 'DB_ONLY') return;
   restoreTreeLoading.value = true;
   try {
-    const res = await api.get<{ items: RestoreTreeItem[] }>(`/backups/${restoringSiteBackup.value.id}/tree`);
+    const res = await runResticQuery<{ items: RestoreTreeItem[] }>(
+      `/backups/${restoringSiteBackup.value.id}/tree/query`,
+      {},
+      'restic-backup-tree',
+      6 * 60_000,
+    );
     restoreTree.value = res.items || [];
     // По умолчанию выбираем всё
     for (const it of restoreTree.value) restoreSelected.add(it.name);
@@ -4810,8 +4886,11 @@ async function loadSnapshotsInPicker() {
   snapshotPicker.error = '';
   snapshotPicker.selectedId = '';
   try {
-    const res = await api.get<ResticSnapshotItem[]>(
-      `/sites/${siteId}/restic-snapshots?locationId=${encodeURIComponent(snapshotPicker.locationId)}`,
+    const res = await runResticQuery<ResticSnapshotItem[]>(
+      `/sites/${siteId}/restic-snapshots/query`,
+      { locationId: snapshotPicker.locationId },
+      'restic-snapshots',
+      6 * 60_000,
     );
     // Сортируем свежие сверху
     const arr = Array.isArray(res) ? [...res] : [];
@@ -4830,6 +4909,25 @@ function backupRestoreIdempotencyKey(prefix: string): string {
     globalThis.crypto?.randomUUID?.() ||
     `${Date.now()}-${Math.random().toString(36).slice(2, 12)}`;
   return `${prefix}:${suffix}`;
+}
+
+async function runResticQuery<T>(
+  url: string,
+  body: Record<string, unknown>,
+  idempotencyPrefix: string,
+  timeoutMs: number,
+): Promise<T> {
+  const accepted = await api.post<AcceptedOperation>(
+    url,
+    body,
+    {
+      headers: {
+        'Idempotency-Key': backupRestoreIdempotencyKey(idempotencyPrefix),
+      },
+    },
+  );
+  const operation = await waitForOperation(accepted.operationId, { timeoutMs });
+  return operation.result as T;
 }
 
 async function restoreFromPickedSnapshot() {
@@ -4978,25 +5076,29 @@ async function runBackupCompare() {
 
   try {
     if (backupCompare.rightMode === 'live') {
-      const res = await api.post<{ items: BackupCompareItem[]; stats: BackupCompareStats }>(
+      const res = await runResticQuery<{ items: BackupCompareItem[]; stats: BackupCompareStats }>(
         `/sites/${site.value.id}/restic-diff/live`,
         {
           locationId: backupCompare.leftLocationId,
           snapshotId: backupCompare.leftSnapshotId,
         },
+        'restic-diff-live',
+        16 * 60_000,
       );
       backupCompare.items = res?.items || [];
       backupCompare.stats = res?.stats || null;
     } else {
       const right = siteBackups.value.find((b) => b.id === backupCompare.rightBackupId);
       if (!right?.resticSnapshotId) throw new Error('Бэкап-цель не найден');
-      const res = await api.post<{ items: BackupCompareItem[]; stats: BackupCompareStats }>(
+      const res = await runResticQuery<{ items: BackupCompareItem[]; stats: BackupCompareStats }>(
         `/sites/${site.value.id}/restic-diff/snapshots`,
         {
           locationId: backupCompare.leftLocationId,
           snapshotIdA: backupCompare.leftSnapshotId,
           snapshotIdB: right.resticSnapshotId,
         },
+        'restic-diff-snapshots',
+        11 * 60_000,
       );
       backupCompare.items = res?.items || [];
       backupCompare.stats = res?.stats || null;
@@ -5034,20 +5136,30 @@ async function onBackupCompareFileClick(item: BackupCompareItem) {
   try {
     let res: any;
     if (backupCompare.rightMode === 'live') {
-      res = await api.post(`/sites/${site.value.id}/restic-diff/file-live`, {
-        locationId: backupCompare.leftLocationId,
-        snapshotId: backupCompare.leftSnapshotId,
-        filePath: item.path,
-      });
+      res = await runResticQuery(
+        `/sites/${site.value.id}/restic-diff/file-live`,
+        {
+          locationId: backupCompare.leftLocationId,
+          snapshotId: backupCompare.leftSnapshotId,
+          filePath: item.path,
+        },
+        'restic-diff-file-live',
+        6 * 60_000,
+      );
     } else {
       const right = siteBackups.value.find((b) => b.id === backupCompare.rightBackupId);
       if (!right?.resticSnapshotId) throw new Error('Бэкап-цель не найден');
-      res = await api.post(`/sites/${site.value.id}/restic-diff/file`, {
-        locationId: backupCompare.leftLocationId,
-        snapshotIdA: backupCompare.leftSnapshotId,
-        snapshotIdB: right.resticSnapshotId,
-        filePath: item.path,
-      });
+      res = await runResticQuery(
+        `/sites/${site.value.id}/restic-diff/file`,
+        {
+          locationId: backupCompare.leftLocationId,
+          snapshotIdA: backupCompare.leftSnapshotId,
+          snapshotIdB: right.resticSnapshotId,
+          filePath: item.path,
+        },
+        'restic-diff-file',
+        6 * 60_000,
+      );
     }
     backupCompare.fileBinary = !!res?.binary;
     backupCompare.fileSizeA = res?.sizeA || 0;
@@ -5288,9 +5400,9 @@ async function triggerSiteBackup() {
 // ─── Backup export (download) dialog ───
 interface BackupExportRow {
   id: string;
-  mode: 'STREAM' | 'S3_PRESIGNED';
+  mode: 'STREAM' | 'STAGED_ARTIFACT' | 'S3_PRESIGNED';
   status: 'PENDING' | 'PROCESSING' | 'READY' | 'FAILED' | 'EXPIRED';
-  downloadUrl?: string | null;
+  deliveryAvailable?: boolean;
   expiresAt: string;
   sizeBytes?: number | null;
   errorMessage?: string | null;
@@ -5300,6 +5412,13 @@ interface BackupExportRow {
   progressBytesUploaded?: number | null;
   progressElapsedMs?: number | null;
   progressUpdatedAt?: number | null;
+  operationId?: string | null;
+  operationStatusPath?: string | null;
+}
+
+function exportModeLabel(mode: BackupExportRow['mode']): string {
+  if (mode === 'STAGED_ARTIFACT') return 'RANGE';
+  return mode === 'S3_PRESIGNED' ? 'S3' : 'STREAM';
 }
 
 function formatExportBytes(b?: number | null): string {
@@ -5327,7 +5446,7 @@ const exportDialog = reactive({
   list: [] as BackupExportRow[],
   pollTimer: null as ReturnType<typeof setInterval> | null,
   form: {
-    mode: 'STREAM' as 'STREAM' | 'S3_PRESIGNED',
+    mode: 'STREAM' as 'STREAM' | 'STAGED_ARTIFACT' | 'S3_PRESIGNED',
     ttlHours: 7,
   },
 });
@@ -5377,92 +5496,58 @@ function startExportPoll() {
 
 async function createExport() {
   if (!exportDialog.targetBackup) return;
+  const popup = exportDialog.form.mode === 'STREAM' ? window.open('', '_blank') : null;
   exportDialog.creating = true;
   try {
-    const res = await api.post<{ id: string; mode: string; status: string; downloadUrl?: string; expiresAt: string }>(
-      '/backup-exports',
-      {
-        backupId: exportDialog.targetBackup.id,
-        mode: exportDialog.form.mode,
-        ttlHours: exportDialog.form.ttlHours,
-      },
+    const staged = exportDialog.form.mode === 'STAGED_ARTIFACT';
+    const res = await api.post<{
+      id?: string;
+      mode?: string;
+      status?: string;
+      expiresAt?: string;
+      export?: { id: string; mode: string; status: string; expiresAt: string };
+    }>(
+      staged ? '/backup-exports/staged' : '/backup-exports',
+      staged
+        ? {
+            backupId: exportDialog.targetBackup.id,
+            ttlHours: exportDialog.form.ttlHours,
+          }
+        : {
+            backupId: exportDialog.targetBackup.id,
+            mode: exportDialog.form.mode,
+            ttlHours: exportDialog.form.ttlHours,
+          },
+      { headers: { 'Idempotency-Key': publicDeliveryIdempotencyKey('DOWNLOAD') } },
     );
-    if (exportDialog.form.mode === 'STREAM' && res.downloadUrl) {
-      // STREAM готов сразу — открываем ссылку для скачивания
-      openExportLink(res.downloadUrl);
+    const created = res.export ?? res;
+    if (exportDialog.form.mode === 'STREAM' && created.status === 'READY' && created.id) {
+      await issueExportDelivery(created.id, popup);
     }
     await loadExportsList();
   } catch (err) {
+    if (popup && !popup.closed) popup.close();
     useMbToast().error((err as Error).message || 'Ошибка создания экспорта');
   } finally {
     exportDialog.creating = false;
   }
 }
 
-function openExportLink(url: string) {
-  // STREAM-режим: URL вида /backup-exports/:id/download?token=<one-shot>
-  // — токен в querystring, поэтому browser качает НАТИВНО через <a download>
-  // без удержания файла в памяти (для 50GB это критично).
-  // S3_PRESIGNED: полный https-URL pre-signed.
-  let finalUrl: string;
-  if (url.startsWith('http://') || url.startsWith('https://')) {
-    finalUrl = url;
-  } else {
-    const baseUrl = (useRuntimeConfig().public.apiBase as string) || '';
-    // Нормализация дублирующего /api префикса (старые записи)
-    let normalizedUrl = url;
-    if (baseUrl.endsWith('/api') && url.startsWith('/api/')) {
-      normalizedUrl = url.slice(4);
-    } else if (baseUrl.endsWith('/api/') && url.startsWith('/api/')) {
-      normalizedUrl = url.slice(5);
-    }
-    finalUrl = `${baseUrl}${normalizedUrl}`;
-  }
-  // Нативный download через временный <a>
-  const a = document.createElement('a');
-  a.href = finalUrl;
-  a.target = '_blank';
-  a.rel = 'noopener';
-  // Имя файла для download — браузер использует Content-Disposition с сервера,
-  // но указываем fallback на случай если S3 не пришлёт правильный заголовок.
-  a.download = '';
-  document.body.appendChild(a);
-  a.click();
-  a.remove();
+async function issueExportDelivery(id: string, popup: Window | null) {
+  const delivery = await api.post<unknown>(
+    `/backup-exports/${id}/delivery`,
+    {},
+    { headers: { 'Idempotency-Key': publicDeliveryIdempotencyKey('DOWNLOAD') } },
+  );
+  await navigateDownloadDelivery(delivery, popup, 'BACKUP_EXPORT');
 }
 
-// Скачивание уже созданного экспорта.
-// STREAM: запрашиваем СВЕЖИЙ download-URL (короткоживущий токен) — это не
-// даёт долгоживущему токену протухнуть в БД и не светит его в logs.
-// S3_PRESIGNED: используем сохранённый presigned URL напрямую.
 async function downloadExportRow(ex: BackupExportRow) {
+  const popup = window.open('', '_blank');
   try {
-    if (ex.mode === 'STREAM') {
-      const res = await api.post<{ downloadUrl: string }>(
-        `/backup-exports/${ex.id}/issue-token`,
-        {},
-      );
-      // На remote-сервере one-shot токен в querystring не сработает через
-      // нативный <a> — мастер требует JWT для proxy-роута. Тянем через
-      // api.download (с Authorization header) — тот сам добавит /proxy/{id}.
-      // TODO(3b): для bulk-скачиваний 50GB+ переехать на signed URL прямо
-      // к slave (см. proxy.service.ts::proxyRaw комментарий).
-      try {
-        const serverStore = useServerStore();
-        if (!serverStore.isLocal && res.downloadUrl.startsWith('/api/')) {
-          const dateStr = new Date(ex.createdAt).toISOString().slice(0, 10);
-          const filename = `export-${dateStr}-${ex.id.slice(0, 8)}.tar.gz`;
-          // Strip /api prefix — api.download сам добавит baseUrl
-          const endpoint = res.downloadUrl.slice(4);
-          await api.download(endpoint, filename);
-          return;
-        }
-      } catch { /* fallback to native open */ }
-      openExportLink(res.downloadUrl);
-    } else if (ex.downloadUrl) {
-      openExportLink(ex.downloadUrl);
-    }
+    await issueExportDelivery(ex.id, popup);
   } catch (err) {
+    if (popup && !popup.closed) popup.close();
     useMbToast().error((err as Error).message || 'Не удалось получить ссылку');
   }
 }
@@ -5476,7 +5561,11 @@ async function deleteExportRow(id: string) {
   });
   if (!ok) return;
   try {
-    await api.del(`/backup-exports/${id}`);
+    await api.del(
+      `/backup-exports/${id}`,
+      undefined,
+      { headers: { 'Idempotency-Key': publicDeliveryIdempotencyKey('DOWNLOAD') } },
+    );
     await loadExportsList();
   } catch (err) {
     useMbToast().error((err as Error).message || 'Ошибка удаления');
@@ -5484,32 +5573,28 @@ async function deleteExportRow(id: string) {
 }
 
 async function downloadSiteBackup(b: SiteBackup) {
-  const dateStr = new Date(b.createdAt).toISOString().slice(0, 10);
+  backupDownloading[b.id] = 0;
+  const popups = b.type === 'DIFFERENTIAL' && b.baseBackupId
+    ? [window.open('about:blank', '_blank'), window.open('about:blank', '_blank')]
+    : [window.open('about:blank', '_blank')];
+  let navigated = 0;
   try {
-    // For differential backups, download base first, then diff
     if (b.type === 'DIFFERENTIAL' && b.baseBackupId) {
-      backupDownloading[b.id] = 0;
-      await api.download(
-        `/backups/${b.baseBackupId}/download`,
-        `backup-base-${dateStr}-${b.baseBackupId.slice(0, 8)}.tar.gz`,
-        (pct) => { backupDownloading[b.id] = Math.round(pct / 2); },
-      );
-      await api.download(
-        `/backups/${b.id}/download`,
-        `backup-diff-${dateStr}-${b.id.slice(0, 8)}.tar.gz`,
-        (pct) => { backupDownloading[b.id] = 50 + Math.round(pct / 2); },
-      );
+      await downloadBackupFile(b.baseBackupId, popups[0] ?? null);
+      navigated = 1;
+      await downloadBackupFile(b.id, popups[1] ?? null);
+      navigated = 2;
     } else {
-      backupDownloading[b.id] = 0;
-      await api.download(
-        `/backups/${b.id}/download`,
-        `backup-${dateStr}-${b.id.slice(0, 8)}.tar.gz`,
-        (pct) => { backupDownloading[b.id] = pct; },
-      );
+      await downloadBackupFile(b.id, popups[0] ?? null);
+      navigated = 1;
     }
   } catch (err) {
     useMbToast().error((err as Error).message || 'Ошибка скачивания');
   } finally {
+    for (let index = navigated; index < popups.length; index += 1) {
+      const popup = popups[index];
+      if (popup && !popup.closed) popup.close();
+    }
     delete backupDownloading[b.id];
   }
 }
@@ -5899,7 +5984,7 @@ const migrationSteps = [
 
 const migrateTargetServers = computed(() => {
   const currentId = serverStore.currentServerId || 'main';
-  return serverStore.servers.filter(s => s.id !== currentId);
+  return serverStore.serverOptions.filter(s => s.id !== currentId);
 });
 
 watch(showMigrateModal, (open) => {
@@ -5915,7 +6000,7 @@ async function startMigration() {
   migrateStarting.value = true;
   migrateError.value = '';
   try {
-    const res = await api.post<{ migrationId: string }>('/migration/start', {
+    const res = await masterApi.post<{ migrationId: string }>('/migration/start', {
       siteId,
       sourceServerId: serverStore.currentServerId || 'main',
       targetServerId: migrateTarget.value,
@@ -5924,7 +6009,7 @@ async function startMigration() {
       panelUrl: window.location.origin,
       targetName: migrateTargetName.value,
       targetDomain: migrateTargetDomain.value,
-    }, { noProxy: true });
+    });
     migrationId.value = res?.migrationId || '';
     migrationRunning.value = true;
     migrationStepIndex.value = 0;
@@ -5943,13 +6028,13 @@ function pollMigrationStatus() {
   migrationPollTimer = setInterval(async () => {
     if (!migrationId.value) return;
     try {
-      const state = await api.get<{
+      const state = await masterApi.get<{
         step: string;
         stepIndex: number;
         message: string;
         error?: string;
         completedAt?: string;
-      }>(`/migration/${migrationId.value}/status`, { noProxy: true });
+      }>(`/migration/${migrationId.value}/status`);
       if (!state) return;
       migrationStepIndex.value = state.stepIndex;
       if (state.step === 'done') {

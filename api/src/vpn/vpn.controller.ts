@@ -5,7 +5,9 @@ import {
   Delete,
   Get,
   Header,
+  Headers,
   HttpCode,
+  HttpStatus,
   Param,
   ParseUUIDPipe,
   Patch,
@@ -15,6 +17,7 @@ import {
 import { Throttle } from '@nestjs/throttler';
 import { Response } from 'express';
 import { Roles } from '../common/decorators/roles.decorator';
+import { CurrentUser } from '../common/decorators/current-user.decorator';
 import { Public } from '../common/decorators/public.decorator';
 import { VpnService } from './vpn.service';
 import {
@@ -61,20 +64,42 @@ export class VpnController {
 
   @Post('install/:protocol')
   @Roles('ADMIN')
+  @HttpCode(HttpStatus.ACCEPTED)
   @Throttle({ medium: { ttl: 60000, limit: 3 } })
-  async installRuntime(@Param('protocol') protocol: string) {
+  async installRuntime(
+    @Param('protocol') protocol: string,
+    @CurrentUser('sub') userId: string,
+    @CurrentUser('role') role: string,
+    @Headers('idempotency-key') idempotencyKey?: string,
+  ) {
     const proto = parseProtocol(protocol);
-    const data = await this.service.installRuntime(proto);
+    const data = await this.service.installRuntime(
+      proto,
+      userId,
+      role,
+      idempotencyKey,
+    );
     return { success: true, data };
   }
 
   @Delete('install/:protocol')
   @Roles('ADMIN')
+  @HttpCode(HttpStatus.ACCEPTED)
   @Throttle({ medium: { ttl: 60000, limit: 3 } })
-  async uninstallRuntime(@Param('protocol') protocol: string) {
+  async uninstallRuntime(
+    @Param('protocol') protocol: string,
+    @CurrentUser('sub') userId: string,
+    @CurrentUser('role') role: string,
+    @Headers('idempotency-key') idempotencyKey?: string,
+  ) {
     const proto = parseProtocol(protocol);
-    await this.service.uninstallRuntime(proto);
-    return { success: true };
+    const data = await this.service.uninstallRuntime(
+      proto,
+      userId,
+      role,
+      idempotencyKey,
+    );
+    return { success: true, data };
   }
 
   // ---- Services ----
@@ -151,9 +176,18 @@ export class VpnController {
 
   @Post('sni-health-check')
   @Roles('ADMIN')
+  @HttpCode(HttpStatus.ACCEPTED)
   @Throttle({ medium: { ttl: 10000, limit: 5 } })
-  async sniHealthCheck() {
-    const data = await this.service.runSniHealthCheck();
+  async sniHealthCheck(
+    @CurrentUser('sub') userId: string,
+    @CurrentUser('role') role: string,
+    @Headers('idempotency-key') idempotencyKey?: string,
+  ) {
+    const data = await this.service.enqueueSniHealthCheck(
+      userId,
+      role,
+      idempotencyKey,
+    );
     return { success: true, data };
   }
 

@@ -974,12 +974,13 @@ export class ResticExecutor {
         'dump', params.snapshotId,
         params.rootPath,
         '--archive', 'tar',
-      ], { env, stdio: ['ignore', 'pipe', 'pipe'] });
+      ], { env, stdio: ['ignore', 'pipe', 'pipe'], detached: true });
       // Регистрируем в реестре — на shutdown агента registry убьёт
       // restic SIGTERM'ом, чтобы не оставлять зомби-процессы.
       const procHandle = childProcessRegistry.track(
         proc,
         `restic-dump-to-s3:${params.targetKey.slice(0, 40)}`,
+        { processGroup: true },
       );
 
       let stderrBuf = '';
@@ -1423,13 +1424,18 @@ export class ResticExecutor {
           LC_ALL: 'C',
           LANG: 'C',
         },
+        detached: true,
       });
       // Трекаем в реестре: shutdown агента прибьёт всех восставших.
       // Метка короткая — берём первый осмысленный аргумент (subcommand).
       const subcmd = args.find(
         (a) => !a.startsWith('-') && !/^[A-Za-z0-9+/=:._-]{20,}$/.test(a),
       ) || 'restic';
-      const procHandle = childProcessRegistry.track(child, `restic-stream:${subcmd}`);
+      const procHandle = childProcessRegistry.track(
+        child,
+        `restic-stream:${subcmd}`,
+        { processGroup: true },
+      );
 
       let stdoutBuf = '';
       let stderrBuf = '';
@@ -1859,8 +1865,13 @@ export class ResticExecutor {
           LC_ALL: 'C',
           LANG: 'C',
         },
+        detached: true,
       });
-      const procHandle = childProcessRegistry.track(child, `restic-dump:${snapshotId.substring(0, 8)}`);
+      const procHandle = childProcessRegistry.track(
+        child,
+        `restic-dump:${snapshotId.substring(0, 8)}`,
+        { processGroup: true },
+      );
 
       const out = fs.createWriteStream(outputPath, { flags: 'w', mode: 0o600 });
       let written = 0;

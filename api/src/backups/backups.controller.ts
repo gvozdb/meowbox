@@ -12,12 +12,11 @@ import {
   ParseUUIDPipe,
   NotFoundException,
   BadRequestException,
-  StreamableFile,
+  HttpCode,
+  HttpStatus,
+  GoneException,
 } from '@nestjs/common';
 import { Throttle } from '@nestjs/throttler';
-import { Response } from 'express';
-import * as fs from 'fs';
-import * as path from 'path';
 import { BackupsService } from './backups.service';
 import { ResticCheckService } from './restic-check.service';
 import {
@@ -31,10 +30,13 @@ import {
   DiffResticLiveDto,
   DiffResticFileDto,
   DiffResticFileLiveDto,
+  ResticLocationQueryDto,
 } from './backups.dto';
 import { CurrentUser } from '../common/decorators/current-user.decorator';
 import { Roles } from '../common/decorators/roles.decorator';
-import { attachmentDisposition } from '../common/http/content-disposition';
+import { ResticQueryOperationsService } from './restic-query-operations.service';
+import { BackupDeleteOperationsService } from './backup-delete-operations.service';
+import { BackupTransferService } from './backup-transfer.service';
 
 interface JwtUser {
   id: string;
@@ -46,6 +48,9 @@ export class BackupsController {
   constructor(
     private readonly backupsService: BackupsService,
     private readonly resticCheckService: ResticCheckService,
+    private readonly resticQueries: ResticQueryOperationsService,
+    private readonly backupDeletes: BackupDeleteOperationsService,
+    private readonly backupTransfers: BackupTransferService,
   ) {}
 
   // ===========================================================================
@@ -84,10 +89,13 @@ export class BackupsController {
   // ===========================================================================
 
   @Post('backups/trigger')
+  @Roles('ADMIN', 'MANAGER')
+  @HttpCode(HttpStatus.ACCEPTED)
   @Throttle({ default: { limit: 5, ttl: 60000 } })
   async triggerBackup(
     @Body() dto: TriggerBackupDto,
     @CurrentUser() user?: JwtUser,
+    @Headers('idempotency-key') _idempotencyKey?: string,
   ) {
     const result = await this.backupsService.triggerBackup(dto, user!.id, user!.role);
     return {
@@ -135,7 +143,28 @@ export class BackupsController {
     return { success: true, data: snapshots };
   }
 
+  @Post('sites/:siteId/restic-snapshots/query')
+  @Roles('ADMIN', 'MANAGER')
+  @HttpCode(HttpStatus.ACCEPTED)
+  @Throttle({ default: { limit: 10, ttl: 60000 } })
+  async enqueueResticSnapshots(
+    @Param('siteId', ParseUUIDPipe) siteId: string,
+    @Body() body: ResticLocationQueryDto,
+    @CurrentUser() user?: JwtUser,
+    @Headers('idempotency-key') idempotencyKey?: string,
+  ) {
+    const data = await this.resticQueries.enqueueSnapshots(
+      siteId,
+      body.locationId,
+      { userId: user!.id, role: user!.role },
+      idempotencyKey,
+    );
+    return { success: true, data };
+  }
+
   @Post('backups/:id/restore')
+  @Roles('ADMIN', 'MANAGER')
+  @HttpCode(HttpStatus.ACCEPTED)
   @Throttle({ default: { limit: 3, ttl: 60000 } })
   async restoreBackup(
     @Param('id', ParseUUIDPipe) id: string,
@@ -173,9 +202,28 @@ export class BackupsController {
     return { success: true, data: { items } };
   }
 
+  @Post('backups/:id/tree/query')
+  @Roles('ADMIN', 'MANAGER')
+  @HttpCode(HttpStatus.ACCEPTED)
+  @Throttle({ default: { limit: 10, ttl: 60000 } })
+  async enqueueBackupTree(
+    @Param('id', ParseUUIDPipe) id: string,
+    @CurrentUser() user?: JwtUser,
+    @Headers('idempotency-key') idempotencyKey?: string,
+  ) {
+    const data = await this.resticQueries.enqueueBackupTree(
+      id,
+      { userId: user!.id, role: user!.role },
+      idempotencyKey,
+    );
+    return { success: true, data };
+  }
+
   // Восстановление из произвольного restic-snapshotId (взятого прямо из репы).
   // Создаёт запись Backup и запускает стандартный restore.
   @Post('sites/:siteId/restic-snapshots/:snapshotId/restore')
+  @Roles('ADMIN', 'MANAGER')
+  @HttpCode(HttpStatus.ACCEPTED)
   @Throttle({ default: { limit: 3, ttl: 60000 } })
   async restoreFromResticSnapshot(
     @Param('siteId', ParseUUIDPipe) siteId: string,
@@ -220,16 +268,38 @@ export class BackupsController {
     return { success: true, data: { items } };
   }
 
+  @Post('sites/:siteId/restic-snapshots/:snapshotId/tree/query')
+  @Roles('ADMIN', 'MANAGER')
+  @HttpCode(HttpStatus.ACCEPTED)
+  @Throttle({ default: { limit: 10, ttl: 60000 } })
+  async enqueueSnapshotTree(
+    @Param('siteId', ParseUUIDPipe) siteId: string,
+    @Param('snapshotId') snapshotId: string,
+    @Body() body: ResticLocationQueryDto,
+    @CurrentUser() user?: JwtUser,
+    @Headers('idempotency-key') idempotencyKey?: string,
+  ) {
+    const data = await this.resticQueries.enqueueSnapshotTree(
+      { siteId, snapshotId, locationId: body.locationId },
+      { userId: user!.id, role: user!.role },
+      idempotencyKey,
+    );
+    return { success: true, data };
+  }
+
   // ===========================================================================
   // Restic check (integrity verification)
   // ===========================================================================
 
   @Post('sites/:siteId/restic-checks')
+  @Roles('ADMIN', 'MANAGER')
+  @HttpCode(HttpStatus.ACCEPTED)
   @Throttle({ default: { limit: 5, ttl: 60000 } })
   async runResticCheck(
     @Param('siteId', ParseUUIDPipe) siteId: string,
     @Body() body: RunResticCheckDto,
     @CurrentUser() user?: JwtUser,
+    @Headers('idempotency-key') _idempotencyKey?: string,
   ) {
     if (!body?.locationId) {
       return { success: false, error: 'locationId обязателен' };
@@ -303,36 +373,37 @@ export class BackupsController {
   }
 
   @Get('backups/:id/download')
-  @Header('Cache-Control', 'no-store')
-  async downloadBackup(
+  downloadBackup() {
+    throw new GoneException('Use POST /backups/:id/download-session');
+  }
+
+  @Post('backups/:id/download-session')
+  @Roles('ADMIN', 'MANAGER')
+  @Throttle({ default: { limit: 5, ttl: 60_000 } })
+  async createBackupDownloadSession(
     @Param('id', ParseUUIDPipe) id: string,
-    @Res({ passthrough: true }) res: Response,
     @CurrentUser() user?: JwtUser,
   ) {
-    const backup = await this.backupsService.getBackupForDownload(id, user!.id, user!.role);
-
-    if (!backup.filePath || !fs.existsSync(backup.filePath)) {
-      throw new NotFoundException('Файл бэкапа не найден на диске. Возможно, он хранится только в облаке.');
-    }
-
-    const stat = fs.statSync(backup.filePath);
-    const filename = path.basename(backup.filePath);
-
-    res.set({
-      'Content-Type': 'application/octet-stream',
-      'Content-Length': stat.size.toString(),
-      'Content-Disposition': attachmentDisposition(filename),
-    });
-
-    return new StreamableFile(fs.createReadStream(backup.filePath));
+    const data = await this.backupTransfers.issueDelivery(
+      id,
+      { userId: user!.id, role: user!.role },
+    );
+    return { success: true, data };
   }
 
   @Delete('backups/:id')
+  @Roles('ADMIN', 'MANAGER')
+  @HttpCode(HttpStatus.ACCEPTED)
   async deleteBackup(
     @Param('id', ParseUUIDPipe) id: string,
     @CurrentUser() user?: JwtUser,
+    @Headers('idempotency-key') idempotencyKey?: string,
   ) {
-    const result = await this.backupsService.deleteBackup(id, user!.id, user!.role);
+    const result = await this.backupDeletes.enqueue(
+      id,
+      { userId: user!.id, role: user!.role },
+      idempotencyKey,
+    );
     return { success: true, data: result };
   }
 
@@ -343,77 +414,81 @@ export class BackupsController {
   // Diff между двумя снапшотами (одна репа = одно хранилище для обоих).
   // Возвращает плоский список изменённых/добавленных/удалённых файлов.
   @Post('sites/:siteId/restic-diff/snapshots')
+  @Roles('ADMIN', 'MANAGER')
+  @HttpCode(HttpStatus.ACCEPTED)
   @Throttle({ default: { limit: 10, ttl: 60000 } })
   async diffResticSnapshots(
     @Param('siteId', ParseUUIDPipe) siteId: string,
     @Body() body: DiffResticSnapshotsDto,
     @CurrentUser() user?: JwtUser,
+    @Headers('idempotency-key') idempotencyKey?: string,
   ) {
-    const data = await this.backupsService.diffResticSnapshots({
+    const data = await this.resticQueries.enqueueDiffSnapshots({
       siteId,
       locationId: body.locationId,
       snapshotIdA: body.snapshotIdA,
       snapshotIdB: body.snapshotIdB,
-      userId: user!.id,
-      role: user!.role,
-    });
+    }, { userId: user!.id, role: user!.role }, idempotencyKey);
     return { success: true, data };
   }
 
   // Diff: снапшот vs текущие live-файлы (rootPath сайта).
   @Post('sites/:siteId/restic-diff/live')
+  @Roles('ADMIN', 'MANAGER')
+  @HttpCode(HttpStatus.ACCEPTED)
   @Throttle({ default: { limit: 10, ttl: 60000 } })
   async diffResticLive(
     @Param('siteId', ParseUUIDPipe) siteId: string,
     @Body() body: DiffResticLiveDto,
     @CurrentUser() user?: JwtUser,
+    @Headers('idempotency-key') idempotencyKey?: string,
   ) {
-    const data = await this.backupsService.diffResticSnapshotWithLive({
+    const data = await this.resticQueries.enqueueDiffLive({
       siteId,
       locationId: body.locationId,
       snapshotId: body.snapshotId,
-      userId: user!.id,
-      role: user!.role,
-    });
+    }, { userId: user!.id, role: user!.role }, idempotencyKey);
     return { success: true, data };
   }
 
   // Diff содержимого одного файла между двумя снапами (unified diff).
   @Post('sites/:siteId/restic-diff/file')
+  @Roles('ADMIN', 'MANAGER')
+  @HttpCode(HttpStatus.ACCEPTED)
   @Throttle({ default: { limit: 30, ttl: 60000 } })
   async diffResticFile(
     @Param('siteId', ParseUUIDPipe) siteId: string,
     @Body() body: DiffResticFileDto,
     @CurrentUser() user?: JwtUser,
+    @Headers('idempotency-key') idempotencyKey?: string,
   ) {
-    const data = await this.backupsService.diffResticFile({
+    const data = await this.resticQueries.enqueueDiffFile({
       siteId,
       locationId: body.locationId,
       snapshotIdA: body.snapshotIdA,
       snapshotIdB: body.snapshotIdB,
       filePath: body.filePath,
-      userId: user!.id,
-      role: user!.role,
-    });
+    }, { userId: user!.id, role: user!.role }, idempotencyKey);
     return { success: true, data };
   }
 
   // Diff содержимого одного файла: версия из снапа vs текущий live-файл.
   @Post('sites/:siteId/restic-diff/file-live')
+  @Roles('ADMIN', 'MANAGER')
+  @HttpCode(HttpStatus.ACCEPTED)
   @Throttle({ default: { limit: 30, ttl: 60000 } })
   async diffResticFileLive(
     @Param('siteId', ParseUUIDPipe) siteId: string,
     @Body() body: DiffResticFileLiveDto,
     @CurrentUser() user?: JwtUser,
+    @Headers('idempotency-key') idempotencyKey?: string,
   ) {
-    const data = await this.backupsService.diffResticFileWithLive({
+    const data = await this.resticQueries.enqueueDiffFileLive({
       siteId,
       locationId: body.locationId,
       snapshotId: body.snapshotId,
       filePath: body.filePath,
-      userId: user!.id,
-      role: user!.role,
-    });
+    }, { userId: user!.id, role: user!.role }, idempotencyKey);
     return { success: true, data };
   }
 }

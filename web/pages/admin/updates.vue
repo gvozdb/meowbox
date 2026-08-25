@@ -198,7 +198,7 @@ interface UpdateStatus {
   }>;
 }
 
-const api = useApi();
+const api = useMasterApi();
 const config = useRuntimeConfig();
 const githubRepo = computed(() => (config.public as { githubRepo?: string }).githubRepo || 'gvozdb/meowbox');
 

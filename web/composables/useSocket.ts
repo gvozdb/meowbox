@@ -1,4 +1,8 @@
 import { io, Socket } from 'socket.io-client';
+import type {
+  FederatedWsState,
+  FederatedWsStatePayload,
+} from '@meowbox/shared';
 
 interface SystemMetricsEnvelope {
   serverId: string;
@@ -41,26 +45,96 @@ interface SiteProvisionDonePayload {
 }
 
 let socket: Socket | null = null;
-/**
- * id slave-сервера, к которому привязан текущий socket. Если null — socket
- * соединён с локальным мастером. При смене активного сервера в сайдбаре мы
- * закрываем существующий socket и переоткрываем с новым auth.proxyServerId
- * (см. ensureSocketForCurrentServer).
- */
-let socketBoundServerId: string | null = null;
-const pendingListeners: Array<{ event: string; callback: Function }> = [];
+let socketBoundContextKey: string | null = null;
 
-/** Register a socket listener, queuing it if the socket isn't connected yet */
-function registerListener(event: string, callback: Function): () => void {
-  if (socket) {
-    socket.on(event, callback as never);
-  } else {
-    pendingListeners.push({ event, callback });
+interface SocketBinding {
+  contextKey: string;
+  eventServerId: string;
+  proxyServerId: string | null;
+}
+
+interface RegisteredListener {
+  event: string;
+  callback: Function;
+  attachedSocket: Socket | null;
+  wrapped: Function | null;
+}
+
+const registeredListeners = new Set<RegisteredListener>();
+
+function currentSocketBinding(): SocketBinding {
+  const serverStore = useServerStore();
+  if (serverStore.isLocal) {
+    return {
+      contextKey: `main:0:${serverStore.contextEpoch}`,
+      eventServerId: 'main',
+      proxyServerId: null,
+    };
   }
+  const context = serverStore.captureRemoteRequestContext();
+  if (!context) throw new Error('Selected target context is unavailable');
+  return {
+    contextKey: [
+      context.serverId,
+      context.transportServerId,
+      context.registryGeneration,
+      context.contextEpoch,
+    ].join(':'),
+    eventServerId: context.serverId,
+    proxyServerId: context.transportServerId,
+  };
+}
+
+function contextKeyIsCurrent(expected: string): boolean {
+  try {
+    return currentSocketBinding().contextKey === expected;
+  } catch {
+    return false;
+  }
+}
+
+function attachListener(entry: RegisteredListener, target: Socket, contextKey: string): void {
+  if (entry.attachedSocket === target) return;
+  if (entry.attachedSocket && entry.wrapped) {
+    entry.attachedSocket.off(entry.event, entry.wrapped as never);
+  }
+  const wrapped = (...args: unknown[]) => {
+    if (
+      socket !== target ||
+      socketBoundContextKey !== contextKey ||
+      !contextKeyIsCurrent(contextKey)
+    ) return;
+    entry.callback(...args);
+  };
+  entry.attachedSocket = target;
+  entry.wrapped = wrapped;
+  target.on(entry.event, wrapped as never);
+}
+
+function detachListeners(target: Socket): void {
+  for (const entry of registeredListeners) {
+    if (entry.attachedSocket !== target || !entry.wrapped) continue;
+    target.off(entry.event, entry.wrapped as never);
+    entry.attachedSocket = null;
+    entry.wrapped = null;
+  }
+}
+
+/** Listener registrations survive a context-safe socket rebind. */
+function registerListener(event: string, callback: Function): () => void {
+  const entry: RegisteredListener = {
+    event,
+    callback,
+    attachedSocket: null,
+    wrapped: null,
+  };
+  registeredListeners.add(entry);
+  if (socket && socketBoundContextKey) attachListener(entry, socket, socketBoundContextKey);
   return () => {
-    socket?.off(event, callback as never);
-    const idx = pendingListeners.findIndex(p => p.event === event && p.callback === callback);
-    if (idx >= 0) pendingListeners.splice(idx, 1);
+    if (entry.attachedSocket && entry.wrapped) {
+      entry.attachedSocket.off(entry.event, entry.wrapped as never);
+    }
+    registeredListeners.delete(entry);
   };
 }
 
@@ -68,42 +142,34 @@ export function useSocket() {
   const config = useRuntimeConfig();
   const metrics = useState<SystemMetricsEnvelope | null>('ws-metrics', () => null);
   const connected = useState<boolean>('ws-connected', () => false);
+  const federationState = useState<FederatedWsState>('ws-federation-state', () => 'CLOSED');
+  const federationReason = useState<string>('ws-federation-reason', () => 'NOT_CONNECTED');
+  const ready = computed(() => federationState.value === 'READY');
 
-  function isRemoteServer(): boolean {
-    try {
-      const serverStore = useServerStore();
-      return !serverStore.isLocal;
-    } catch {
-      return false;
-    }
-  }
-
-  function getActiveServerId(): string | null {
-    try {
-      const serverStore = useServerStore();
-      // isLocal === true означает, что выбран master ('main') — сокет идёт в локальный мастер.
-      if (serverStore.isLocal) return null;
-      return serverStore.currentServerId || null;
-    } catch {
-      return null;
-    }
+  function setFederationState(payload: FederatedWsStatePayload): void {
+    federationState.value = payload.state;
+    federationReason.value = payload.reasonCode;
   }
 
   function connect() {
-    const targetServerId = getActiveServerId();
+    const binding = currentSocketBinding();
 
-    // Если сокет уже подключён И привязан к нужному серверу — ничего не делаем.
-    if (socket?.connected && socketBoundServerId === targetServerId) return;
-
-    // Если сокет существует, но привязан к другому серверу — переоткрываем.
-    if (socket && socketBoundServerId !== targetServerId) {
-      try { socket.disconnect(); } catch { /* noop */ }
-      socket = null;
-      connected.value = false;
+    if (socket && socketBoundContextKey === binding.contextKey) {
+      if (!socket.connected) socket.connect();
+      return;
     }
+
+    disconnect();
 
     const token = localStorage.getItem('accessToken');
     if (!token) return;
+
+    setFederationState({
+      state: binding.proxyServerId ? 'TARGET_CONNECTING' : 'MASTER_CONNECTED',
+      reasonCode: binding.proxyServerId ? 'REMOTE_NOT_READY' : 'CONNECTING',
+      readyAt: null,
+      retryAfterMs: null,
+    });
 
     const apiBase = config.public.apiBase as string;
     // Extract base URL (protocol + host) from apiBase
@@ -114,52 +180,102 @@ export function useSocket() {
     // Это разблокирует terminal/logs-tail/AI/deploy-log/backup-progress/
     // site-provision/php-install/migrate-hostpanel на удалённых серверах.
     const auth: Record<string, string> = { token };
-    if (targetServerId) auth.proxyServerId = targetServerId;
+    if (binding.proxyServerId) auth.proxyServerId = binding.proxyServerId;
 
-    socket = io(url, {
+    const created = io(url, {
       auth,
       transports: ['websocket'],
       reconnection: true,
       reconnectionDelay: 5000,
     });
-    socketBoundServerId = targetServerId;
+    socket = created;
+    socketBoundContextKey = binding.contextKey;
 
-    // Replay listeners that were registered before the socket was created
-    for (const { event, callback } of pendingListeners) {
-      socket.on(event, callback as never);
+    for (const entry of registeredListeners) {
+      attachListener(entry, created, binding.contextKey);
     }
-    pendingListeners.length = 0;
 
-    socket.on('connect', () => {
+    created.on('connect', () => {
+      if (socket !== created || !contextKeyIsCurrent(binding.contextKey)) return;
       connected.value = true;
+      setFederationState({
+        state: binding.proxyServerId ? 'MASTER_CONNECTED' : 'READY',
+        reasonCode: binding.proxyServerId ? 'TARGET_CONNECTING' : 'READY',
+        readyAt: binding.proxyServerId ? null : new Date().toISOString(),
+        retryAfterMs: null,
+      });
     });
 
-    socket.on('disconnect', () => {
+    created.on('disconnect', () => {
+      if (socket !== created) return;
       connected.value = false;
+      setFederationState({
+        state: 'CLOSED',
+        reasonCode: 'MASTER_DISCONNECTED',
+        readyAt: null,
+        retryAfterMs: null,
+      });
+    });
+
+    created.on('federation:state', (payload: FederatedWsStatePayload) => {
+      if (
+        socket !== created ||
+        !contextKeyIsCurrent(binding.contextKey) ||
+        !binding.proxyServerId ||
+        !payload ||
+        !['MASTER_CONNECTED', 'TARGET_CONNECTING', 'READY', 'DEGRADED', 'CLOSED'].includes(payload.state)
+      ) return;
+      setFederationState(payload);
     });
 
     // Если мастер не смог достучаться до slave — закрываем сокет и кидаем
     // toast (proxy:error прилетает один раз в начале сессии).
-    socket.on('proxy:error', (payload: { code?: string; message?: string }) => {
+    created.on('proxy:error', (payload: { code?: string; message?: string }) => {
+      if (socket !== created || !contextKeyIsCurrent(binding.contextKey)) return;
+      setFederationState({
+        state: payload.code === 'REMOTE_WS_UPGRADE_REQUIRED' ? 'CLOSED' : 'DEGRADED',
+        reasonCode: payload.code || 'REMOTE_NOT_READY',
+        readyAt: null,
+        retryAfterMs: null,
+      });
       // eslint-disable-next-line no-console
       console.warn('[useSocket] proxy error:', payload);
     });
 
     // System metrics stream (every 10s) — на remote мастер ретранслирует метрики slave'а
     // (после WS-прокси), на local — приходят от агента мастера.
-    const eventServerId = targetServerId || 'main';
-    socket.on('system:metrics', (data: unknown) => {
-      metrics.value = { serverId: eventServerId, data };
+    created.on('system:metrics', (data: unknown) => {
+      if (socket !== created || !contextKeyIsCurrent(binding.contextKey)) return;
+      metrics.value = { serverId: binding.eventServerId, data };
     });
   }
 
   function disconnect() {
     if (socket) {
-      socket.disconnect();
+      const previous = socket;
+      detachListeners(previous);
+      previous.disconnect();
       socket = null;
-      socketBoundServerId = null;
+      socketBoundContextKey = null;
       connected.value = false;
+      federationState.value = 'CLOSED';
+      federationReason.value = 'DISCONNECTED';
     }
+  }
+
+  function contextSocket(): Socket | null {
+    if (
+      !socket ||
+      !socketBoundContextKey ||
+      !contextKeyIsCurrent(socketBoundContextKey)
+    ) {
+      return null;
+    }
+    return socket;
+  }
+
+  function activeSocket(): Socket | null {
+    return federationState.value === 'READY' ? contextSocket() : null;
   }
 
   function onSiteStatus(callback: (payload: SiteStatusPayload) => void) {
@@ -190,11 +306,17 @@ export function useSocket() {
 
   function terminalOpen(user?: string): Promise<{ sessionId: string }> {
     return new Promise((resolve, reject) => {
-      if (!socket?.connected) {
+      const target = activeSocket();
+      const expectedContext = socketBoundContextKey;
+      if (!target?.connected || !expectedContext) {
         reject(new Error('Socket not connected'));
         return;
       }
       const cb = (response: { sessionId?: string; error?: string }) => {
+        if (target !== activeSocket() || !contextKeyIsCurrent(expectedContext)) {
+          reject(new Error('Selected server changed before terminal opened'));
+          return;
+        }
         if (response.error) {
           reject(new Error(response.error));
         } else {
@@ -202,23 +324,23 @@ export function useSocket() {
         }
       };
       if (user) {
-        socket.emit('terminal:open', { user }, cb);
+        target.emit('terminal:open', { user }, cb);
       } else {
-        socket.emit('terminal:open', cb);
+        target.emit('terminal:open', cb);
       }
     });
   }
 
   function terminalInput(sessionId: string, data: string) {
-    socket?.emit('terminal:input', { sessionId, data });
+    activeSocket()?.emit('terminal:input', { sessionId, data });
   }
 
   function terminalResize(sessionId: string, cols: number, rows: number) {
-    socket?.emit('terminal:resize', { sessionId, cols, rows });
+    activeSocket()?.emit('terminal:resize', { sessionId, cols, rows });
   }
 
   function terminalClose(sessionId: string) {
-    socket?.emit('terminal:close', { sessionId });
+    activeSocket()?.emit('terminal:close', { sessionId });
   }
 
   function onTerminalData(callback: (payload: { sessionId: string; data: string }) => void) {
@@ -229,11 +351,17 @@ export function useSocket() {
 
   function logsTailStart(source: string, type: string): Promise<{ tailId: string }> {
     return new Promise((resolve, reject) => {
-      if (!socket?.connected) {
+      const target = activeSocket();
+      const expectedContext = socketBoundContextKey;
+      if (!target?.connected || !expectedContext) {
         reject(new Error('Socket not connected'));
         return;
       }
-      socket.emit('logs:tail:start', { source, type }, (response: { tailId?: string; error?: string }) => {
+      target.emit('logs:tail:start', { source, type }, (response: { tailId?: string; error?: string }) => {
+        if (target !== activeSocket() || !contextKeyIsCurrent(expectedContext)) {
+          reject(new Error('Selected server changed before log tail opened'));
+          return;
+        }
         if (response.error) {
           reject(new Error(response.error));
         } else {
@@ -244,7 +372,7 @@ export function useSocket() {
   }
 
   function logsTailStop(tailId: string) {
-    socket?.emit('logs:tail:stop', { tailId });
+    activeSocket()?.emit('logs:tail:stop', { tailId });
   }
 
   function onLogsTailData(callback: (payload: { tailId: string; line: string }) => void) {
@@ -254,15 +382,15 @@ export function useSocket() {
   // --- AI Chat ---
 
   function aiStart(prompt: string, options?: { cwd?: string; sessionId?: string }) {
-    socket?.emit('ai:start', { prompt, cwd: options?.cwd, sessionId: options?.sessionId });
+    activeSocket()?.emit('ai:start', { prompt, cwd: options?.cwd, sessionId: options?.sessionId });
   }
 
   function aiMessage(sessionId: string, message: string) {
-    socket?.emit('ai:message', { sessionId, message });
+    activeSocket()?.emit('ai:message', { sessionId, message });
   }
 
   function aiStop() {
-    socket?.emit('ai:stop');
+    activeSocket()?.emit('ai:stop');
   }
 
   function onAiEvent(eventType: string, callback: (payload: Record<string, unknown>) => void) {
@@ -274,6 +402,9 @@ export function useSocket() {
     disconnect,
     metrics,
     connected,
+    ready,
+    federationState,
+    federationReason,
     onSiteStatus,
     onDeployLog,
     onBackupProgress,
@@ -292,6 +423,6 @@ export function useSocket() {
     aiMessage,
     aiStop,
     onAiEvent,
-    getSocket: () => socket,
+    getSocket: contextSocket,
   };
 }

@@ -13,7 +13,7 @@
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round">
             <line x1="12" y1="5" x2="12" y2="19" /><line x1="5" y1="12" x2="19" y2="12" />
           </svg>
-          Добавить сервер
+          Добавить legacy
         </button>
         <button
           class="servers-page__btn servers-page__btn--provision"
@@ -23,7 +23,7 @@
             <rect x="2" y="2" width="20" height="8" rx="2" ry="2" /><rect x="2" y="14" width="20" height="8" rx="2" ry="2" />
             <line x1="6" y1="6" x2="6.01" y2="6" /><line x1="6" y1="18" x2="6.01" y2="18" />
           </svg>
-          Провизия
+          Подключить target
         </button>
         <button
           class="servers-page__btn servers-page__btn--refresh"
@@ -65,7 +65,7 @@
         <line x1="6" y1="6" x2="6.01" y2="6" /><line x1="6" y1="18" x2="6.01" y2="18" />
       </svg>
       <p class="servers-page__empty-text">Серверы не настроены</p>
-      <p class="servers-page__empty-hint">Добавьте сервер вручную или настройте через SSH</p>
+      <p class="servers-page__empty-hint">Подключите target через проверяемый SSH/TLS enrollment</p>
     </div>
 
     <!-- Server cards -->
@@ -90,22 +90,23 @@
           }"
         >
           <div class="server-card__header">
-            <label class="server-card__checkbox" :title="server.online ? 'Выбрать для массового обновления' : 'Сервер офлайн'">
+            <label class="server-card__checkbox" :title="fleetUpdateTitle(server)">
               <input
                 type="checkbox"
                 :checked="selectedIds.has(server.id)"
-                :disabled="!server.online"
+                :disabled="!canFleetUpdate(server)"
                 @change="toggleSelected(server.id)"
               />
               <span class="server-card__checkbox-mark" />
             </label>
-            <div class="server-card__status" :class="server.online ? 'server-card__status--online' : 'server-card__status--offline'" />
+            <div class="server-card__status" :class="canSelectServer(server) ? 'server-card__status--online' : 'server-card__status--offline'" />
             <span class="server-card__name">{{ server.name }}</span>
+            <span v-if="server.federation" class="server-card__update-badge">federation</span>
             <span v-if="server.hasUpdate" class="server-card__update-badge" :title="`Доступна ${server.latestVersion}`">
               <span class="server-card__update-dot" />
               update
             </span>
-            <div class="server-card__actions">
+            <div v-if="!server.federation" class="server-card__actions">
               <button class="server-card__action" title="Edit" @click="openEditModal(server)">
                 <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
                   <path d="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7" /><path d="M18.5 2.5a2.121 2.121 0 013 3L12 15l-4 1 1-4 9.5-9.5z" />
@@ -121,8 +122,8 @@
           <div class="server-card__details">
             <div class="server-card__row">
               <span class="server-card__label">Статус</span>
-              <span class="server-card__value" :class="server.online ? 'server-card__value--online' : 'server-card__value--offline'">
-                {{ server.online ? 'Онлайн' : 'Офлайн' }}
+              <span class="server-card__value" :class="canSelectServer(server) ? 'server-card__value--online' : 'server-card__value--offline'">
+                {{ serverStatusLabel(server) }}
               </span>
             </div>
             <div class="server-card__row">
@@ -134,6 +135,12 @@
               <span class="server-card__value server-card__value--mono">
                 {{ server.version }}
                 <span v-if="server.hasUpdate && server.latestVersion" class="server-card__version-arrow">→ {{ server.latestVersion }}</span>
+              </span>
+            </div>
+            <div v-if="server.federation" class="server-card__row">
+              <span class="server-card__label">Protocol</span>
+              <span class="server-card__value server-card__value--mono">
+                v{{ server.protocolVersion ?? '?' }} · {{ server.activationMode ?? 'UNKNOWN' }}
               </span>
             </div>
             <div v-if="!server.online && server.lastError" class="server-card__row">
@@ -165,9 +172,11 @@
           <button
             class="server-card__select"
             :class="{ 'server-card__select--active': server.id === serverStore.currentServerId }"
+            :disabled="!canSelectServer(server)"
+            :title="!canSelectServer(server) ? (server.reasonCode || 'Target недоступен для выбора') : ''"
             @click="selectServer(server.id)"
           >
-            {{ server.id === serverStore.currentServerId ? 'Выбран' : 'Выбрать' }}
+            {{ server.id === serverStore.currentServerId ? 'Выбран' : (canSelectServer(server) ? 'Выбрать' : 'Недоступен') }}
           </button>
         </div>
       </div>
@@ -177,21 +186,21 @@
     <div v-if="updateResults.length > 0" class="results-section">
       <div class="results-section__header">
         <h2 class="servers-page__section-title" style="margin-bottom: 0">Результаты обновления</h2>
-        <button class="results-section__clear" @click="updateResults = []">Очистить</button>
+        <button class="results-section__clear" @click="clearUpdateResults">Очистить</button>
       </div>
       <div class="results-list">
         <div
           v-for="result in updateResults"
           :key="result.id"
           class="result-item"
-          :class="result.success ? 'result-item--success' : 'result-item--fail'"
+          :class="result.status === 'FAILED' ? 'result-item--fail' : 'result-item--success'"
         >
           <div class="result-item__indicator" />
           <div class="result-item__info">
             <span class="result-item__name">{{ result.name }}</span>
             <span v-if="result.error" class="result-item__error">{{ result.error }}</span>
           </div>
-          <span class="result-item__status">{{ result.success ? 'Обновлён' : 'Ошибка' }}</span>
+          <span class="result-item__status">{{ updateStatusLabel(result) }}</span>
         </div>
       </div>
     </div>
@@ -292,7 +301,7 @@
         <div v-if="showProvisionModal" class="modal-overlay" @mousedown.self="!provisionLoading && closeProvisionModal()">
           <div class="modal modal--lg">
             <div class="modal__header">
-              <h3 class="modal__title">Провизия сервера</h3>
+              <h3 class="modal__title">Федеративное подключение</h3>
               <button v-if="!provisionLoading" class="modal__close" @click="closeProvisionModal">
                 <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
                   <line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" />
@@ -300,7 +309,10 @@
               </button>
             </div>
             <form v-if="!provisionStarted" class="modal__body" @submit.prevent="startProvision">
-              <p class="modal__desc">Подключение к серверу по SSH и автоматическая установка Meowbox.</p>
+              <p class="modal__desc">
+                Target должен уже поддерживать protocol 1 и иметь доступный HTTPS endpoint.
+                SSH host key, TLS SPKI и подписанный manifest проверяются до записи в registry.
+              </p>
               <div class="modal__field">
                 <label class="modal__label">Имя сервера</label>
                 <input
@@ -334,12 +346,46 @@
                 </div>
               </div>
               <div class="modal__field">
+                <label class="modal__label">SSH fingerprint</label>
+                <input
+                  v-model.trim="provisionForm.sshFingerprint"
+                  class="modal__input modal__input--mono"
+                  type="text"
+                  placeholder="SHA256:..."
+                  pattern="SHA256:[A-Za-z0-9+/]{43}"
+                  required
+                />
+                <span class="modal__hint">Сверьте fingerprint по независимому каналу.</span>
+              </div>
+              <div class="modal__field">
+                <label class="modal__label">Публичный HTTPS origin</label>
+                <input
+                  v-model.trim="provisionForm.origin"
+                  class="modal__input modal__input--mono"
+                  type="url"
+                  placeholder="https://target.example.com"
+                  required
+                />
+              </div>
+              <div class="modal__field">
+                <label class="modal__label">TLS SPKI pin</label>
+                <input
+                  v-model.trim="provisionForm.spkiSha256"
+                  class="modal__input modal__input--mono"
+                  type="text"
+                  placeholder="sha256/...="
+                  pattern="sha256/[A-Za-z0-9+/]{43}="
+                  required
+                />
+              </div>
+              <div class="modal__field">
                 <label class="modal__label">Root-пароль</label>
                 <input
                   v-model="provisionForm.password"
                   class="modal__input modal__input--mono"
                   type="password"
                   placeholder="SSH root-пароль"
+                  autocomplete="off"
                   required
                 />
               </div>
@@ -347,7 +393,7 @@
               <div class="modal__actions">
                 <button type="button" class="modal__btn modal__btn--cancel" @click="closeProvisionModal">Отмена</button>
                 <button type="submit" class="modal__btn modal__btn--submit">
-                  Начать провизию
+                  {{ provisionEnrollmentId ? 'Повторить enrollment' : 'Проверить и подключить' }}
                 </button>
               </div>
             </form>
@@ -356,14 +402,14 @@
                 <div class="provision-log__header">
                   <span v-if="provisionLoading" class="provision-log__status provision-log__status--running">
                     <span class="servers-page__spinner" />
-                    Установка...
+                    Проверка trust и manifest...
                   </span>
-                  <span v-else-if="provisionResult?.online" class="provision-log__status provision-log__status--done">
+                  <span v-else-if="provisionResult?.state === 'COMPLETED'" class="provision-log__status provision-log__status--done">
                     <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><polyline points="20 6 9 17 4 12" /></svg>
                     Готово
                   </span>
                   <span v-else class="provision-log__status provision-log__status--warn">
-                    Завершено (серверу может понадобиться время для запуска)
+                    Enrollment не завершён
                   </span>
                 </div>
                 <div ref="logContainer" class="provision-log__output">
@@ -471,6 +517,7 @@
 
 <script setup lang="ts">
 import type { PaletteId } from '~/composables/usePalette';
+import { compareReleaseSemver, isReleaseSemver } from '../../shared/src/semver';
 
 definePageMeta({ middleware: 'auth' });
 
@@ -485,12 +532,23 @@ interface ServerInfo {
   hasUpdate?: boolean;
   lastCheckedAt?: string;
   lastError?: string;
+  federation?: boolean;
+  protocolVersion?: number | null;
+  activationMode?: string;
+  capabilityState?: string;
+  reasonCode?: string;
+  fleetUpdateReady?: boolean;
+  fleetUpdateReason?: string | null;
 }
 
 interface UpdateResult {
   id: string;
   name: string;
   success: boolean;
+  federation: boolean;
+  trackingPath?: string;
+  expectedVersion?: string;
+  status?: 'ACCEPTED' | 'RUNNING' | 'VERIFYING' | 'SUCCEEDED' | 'FAILED';
   error?: string;
 }
 
@@ -500,29 +558,32 @@ interface ReleaseTag {
   prerelease: boolean;
 }
 
-function compareSemver(a: string, b: string): number {
-  const norm = (v: string) => v.replace(/^v/i, '').split(/[.-]/);
-  const aa = norm(a);
-  const bb = norm(b);
-  for (let i = 0; i < Math.max(aa.length, bb.length); i++) {
-    const ai = aa[i] ?? '0';
-    const bi = bb[i] ?? '0';
-    const an = Number(ai);
-    const bn = Number(bi);
-    if (!Number.isNaN(an) && !Number.isNaN(bn)) {
-      if (an !== bn) return an < bn ? -1 : 1;
-    } else {
-      if (ai !== bi) return ai < bi ? -1 : 1;
-    }
-  }
-  return 0;
-}
-
 function truncate(s: string, n: number): string {
   return s.length > n ? s.slice(0, n - 1) + '…' : s;
 }
 
-const api = useApi();
+function canSelectServer(server: ServerInfo): boolean {
+  return server.online && (!server.federation || server.activationMode !== 'DISABLED');
+}
+
+function serverStatusLabel(server: ServerInfo): string {
+  if (server.federation && server.activationMode === 'DISABLED') return 'Отключён';
+  if (!server.online) return server.reasonCode === 'STATUS_STALE' ? 'Статус устарел' : 'Офлайн';
+  return 'Онлайн';
+}
+
+function canFleetUpdate(server: ServerInfo): boolean {
+  return server.online && (!server.federation || server.fleetUpdateReady === true);
+}
+
+function fleetUpdateTitle(server: ServerInfo): string {
+  if (!server.online) return 'Сервер офлайн';
+  if (!server.federation) return 'Выбрать для массового обновления';
+  if (server.fleetUpdateReady) return 'Protocol 1: подписанное target-update доступно';
+  return server.fleetUpdateReason || 'Target не объявил безопасную update capability';
+}
+
+const api = useMasterApi();
 const serverStore = useServerStore();
 const {
   options: paletteOptions,
@@ -579,11 +640,28 @@ async function changeServerPalette(server: ServerInfo, palette: PaletteId) {
 }
 const updating = ref(false);
 const updateResults = ref<UpdateResult[]>([]);
+const updatePollControllers = new Map<string, AbortController>();
+
+function updateStatusLabel(result: UpdateResult): string {
+  if (result.status === 'RUNNING') return 'Обновляется';
+  if (result.status === 'VERIFYING') return 'Проверка manifest';
+  if (result.status === 'SUCCEEDED') return 'Проверен';
+  if (result.status === 'FAILED') return 'Ошибка';
+  return result.success ? 'Запущено' : 'Ошибка';
+}
+
+function clearUpdateResults() {
+  for (const controller of updatePollControllers.values()) controller.abort();
+  updatePollControllers.clear();
+  updateResults.value = [];
+}
 
 // ── Selection (для массового обновления) ──
 const selectedIds = ref<Set<string>>(new Set());
 
 function toggleSelected(id: string) {
+  const server = serverStore.servers.find((item) => item.id === id);
+  if (!server || !canFleetUpdate(server)) return;
   // Хитрость с Set: чтобы Vue реактивно перерисовывал — пересоздаём Set.
   const next = new Set(selectedIds.value);
   if (next.has(id)) next.delete(id);
@@ -602,14 +680,14 @@ const selectedServers = computed(() =>
 const maxCurrentVersion = computed(() => {
   const versions = selectedServers.value
     .map((s) => s.version)
-    .filter((v): v is string => !!v && v !== 'unknown');
+    .filter((v): v is string => !!v && isReleaseSemver(v));
   if (versions.length === 0) return null;
-  return versions.reduce((a, b) => (compareSemver(a, b) >= 0 ? a : b));
+  return versions.reduce((a, b) => (compareReleaseSemver(a, b) >= 0 ? a : b));
 });
 
 function isVersionAllowed(tag: string): boolean {
   if (!maxCurrentVersion.value) return true;
-  return compareSemver(tag, maxCurrentVersion.value) > 0;
+  return isReleaseSemver(tag) && compareReleaseSemver(tag, maxCurrentVersion.value) > 0;
 }
 
 // ── Bulk update modal ──
@@ -649,6 +727,68 @@ function closeBulkUpdateModal() {
   showBulkUpdateModal.value = false;
 }
 
+async function pollFederatedUpdate(result: UpdateResult) {
+  if (!result.trackingPath) return;
+  const controller = new AbortController();
+  updatePollControllers.get(result.id)?.abort();
+  updatePollControllers.set(result.id, controller);
+  const deadline = Date.now() + 30 * 60_000;
+  let lastError: string | null = null;
+  try {
+    while (!controller.signal.aborted && Date.now() < deadline) {
+      try {
+        const snapshot = await api.get<{
+          status?: {
+            current?: string;
+            state?: { status?: string; errorMessage?: string | null };
+          };
+          manifestVerified?: boolean;
+          manifestReason?: string | null;
+        }>(result.trackingPath, { signal: controller.signal });
+        const state = snapshot?.status?.state?.status;
+        const current = snapshot?.status?.current;
+        if (state === 'failed') {
+          result.status = 'FAILED';
+          result.success = false;
+          result.error = snapshot.status?.state?.errorMessage || 'Target update failed';
+          return;
+        }
+        if (
+          snapshot?.manifestVerified &&
+          current === result.expectedVersion &&
+          (state === 'succeeded' || state === 'idle')
+        ) {
+          result.status = 'SUCCEEDED';
+          result.success = true;
+          result.error = undefined;
+          await serverStore.loadServers();
+          return;
+        }
+        result.status = state === 'running' ? 'RUNNING' : 'VERIFYING';
+        result.error = snapshot?.manifestVerified
+          ? undefined
+          : snapshot?.manifestReason || 'Ожидается подписанный post-update manifest';
+        lastError = result.error || null;
+      } catch (error) {
+        if (controller.signal.aborted) return;
+        lastError = (error as Error).message || 'Target временно недоступен после restart';
+        result.status = 'VERIFYING';
+        result.error = lastError;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 5_000));
+    }
+    if (!controller.signal.aborted) {
+      result.status = 'FAILED';
+      result.success = false;
+      result.error = lastError || 'Post-update manifest не подтверждён за 30 минут';
+    }
+  } finally {
+    if (updatePollControllers.get(result.id) === controller) {
+      updatePollControllers.delete(result.id);
+    }
+  }
+}
+
 async function executeBulkUpdate() {
   if (!bulkTargetVersion.value) return;
   if (!isVersionAllowed(bulkTargetVersion.value)) {
@@ -657,17 +797,30 @@ async function executeBulkUpdate() {
   }
   updating.value = true;
   bulkUpdateError.value = '';
-  updateResults.value = [];
+  clearUpdateResults();
   try {
-    const data = await api.post<{ version: string; results: UpdateResult[] }>('/servers/update-bulk', {
-      serverIds: Array.from(selectedIds.value),
-      version: bulkTargetVersion.value,
-    });
-    updateResults.value = data?.results || [];
+    const expectedVersion = bulkTargetVersion.value;
+    const data = await api.post<{ version: string; results: UpdateResult[] }>(
+      '/servers/update-bulk',
+      {
+        serverIds: Array.from(selectedIds.value),
+        version: expectedVersion,
+      },
+      {
+        headers: { 'Idempotency-Key': operationIdempotencyKey('fleet-update') },
+      },
+    );
+    updateResults.value = (data?.results || []).map((result) => ({
+      ...result,
+      expectedVersion,
+      status: result.success ? 'ACCEPTED' : 'FAILED',
+    }));
     showStatus(`Обновление запущено на ${updateResults.value.filter((r) => r.success).length}/${updateResults.value.length} серверов`);
-    closeBulkUpdateModal();
+    showBulkUpdateModal.value = false;
     clearSelection();
-    // Подождём чуть и обновим статусы — slave запустит update.sh в фоне.
+    for (const result of updateResults.value) {
+      if (result.success && result.federation) void pollFederatedUpdate(result);
+    }
     setTimeout(() => serverStore.loadServers(), 5000);
   } catch (err: unknown) {
     bulkUpdateError.value = (err as Error).message || 'Ошибка массового обновления';
@@ -675,6 +828,8 @@ async function executeBulkUpdate() {
     updating.value = false;
   }
 }
+
+onBeforeUnmount(clearUpdateResults);
 
 // Status toast
 const mbToast = useMbToast();
@@ -775,12 +930,32 @@ async function executeDelete() {
 // ── Provision Modal ──
 
 const showProvisionModal = ref(false);
-const provisionForm = reactive({ name: '', host: '', port: 22, password: '' });
+interface FederationEnrollmentView {
+  id: string;
+  displayName: string;
+  state: string;
+  inProgress: boolean;
+  reasonCode: string | null;
+  attemptCount: number;
+  targetInstallationId: string | null;
+  remoteServerId: string | null;
+}
+
+const provisionForm = reactive({
+  name: '',
+  host: '',
+  port: 22,
+  password: '',
+  sshFingerprint: '',
+  origin: '',
+  spkiSha256: '',
+});
+const provisionEnrollmentId = ref<string | null>(null);
 const provisionStarted = ref(false);
 const provisionLoading = ref(false);
 const provisionLogs = ref<string[]>([]);
 const provisionError = ref('');
-const provisionResult = ref<{ online: boolean; version?: string } | null>(null);
+const provisionResult = ref<FederationEnrollmentView | null>(null);
 const logContainer = ref<HTMLElement | null>(null);
 
 function openProvisionModal() {
@@ -788,6 +963,10 @@ function openProvisionModal() {
   provisionForm.host = '';
   provisionForm.port = 22;
   provisionForm.password = '';
+  provisionForm.sshFingerprint = '';
+  provisionForm.origin = '';
+  provisionForm.spkiSha256 = '';
+  provisionEnrollmentId.value = null;
   provisionStarted.value = false;
   provisionLoading.value = false;
   provisionLogs.value = [];
@@ -805,18 +984,35 @@ async function startProvision() {
   provisionStarted.value = true;
   provisionLoading.value = true;
   provisionError.value = '';
-  provisionLogs.value = ['Подключение к серверу...'];
+  provisionLogs.value = ['Проверка enrollment-параметров...'];
 
   try {
-    const result = await serverStore.provisionServer({
-      name: provisionForm.name,
-      host: provisionForm.host,
-      port: provisionForm.port || 22,
-      password: provisionForm.password,
-    });
-
-    provisionResult.value = { online: result.online, version: result.version };
-    provisionLogs.value = result.logs;
+    if (!provisionEnrollmentId.value) {
+      const created = await serverStore.createFederationEnrollment({
+        displayName: provisionForm.name,
+        sshHost: provisionForm.host,
+        sshPort: provisionForm.port || 22,
+        sshFingerprint: provisionForm.sshFingerprint,
+        apiOrigin: provisionForm.origin,
+        wsOrigin: provisionForm.origin,
+        wsPath: '/socket.io',
+        browserPublicOrigin: provisionForm.origin,
+        directTransferOrigin: provisionForm.origin,
+        spkiSha256: provisionForm.spkiSha256,
+        maxRole: 'ADMIN',
+      });
+      provisionEnrollmentId.value = created.id;
+      provisionResult.value = created;
+      provisionLogs.value.push(`Attempt: ${created.id}`);
+      provisionLogs.value.push('SSH host key и target identity...');
+    }
+    const result = await serverStore.resumeFederationEnrollment(
+      provisionEnrollmentId.value,
+      provisionForm.password,
+    );
+    provisionResult.value = result;
+    provisionLogs.value.push('Pinned HTTPS и Ed25519 manifest: OK');
+    provisionLogs.value.push('Registry commit: target добавлен в disabled mode');
 
     // Scroll log to bottom
     await nextTick();
@@ -824,12 +1020,14 @@ async function startProvision() {
       logContainer.value.scrollTop = logContainer.value.scrollHeight;
     }
 
-    showStatus(result.online ? 'Сервер успешно настроен' : 'Провизия завершена');
+    showStatus('Target проверен и добавлен; активация пока выключена');
     await serverStore.loadServers();
   } catch (err: unknown) {
-    provisionError.value = (err as Error).message || 'Ошибка провизии';
+    provisionError.value = (err as Error).message || 'Ошибка enrollment';
     provisionLogs.value.push(`Error: ${provisionError.value}`);
+    provisionStarted.value = false;
   } finally {
+    provisionForm.password = '';
     provisionLoading.value = false;
   }
 }
@@ -848,9 +1046,13 @@ async function refresh() {
   }
 }
 
-function selectServer(id: string) {
-  serverStore.selectServer(id);
-  navigateTo('/');
+async function selectServer(id: string) {
+  try {
+    await serverStore.selectServer(id);
+    await navigateTo('/');
+  } catch (error) {
+    mbToast.error((error as Error).message || 'Не удалось переключить сервер');
+  }
 }
 
 onMounted(async () => {
@@ -1244,10 +1446,15 @@ watch(
   transition: all 0.15s;
 }
 
-.server-card__select:hover {
+.server-card__select:hover:not(:disabled) {
   background: var(--bg-elevated);
   border-color: var(--border);
   color: var(--text-secondary);
+}
+
+.server-card__select:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
 }
 
 .server-card__select--active {

@@ -1,7 +1,10 @@
 import {
   Controller, Get, Post, Patch, Delete, Body, Param, BadRequestException,
+  Headers, HttpCode, HttpStatus,
 } from '@nestjs/common';
+import { Throttle } from '@nestjs/throttler';
 import { Roles } from '../common/decorators/roles.decorator';
+import { CurrentUser } from '../common/decorators/current-user.decorator';
 import { CountryBlockService } from './country-block.service';
 import {
   CreateCountryBlockDto, UpdateCountryBlockDto, UpdateCountryBlockSettingsDto, RefreshDbDto,
@@ -52,18 +55,35 @@ export class CountryBlockController {
 
   // ── Sync / Refresh / Status ─────────────────────────────────────────────
   @Post('sync')
-  async sync() {
-    const data = await this.service.sync();
-    return { success: data.success, data };
+  @HttpCode(HttpStatus.ACCEPTED)
+  @Throttle({ default: { limit: 5, ttl: 60_000 } })
+  async sync(
+    @CurrentUser('sub') userId: string,
+    @CurrentUser('role') role: string,
+    @Headers('idempotency-key') idempotencyKey?: string,
+  ) {
+    const data = await this.service.enqueueSync({ userId, role }, idempotencyKey);
+    return { success: true, data };
   }
 
   @Post('refresh-db')
-  async refreshDb(@Body() body: RefreshDbDto) {
+  @HttpCode(HttpStatus.ACCEPTED)
+  @Throttle({ default: { limit: 2, ttl: 60_000 } })
+  async refreshDb(
+    @Body() body: RefreshDbDto,
+    @CurrentUser('sub') userId: string,
+    @CurrentUser('role') role: string,
+    @Headers('idempotency-key') idempotencyKey?: string,
+  ) {
     if (body.countries && !Array.isArray(body.countries)) {
       throw new BadRequestException('countries должен быть массивом ISO-кодов');
     }
-    const data = await this.service.refreshDb(body.countries);
-    return { success: data.success, data };
+    const data = await this.service.enqueueRefreshDb(
+      body.countries,
+      { userId, role },
+      idempotencyKey,
+    );
+    return { success: true, data };
   }
 
   @Get('status')

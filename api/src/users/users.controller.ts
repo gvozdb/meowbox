@@ -12,6 +12,7 @@ import { Throttle } from '@nestjs/throttler';
 import { UsersService } from './users.service';
 import { CreateUserDto, UpdateUserDto } from './users.dto';
 import { Roles } from '../common/decorators/roles.decorator';
+import { CurrentUser } from '../common/decorators/current-user.decorator';
 
 @Controller('users')
 @Roles('ADMIN')
@@ -47,8 +48,11 @@ export class UsersController {
 
   @Delete(':id')
   @Throttle({ default: { limit: 5, ttl: 60_000 } })
-  async delete(@Param('id', ParseUUIDPipe) id: string) {
-    await this.usersService.delete(id);
+  async delete(
+    @Param('id', ParseUUIDPipe) id: string,
+    @CurrentUser('sub') actorId: string,
+  ) {
+    await this.usersService.delete(id, actorId);
     return { success: true, data: null };
   }
 }

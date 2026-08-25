@@ -3,6 +3,9 @@ import {
   Get,
   Post,
   Body,
+  Headers,
+  HttpCode,
+  HttpStatus,
   Param,
   ParseUUIDPipe,
 } from '@nestjs/common';
@@ -35,6 +38,7 @@ export class SslOverviewController {
  * собственный сертификат (`SslCertificate.domainId`).
  */
 @Controller('sites/:siteId/domains/:domainId/ssl')
+@Roles('ADMIN', 'MANAGER')
 export class SslController {
   constructor(private readonly sslService: SslService) {}
 
@@ -49,29 +53,43 @@ export class SslController {
   }
 
   @Post('issue')
+  @HttpCode(HttpStatus.ACCEPTED)
   @Throttle({ default: { limit: 3, ttl: 60000 } })
   async issueCertificate(
     @Param('siteId', ParseUUIDPipe) siteId: string,
     @Param('domainId', ParseUUIDPipe) domainId: string,
     @CurrentUser() user?: JwtUser,
+    @Headers('idempotency-key') idempotencyKey?: string,
   ) {
-    const params = await this.sslService.requestIssuance(siteId, domainId, user!.id, user!.role);
+    const data = await this.sslService.enqueueIssuance(
+      siteId,
+      domainId,
+      { userId: user!.id, role: user!.role },
+      idempotencyKey,
+    );
     return {
       success: true,
-      data: params,
-      message: 'SSL certificate issued successfully',
+      data,
+      message: 'SSL certificate issuance queued',
     };
   }
 
   @Post('revoke')
+  @HttpCode(HttpStatus.ACCEPTED)
   @Throttle({ default: { limit: 3, ttl: 60000 } })
   async revokeCertificate(
     @Param('siteId', ParseUUIDPipe) siteId: string,
     @Param('domainId', ParseUUIDPipe) domainId: string,
     @CurrentUser() user?: JwtUser,
+    @Headers('idempotency-key') idempotencyKey?: string,
   ) {
-    const result = await this.sslService.revokeCertificate(siteId, domainId, user!.id, user!.role);
-    return { success: true, data: result };
+    const data = await this.sslService.enqueueRevoke(
+      siteId,
+      domainId,
+      { userId: user!.id, role: user!.role },
+      idempotencyKey,
+    );
+    return { success: true, data };
   }
 
   @Post('import')

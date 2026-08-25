@@ -7,6 +7,8 @@ import {
   Post,
   Put,
   ParseUUIDPipe,
+  HttpCode,
+  HttpStatus,
 } from '@nestjs/common';
 
 import { CurrentUser } from '../common/decorators/current-user.decorator';
@@ -14,6 +16,7 @@ import { Roles } from '../common/decorators/roles.decorator';
 import { UserRole } from '../common/enums';
 
 import { SitesNginxService, type NginxSettingsResponse } from './sites-nginx.service';
+import { SitesNginxOperationsService } from './sites-nginx-operations.service';
 import { UpdateSiteNginxSettingsDto, UpdateSiteNginxCustomDto } from './sites.dto';
 
 interface AuthCtx {
@@ -23,7 +26,10 @@ interface AuthCtx {
 
 @Controller('sites')
 export class SitesNginxController {
-  constructor(private readonly service: SitesNginxService) {}
+  constructor(
+    private readonly service: SitesNginxService,
+    private readonly operations: SitesNginxOperationsService,
+  ) {}
 
   /**
    * POST /sites/nginx/rebuild-all — массовая регенерация конфигов всех
@@ -31,8 +37,15 @@ export class SitesNginxController {
    */
   @Post('nginx/rebuild-all')
   @Roles(UserRole.ADMIN)
-  async rebuildAll(@CurrentUser() user: AuthCtx) {
-    const data = await this.service.regenerateAll(user.role);
+  @HttpCode(HttpStatus.ACCEPTED)
+  async rebuildAll(
+    @CurrentUser() user: AuthCtx,
+    @Headers('idempotency-key') idempotencyKey?: string,
+  ) {
+    const data = await this.operations.enqueue(
+      { userId: user.id, role: user.role },
+      idempotencyKey,
+    );
     return { success: true, data };
   }
 
@@ -56,6 +69,7 @@ export class SitesNginxController {
 
   @Put(':id/domains/:domainId/nginx/settings')
   @Roles(UserRole.ADMIN, UserRole.MANAGER)
+  @HttpCode(HttpStatus.ACCEPTED)
   async updateSettings(
     @Param('id', new ParseUUIDPipe()) id: string,
     @Param('domainId', new ParseUUIDPipe()) domainId: string,
@@ -89,6 +103,7 @@ export class SitesNginxController {
 
   @Put(':id/domains/:domainId/nginx/custom')
   @Roles(UserRole.ADMIN, UserRole.MANAGER)
+  @HttpCode(HttpStatus.ACCEPTED)
   async updateCustom(
     @Param('id', new ParseUUIDPipe()) id: string,
     @Param('domainId', new ParseUUIDPipe()) domainId: string,

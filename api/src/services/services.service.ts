@@ -4,12 +4,25 @@ import {
   Injectable,
   Logger,
   NotFoundException,
+  OnModuleDestroy,
   OnModuleInit,
 } from '@nestjs/common';
+import {
+  SERVICE_OPERATION_ACTIONS,
+  resolveServiceAgentCall,
+  serviceAgentActionForOperation,
+  type ServiceOperationAction,
+} from '@meowbox/shared';
 import * as path from 'path';
 import { PrismaService } from '../common/prisma.service';
 import { AgentRelayService } from '../gateway/agent-relay.service';
-import { encryptToken } from '../common/crypto/adminer-cipher';
+import { OperationAdmissionService } from '../operations/operation-admission.service';
+import {
+  OperationsWorkerService,
+  type OperationExecutionContext,
+} from '../operations/operations-worker.service';
+import { OperationNeedsAttentionError } from '../operations/operation-errors';
+import { AdminerHandoffService } from '../adminer/adminer-handoff.service';
 import { SERVICE_CATALOG, findServiceEntry, getServiceScope } from './service.registry';
 import { ServiceHandler } from './service.handler';
 import { ManticoreServiceHandler } from './handlers/manticore.handler';
@@ -37,14 +50,63 @@ export interface CatalogItemForSite extends SiteServiceState {
   serverInstalled: boolean;
 }
 
+const SERVICE_REQUEST_UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+function safeServiceError(error: unknown): string {
+  const message = error instanceof Error ? error.message : 'Service operation failed';
+  return message
+    .replace(/(password|secret|token|authorization|cookie)\s*[=:]\s*[^\s,;]+/gi, '$1=[REDACTED]')
+    .slice(0, 4096);
+}
+
+function validateServiceOperationRequest(
+  actionId: string,
+  request: unknown,
+): { key: string; siteId?: string; config?: Record<string, unknown> } {
+  if (!request || typeof request !== 'object' || Array.isArray(request)) {
+    throw new BadRequestException('Service operation request is invalid');
+  }
+  const value = request as Record<string, unknown>;
+  const serverAction = actionId.startsWith('services.server.');
+  const needsConfig =
+    actionId === SERVICE_OPERATION_ACTIONS.SITE_ENABLE ||
+    actionId === SERVICE_OPERATION_ACTIONS.SITE_RECONFIGURE;
+  const expected = serverAction
+    ? ['key']
+    : ['key', 'siteId', ...(needsConfig ? ['config'] : [])];
+  if (
+    Object.keys(value).sort().join(',') !== expected.sort().join(',') ||
+    typeof value.key !== 'string' ||
+    value.key.length > 32 ||
+    !/^[a-z][a-z0-9_-]*$/.test(value.key) ||
+    (!serverAction && (
+      typeof value.siteId !== 'string' ||
+      !SERVICE_REQUEST_UUID.test(value.siteId)
+    )) ||
+    (needsConfig && (
+      !value.config ||
+      typeof value.config !== 'object' ||
+      Array.isArray(value.config)
+    ))
+  ) {
+    throw new BadRequestException('Service operation request is invalid');
+  }
+  return value as { key: string; siteId?: string; config?: Record<string, unknown> };
+}
+
 @Injectable()
-export class ServicesService implements OnModuleInit {
+export class ServicesService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger('ServicesService');
   private readonly handlers = new Map<string, ServiceHandler>();
+  private unregisterOperationHandlers: Array<() => void> = [];
+  private syncTimer: NodeJS.Timeout | null = null;
 
   constructor(
     private readonly prisma: PrismaService,
     private readonly agent: AgentRelayService,
+    private readonly admission: OperationAdmissionService,
+    private readonly worker: OperationsWorkerService,
+    private readonly adminerHandoffs: AdminerHandoffService,
   ) {
     this.registerHandler(new ManticoreServiceHandler(agent));
     this.registerHandler(new RedisServiceHandler(agent));
@@ -66,14 +128,28 @@ export class ServicesService implements OnModuleInit {
    * Делаем с задержкой 6 сек, чтобы агент успел подключиться по WS
    * (см. SitesService.onModuleInit — там 5 сек задержка).
    */
-  async onModuleInit(): Promise<void> {
-    setTimeout(() => {
+  onModuleInit(): void {
+    for (const actionId of Object.values(SERVICE_OPERATION_ACTIONS)) {
+      this.unregisterOperationHandlers.push(this.worker.registerHandler(
+        actionId,
+        (request, context) => this.executeServiceOperation(actionId, request, context),
+      ));
+    }
+    this.syncTimer = setTimeout(() => {
+      this.syncTimer = null;
       this.syncAllServerServices().catch((err) => {
         this.logger.warn(
           `Initial server-service sync skipped: ${(err as Error).message}`,
         );
       });
     }, 6000);
+    this.syncTimer.unref();
+  }
+
+  onModuleDestroy(): void {
+    if (this.syncTimer) clearTimeout(this.syncTimer);
+    this.syncTimer = null;
+    for (const unregister of this.unregisterOperationHandlers.splice(0)) unregister();
   }
 
   /** Best-effort: пробежать по каталогу и upsert'нуть ServerService по реальному статусу. */
@@ -286,33 +362,66 @@ export class ServicesService implements OnModuleInit {
     return this.prisma.siteService.count({ where: { serviceKey: catalog.key } });
   }
 
-  async installServerService(key: string): Promise<CatalogItemForServer> {
+  async enqueueInstallServerService(
+    key: string,
+    actor: { userId: string; role: string },
+    idempotencyKey?: string,
+  ) {
     const catalog = findServiceEntry(key);
     if (!catalog) throw new NotFoundException(`Unknown service "${key}"`);
-    const handler = this.getHandler(key);
-
-    try {
-      const r = await handler.installOnServer();
-      await this.upsertServerRecord(key, {
-        installed: true,
-        version: r.version,
-        lastError: null,
-        installedAt: new Date(),
-      });
-      this.logger.log(`Service ${key} installed on server (${r.version})`);
-    } catch (err) {
-      const msg = (err as Error).message;
-      this.logger.error(`Service ${key} install failed: ${msg}`);
-      await this.upsertServerRecord(key, { lastError: msg });
-      // Прокидываем читаемую ошибку клиенту (иначе GlobalExceptionFilter
-      // схватит обычный Error и отдаст «An unexpected error occurred»).
-      throw new BadRequestException(`Установка «${catalog.name}» провалилась: ${msg}`);
-    }
-
-    return this.getServerService(key);
+    this.getHandler(key);
+    return this.admission.admit({
+      actionId: SERVICE_OPERATION_ACTIONS.SERVER_INSTALL,
+      type: 'SERVICE_SERVER_INSTALL',
+      idempotencyKey,
+      actor,
+      request: { key },
+      deadlineMs: 60 * 60_000,
+      recoveryPolicy: 'RECONCILE_ONLY',
+      retryable: false,
+      globalLockKey: `service:${key}`,
+    });
   }
 
-  async uninstallServerService(key: string): Promise<void> {
+  async enqueueUninstallServerService(
+    key: string,
+    actor: { userId: string; role: string },
+    idempotencyKey?: string,
+  ) {
+    await this.assertServerUninstallAllowed(key);
+    return this.admission.admit({
+      actionId: SERVICE_OPERATION_ACTIONS.SERVER_UNINSTALL,
+      type: 'SERVICE_SERVER_UNINSTALL',
+      idempotencyKey,
+      actor,
+      request: { key },
+      deadlineMs: 60 * 60_000,
+      recoveryPolicy: 'RECONCILE_ONLY',
+      retryable: false,
+      globalLockKey: `service:${key}`,
+    });
+  }
+
+  async enqueueRestartServerService(
+    key: string,
+    actor: { userId: string; role: string },
+    idempotencyKey?: string,
+  ) {
+    this.assertConfigEditableService(key);
+    return this.admission.admit({
+      actionId: SERVICE_OPERATION_ACTIONS.SERVER_RESTART,
+      type: 'SERVICE_SERVER_RESTART',
+      idempotencyKey,
+      actor,
+      request: { key },
+      deadlineMs: 15 * 60_000,
+      recoveryPolicy: 'RECONCILE_ONLY',
+      retryable: false,
+      globalLockKey: `service:${key}`,
+    });
+  }
+
+  private async assertServerUninstallAllowed(key: string): Promise<void> {
     const catalog = findServiceEntry(key);
     if (!catalog) throw new NotFoundException(`Unknown service "${key}"`);
 
@@ -345,19 +454,7 @@ export class ServicesService implements OnModuleInit {
       }
     }
 
-    const handler = this.getHandler(key);
-    try {
-      await handler.uninstallFromServer();
-    } catch (err) {
-      const msg = (err as Error).message;
-      this.logger.error(`Service ${key} uninstall failed: ${msg}`);
-      await this.upsertServerRecord(key, { lastError: msg });
-      throw new BadRequestException(`Удаление «${catalog.name}» провалилось: ${msg}`);
-    }
-    await this.prisma.serverService.update({
-      where: { serviceKey: key },
-      data: { installed: false, version: null, installedAt: null, lastError: null },
-    });
+    this.getHandler(key);
   }
 
   // =====================================================================
@@ -408,17 +505,6 @@ export class ServicesService implements OnModuleInit {
       30_000,
     );
     if (!r.success) throw new BadRequestException(r.error || 'write-server-config failed');
-    return r.data!;
-  }
-
-  async restartServerService(key: string): Promise<{ unit: string; ok: boolean; output: string }> {
-    this.assertConfigEditableService(key);
-    const r = await this.agent.emitToAgent<{ unit: string; ok: boolean; output: string }>(
-      'services:restart-server',
-      { serviceKey: key },
-      90_000,
-    );
-    if (!r.success) throw new BadRequestException(r.error || 'restart-server failed');
     return r.data!;
   }
 
@@ -725,8 +811,140 @@ export class ServicesService implements OnModuleInit {
     };
   }
 
-  async enableSiteService(siteId: string, key: string, config: Record<string, unknown> = {}) {
-    const site = await this.requireSite(siteId);
+  async enqueueEnableSiteService(
+    siteId: string,
+    key: string,
+    config: Record<string, unknown>,
+    actor: { userId: string; role: string },
+    idempotencyKey?: string,
+  ) {
+    await this.assertSiteServiceAction(SERVICE_OPERATION_ACTIONS.SITE_ENABLE, siteId, key);
+    await this.assertSiteAgentPayload(
+      SERVICE_OPERATION_ACTIONS.SITE_ENABLE,
+      siteId,
+      key,
+      config || {},
+    );
+    return this.admitSiteServiceOperation(
+      SERVICE_OPERATION_ACTIONS.SITE_ENABLE,
+      'SERVICE_SITE_ENABLE',
+      siteId,
+      key,
+      config || {},
+      actor,
+      idempotencyKey,
+    );
+  }
+
+  async enqueueDisableSiteService(
+    siteId: string,
+    key: string,
+    actor: { userId: string; role: string },
+    idempotencyKey?: string,
+  ) {
+    await this.assertSiteServiceAction(SERVICE_OPERATION_ACTIONS.SITE_DISABLE, siteId, key);
+    return this.admitSiteServiceOperation(
+      SERVICE_OPERATION_ACTIONS.SITE_DISABLE,
+      'SERVICE_SITE_DISABLE',
+      siteId,
+      key,
+      undefined,
+      actor,
+      idempotencyKey,
+    );
+  }
+
+  async enqueueStartSiteService(
+    siteId: string,
+    key: string,
+    actor: { userId: string; role: string },
+    idempotencyKey?: string,
+  ) {
+    await this.assertSiteServiceAction(SERVICE_OPERATION_ACTIONS.SITE_START, siteId, key);
+    return this.admitSiteServiceOperation(
+      SERVICE_OPERATION_ACTIONS.SITE_START,
+      'SERVICE_SITE_START',
+      siteId,
+      key,
+      undefined,
+      actor,
+      idempotencyKey,
+    );
+  }
+
+  async enqueueStopSiteService(
+    siteId: string,
+    key: string,
+    actor: { userId: string; role: string },
+    idempotencyKey?: string,
+  ) {
+    await this.assertSiteServiceAction(SERVICE_OPERATION_ACTIONS.SITE_STOP, siteId, key);
+    return this.admitSiteServiceOperation(
+      SERVICE_OPERATION_ACTIONS.SITE_STOP,
+      'SERVICE_SITE_STOP',
+      siteId,
+      key,
+      undefined,
+      actor,
+      idempotencyKey,
+    );
+  }
+
+  async enqueueReconfigureSiteService(
+    siteId: string,
+    key: string,
+    config: Record<string, unknown>,
+    actor: { userId: string; role: string },
+    idempotencyKey?: string,
+  ) {
+    await this.assertSiteServiceAction(SERVICE_OPERATION_ACTIONS.SITE_RECONFIGURE, siteId, key);
+    await this.assertSiteAgentPayload(
+      SERVICE_OPERATION_ACTIONS.SITE_RECONFIGURE,
+      siteId,
+      key,
+      config || {},
+    );
+    return this.admitSiteServiceOperation(
+      SERVICE_OPERATION_ACTIONS.SITE_RECONFIGURE,
+      'SERVICE_SITE_RECONFIGURE',
+      siteId,
+      key,
+      config || {},
+      actor,
+      idempotencyKey,
+    );
+  }
+
+  private admitSiteServiceOperation(
+    actionId: ServiceOperationAction,
+    type: string,
+    siteId: string,
+    key: string,
+    config: Record<string, unknown> | undefined,
+    actor: { userId: string; role: string },
+    idempotencyKey?: string,
+  ) {
+    const request = config === undefined ? { siteId, key } : { siteId, key, config };
+    return this.admission.admit({
+      actionId,
+      type,
+      idempotencyKey,
+      actor,
+      request,
+      deadlineMs: 15 * 60_000,
+      recoveryPolicy: 'RECONCILE_ONLY',
+      retryable: false,
+      siteId,
+      lockSite: true,
+    });
+  }
+
+  private async assertSiteServiceAction(
+    actionId: ServiceOperationAction,
+    siteId: string,
+    key: string,
+  ): Promise<void> {
+    await this.requireSite(siteId);
     const catalog = findServiceEntry(key);
     if (!catalog) throw new NotFoundException(`Unknown service "${key}"`);
 
@@ -736,145 +954,360 @@ export class ServicesService implements OnModuleInit {
       );
     }
 
-    const server = await this.prisma.serverService.findUnique({ where: { serviceKey: key } });
-    if (!server || !server.installed) {
-      throw new ConflictException(
-        `Сервис "${catalog.name}" не установлен на сервере. Установи его сначала на странице Сервисы.`,
-      );
-    }
-
-    const exists = await this.prisma.siteService.findUnique({
+    const record = await this.prisma.siteService.findUnique({
       where: { siteId_serviceKey: { siteId, serviceKey: key } },
     });
-    if (exists) {
-      throw new ConflictException(`Сервис "${catalog.name}" уже активирован для этого сайта`);
+    if (actionId === SERVICE_OPERATION_ACTIONS.SITE_ENABLE) {
+      const server = await this.prisma.serverService.findUnique({ where: { serviceKey: key } });
+      if (!server || !server.installed) {
+        throw new ConflictException(
+          `Сервис "${catalog.name}" не установлен на сервере. Установи его сначала на странице Сервисы.`,
+        );
+      }
+      if (record) {
+        throw new ConflictException(`Сервис "${catalog.name}" уже активирован для этого сайта`);
+      }
+      return;
     }
+    if (!record && actionId !== SERVICE_OPERATION_ACTIONS.SITE_DISABLE) {
+      throw new NotFoundException(`Сервис "${key}" не активирован для сайта`);
+    }
+    if (
+      (actionId === SERVICE_OPERATION_ACTIONS.SITE_START ||
+        actionId === SERVICE_OPERATION_ACTIONS.SITE_STOP ||
+        actionId === SERVICE_OPERATION_ACTIONS.SITE_RECONFIGURE) &&
+      catalog.siteLifecycle === false
+    ) {
+      throw new ConflictException(`«${catalog.name}» — общий сервис; его нельзя запускать с одного сайта`);
+    }
+    this.getHandler(key);
+  }
 
+  private async assertSiteAgentPayload(
+    actionId: ServiceOperationAction,
+    siteId: string,
+    key: string,
+    config: Record<string, unknown>,
+  ): Promise<void> {
+    const targetSite = await this.requireSite(siteId);
+    resolveServiceAgentCall(serviceAgentActionForOperation(actionId), {
+      serviceKey: key,
+      site: this.toCtx(targetSite),
+      config,
+    });
+  }
+
+  /** Existing migration orchestration compatibility; browser routes never call this path. */
+  async enableSiteService(
+    siteId: string,
+    key: string,
+    config: Record<string, unknown> = {},
+  ): Promise<void> {
+    await this.assertSiteServiceAction(SERVICE_OPERATION_ACTIONS.SITE_ENABLE, siteId, key);
+    const targetSite = await this.requireSite(siteId);
     const handler = this.getHandler(key);
-    const ctx = this.toCtx(site);
-
-    // Создаём запись со статусом STARTING
-    const rec = await this.prisma.siteService.create({
+    const record = await this.prisma.siteService.create({
       data: {
         siteId,
         serviceKey: key,
         status: 'STARTING',
-        config: JSON.stringify(config || {}),
+        config: JSON.stringify(config),
       },
     });
-
     try {
-      await handler.enableForSite(ctx, config || {});
+      await handler.enableForSite(this.toCtx(targetSite), config);
       await this.prisma.siteService.update({
-        where: { id: rec.id },
+        where: { id: record.id },
         data: { status: 'RUNNING', lastError: null },
       });
-    } catch (err) {
-      const msg = (err as Error).message;
-      this.logger.error(`Service ${key} enable for site ${site.name} failed: ${msg}`);
+    } catch (error) {
+      const message = safeServiceError(error);
       await this.prisma.siteService.update({
-        where: { id: rec.id },
-        data: { status: 'ERROR', lastError: msg },
+        where: { id: record.id },
+        data: { status: 'ERROR', lastError: message },
       });
-      throw new BadRequestException(`Активация «${catalog.name}» провалилась: ${msg}`);
+      throw error;
     }
-
-    return this.getSiteService(siteId, key);
   }
 
-  async disableSiteService(siteId: string, key: string): Promise<void> {
-    const site = await this.requireSite(siteId);
-    const rec = await this.prisma.siteService.findUnique({
+  /** Existing migration orchestration compatibility; browser routes never call this path. */
+  async startSiteService(siteId: string, key: string): Promise<void> {
+    await this.runLegacySiteLifecycle(siteId, key, 'start');
+  }
+
+  /** Existing migration orchestration compatibility; browser routes never call this path. */
+  async stopSiteService(siteId: string, key: string): Promise<void> {
+    await this.runLegacySiteLifecycle(siteId, key, 'stop');
+  }
+
+  /** Existing migration orchestration compatibility; browser routes never call this path. */
+  async reconfigureSiteService(
+    siteId: string,
+    key: string,
+    config: Record<string, unknown>,
+  ): Promise<void> {
+    await this.assertSiteServiceAction(SERVICE_OPERATION_ACTIONS.SITE_RECONFIGURE, siteId, key);
+    const targetSite = await this.requireSite(siteId);
+    const record = await this.requireRecord(siteId, key);
+    try {
+      await this.getHandler(key).reconfigureForSite(this.toCtx(targetSite), config);
+      await this.prisma.siteService.update({
+        where: { id: record.id },
+        data: { config: JSON.stringify(config), lastError: null },
+      });
+    } catch (error) {
+      await this.prisma.siteService.update({
+        where: { id: record.id },
+        data: { lastError: safeServiceError(error) },
+      });
+      throw error;
+    }
+  }
+
+  private async runLegacySiteLifecycle(
+    siteId: string,
+    key: string,
+    action: 'start' | 'stop',
+  ): Promise<void> {
+    const operationAction = action === 'start'
+      ? SERVICE_OPERATION_ACTIONS.SITE_START
+      : SERVICE_OPERATION_ACTIONS.SITE_STOP;
+    await this.assertSiteServiceAction(operationAction, siteId, key);
+    const targetSite = await this.requireSite(siteId);
+    const record = await this.requireRecord(siteId, key);
+    try {
+      const handler = this.getHandler(key);
+      if (action === 'start') await handler.startForSite(this.toCtx(targetSite));
+      else await handler.stopForSite(this.toCtx(targetSite));
+      await this.prisma.siteService.update({
+        where: { id: record.id },
+        data: { status: action === 'start' ? 'RUNNING' : 'STOPPED', lastError: null },
+      });
+    } catch (error) {
+      await this.prisma.siteService.update({
+        where: { id: record.id },
+        data: { status: 'ERROR', lastError: safeServiceError(error) },
+      });
+      throw error;
+    }
+  }
+
+  private async executeServiceOperation(
+    actionId: ServiceOperationAction,
+    request: unknown,
+    context: OperationExecutionContext,
+  ): Promise<unknown> {
+    const parsed = validateServiceOperationRequest(actionId, request);
+    if (actionId.startsWith('services.server.')) {
+      return this.executeServerServiceOperation(actionId, parsed.key, context);
+    }
+    return this.executeSiteServiceOperation(
+      actionId,
+      parsed.siteId!,
+      parsed.key,
+      parsed.config,
+      context,
+    );
+  }
+
+  private async executeServerServiceOperation(
+    actionId: ServiceOperationAction,
+    key: string,
+    context: OperationExecutionContext,
+  ): Promise<unknown> {
+    const catalog = findServiceEntry(key);
+    if (!catalog) throw new NotFoundException(`Unknown service "${key}"`);
+    this.getHandler(key);
+    if (actionId === SERVICE_OPERATION_ACTIONS.SERVER_UNINSTALL) {
+      await this.assertServerUninstallAllowed(key);
+    } else if (actionId === SERVICE_OPERATION_ACTIONS.SERVER_RESTART) {
+      this.assertConfigEditableService(key);
+    }
+    const agentAction = serviceAgentActionForOperation(actionId);
+    const payload = { serviceKey: key };
+    resolveServiceAgentCall(agentAction, payload);
+    await context.throwIfCancellationRequested();
+
+    try {
+      const result = await this.agent.runAgentJob(
+        {
+          operationId: context.operationId,
+          actionId: agentAction,
+          step: 'execute',
+          payload,
+          deadlineAt: context.deadlineAt,
+          cancelSafe: false,
+        },
+        () => context.isCancellationRequested(),
+      );
+      if (actionId === SERVICE_OPERATION_ACTIONS.SERVER_INSTALL) {
+        if (
+          !result ||
+          typeof result !== 'object' ||
+          typeof (result as Record<string, unknown>).version !== 'string' ||
+          (result as Record<string, unknown>).version!.toString().length > 128
+        ) {
+          throw new OperationNeedsAttentionError('Service install returned an invalid version');
+        }
+        const version = (result as { version: string }).version;
+        await this.upsertServerRecord(key, {
+          installed: true,
+          version,
+          lastError: null,
+          installedAt: new Date(),
+        });
+        this.logger.log(`Service ${key} installed on server (${version})`);
+        return { key, installed: true, version };
+      }
+      if (actionId === SERVICE_OPERATION_ACTIONS.SERVER_UNINSTALL) {
+        await this.upsertServerRecord(key, {
+          installed: false,
+          version: null,
+          installedAt: null,
+          lastError: null,
+        });
+        this.logger.log(`Service ${key} uninstalled from server`);
+        return { key, installed: false };
+      }
+      if (
+        !result ||
+        typeof result !== 'object' ||
+        typeof (result as Record<string, unknown>).unit !== 'string' ||
+        typeof (result as Record<string, unknown>).ok !== 'boolean'
+      ) {
+        throw new OperationNeedsAttentionError('Service restart returned an invalid result');
+      }
+      await this.upsertServerRecord(key, { lastError: null });
+      return result;
+    } catch (error) {
+      const message = safeServiceError(error);
+      this.logger.error(`Service ${key} operation failed: ${message}`);
+      await this.upsertServerRecord(key, { lastError: message });
+      throw error;
+    }
+  }
+
+  private async executeSiteServiceOperation(
+    actionId: ServiceOperationAction,
+    siteId: string,
+    key: string,
+    config: Record<string, unknown> | undefined,
+    context: OperationExecutionContext,
+  ): Promise<unknown> {
+    const targetSite = await this.requireSite(siteId);
+    const catalog = findServiceEntry(key);
+    if (!catalog) throw new NotFoundException(`Unknown service "${key}"`);
+    if (getServiceScope(catalog) === 'global') {
+      throw new ConflictException(`«${catalog.name}» is not a per-site service`);
+    }
+    if (
+      (actionId === SERVICE_OPERATION_ACTIONS.SITE_START ||
+        actionId === SERVICE_OPERATION_ACTIONS.SITE_STOP ||
+        actionId === SERVICE_OPERATION_ACTIONS.SITE_RECONFIGURE) &&
+      catalog.siteLifecycle === false
+    ) {
+      throw new ConflictException(`«${catalog.name}» has no site lifecycle`);
+    }
+    let record = await this.prisma.siteService.findUnique({
       where: { siteId_serviceKey: { siteId, serviceKey: key } },
     });
-    if (!rec) return; // Идемпотентно
-    const handler = this.getHandler(key);
-    try {
-      await handler.disableForSite(this.toCtx(site));
-    } catch (err) {
-      const msg = (err as Error).message;
-      this.logger.error(`Service ${key} disable for site ${site.name} failed: ${msg}`);
-      if (handler.preserveRecordOnDisableFailure) {
-        await this.prisma.siteService.update({
-          where: { id: rec.id },
-          data: { status: 'ERROR', lastError: msg },
-        });
-        throw new BadRequestException(`Деактивация сервиса провалилась: ${msg}`);
+
+    if (actionId === SERVICE_OPERATION_ACTIONS.SITE_ENABLE) {
+      const server = await this.prisma.serverService.findUnique({ where: { serviceKey: key } });
+      if (!server?.installed) throw new ConflictException(`Service "${key}" is not installed`);
+      if (record?.status === 'RUNNING') {
+        return { key, siteId, status: 'RUNNING', reconciled: true };
       }
+      if (record && record.status !== 'STARTING') {
+        throw new ConflictException(`Service "${key}" is already active for site`);
+      }
+      if (!record) {
+        record = await this.prisma.siteService.create({
+          data: {
+            siteId,
+            serviceKey: key,
+            status: 'STARTING',
+            config: JSON.stringify(config || {}),
+          },
+        });
+      }
+    } else if (!record) {
+      if (actionId === SERVICE_OPERATION_ACTIONS.SITE_DISABLE) {
+        return { key, siteId, disabled: true, reconciled: true };
+      }
+      throw new NotFoundException(`Service "${key}" is not active for site`);
+    } else if (
+      actionId === SERVICE_OPERATION_ACTIONS.SITE_START &&
+      record.status === 'RUNNING'
+    ) {
+      return { key, siteId, status: 'RUNNING', reconciled: true };
+    } else if (
+      actionId === SERVICE_OPERATION_ACTIONS.SITE_STOP &&
+      record.status === 'STOPPED'
+    ) {
+      return { key, siteId, status: 'STOPPED', reconciled: true };
+    } else if (
+      actionId === SERVICE_OPERATION_ACTIONS.SITE_RECONFIGURE &&
+      record.config === JSON.stringify(config || {}) &&
+      context.recovering
+    ) {
+      return { key, siteId, reconfigured: true, reconciled: true };
     }
-    await this.prisma.siteService.delete({ where: { id: rec.id } });
-  }
 
-  async startSiteService(siteId: string, key: string) {
-    const site = await this.requireSite(siteId);
-    const catalog = findServiceEntry(key);
-    if (catalog?.siteLifecycle === false) {
-      throw new ConflictException(`«${catalog.name}» — общий сервис; его нельзя запускать с одного сайта`);
-    }
-    const rec = await this.requireRecord(siteId, key);
-    const handler = this.getHandler(key);
-    try {
-      await handler.startForSite(this.toCtx(site));
-      await this.prisma.siteService.update({
-        where: { id: rec.id },
-        data: { status: 'RUNNING', lastError: null },
-      });
-    } catch (err) {
-      const msg = (err as Error).message;
-      this.logger.error(`Service ${key} start for site ${site.name} failed: ${msg}`);
-      await this.prisma.siteService.update({
-        where: { id: rec.id },
-        data: { status: 'ERROR', lastError: msg },
-      });
-      throw new BadRequestException(`Запуск сервиса провалился: ${msg}`);
-    }
-    return this.getSiteService(siteId, key);
-  }
+    const agentAction = serviceAgentActionForOperation(actionId);
+    const payload = {
+      serviceKey: key,
+      site: this.toCtx(targetSite),
+      ...(actionId === SERVICE_OPERATION_ACTIONS.SITE_ENABLE ||
+      actionId === SERVICE_OPERATION_ACTIONS.SITE_RECONFIGURE
+        ? { config: config || {} }
+        : {}),
+    };
+    resolveServiceAgentCall(agentAction, payload);
+    await context.throwIfCancellationRequested();
 
-  async stopSiteService(siteId: string, key: string) {
-    const site = await this.requireSite(siteId);
-    const catalog = findServiceEntry(key);
-    if (catalog?.siteLifecycle === false) {
-      throw new ConflictException(`«${catalog.name}» — общий сервис; его нельзя останавливать с одного сайта`);
-    }
-    const rec = await this.requireRecord(siteId, key);
-    const handler = this.getHandler(key);
     try {
-      await handler.stopForSite(this.toCtx(site));
-      await this.prisma.siteService.update({
-        where: { id: rec.id },
-        data: { status: 'STOPPED', lastError: null },
-      });
-    } catch (err) {
-      const msg = (err as Error).message;
-      this.logger.error(`Service ${key} stop for site ${site.name} failed: ${msg}`);
-      await this.prisma.siteService.update({
-        where: { id: rec.id },
-        data: { status: 'ERROR', lastError: msg },
-      });
-      throw new BadRequestException(`Остановка сервиса провалилась: ${msg}`);
+      await this.agent.runAgentJob(
+        {
+          operationId: context.operationId,
+          actionId: agentAction,
+          step: 'execute',
+          payload,
+          deadlineAt: context.deadlineAt,
+          cancelSafe: false,
+        },
+        () => context.isCancellationRequested(),
+      );
+      if (actionId === SERVICE_OPERATION_ACTIONS.SITE_DISABLE) {
+        await this.prisma.siteService.deleteMany({ where: { id: record!.id } });
+        return { key, siteId, disabled: true };
+      }
+      const data = actionId === SERVICE_OPERATION_ACTIONS.SITE_STOP
+        ? { status: 'STOPPED', lastError: null }
+        : actionId === SERVICE_OPERATION_ACTIONS.SITE_RECONFIGURE
+          ? { config: JSON.stringify(config || {}), lastError: null }
+          : { status: 'RUNNING', lastError: null };
+      await this.prisma.siteService.update({ where: { id: record!.id }, data });
+      return {
+        key,
+        siteId,
+        ...(actionId === SERVICE_OPERATION_ACTIONS.SITE_RECONFIGURE
+          ? { reconfigured: true }
+          : { status: data.status }),
+      };
+    } catch (error) {
+      const message = safeServiceError(error);
+      this.logger.error(`Service ${key} operation for site ${targetSite.name} failed: ${message}`);
+      if (record) {
+        await this.prisma.siteService.updateMany({
+          where: { id: record.id },
+          data: actionId === SERVICE_OPERATION_ACTIONS.SITE_RECONFIGURE
+            ? { lastError: message }
+            : { status: 'ERROR', lastError: message },
+        });
+      }
+      throw error;
     }
-    return this.getSiteService(siteId, key);
-  }
-
-  async reconfigureSiteService(siteId: string, key: string, config: Record<string, unknown>) {
-    const site = await this.requireSite(siteId);
-    const rec = await this.requireRecord(siteId, key);
-    const handler = this.getHandler(key);
-    try {
-      await handler.reconfigureForSite(this.toCtx(site), config || {});
-      await this.prisma.siteService.update({
-        where: { id: rec.id },
-        data: { config: JSON.stringify(config || {}), lastError: null },
-      });
-    } catch (err) {
-      await this.prisma.siteService.update({
-        where: { id: rec.id },
-        data: { lastError: (err as Error).message },
-      });
-      throw err;
-    }
-    return this.getSiteService(siteId, key);
   }
 
   async getSiteServiceLogs(siteId: string, key: string, lines = 200): Promise<string> {
@@ -884,20 +1317,7 @@ export class ServicesService implements OnModuleInit {
     return handler.logsForSite(this.toCtx(site), lines);
   }
 
-  /**
-   * Возвращает короткоживущий ticket для входа в Adminer без формы,
-   * подключённый к Manticore этого сайта через unix-socket.
-   *
-   * Manticore говорит на mysql41 — Adminer-овский MySQL-драйвер цепляется
-   * через `mysqli_real_connect(host=localhost, ..., socket=/path/.sock)`.
-   * Авторизации в Manticore нет, поэтому user/pass — пустые строки.
-   *
-   * Безопасность:
-   *   - TTL 60 секунд (одноразовый short-lived токен).
-   *   - Доступ проверяется на уровне роута (только админ).
-   *   - Сокет принадлежит site-юзеру; www-data в его группе → connect ок.
-   */
-  async createManticoreAdminerTicket(siteId: string): Promise<{ url: string }> {
+  async createManticoreAdminerTicket(siteId: string, userId: string, role: string) {
     const site = await this.requireSite(siteId);
     const catalog = findServiceEntry('manticore');
     if (!catalog) throw new NotFoundException('Manticore не зарегистрирован в каталоге');
@@ -920,25 +1340,23 @@ export class ServicesService implements OnModuleInit {
     // см. agent/src/services/manticore.executor.ts (renderManticoreConfig).
     const socket = path.join(site.rootPath, 'tmp', 'manticore.sock');
 
-    const now = Math.floor(Date.now() / 1000);
-    const ticket = encryptToken({
-      v: 1,
-      kind: 'sso',
-      service: 'manticore',
-      site: site.name,
-      siteId: site.id,
-      driver: 'server',
-      host: 'localhost',
-      socket,
-      port: null,
-      user: '',
-      pass: '',
-      database: '',
-      iat: now,
-      exp: now + 60,
+    return this.adminerHandoffs.create({
+      purpose: 'MANTICORE',
+      resourceKind: 'SITE_SERVICE',
+      resourceId: `${site.id}:manticore`,
+      actor: { userId, role },
+      credentials: {
+        service: 'manticore',
+        site: site.name,
+        driver: 'server',
+        host: 'localhost',
+        socket,
+        port: null,
+        user: '',
+        pass: '',
+        database: '',
+      },
     });
-
-    return { url: `/adminer/sso.php?ticket=${ticket}` };
   }
 
   // =====================================================================

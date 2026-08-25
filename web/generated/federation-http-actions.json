@@ -1,0 +1,1671 @@
+{
+  "schemaVersion": "meowbox.browser-federation-http-actions/v1",
+  "matrixSha256": "7ee788262080dbdc9f2f9f4079809c9ccb340378408be3396b3c323937fa4d47",
+  "actions": [
+    {
+      "actionId": "http.post.admin-ip-allowlist-entries",
+      "method": "POST",
+      "routeTemplate": "/api/admin/ip-allowlist/entries"
+    },
+    {
+      "actionId": "http.get.admin-ip-allowlist",
+      "method": "GET",
+      "routeTemplate": "/api/admin/ip-allowlist"
+    },
+    {
+      "actionId": "http.put.admin-ip-allowlist",
+      "method": "PUT",
+      "routeTemplate": "/api/admin/ip-allowlist"
+    },
+    {
+      "actionId": "http.post.admin-ip-allowlist-reload",
+      "method": "POST",
+      "routeTemplate": "/api/admin/ip-allowlist/reload"
+    },
+    {
+      "actionId": "http.delete.admin-ip-allowlist-entries-cidr",
+      "method": "DELETE",
+      "routeTemplate": "/api/admin/ip-allowlist/entries/:cidr"
+    },
+    {
+      "actionId": "http.delete.ai-sessions-id",
+      "method": "DELETE",
+      "routeTemplate": "/api/ai/sessions/:id"
+    },
+    {
+      "actionId": "http.get.ai-sessions-id",
+      "method": "GET",
+      "routeTemplate": "/api/ai/sessions/:id"
+    },
+    {
+      "actionId": "http.get.ai-sessions",
+      "method": "GET",
+      "routeTemplate": "/api/ai/sessions"
+    },
+    {
+      "actionId": "http.patch.ai-sessions-id",
+      "method": "PATCH",
+      "routeTemplate": "/api/ai/sessions/:id"
+    },
+    {
+      "actionId": "http.get.audit-logs",
+      "method": "GET",
+      "routeTemplate": "/api/audit-logs"
+    },
+    {
+      "actionId": "http.post.backup-exports",
+      "method": "POST",
+      "routeTemplate": "/api/backup-exports"
+    },
+    {
+      "actionId": "http.post.backup-exports-staged",
+      "method": "POST",
+      "routeTemplate": "/api/backup-exports/staged"
+    },
+    {
+      "actionId": "http.delete.backup-exports-id",
+      "method": "DELETE",
+      "routeTemplate": "/api/backup-exports/:id"
+    },
+    {
+      "actionId": "http.get.backup-exports-id",
+      "method": "GET",
+      "routeTemplate": "/api/backup-exports/:id"
+    },
+    {
+      "actionId": "http.post.backup-exports-id-delivery",
+      "method": "POST",
+      "routeTemplate": "/api/backup-exports/:id/delivery"
+    },
+    {
+      "actionId": "http.get.backups-backup-id-exports",
+      "method": "GET",
+      "routeTemplate": "/api/backups/:backupId/exports"
+    },
+    {
+      "actionId": "http.post.backups-id-download-session",
+      "method": "POST",
+      "routeTemplate": "/api/backups/:id/download-session"
+    },
+    {
+      "actionId": "http.post.backup-configs",
+      "method": "POST",
+      "routeTemplate": "/api/backup-configs"
+    },
+    {
+      "actionId": "http.delete.backups-id",
+      "method": "DELETE",
+      "routeTemplate": "/api/backups/:id"
+    },
+    {
+      "actionId": "http.delete.backup-configs-id",
+      "method": "DELETE",
+      "routeTemplate": "/api/backup-configs/:id"
+    },
+    {
+      "actionId": "http.post.sites-site-id-restic-diff-file",
+      "method": "POST",
+      "routeTemplate": "/api/sites/:siteId/restic-diff/file"
+    },
+    {
+      "actionId": "http.post.sites-site-id-restic-diff-file-live",
+      "method": "POST",
+      "routeTemplate": "/api/sites/:siteId/restic-diff/file-live"
+    },
+    {
+      "actionId": "http.post.sites-site-id-restic-diff-live",
+      "method": "POST",
+      "routeTemplate": "/api/sites/:siteId/restic-diff/live"
+    },
+    {
+      "actionId": "http.post.sites-site-id-restic-diff-snapshots",
+      "method": "POST",
+      "routeTemplate": "/api/sites/:siteId/restic-diff/snapshots"
+    },
+    {
+      "actionId": "http.post.backups-id-tree-query",
+      "method": "POST",
+      "routeTemplate": "/api/backups/:id/tree/query"
+    },
+    {
+      "actionId": "http.post.sites-site-id-restic-snapshots-query",
+      "method": "POST",
+      "routeTemplate": "/api/sites/:siteId/restic-snapshots/query"
+    },
+    {
+      "actionId": "http.post.sites-site-id-restic-snapshots-snapshot-id-tree-query",
+      "method": "POST",
+      "routeTemplate": "/api/sites/:siteId/restic-snapshots/:snapshotId/tree/query"
+    },
+    {
+      "actionId": "http.get.backups-auto-settings",
+      "method": "GET",
+      "routeTemplate": "/api/backups/auto-settings"
+    },
+    {
+      "actionId": "http.get.sites-site-id-backup-configs",
+      "method": "GET",
+      "routeTemplate": "/api/sites/:siteId/backup-configs"
+    },
+    {
+      "actionId": "http.get.restic-checks-latest",
+      "method": "GET",
+      "routeTemplate": "/api/restic-checks/latest"
+    },
+    {
+      "actionId": "http.get.sites-site-id-backups",
+      "method": "GET",
+      "routeTemplate": "/api/sites/:siteId/backups"
+    },
+    {
+      "actionId": "http.get.sites-site-id-restic-checks",
+      "method": "GET",
+      "routeTemplate": "/api/sites/:siteId/restic-checks"
+    },
+    {
+      "actionId": "http.get.backups-history",
+      "method": "GET",
+      "routeTemplate": "/api/backups/history"
+    },
+    {
+      "actionId": "http.post.backups-id-restore",
+      "method": "POST",
+      "routeTemplate": "/api/backups/:id/restore"
+    },
+    {
+      "actionId": "http.post.sites-site-id-restic-snapshots-snapshot-id-restore",
+      "method": "POST",
+      "routeTemplate": "/api/sites/:siteId/restic-snapshots/:snapshotId/restore"
+    },
+    {
+      "actionId": "http.post.sites-site-id-restic-checks",
+      "method": "POST",
+      "routeTemplate": "/api/sites/:siteId/restic-checks"
+    },
+    {
+      "actionId": "http.post.backups-trigger",
+      "method": "POST",
+      "routeTemplate": "/api/backups/trigger"
+    },
+    {
+      "actionId": "http.post.backups-auto-settings",
+      "method": "POST",
+      "routeTemplate": "/api/backups/auto-settings"
+    },
+    {
+      "actionId": "http.post.backups-panel-data",
+      "method": "POST",
+      "routeTemplate": "/api/backups/panel-data"
+    },
+    {
+      "actionId": "http.delete.backups-panel-data-id",
+      "method": "DELETE",
+      "routeTemplate": "/api/backups/panel-data/:id"
+    },
+    {
+      "actionId": "http.get.backups-panel-data-id",
+      "method": "GET",
+      "routeTemplate": "/api/backups/panel-data/:id"
+    },
+    {
+      "actionId": "http.get.backups-panel-data",
+      "method": "GET",
+      "routeTemplate": "/api/backups/panel-data"
+    },
+    {
+      "actionId": "http.get.backups-panel-data-id-backups",
+      "method": "GET",
+      "routeTemplate": "/api/backups/panel-data/:id/backups"
+    },
+    {
+      "actionId": "http.post.backups-panel-data-id-run",
+      "method": "POST",
+      "routeTemplate": "/api/backups/panel-data/:id/run"
+    },
+    {
+      "actionId": "http.patch.backups-panel-data-id",
+      "method": "PATCH",
+      "routeTemplate": "/api/backups/panel-data/:id"
+    },
+    {
+      "actionId": "http.post.backups-server-paths",
+      "method": "POST",
+      "routeTemplate": "/api/backups/server-paths"
+    },
+    {
+      "actionId": "http.delete.backups-server-paths-id",
+      "method": "DELETE",
+      "routeTemplate": "/api/backups/server-paths/:id"
+    },
+    {
+      "actionId": "http.get.backups-server-paths-id",
+      "method": "GET",
+      "routeTemplate": "/api/backups/server-paths/:id"
+    },
+    {
+      "actionId": "http.get.backups-server-paths",
+      "method": "GET",
+      "routeTemplate": "/api/backups/server-paths"
+    },
+    {
+      "actionId": "http.get.backups-server-paths-id-backups",
+      "method": "GET",
+      "routeTemplate": "/api/backups/server-paths/:id/backups"
+    },
+    {
+      "actionId": "http.post.backups-server-paths-id-run",
+      "method": "POST",
+      "routeTemplate": "/api/backups/server-paths/:id/run"
+    },
+    {
+      "actionId": "http.patch.backups-server-paths-id",
+      "method": "PATCH",
+      "routeTemplate": "/api/backups/server-paths/:id"
+    },
+    {
+      "actionId": "http.post.backups-site-schedules",
+      "method": "POST",
+      "routeTemplate": "/api/backups/site-schedules"
+    },
+    {
+      "actionId": "http.delete.backups-site-schedules-id",
+      "method": "DELETE",
+      "routeTemplate": "/api/backups/site-schedules/:id"
+    },
+    {
+      "actionId": "http.get.backups-site-schedules-id",
+      "method": "GET",
+      "routeTemplate": "/api/backups/site-schedules/:id"
+    },
+    {
+      "actionId": "http.get.backups-site-schedules",
+      "method": "GET",
+      "routeTemplate": "/api/backups/site-schedules"
+    },
+    {
+      "actionId": "http.post.backups-site-schedules-id-run",
+      "method": "POST",
+      "routeTemplate": "/api/backups/site-schedules/:id/run"
+    },
+    {
+      "actionId": "http.patch.backups-site-schedules-id",
+      "method": "PATCH",
+      "routeTemplate": "/api/backups/site-schedules/:id"
+    },
+    {
+      "actionId": "http.post.country-block-rules",
+      "method": "POST",
+      "routeTemplate": "/api/country-block/rules"
+    },
+    {
+      "actionId": "http.delete.country-block-rules-id",
+      "method": "DELETE",
+      "routeTemplate": "/api/country-block/rules/:id"
+    },
+    {
+      "actionId": "http.get.country-block-settings",
+      "method": "GET",
+      "routeTemplate": "/api/country-block/settings"
+    },
+    {
+      "actionId": "http.get.country-block-rules",
+      "method": "GET",
+      "routeTemplate": "/api/country-block/rules"
+    },
+    {
+      "actionId": "http.post.country-block-refresh-db",
+      "method": "POST",
+      "routeTemplate": "/api/country-block/refresh-db"
+    },
+    {
+      "actionId": "http.get.country-block-status",
+      "method": "GET",
+      "routeTemplate": "/api/country-block/status"
+    },
+    {
+      "actionId": "http.post.country-block-sync",
+      "method": "POST",
+      "routeTemplate": "/api/country-block/sync"
+    },
+    {
+      "actionId": "http.patch.country-block-rules-id",
+      "method": "PATCH",
+      "routeTemplate": "/api/country-block/rules/:id"
+    },
+    {
+      "actionId": "http.patch.country-block-settings",
+      "method": "PATCH",
+      "routeTemplate": "/api/country-block/settings"
+    },
+    {
+      "actionId": "http.post.cron-jobs",
+      "method": "POST",
+      "routeTemplate": "/api/cron-jobs"
+    },
+    {
+      "actionId": "http.delete.cron-jobs-id",
+      "method": "DELETE",
+      "routeTemplate": "/api/cron-jobs/:id"
+    },
+    {
+      "actionId": "http.get.sites-site-id-cron-jobs",
+      "method": "GET",
+      "routeTemplate": "/api/sites/:siteId/cron-jobs"
+    },
+    {
+      "actionId": "http.post.cron-jobs-id-toggle",
+      "method": "POST",
+      "routeTemplate": "/api/cron-jobs/:id/toggle"
+    },
+    {
+      "actionId": "http.put.cron-jobs-id",
+      "method": "PUT",
+      "routeTemplate": "/api/cron-jobs/:id"
+    },
+    {
+      "actionId": "http.get.dashboard-overview",
+      "method": "GET",
+      "routeTemplate": "/api/dashboard/overview"
+    },
+    {
+      "actionId": "http.get.dashboard-summary",
+      "method": "GET",
+      "routeTemplate": "/api/dashboard/summary"
+    },
+    {
+      "actionId": "http.get.databases",
+      "method": "GET",
+      "routeTemplate": "/api/databases"
+    },
+    {
+      "actionId": "http.post.sites-site-id-domains-domain-id-databases",
+      "method": "POST",
+      "routeTemplate": "/api/sites/:siteId/domains/:domainId/databases"
+    },
+    {
+      "actionId": "http.post.sites-site-id-domains-domain-id-databases-id-adminer-ticket",
+      "method": "POST",
+      "routeTemplate": "/api/sites/:siteId/domains/:domainId/databases/:id/adminer-ticket"
+    },
+    {
+      "actionId": "http.post.sites-site-id-domains-domain-id-databases-id-import-session",
+      "method": "POST",
+      "routeTemplate": "/api/sites/:siteId/domains/:domainId/databases/:id/import-session"
+    },
+    {
+      "actionId": "http.delete.sites-site-id-domains-domain-id-databases-id",
+      "method": "DELETE",
+      "routeTemplate": "/api/sites/:siteId/domains/:domainId/databases/:id"
+    },
+    {
+      "actionId": "http.post.sites-site-id-domains-domain-id-databases-id-export",
+      "method": "POST",
+      "routeTemplate": "/api/sites/:siteId/domains/:domainId/databases/:id/export"
+    },
+    {
+      "actionId": "http.get.sites-site-id-domains-domain-id-databases",
+      "method": "GET",
+      "routeTemplate": "/api/sites/:siteId/domains/:domainId/databases"
+    },
+    {
+      "actionId": "http.get.sites-site-id-domains-domain-id-databases-id",
+      "method": "GET",
+      "routeTemplate": "/api/sites/:siteId/domains/:domainId/databases/:id"
+    },
+    {
+      "actionId": "http.post.sites-site-id-domains-domain-id-databases-id-import",
+      "method": "POST",
+      "routeTemplate": "/api/sites/:siteId/domains/:domainId/databases/:id/import"
+    },
+    {
+      "actionId": "http.post.sites-site-id-domains-domain-id-databases-id-exports-operation-id-delivery",
+      "method": "POST",
+      "routeTemplate": "/api/sites/:siteId/domains/:domainId/databases/:id/exports/:operationId/delivery"
+    },
+    {
+      "actionId": "http.post.sites-site-id-domains-domain-id-databases-id-reset-password",
+      "method": "POST",
+      "routeTemplate": "/api/sites/:siteId/domains/:domainId/databases/:id/reset-password"
+    },
+    {
+      "actionId": "http.post.sites-site-id-domains-domain-id-databases-id-reveal-password",
+      "method": "POST",
+      "routeTemplate": "/api/sites/:siteId/domains/:domainId/databases/:id/reveal-password"
+    },
+    {
+      "actionId": "http.put.sites-site-id-domains-domain-id-databases-id",
+      "method": "PUT",
+      "routeTemplate": "/api/sites/:siteId/domains/:domainId/databases/:id"
+    },
+    {
+      "actionId": "http.get.sites-site-id-domains-domain-id-deploys-id",
+      "method": "GET",
+      "routeTemplate": "/api/sites/:siteId/domains/:domainId/deploys/:id"
+    },
+    {
+      "actionId": "http.get.sites-site-id-domains-domain-id-deploys",
+      "method": "GET",
+      "routeTemplate": "/api/sites/:siteId/domains/:domainId/deploys"
+    },
+    {
+      "actionId": "http.post.sites-site-id-domains-domain-id-deploys-id-rollback",
+      "method": "POST",
+      "routeTemplate": "/api/sites/:siteId/domains/:domainId/deploys/:id/rollback"
+    },
+    {
+      "actionId": "http.post.sites-site-id-domains-domain-id-deploy",
+      "method": "POST",
+      "routeTemplate": "/api/sites/:siteId/domains/:domainId/deploy"
+    },
+    {
+      "actionId": "http.post.dns-zones-id-templates",
+      "method": "POST",
+      "routeTemplate": "/api/dns/zones/:id/templates"
+    },
+    {
+      "actionId": "http.post.dns-providers",
+      "method": "POST",
+      "routeTemplate": "/api/dns/providers"
+    },
+    {
+      "actionId": "http.post.dns-zones-id-records",
+      "method": "POST",
+      "routeTemplate": "/api/dns/zones/:id/records"
+    },
+    {
+      "actionId": "http.delete.dns-providers-id",
+      "method": "DELETE",
+      "routeTemplate": "/api/dns/providers/:id"
+    },
+    {
+      "actionId": "http.delete.dns-zones-id-records-rid",
+      "method": "DELETE",
+      "routeTemplate": "/api/dns/zones/:id/records/:rid"
+    },
+    {
+      "actionId": "http.get.dns-sites-site-id",
+      "method": "GET",
+      "routeTemplate": "/api/dns/sites/:siteId"
+    },
+    {
+      "actionId": "http.get.dns-sites-site-id-domains-domain-id",
+      "method": "GET",
+      "routeTemplate": "/api/dns/sites/:siteId/domains/:domainId"
+    },
+    {
+      "actionId": "http.get.dns-zones-id",
+      "method": "GET",
+      "routeTemplate": "/api/dns/zones/:id"
+    },
+    {
+      "actionId": "http.post.dns-zones-id-link-site",
+      "method": "POST",
+      "routeTemplate": "/api/dns/zones/:id/link-site"
+    },
+    {
+      "actionId": "http.get.dns-providers",
+      "method": "GET",
+      "routeTemplate": "/api/dns/providers"
+    },
+    {
+      "actionId": "http.get.dns-zones-id-records",
+      "method": "GET",
+      "routeTemplate": "/api/dns/zones/:id/records"
+    },
+    {
+      "actionId": "http.get.dns-zones",
+      "method": "GET",
+      "routeTemplate": "/api/dns/zones"
+    },
+    {
+      "actionId": "http.post.dns-zones-id-refresh",
+      "method": "POST",
+      "routeTemplate": "/api/dns/zones/:id/refresh"
+    },
+    {
+      "actionId": "http.post.dns-sites-site-id-domains-domain-id-relink",
+      "method": "POST",
+      "routeTemplate": "/api/dns/sites/:siteId/domains/:domainId/relink"
+    },
+    {
+      "actionId": "http.post.dns-providers-id-sync",
+      "method": "POST",
+      "routeTemplate": "/api/dns/providers/:id/sync"
+    },
+    {
+      "actionId": "http.post.dns-providers-id-test",
+      "method": "POST",
+      "routeTemplate": "/api/dns/providers/:id/test"
+    },
+    {
+      "actionId": "http.patch.dns-zones-id-records-rid",
+      "method": "PATCH",
+      "routeTemplate": "/api/dns/zones/:id/records/:rid"
+    },
+    {
+      "actionId": "http.get.federation-v1-trust-keys",
+      "method": "GET",
+      "routeTemplate": "/api/federation/v1/trust/keys"
+    },
+    {
+      "actionId": "http.post.federation-v1-trust-revoke",
+      "method": "POST",
+      "routeTemplate": "/api/federation/v1/trust/revoke"
+    },
+    {
+      "actionId": "http.post.federation-v1-trust-keys",
+      "method": "POST",
+      "routeTemplate": "/api/federation/v1/trust/keys"
+    },
+    {
+      "actionId": "http.post.sites-site-id-domains-domain-id-files-upload-commit",
+      "method": "POST",
+      "routeTemplate": "/api/sites/:siteId/domains/:domainId/files/upload-commit"
+    },
+    {
+      "actionId": "http.post.sites-site-id-domains-domain-id-files-create",
+      "method": "POST",
+      "routeTemplate": "/api/sites/:siteId/domains/:domainId/files/create"
+    },
+    {
+      "actionId": "http.post.sites-site-id-domains-domain-id-files-download-session",
+      "method": "POST",
+      "routeTemplate": "/api/sites/:siteId/domains/:domainId/files/download-session"
+    },
+    {
+      "actionId": "http.post.sites-site-id-domains-domain-id-files-upload-session",
+      "method": "POST",
+      "routeTemplate": "/api/sites/:siteId/domains/:domainId/files/upload-session"
+    },
+    {
+      "actionId": "http.get.sites-site-id-domains-domain-id-files",
+      "method": "GET",
+      "routeTemplate": "/api/sites/:siteId/domains/:domainId/files"
+    },
+    {
+      "actionId": "http.get.sites-site-id-domains-domain-id-files-read",
+      "method": "GET",
+      "routeTemplate": "/api/sites/:siteId/domains/:domainId/files/read"
+    },
+    {
+      "actionId": "http.delete.sites-site-id-domains-domain-id-files",
+      "method": "DELETE",
+      "routeTemplate": "/api/sites/:siteId/domains/:domainId/files"
+    },
+    {
+      "actionId": "http.post.sites-site-id-domains-domain-id-files-rename",
+      "method": "POST",
+      "routeTemplate": "/api/sites/:siteId/domains/:domainId/files/rename"
+    },
+    {
+      "actionId": "http.put.sites-site-id-domains-domain-id-files-write",
+      "method": "PUT",
+      "routeTemplate": "/api/sites/:siteId/domains/:domainId/files/write"
+    },
+    {
+      "actionId": "http.post.firewall-presets-name-apply",
+      "method": "POST",
+      "routeTemplate": "/api/firewall/presets/:name/apply"
+    },
+    {
+      "actionId": "http.post.firewall",
+      "method": "POST",
+      "routeTemplate": "/api/firewall"
+    },
+    {
+      "actionId": "http.delete.firewall-id",
+      "method": "DELETE",
+      "routeTemplate": "/api/firewall/:id"
+    },
+    {
+      "actionId": "http.get.firewall",
+      "method": "GET",
+      "routeTemplate": "/api/firewall"
+    },
+    {
+      "actionId": "http.get.firewall-presets",
+      "method": "GET",
+      "routeTemplate": "/api/firewall/presets"
+    },
+    {
+      "actionId": "http.get.firewall-status",
+      "method": "GET",
+      "routeTemplate": "/api/firewall/status"
+    },
+    {
+      "actionId": "http.post.firewall-sync",
+      "method": "POST",
+      "routeTemplate": "/api/firewall/sync"
+    },
+    {
+      "actionId": "http.put.firewall-id",
+      "method": "PUT",
+      "routeTemplate": "/api/firewall/:id"
+    },
+    {
+      "actionId": "http.get.health",
+      "method": "GET",
+      "routeTemplate": "/api/health"
+    },
+    {
+      "actionId": "http.get.health-site-id-pings",
+      "method": "GET",
+      "routeTemplate": "/api/health/:siteId/pings"
+    },
+    {
+      "actionId": "http.get.health-site-id-domains-domain-id-pings",
+      "method": "GET",
+      "routeTemplate": "/api/health/:siteId/domains/:domainId/pings"
+    },
+    {
+      "actionId": "http.get.logs-sources",
+      "method": "GET",
+      "routeTemplate": "/api/logs/sources"
+    },
+    {
+      "actionId": "http.get.logs-read",
+      "method": "GET",
+      "routeTemplate": "/api/logs/read"
+    },
+    {
+      "actionId": "http.get.sites-site-id-domains-domain-id-logs",
+      "method": "GET",
+      "routeTemplate": "/api/sites/:siteId/domains/:domainId/logs"
+    },
+    {
+      "actionId": "http.get.sites-site-id-domains-domain-id-logs-read",
+      "method": "GET",
+      "routeTemplate": "/api/sites/:siteId/domains/:domainId/logs/read"
+    },
+    {
+      "actionId": "http.post.admin-migrate-hostpanel-id-cancel",
+      "method": "POST",
+      "routeTemplate": "/api/admin/migrate-hostpanel/:id/cancel"
+    },
+    {
+      "actionId": "http.get.admin-migrate-hostpanel-check-domain",
+      "method": "GET",
+      "routeTemplate": "/api/admin/migrate-hostpanel/check-domain"
+    },
+    {
+      "actionId": "http.get.admin-migrate-hostpanel-id-items-item-id-force-retry-check",
+      "method": "GET",
+      "routeTemplate": "/api/admin/migrate-hostpanel/:id/items/:itemId/force-retry-check"
+    },
+    {
+      "actionId": "http.get.admin-migrate-hostpanel-check-name",
+      "method": "GET",
+      "routeTemplate": "/api/admin/migrate-hostpanel/check-name"
+    },
+    {
+      "actionId": "http.post.admin-migrate-hostpanel-sources",
+      "method": "POST",
+      "routeTemplate": "/api/admin/migrate-hostpanel/sources"
+    },
+    {
+      "actionId": "http.delete.admin-migrate-hostpanel-sources-id",
+      "method": "DELETE",
+      "routeTemplate": "/api/admin/migrate-hostpanel/sources/:id"
+    },
+    {
+      "actionId": "http.get.admin-migrate-hostpanel",
+      "method": "GET",
+      "routeTemplate": "/api/admin/migrate-hostpanel"
+    },
+    {
+      "actionId": "http.get.admin-migrate-hostpanel-id",
+      "method": "GET",
+      "routeTemplate": "/api/admin/migrate-hostpanel/:id"
+    },
+    {
+      "actionId": "http.post.admin-migrate-hostpanel-id-items-item-id-force-retry",
+      "method": "POST",
+      "routeTemplate": "/api/admin/migrate-hostpanel/:id/items/:itemId/force-retry"
+    },
+    {
+      "actionId": "http.get.admin-migrate-hostpanel-id-log",
+      "method": "GET",
+      "routeTemplate": "/api/admin/migrate-hostpanel/:id/log"
+    },
+    {
+      "actionId": "http.get.admin-migrate-hostpanel-sources",
+      "method": "GET",
+      "routeTemplate": "/api/admin/migrate-hostpanel/sources"
+    },
+    {
+      "actionId": "http.post.admin-migrate-hostpanel-id-pause",
+      "method": "POST",
+      "routeTemplate": "/api/admin/migrate-hostpanel/:id/pause"
+    },
+    {
+      "actionId": "http.post.admin-migrate-hostpanel-id-resume",
+      "method": "POST",
+      "routeTemplate": "/api/admin/migrate-hostpanel/:id/resume"
+    },
+    {
+      "actionId": "http.post.admin-migrate-hostpanel-id-items-item-id-retry",
+      "method": "POST",
+      "routeTemplate": "/api/admin/migrate-hostpanel/:id/items/:itemId/retry"
+    },
+    {
+      "actionId": "http.post.admin-migrate-hostpanel-id-items-item-id-skip",
+      "method": "POST",
+      "routeTemplate": "/api/admin/migrate-hostpanel/:id/items/:itemId/skip"
+    },
+    {
+      "actionId": "http.post.admin-migrate-hostpanel-id-start",
+      "method": "POST",
+      "routeTemplate": "/api/admin/migrate-hostpanel/:id/start"
+    },
+    {
+      "actionId": "http.post.admin-migrate-hostpanel-discover",
+      "method": "POST",
+      "routeTemplate": "/api/admin/migrate-hostpanel/discover"
+    },
+    {
+      "actionId": "http.post.admin-migrate-hostpanel-id-probe",
+      "method": "POST",
+      "routeTemplate": "/api/admin/migrate-hostpanel/:id/probe"
+    },
+    {
+      "actionId": "http.patch.admin-migrate-hostpanel-id-items-item-id",
+      "method": "PATCH",
+      "routeTemplate": "/api/admin/migrate-hostpanel/:id/items/:itemId"
+    },
+    {
+      "actionId": "http.get.monitoring-current",
+      "method": "GET",
+      "routeTemplate": "/api/monitoring/current"
+    },
+    {
+      "actionId": "http.get.monitoring-history",
+      "method": "GET",
+      "routeTemplate": "/api/monitoring/history"
+    },
+    {
+      "actionId": "http.get.nginx-status",
+      "method": "GET",
+      "routeTemplate": "/api/nginx/status"
+    },
+    {
+      "actionId": "http.get.nginx-configs",
+      "method": "GET",
+      "routeTemplate": "/api/nginx/configs"
+    },
+    {
+      "actionId": "http.get.nginx-configs-domain",
+      "method": "GET",
+      "routeTemplate": "/api/nginx/configs/:domain"
+    },
+    {
+      "actionId": "http.get.nginx-global-config",
+      "method": "GET",
+      "routeTemplate": "/api/nginx/global-config"
+    },
+    {
+      "actionId": "http.post.nginx-reload",
+      "method": "POST",
+      "routeTemplate": "/api/nginx/reload"
+    },
+    {
+      "actionId": "http.post.nginx-test",
+      "method": "POST",
+      "routeTemplate": "/api/nginx/test"
+    },
+    {
+      "actionId": "http.put.nginx-global-config",
+      "method": "PUT",
+      "routeTemplate": "/api/nginx/global-config"
+    },
+    {
+      "actionId": "http.post.notifications",
+      "method": "POST",
+      "routeTemplate": "/api/notifications"
+    },
+    {
+      "actionId": "http.delete.notifications-id",
+      "method": "DELETE",
+      "routeTemplate": "/api/notifications/:id"
+    },
+    {
+      "actionId": "http.get.notifications",
+      "method": "GET",
+      "routeTemplate": "/api/notifications"
+    },
+    {
+      "actionId": "http.post.notifications-id-test",
+      "method": "POST",
+      "routeTemplate": "/api/notifications/:id/test"
+    },
+    {
+      "actionId": "http.post.operations-id-cancel",
+      "method": "POST",
+      "routeTemplate": "/api/operations/:id/cancel"
+    },
+    {
+      "actionId": "http.post.operations-id-sensitive-result",
+      "method": "POST",
+      "routeTemplate": "/api/operations/:id/sensitive-result"
+    },
+    {
+      "actionId": "http.get.operations-id",
+      "method": "GET",
+      "routeTemplate": "/api/operations/:id"
+    },
+    {
+      "actionId": "http.get.operations",
+      "method": "GET",
+      "routeTemplate": "/api/operations"
+    },
+    {
+      "actionId": "http.post.panel-access-federation-cutovers-cutover-id-finalize",
+      "method": "POST",
+      "routeTemplate": "/api/panel-access/federation-cutovers/:cutoverId/finalize"
+    },
+    {
+      "actionId": "http.get.panel-access-federation-cutovers-cutover-id",
+      "method": "GET",
+      "routeTemplate": "/api/panel-access/federation-cutovers/:cutoverId"
+    },
+    {
+      "actionId": "http.get.panel-access",
+      "method": "GET",
+      "routeTemplate": "/api/panel-access"
+    },
+    {
+      "actionId": "http.post.panel-access-federation-cutovers-cutover-id-rollback",
+      "method": "POST",
+      "routeTemplate": "/api/panel-access/federation-cutovers/:cutoverId/rollback"
+    },
+    {
+      "actionId": "http.post.panel-access-federation-cutovers",
+      "method": "POST",
+      "routeTemplate": "/api/panel-access/federation-cutovers"
+    },
+    {
+      "actionId": "http.put.panel-access-behavior",
+      "method": "PUT",
+      "routeTemplate": "/api/panel-access/behavior"
+    },
+    {
+      "actionId": "http.get.panel-settings-backup-defaults",
+      "method": "GET",
+      "routeTemplate": "/api/panel-settings/backup-defaults"
+    },
+    {
+      "actionId": "http.get.panel-settings",
+      "method": "GET",
+      "routeTemplate": "/api/panel-settings"
+    },
+    {
+      "actionId": "http.get.panel-settings-site-defaults",
+      "method": "GET",
+      "routeTemplate": "/api/panel-settings/site-defaults"
+    },
+    {
+      "actionId": "http.put.panel-settings-backup-defaults",
+      "method": "PUT",
+      "routeTemplate": "/api/panel-settings/backup-defaults"
+    },
+    {
+      "actionId": "http.put.panel-settings",
+      "method": "PUT",
+      "routeTemplate": "/api/panel-settings"
+    },
+    {
+      "actionId": "http.put.panel-settings-site-defaults",
+      "method": "PUT",
+      "routeTemplate": "/api/panel-settings/site-defaults"
+    },
+    {
+      "actionId": "http.get.federation-v1-target-update-manifest",
+      "method": "GET",
+      "routeTemplate": "/api/federation/v1/target-update/manifest"
+    },
+    {
+      "actionId": "http.get.federation-v1-target-update-status",
+      "method": "GET",
+      "routeTemplate": "/api/federation/v1/target-update/status"
+    },
+    {
+      "actionId": "http.post.federation-v1-target-update",
+      "method": "POST",
+      "routeTemplate": "/api/federation/v1/target-update"
+    },
+    {
+      "actionId": "http.get.php-status",
+      "method": "GET",
+      "routeTemplate": "/api/php/status"
+    },
+    {
+      "actionId": "http.get.php-status-version",
+      "method": "GET",
+      "routeTemplate": "/api/php/status/:version"
+    },
+    {
+      "actionId": "http.post.php-version-extensions-install",
+      "method": "POST",
+      "routeTemplate": "/api/php/:version/extensions/install"
+    },
+    {
+      "actionId": "http.post.php-install",
+      "method": "POST",
+      "routeTemplate": "/api/php/install"
+    },
+    {
+      "actionId": "http.get.php-version-extensions",
+      "method": "GET",
+      "routeTemplate": "/api/php/:version/extensions"
+    },
+    {
+      "actionId": "http.get.php-versions",
+      "method": "GET",
+      "routeTemplate": "/api/php/versions"
+    },
+    {
+      "actionId": "http.get.php-version-ini",
+      "method": "GET",
+      "routeTemplate": "/api/php/:version/ini"
+    },
+    {
+      "actionId": "http.post.php-restart-version",
+      "method": "POST",
+      "routeTemplate": "/api/php/restart/:version"
+    },
+    {
+      "actionId": "http.post.php-version-extensions-toggle",
+      "method": "POST",
+      "routeTemplate": "/api/php/:version/extensions/toggle"
+    },
+    {
+      "actionId": "http.delete.php-uninstall-version",
+      "method": "DELETE",
+      "routeTemplate": "/api/php/uninstall/:version"
+    },
+    {
+      "actionId": "http.post.php-version-ini",
+      "method": "POST",
+      "routeTemplate": "/api/php/:version/ini"
+    },
+    {
+      "actionId": "http.get.processes-name-logs",
+      "method": "GET",
+      "routeTemplate": "/api/processes/:name/logs"
+    },
+    {
+      "actionId": "http.get.processes-name",
+      "method": "GET",
+      "routeTemplate": "/api/processes/:name"
+    },
+    {
+      "actionId": "http.get.processes",
+      "method": "GET",
+      "routeTemplate": "/api/processes"
+    },
+    {
+      "actionId": "http.post.processes-name-reload",
+      "method": "POST",
+      "routeTemplate": "/api/processes/:name/reload"
+    },
+    {
+      "actionId": "http.post.processes-name-restart",
+      "method": "POST",
+      "routeTemplate": "/api/processes/:name/restart"
+    },
+    {
+      "actionId": "http.post.processes-name-stop",
+      "method": "POST",
+      "routeTemplate": "/api/processes/:name/stop"
+    },
+    {
+      "actionId": "http.post.services-fail2ban-presets",
+      "method": "POST",
+      "routeTemplate": "/api/services/fail2ban/presets"
+    },
+    {
+      "actionId": "http.delete.sites-site-id-services-key",
+      "method": "DELETE",
+      "routeTemplate": "/api/sites/:siteId/services/:key"
+    },
+    {
+      "actionId": "http.post.sites-site-id-services-key-enable",
+      "method": "POST",
+      "routeTemplate": "/api/sites/:siteId/services/:key/enable"
+    },
+    {
+      "actionId": "http.get.services-fail2ban-client-status",
+      "method": "GET",
+      "routeTemplate": "/api/services/fail2ban/client-status"
+    },
+    {
+      "actionId": "http.get.services-fail2ban-presets",
+      "method": "GET",
+      "routeTemplate": "/api/services/fail2ban/presets"
+    },
+    {
+      "actionId": "http.get.services-key",
+      "method": "GET",
+      "routeTemplate": "/api/services/:key"
+    },
+    {
+      "actionId": "http.get.sites-site-id-services-key",
+      "method": "GET",
+      "routeTemplate": "/api/sites/:siteId/services/:key"
+    },
+    {
+      "actionId": "http.post.services-key-install",
+      "method": "POST",
+      "routeTemplate": "/api/services/:key/install"
+    },
+    {
+      "actionId": "http.get.services-key-config",
+      "method": "GET",
+      "routeTemplate": "/api/services/:key/config"
+    },
+    {
+      "actionId": "http.get.services",
+      "method": "GET",
+      "routeTemplate": "/api/services"
+    },
+    {
+      "actionId": "http.get.sites-site-id-services",
+      "method": "GET",
+      "routeTemplate": "/api/sites/:siteId/services"
+    },
+    {
+      "actionId": "http.get.sites-site-id-services-key-logs",
+      "method": "GET",
+      "routeTemplate": "/api/sites/:siteId/services/:key/logs"
+    },
+    {
+      "actionId": "http.post.sites-site-id-services-manticore-adminer-ticket",
+      "method": "POST",
+      "routeTemplate": "/api/sites/:siteId/services/manticore/adminer-ticket"
+    },
+    {
+      "actionId": "http.post.services-postfix-relay",
+      "method": "POST",
+      "routeTemplate": "/api/services/postfix/relay"
+    },
+    {
+      "actionId": "http.get.services-postfix-relay",
+      "method": "GET",
+      "routeTemplate": "/api/services/postfix/relay"
+    },
+    {
+      "actionId": "http.post.services-postfix-test-email",
+      "method": "POST",
+      "routeTemplate": "/api/services/postfix/test-email"
+    },
+    {
+      "actionId": "http.get.services-key-config-file",
+      "method": "GET",
+      "routeTemplate": "/api/services/:key/config/:file"
+    },
+    {
+      "actionId": "http.patch.sites-site-id-services-key",
+      "method": "PATCH",
+      "routeTemplate": "/api/sites/:siteId/services/:key"
+    },
+    {
+      "actionId": "http.post.services-key-restart",
+      "method": "POST",
+      "routeTemplate": "/api/services/:key/restart"
+    },
+    {
+      "actionId": "http.post.sites-site-id-services-key-start",
+      "method": "POST",
+      "routeTemplate": "/api/sites/:siteId/services/:key/start"
+    },
+    {
+      "actionId": "http.post.sites-site-id-services-key-stop",
+      "method": "POST",
+      "routeTemplate": "/api/sites/:siteId/services/:key/stop"
+    },
+    {
+      "actionId": "http.delete.services-key",
+      "method": "DELETE",
+      "routeTemplate": "/api/services/:key"
+    },
+    {
+      "actionId": "http.post.services-key-config-file",
+      "method": "POST",
+      "routeTemplate": "/api/services/:key/config/:file"
+    },
+    {
+      "actionId": "http.delete.sites-site-id-domains-domain-id-node-processes-name",
+      "method": "DELETE",
+      "routeTemplate": "/api/sites/:siteId/domains/:domainId/node/processes/:name"
+    },
+    {
+      "actionId": "http.get.sites-site-id-domains-domain-id-node-commands-discover",
+      "method": "GET",
+      "routeTemplate": "/api/sites/:siteId/domains/:domainId/node/commands/discover"
+    },
+    {
+      "actionId": "http.get.sites-site-id-domains-domain-id-node-autostart",
+      "method": "GET",
+      "routeTemplate": "/api/sites/:siteId/domains/:domainId/node/autostart"
+    },
+    {
+      "actionId": "http.get.sites-site-id-domains-domain-id-node-processes",
+      "method": "GET",
+      "routeTemplate": "/api/sites/:siteId/domains/:domainId/node/processes"
+    },
+    {
+      "actionId": "http.get.sites-site-id-domains-domain-id-node-processes-name-logs",
+      "method": "GET",
+      "routeTemplate": "/api/sites/:siteId/domains/:domainId/node/processes/:name/logs"
+    },
+    {
+      "actionId": "http.get.sites-site-id-domains-domain-id-node-quick-commands",
+      "method": "GET",
+      "routeTemplate": "/api/sites/:siteId/domains/:domainId/node/quick-commands"
+    },
+    {
+      "actionId": "http.post.sites-site-id-domains-domain-id-node-processes-name-reload",
+      "method": "POST",
+      "routeTemplate": "/api/sites/:siteId/domains/:domainId/node/processes/:name/reload"
+    },
+    {
+      "actionId": "http.put.sites-site-id-domains-domain-id-node-quick-commands",
+      "method": "PUT",
+      "routeTemplate": "/api/sites/:siteId/domains/:domainId/node/quick-commands"
+    },
+    {
+      "actionId": "http.post.sites-site-id-domains-domain-id-node-processes-name-restart",
+      "method": "POST",
+      "routeTemplate": "/api/sites/:siteId/domains/:domainId/node/processes/:name/restart"
+    },
+    {
+      "actionId": "http.post.sites-site-id-domains-domain-id-node-quick-commands-id-run",
+      "method": "POST",
+      "routeTemplate": "/api/sites/:siteId/domains/:domainId/node/quick-commands/:id/run"
+    },
+    {
+      "actionId": "http.put.sites-site-id-domains-domain-id-node-autostart",
+      "method": "PUT",
+      "routeTemplate": "/api/sites/:siteId/domains/:domainId/node/autostart"
+    },
+    {
+      "actionId": "http.post.sites-site-id-domains-domain-id-node-ecosystem-start",
+      "method": "POST",
+      "routeTemplate": "/api/sites/:siteId/domains/:domainId/node/ecosystem/start"
+    },
+    {
+      "actionId": "http.post.sites-site-id-domains-domain-id-node-processes-name-stop",
+      "method": "POST",
+      "routeTemplate": "/api/sites/:siteId/domains/:domainId/node/processes/:name/stop"
+    },
+    {
+      "actionId": "http.post.sites-site-id-domains-domain-id-modx-admin-password",
+      "method": "POST",
+      "routeTemplate": "/api/sites/:siteId/domains/:domainId/modx/admin-password"
+    },
+    {
+      "actionId": "http.post.sites-site-id-domains-domain-id-modx-cleanup-setup",
+      "method": "POST",
+      "routeTemplate": "/api/sites/:siteId/domains/:domainId/modx/cleanup-setup"
+    },
+    {
+      "actionId": "http.post.sites-site-id-domains-domain-id-modx-admin-login",
+      "method": "POST",
+      "routeTemplate": "/api/sites/:siteId/domains/:domainId/modx/admin-login"
+    },
+    {
+      "actionId": "http.get.sites-site-id-domains-domain-id-application",
+      "method": "GET",
+      "routeTemplate": "/api/sites/:siteId/domains/:domainId/application"
+    },
+    {
+      "actionId": "http.get.sites-site-id-domains-domain-id-metrics",
+      "method": "GET",
+      "routeTemplate": "/api/sites/:siteId/domains/:domainId/metrics"
+    },
+    {
+      "actionId": "http.get.sites-site-id-domains-domain-id-php-pool-config",
+      "method": "GET",
+      "routeTemplate": "/api/sites/:siteId/domains/:domainId/php-pool-config"
+    },
+    {
+      "actionId": "http.post.sites-site-id-domains-domain-id-permissions-normalize",
+      "method": "POST",
+      "routeTemplate": "/api/sites/:siteId/domains/:domainId/permissions/normalize"
+    },
+    {
+      "actionId": "http.post.sites-site-id-domains-domain-id-application-retry",
+      "method": "POST",
+      "routeTemplate": "/api/sites/:siteId/domains/:domainId/application/retry"
+    },
+    {
+      "actionId": "http.post.sites-site-id-domains-domain-id-modx-doctor-scan",
+      "method": "POST",
+      "routeTemplate": "/api/sites/:siteId/domains/:domainId/modx/doctor/scan"
+    },
+    {
+      "actionId": "http.post.sites-site-id-domains-domain-id-modx-update",
+      "method": "POST",
+      "routeTemplate": "/api/sites/:siteId/domains/:domainId/modx/update"
+    },
+    {
+      "actionId": "http.put.sites-site-id-domains-domain-id-php-pool-config",
+      "method": "PUT",
+      "routeTemplate": "/api/sites/:siteId/domains/:domainId/php-pool-config"
+    },
+    {
+      "actionId": "http.post.sites-id-domains",
+      "method": "POST",
+      "routeTemplate": "/api/sites/:id/domains"
+    },
+    {
+      "actionId": "http.delete.sites-id-domains-domain-id",
+      "method": "DELETE",
+      "routeTemplate": "/api/sites/:id/domains/:domainId"
+    },
+    {
+      "actionId": "http.get.sites-id-domains",
+      "method": "GET",
+      "routeTemplate": "/api/sites/:id/domains"
+    },
+    {
+      "actionId": "http.post.sites-id-domains-domain-id-make-primary",
+      "method": "POST",
+      "routeTemplate": "/api/sites/:id/domains/:domainId/make-primary"
+    },
+    {
+      "actionId": "http.put.sites-id-domains-domain-id",
+      "method": "PUT",
+      "routeTemplate": "/api/sites/:id/domains/:domainId"
+    },
+    {
+      "actionId": "http.put.sites-id-domains-domain-id-aliases",
+      "method": "PUT",
+      "routeTemplate": "/api/sites/:id/domains/:domainId/aliases"
+    },
+    {
+      "actionId": "http.get.sites-id-domains-domain-id-nginx-custom",
+      "method": "GET",
+      "routeTemplate": "/api/sites/:id/domains/:domainId/nginx/custom"
+    },
+    {
+      "actionId": "http.get.sites-id-domains-domain-id-nginx-settings",
+      "method": "GET",
+      "routeTemplate": "/api/sites/:id/domains/:domainId/nginx/settings"
+    },
+    {
+      "actionId": "http.post.sites-nginx-rebuild-all",
+      "method": "POST",
+      "routeTemplate": "/api/sites/nginx/rebuild-all"
+    },
+    {
+      "actionId": "http.post.sites-id-nginx-reload",
+      "method": "POST",
+      "routeTemplate": "/api/sites/:id/nginx/reload"
+    },
+    {
+      "actionId": "http.post.sites-id-nginx-test",
+      "method": "POST",
+      "routeTemplate": "/api/sites/:id/nginx/test"
+    },
+    {
+      "actionId": "http.put.sites-id-domains-domain-id-nginx-custom",
+      "method": "PUT",
+      "routeTemplate": "/api/sites/:id/domains/:domainId/nginx/custom"
+    },
+    {
+      "actionId": "http.put.sites-id-domains-domain-id-nginx-settings",
+      "method": "PUT",
+      "routeTemplate": "/api/sites/:id/domains/:domainId/nginx/settings"
+    },
+    {
+      "actionId": "http.post.sites-id-ssh-password",
+      "method": "POST",
+      "routeTemplate": "/api/sites/:id/ssh-password"
+    },
+    {
+      "actionId": "http.post.sites",
+      "method": "POST",
+      "routeTemplate": "/api/sites"
+    },
+    {
+      "actionId": "http.delete.sites-id",
+      "method": "DELETE",
+      "routeTemplate": "/api/sites/:id"
+    },
+    {
+      "actionId": "http.post.sites-id-duplicate",
+      "method": "POST",
+      "routeTemplate": "/api/sites/:id/duplicate"
+    },
+    {
+      "actionId": "http.get.sites",
+      "method": "GET",
+      "routeTemplate": "/api/sites"
+    },
+    {
+      "actionId": "http.get.sites-id",
+      "method": "GET",
+      "routeTemplate": "/api/sites/:id"
+    },
+    {
+      "actionId": "http.get.sites-modx-versions",
+      "method": "GET",
+      "routeTemplate": "/api/sites/modx-versions"
+    },
+    {
+      "actionId": "http.get.sites-id-php-pool-config",
+      "method": "GET",
+      "routeTemplate": "/api/sites/:id/php-pool-config"
+    },
+    {
+      "actionId": "http.get.sites-id-metrics",
+      "method": "GET",
+      "routeTemplate": "/api/sites/:id/metrics"
+    },
+    {
+      "actionId": "http.get.sites-id-ssh",
+      "method": "GET",
+      "routeTemplate": "/api/sites/:id/ssh"
+    },
+    {
+      "actionId": "http.post.sites-id-restart",
+      "method": "POST",
+      "routeTemplate": "/api/sites/:id/restart"
+    },
+    {
+      "actionId": "http.post.sites-id-start",
+      "method": "POST",
+      "routeTemplate": "/api/sites/:id/start"
+    },
+    {
+      "actionId": "http.post.sites-id-stop",
+      "method": "POST",
+      "routeTemplate": "/api/sites/:id/stop"
+    },
+    {
+      "actionId": "http.put.sites-id",
+      "method": "PUT",
+      "routeTemplate": "/api/sites/:id"
+    },
+    {
+      "actionId": "http.get.sites-site-id-domains-domain-id-ssl",
+      "method": "GET",
+      "routeTemplate": "/api/sites/:siteId/domains/:domainId/ssl"
+    },
+    {
+      "actionId": "http.post.sites-site-id-domains-domain-id-ssl-import",
+      "method": "POST",
+      "routeTemplate": "/api/sites/:siteId/domains/:domainId/ssl/import"
+    },
+    {
+      "actionId": "http.post.sites-site-id-domains-domain-id-ssl-custom",
+      "method": "POST",
+      "routeTemplate": "/api/sites/:siteId/domains/:domainId/ssl/custom"
+    },
+    {
+      "actionId": "http.post.sites-site-id-domains-domain-id-ssl-issue",
+      "method": "POST",
+      "routeTemplate": "/api/sites/:siteId/domains/:domainId/ssl/issue"
+    },
+    {
+      "actionId": "http.post.sites-site-id-domains-domain-id-ssl-revoke",
+      "method": "POST",
+      "routeTemplate": "/api/sites/:siteId/domains/:domainId/ssl/revoke"
+    },
+    {
+      "actionId": "http.get.ssl",
+      "method": "GET",
+      "routeTemplate": "/api/ssl"
+    },
+    {
+      "actionId": "http.post.storage-locations",
+      "method": "POST",
+      "routeTemplate": "/api/storage-locations"
+    },
+    {
+      "actionId": "http.get.storage-locations",
+      "method": "GET",
+      "routeTemplate": "/api/storage-locations"
+    },
+    {
+      "actionId": "http.delete.storage-locations-id",
+      "method": "DELETE",
+      "routeTemplate": "/api/storage-locations/:id"
+    },
+    {
+      "actionId": "http.post.storage-locations-id-test",
+      "method": "POST",
+      "routeTemplate": "/api/storage-locations/:id/test"
+    },
+    {
+      "actionId": "http.patch.storage-locations-id",
+      "method": "PATCH",
+      "routeTemplate": "/api/storage-locations/:id"
+    },
+    {
+      "actionId": "http.get.storage",
+      "method": "GET",
+      "routeTemplate": "/api/storage"
+    },
+    {
+      "actionId": "http.get.storage-server",
+      "method": "GET",
+      "routeTemplate": "/api/storage/server"
+    },
+    {
+      "actionId": "http.get.storage-site-id-top-files",
+      "method": "GET",
+      "routeTemplate": "/api/storage/:siteId/top-files"
+    },
+    {
+      "actionId": "http.get.storage-site-id-trend",
+      "method": "GET",
+      "routeTemplate": "/api/storage/:siteId/trend"
+    },
+    {
+      "actionId": "http.post.storage-site-id-top-files-scan",
+      "method": "POST",
+      "routeTemplate": "/api/storage/:siteId/top-files/scan"
+    },
+    {
+      "actionId": "http.post.system-cron",
+      "method": "POST",
+      "routeTemplate": "/api/system-cron"
+    },
+    {
+      "actionId": "http.delete.system-cron-id",
+      "method": "DELETE",
+      "routeTemplate": "/api/system-cron/:id"
+    },
+    {
+      "actionId": "http.get.system-cron",
+      "method": "GET",
+      "routeTemplate": "/api/system-cron"
+    },
+    {
+      "actionId": "http.post.system-cron-id-toggle",
+      "method": "POST",
+      "routeTemplate": "/api/system-cron/:id/toggle"
+    },
+    {
+      "actionId": "http.put.system-cron-id",
+      "method": "PUT",
+      "routeTemplate": "/api/system-cron/:id"
+    },
+    {
+      "actionId": "http.post.system-updates-check",
+      "method": "POST",
+      "routeTemplate": "/api/system/updates/check"
+    },
+    {
+      "actionId": "http.get.system-metrics",
+      "method": "GET",
+      "routeTemplate": "/api/system/metrics"
+    },
+    {
+      "actionId": "http.get.system-status",
+      "method": "GET",
+      "routeTemplate": "/api/system/status"
+    },
+    {
+      "actionId": "http.get.system-versions",
+      "method": "GET",
+      "routeTemplate": "/api/system/versions"
+    },
+    {
+      "actionId": "http.post.system-updates-install",
+      "method": "POST",
+      "routeTemplate": "/api/system/updates/install"
+    },
+    {
+      "actionId": "http.post.system-updates-upgrade-all",
+      "method": "POST",
+      "routeTemplate": "/api/system/updates/upgrade-all"
+    },
+    {
+      "actionId": "http.post.users",
+      "method": "POST",
+      "routeTemplate": "/api/users"
+    },
+    {
+      "actionId": "http.delete.users-id",
+      "method": "DELETE",
+      "routeTemplate": "/api/users/:id"
+    },
+    {
+      "actionId": "http.get.users",
+      "method": "GET",
+      "routeTemplate": "/api/users"
+    },
+    {
+      "actionId": "http.put.users-id",
+      "method": "PUT",
+      "routeTemplate": "/api/users/:id"
+    },
+    {
+      "actionId": "http.get.federation-v1-vpn-fragments-vpn-user-id",
+      "method": "GET",
+      "routeTemplate": "/api/federation/v1/vpn/fragments/:vpnUserId"
+    },
+    {
+      "actionId": "http.post.vpn-users-id-services",
+      "method": "POST",
+      "routeTemplate": "/api/vpn/users/:id/services"
+    },
+    {
+      "actionId": "http.post.vpn-services",
+      "method": "POST",
+      "routeTemplate": "/api/vpn/services"
+    },
+    {
+      "actionId": "http.post.vpn-users",
+      "method": "POST",
+      "routeTemplate": "/api/vpn/users"
+    },
+    {
+      "actionId": "http.delete.vpn-services-id",
+      "method": "DELETE",
+      "routeTemplate": "/api/vpn/services/:id"
+    },
+    {
+      "actionId": "http.delete.vpn-users-id",
+      "method": "DELETE",
+      "routeTemplate": "/api/vpn/users/:id"
+    },
+    {
+      "actionId": "http.get.vpn-services-id",
+      "method": "GET",
+      "routeTemplate": "/api/vpn/services/:id"
+    },
+    {
+      "actionId": "http.get.vpn-users-id",
+      "method": "GET",
+      "routeTemplate": "/api/vpn/users/:id"
+    },
+    {
+      "actionId": "http.get.vpn-users-user-id-services-service-id-creds",
+      "method": "GET",
+      "routeTemplate": "/api/vpn/users/:userId/services/:serviceId/creds"
+    },
+    {
+      "actionId": "http.post.vpn-install-protocol",
+      "method": "POST",
+      "routeTemplate": "/api/vpn/install/:protocol"
+    },
+    {
+      "actionId": "http.get.vpn-install-status",
+      "method": "GET",
+      "routeTemplate": "/api/vpn/install-status"
+    },
+    {
+      "actionId": "http.get.vpn-services",
+      "method": "GET",
+      "routeTemplate": "/api/vpn/services"
+    },
+    {
+      "actionId": "http.get.vpn-users",
+      "method": "GET",
+      "routeTemplate": "/api/vpn/users"
+    },
+    {
+      "actionId": "http.get.vpn-protocols",
+      "method": "GET",
+      "routeTemplate": "/api/vpn/protocols"
+    },
+    {
+      "actionId": "http.post.vpn-users-id-regenerate-sub-token",
+      "method": "POST",
+      "routeTemplate": "/api/vpn/users/:id/regenerate-sub-token"
+    },
+    {
+      "actionId": "http.delete.vpn-users-user-id-services-service-id",
+      "method": "DELETE",
+      "routeTemplate": "/api/vpn/users/:userId/services/:serviceId"
+    },
+    {
+      "actionId": "http.post.vpn-services-id-rotate-keys",
+      "method": "POST",
+      "routeTemplate": "/api/vpn/services/:id/rotate-keys"
+    },
+    {
+      "actionId": "http.post.vpn-services-id-rotate-sni",
+      "method": "POST",
+      "routeTemplate": "/api/vpn/services/:id/rotate-sni"
+    },
+    {
+      "actionId": "http.post.vpn-sni-health-check",
+      "method": "POST",
+      "routeTemplate": "/api/vpn/sni-health-check"
+    },
+    {
+      "actionId": "http.post.vpn-services-id-start",
+      "method": "POST",
+      "routeTemplate": "/api/vpn/services/:id/start"
+    },
+    {
+      "actionId": "http.post.vpn-services-id-stop",
+      "method": "POST",
+      "routeTemplate": "/api/vpn/services/:id/stop"
+    },
+    {
+      "actionId": "http.delete.vpn-install-protocol",
+      "method": "DELETE",
+      "routeTemplate": "/api/vpn/install/:protocol"
+    },
+    {
+      "actionId": "http.patch.vpn-users-id",
+      "method": "PATCH",
+      "routeTemplate": "/api/vpn/users/:id"
+    },
+    {
+      "actionId": "http.post.vpn-validate-sni",
+      "method": "POST",
+      "routeTemplate": "/api/vpn/validate-sni"
+    },
+    {
+      "actionId": "http.post.federation-v1-webhooks-deliveries-delivery-id",
+      "method": "POST",
+      "routeTemplate": "/api/federation/v1/webhooks/deliveries/:deliveryId"
+    }
+  ]
+}

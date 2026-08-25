@@ -170,7 +170,8 @@ const props = defineProps<{
 
 const emit = defineEmits<{ (e: 'changed'): void }>();
 
-const api = useApi();
+const api = useRemoteApi();
+const { waitForOperation } = useOperation();
 const toast = useMbToast();
 const confirm = useMbConfirm();
 
@@ -299,8 +300,15 @@ async function revoke() {
   if (!ok) return;
   revoking.value = true;
   try {
-    await api.post(`${basePath()}/revoke`, {});
-    toast.success('Сертификат отозван, домен переключён на HTTP');
+    const accepted = await api.post<AcceptedOperation>(
+      `${basePath()}/revoke`,
+      undefined,
+      { headers: { 'Idempotency-Key': operationIdempotencyKey('ssl-revoke') } },
+    );
+    const operation = await waitForOperation(accepted.operationId, { timeoutMs: 11 * 60_000 });
+    const result = operation.result as { warning?: string | null } | null;
+    toast.success('Сертификат удалён, домен переключён на HTTP');
+    if (result?.warning) toast.warning(result.warning);
     emit('changed');
   } catch (e) {
     toast.error((e as Error).message || 'Ошибка отзыва сертификата');
@@ -325,18 +333,33 @@ async function doImport() {
 
 async function issue() {
   if (!activeDomain.value || issuing.value) return;
+  const targetDomain = activeDomain.value;
   issuing.value = true;
   issueError.value = '';
-  progress.value = 'Отправка запроса агенту...';
+  progress.value = 'Постановка операции в очередь...';
   elapsed.value = 0;
   elapsedTimer = setInterval(() => {
     elapsed.value++;
-    if (elapsed.value === 3) progress.value = 'Ожидание certbot (может занять до 2 минут)...';
+    if (elapsed.value === 3) progress.value = 'Ожидание certbot...';
   }, 1000);
   try {
-    await api.post(`${basePath()}/issue`, {});
+    const accepted = await api.post<AcceptedOperation>(
+      `/sites/${props.siteId}/domains/${targetDomain.id}/ssl/issue`,
+      undefined,
+      { headers: { 'Idempotency-Key': operationIdempotencyKey('ssl-issue') } },
+    );
+    await waitForOperation(accepted.operationId, {
+      timeoutMs: 11 * 60_000,
+      onUpdate: (operation) => {
+        if (operation.currentStep === 'persist') {
+          progress.value = 'Применение сертификата и Nginx...';
+        } else if (operation.currentStep === 'certbot') {
+          progress.value = 'Ожидание certbot...';
+        }
+      },
+    });
     progress.value = 'Сертификат успешно выпущен';
-    toast.success(`SSL-сертификат для ${activeDomain.value.domain} выпущен`);
+    toast.success(`SSL-сертификат для ${targetDomain.domain} выпущен`);
     emit('changed');
     setTimeout(() => { progress.value = ''; }, 3000);
   } catch (e) {

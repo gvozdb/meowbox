@@ -701,7 +701,41 @@
     <!-- =========================================================== -->
     <div v-if="activeTab === 'access'" class="tab-content">
       <div v-if="accessLoading" class="audit-log__empty"><p>Загрузка состояния…</p></div>
+      <div v-else-if="panelAccessUnavailableReason" class="settings-card access-boundary access-boundary--blocked">
+        <span class="access-boundary__eyebrow">Panel Access недоступен</span>
+        <p>{{ panelAccessUnavailableReason }}</p>
+      </div>
       <template v-else>
+
+        <div v-if="isRemotePanelAccess" class="settings-card access-boundary">
+          <span class="access-boundary__eyebrow">Прямой target origin</span>
+          <p>
+            Изменение домена идёт через candidate listener и master registry cutover.
+            Старый endpoint остаётся активным до проверок API, WebSocket и этого браузера.
+          </p>
+        </div>
+
+        <div v-if="accessCutover" class="settings-card access-cutover-card">
+          <div class="access-cutover-card__head">
+            <div>
+              <span class="access-boundary__eyebrow">Endpoint cutover</span>
+              <strong>{{ accessCutoverMessage || accessCutover.state }}</strong>
+            </div>
+            <span :class="['access-pill', accessCutover.state === 'FINALIZED' ? 'access-pill--ok' : accessCutover.state === 'NEEDS_ATTENTION' ? 'access-pill--danger' : 'access-pill--warn']">
+              {{ accessCutover.state }}
+            </span>
+          </div>
+          <code v-if="accessCutover.candidateOrigin" class="access-cutover-card__origin">{{ accessCutover.candidateOrigin }}</code>
+          <span v-if="accessCutover.reasonCode" class="access-cutover-card__reason">{{ accessCutover.reasonCode }}</span>
+          <button
+            v-if="accessCutoverPending"
+            class="settings-card__btn settings-card__btn--sm settings-card__btn--danger"
+            :disabled="accessIssueLeRunning"
+            @click="rollbackAccessCutover"
+          >
+            Откатить candidate
+          </button>
+        </div>
 
         <!-- ── Текущий доступ (live-статус) ─────────────────────── -->
         <div class="settings-card access-card">
@@ -766,21 +800,26 @@
             <div class="form-group">
               <label class="form-label">Домен</label>
               <div class="access-input-row">
-                <input v-model="accessForm.domain" class="form-input mono" placeholder="panel.example.com" :disabled="accessSaving" />
-                <button class="settings-card__btn settings-card__btn--sm" :disabled="accessSaving" @click="saveAccessDomain">
-                  {{ accessSaving ? '...' : 'Сохранить' }}
+                <input v-model="accessForm.domain" class="form-input mono" placeholder="panel.example.com" :disabled="accessSaving || accessIssueLeRunning || accessCutoverPending" />
+                <button class="settings-card__btn settings-card__btn--sm" :disabled="accessSaving || accessIssueLeRunning || accessCutoverPending" @click="saveAccessDomain">
+                  {{ accessSaving ? '...' : (isFederatedRemotePanelAccess ? 'Подготовить' : 'Сохранить') }}
                 </button>
-                <button v-if="accessForm.domain" class="settings-card__btn settings-card__btn--sm settings-card__btn--danger" :disabled="accessSaving" @click="unbindAccessDomain">
+                <button v-if="accessForm.domain && !isRemotePanelAccess" class="settings-card__btn settings-card__btn--sm settings-card__btn--danger" :disabled="accessSaving" @click="unbindAccessDomain">
                   Отвязать
                 </button>
               </div>
               <span class="form-hint">
-                Сменa домена при наличии текущего сертификата автоматически снесёт серт (нужно будет выпустить заново).
+                {{ isFederatedRemotePanelAccess
+                  ? 'Домен не меняется до полного cutover. Удаление TLS и IP-only режим для federation target запрещены.'
+                  : 'Смена домена при наличии текущего сертификата автоматически снесёт cert — его нужно выпустить заново.' }}
               </span>
             </div>
 
             <div v-if="accessForm.domain" class="access-dns-status">
-              <div v-if="accessLive.dnsResolved === null && accessForm.domain === accessOriginalDomain" class="access-dns-row access-dns-row--off">
+              <div v-if="isRemoteDomainDraft" class="access-dns-row access-dns-row--pending">
+                Candidate DNS и TLS проверит target до изменения registry.
+              </div>
+              <div v-else-if="accessLive.dnsResolved === null && accessForm.domain === accessOriginalDomain" class="access-dns-row access-dns-row--off">
                 <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
                 DNS не резолвится — проверь A-запись у регистратора.
               </div>
@@ -808,7 +847,7 @@
             </div>
             <div class="form-group" style="margin-top: 0.7rem;">
               <label class="form-label">Email регистрации</label>
-              <input v-model="accessForm.leEmailDraft" type="email" class="form-input" placeholder="admin@example.com" :disabled="accessIssueLeRunning" />
+              <input v-model="accessForm.leEmailDraft" type="email" class="form-input" placeholder="admin@example.com" :disabled="accessIssueLeRunning || accessCutoverPending" />
               <span class="form-hint">Используется LE для уведомлений об истечении (предзаполнен из профиля админа).</span>
             </div>
             <div class="settings-actions">
@@ -816,11 +855,11 @@
                 class="settings-card__btn"
                 :disabled="accessIssueLeRunning || !accessLeReady"
                 @click="issueAccessLe"
-                :title="!accessLeReady ? 'Сначала сохрани домен и проверь DNS' : ''"
+                :title="!accessLeReady ? (isFederatedRemotePanelAccess ? 'Укажи новый домен и проверь capability target' : 'Сначала сохрани домен и проверь DNS') : ''"
               >
-                {{ accessIssueLeRunning ? 'Выпускаем…' : (accessForm.certMode === 'LE' ? 'Перевыпустить cert' : 'Выпустить cert') }}
+                {{ accessIssueButtonLabel }}
               </button>
-              <button v-if="accessForm.certMode !== 'NONE'" class="settings-card__btn settings-card__btn--sm settings-card__btn--danger" style="margin-left: 0.6rem;" :disabled="accessRemoveRunning" @click="removeAccessCert">
+              <button v-if="accessForm.certMode !== 'NONE' && !isRemotePanelAccess" class="settings-card__btn settings-card__btn--sm settings-card__btn--danger" style="margin-left: 0.6rem;" :disabled="accessRemoveRunning" @click="removeAccessCert">
                 Снести cert
               </button>
             </div>
@@ -840,7 +879,10 @@
               Let's Encrypt не выдаёт сертификаты на IP. Чтобы избавиться от предупреждений браузера —
               привяжи домен выше.
             </p>
-            <div class="settings-actions">
+            <div v-if="isRemotePanelAccess" class="access-dns-row access-dns-row--pending">
+              Federation target требует проверенный HTTPS endpoint. Self-signed/IP-only переключение удалённо заблокировано.
+            </div>
+            <div v-else class="settings-actions">
               <button class="settings-card__btn" :disabled="accessGenSsRunning" @click="generateAccessSelfSigned">
                 {{ accessGenSsRunning ? 'Генерируем…' : (accessForm.certMode === 'SELFSIGNED' ? 'Сгенерировать заново' : 'Сгенерировать') }}
               </button>
@@ -861,7 +903,7 @@
                 <input
                   type="checkbox"
                   v-model="accessForm.httpsRedirect"
-                  :disabled="accessForm.certMode === 'NONE' || accessBehaviorSaving"
+                  :disabled="(!isRemoteDomainDraft && accessForm.certMode === 'NONE') || accessBehaviorSaving || accessCutoverPending"
                   @change="saveAccessBehavior"
                 />
                 Принудительный редирект HTTP → HTTPS
@@ -876,7 +918,7 @@
                 <input
                   type="checkbox"
                   v-model="accessForm.denyIpAccess"
-                  :disabled="!canDenyIpAccess || accessBehaviorSaving"
+                  :disabled="!canDenyIpAccess || accessBehaviorSaving || accessCutoverPending"
                   @change="saveAccessBehavior"
                 />
                 Запретить доступ по IP:PORT
@@ -897,10 +939,18 @@
 
 <script setup lang="ts">
 import type { PaletteId } from '~/composables/usePalette';
+import {
+  panelAccessCutoverIdempotencyKey,
+  probePanelAccessCandidate,
+  validatePanelAccessCutoverView,
+  type PanelAccessCutoverView,
+} from '~/utils/panel-access-cutover';
 
 definePageMeta({ middleware: 'auth' });
 
 const api = useApi();
+const masterApi = useMasterApi();
+const { waitForOperation } = useOperation();
 const authStore = useAuthStore();
 
 const activeTab = useTabQuery(['general', 'appearance', 'site-defaults', 'security', 'notifications', 'country-block', 'access'], 'general');
@@ -968,7 +1018,7 @@ async function saveGeneralSettings() {
 
 // ── Appearance (палитра — таб «Внешний вид») ──────────────────────────────
 // Палитра хранится на МАСТЕРЕ для каждого сервера (карта { serverId → palette }).
-// Сохранение всегда идёт в мастер (noProxy=true), чтобы фича работала и на
+// Сохранение всегда идёт в мастер, чтобы фича работала и на
 // старых slave-версиях, не знающих /panel-settings/appearance.
 const serverStore = useServerStore();
 const {
@@ -993,7 +1043,7 @@ const paletteChanged = computed(() => appearanceForm.palette !== appearanceIniti
 async function loadAppearance() {
   appearanceLoading.value = true;
   try {
-    const map = await loadAllPalettesFromApi(api);
+    const map = await loadAllPalettesFromApi(masterApi);
     const sid = serverStore.currentServerId || 'main';
     const current = map[sid] || 'amber';
     appearanceForm.palette = current;
@@ -1007,7 +1057,7 @@ async function saveAppearance() {
   appearanceSaving.value = true;
   try {
     const sid = serverStore.currentServerId || 'main';
-    const map = await savePaletteToApi(api, sid, appearanceForm.palette);
+    const map = await savePaletteToApi(masterApi, sid, appearanceForm.palette);
     if (!map) {
       showStatus('Не удалось сохранить гамму', true);
       return;
@@ -1157,7 +1207,7 @@ function cancelEnableBasicAuth() {
 
 async function loadBasicAuth() {
   try {
-    const data = await api.get<BasicAuthState>('/auth/basic-auth');
+    const data = await masterApi.get<BasicAuthState>('/auth/basic-auth');
     basicAuth.enabled = data.enabled;
     basicAuth.username = data.username || '';
     basicAuthForm.username = data.username || '';
@@ -1173,7 +1223,7 @@ async function enableBasicAuth() {
   }
   basicAuthSaving.value = true;
   try {
-    await api.post('/auth/basic-auth', {
+    await masterApi.post('/auth/basic-auth', {
       enabled: true,
       username: basicAuthForm.username,
       password: basicAuthForm.password,
@@ -1265,7 +1315,7 @@ async function saveIpAllowlist() {
 async function disableBasicAuth() {
   basicAuthSaving.value = true;
   try {
-    await api.post('/auth/basic-auth', { enabled: false });
+    await masterApi.post('/auth/basic-auth', { enabled: false });
     basicAuth.enabled = false;
     showStatus('Basic Auth отключён');
   } catch {
@@ -1321,7 +1371,7 @@ function isMobileUA(ua: string): boolean {
 async function loadSessions() {
   sessionsLoading.value = true;
   try {
-    const data = await api.get<Array<{ jti: string; ip: string; userAgent: string; createdAt: string }>>(
+    const data = await masterApi.get<Array<{ jti: string; ip: string; userAgent: string; createdAt: string }>>(
       '/auth/sessions',
     );
     const currentUA = navigator.userAgent;
@@ -1346,7 +1396,7 @@ async function loadSessions() {
 
 async function revokeSession(jti: string) {
   try {
-    await api.del(`/auth/sessions/${jti}`);
+    await masterApi.del(`/auth/sessions/${jti}`);
     sessions.value = sessions.value.filter((s) => s.jti !== jti);
     showStatus('Сессия отозвана');
   } catch {
@@ -1356,7 +1406,7 @@ async function revokeSession(jti: string) {
 
 async function revokeAllSessions() {
   try {
-    await api.del('/auth/sessions/all');
+    await masterApi.del('/auth/sessions/all');
     sessions.value = sessions.value.filter((s) => s.isCurrent);
     showStatus('Все остальные сессии отозваны');
   } catch {
@@ -1372,7 +1422,7 @@ function showStatus(message: string, isError = false) {
 async function saveProfile() {
   saving.value = true;
   try {
-    await api.put('/auth/me', { email: profileForm.email });
+    await masterApi.put('/auth/me', { email: profileForm.email });
     showStatus('Профиль обновлён');
     await authStore.fetchProfile();
   } catch {
@@ -1395,7 +1445,7 @@ async function changePassword() {
 
   saving.value = true;
   try {
-    await api.put('/auth/me', { password: passwordForm.password });
+    await masterApi.put('/auth/me', { password: passwordForm.password });
     passwordForm.password = '';
     passwordForm.confirm = '';
     showStatus('Пароль обновлён');
@@ -1408,7 +1458,7 @@ async function changePassword() {
 
 async function startTotpSetup() {
   try {
-    const data = await api.post<{ secret: string; otpauthUrl: string }>('/auth/totp/enable');
+    const data = await masterApi.post<{ secret: string; otpauthUrl: string }>('/auth/totp/enable');
     totpSetup.secret = data.secret;
     totpSetup.code = '';
     totpSetup.qrDataUrl = '';
@@ -1428,7 +1478,7 @@ async function startTotpSetup() {
 
 async function confirmTotp() {
   try {
-    await api.post('/auth/totp/confirm', { code: totpSetup.code });
+    await masterApi.post('/auth/totp/confirm', { code: totpSetup.code });
     totpSetup.secret = '';
     totpSetup.code = '';
     totpSetup.qrDataUrl = '';
@@ -1441,7 +1491,7 @@ async function confirmTotp() {
 
 async function disableTotp() {
   try {
-    await api.post('/auth/totp/disable', {
+    await masterApi.post('/auth/totp/disable', {
       code: totpDisableCode.value,
       currentPassword: totpDisablePassword.value,
     });
@@ -1828,20 +1878,21 @@ async function onCbMasterToggle(e: Event) {
 async function refreshCountryBlockDb() {
   cbRefreshing.value = true;
   try {
-    // useApi.post возвращает уже unwrap-нутый payload (AgentResult).
-    const res = await api.post<{
-      success: boolean;
-      error?: string;
+    const accepted = await api.post<AcceptedOperation>(
+      '/country-block/refresh-db',
+      {},
+      { headers: { 'Idempotency-Key': operationIdempotencyKey('country-block-refresh') } },
+    );
+    const operation = await waitForOperation(accepted.operationId, { timeoutMs: 31 * 60_000 });
+    const res = operation.result as {
       info?: 'NO_RULES';
       updated?: string[];
       errors?: Array<{ country: string; error: string }> | string[];
-    }>('/country-block/refresh-db', {});
+    } | null;
     const upd = res?.updated || [];
     const errs = res?.errors || [];
     if (res?.info === 'NO_RULES') {
       showStatus('Нет правил — сначала добавь хотя бы одну страну для блокировки.', true);
-    } else if (!res?.success && errs.length === 0) {
-      showStatus('Ошибка обновления: ' + (res?.error || 'неизвестная'), true);
     } else if (upd.length === 0 && errs.length > 0) {
       showStatus(`Не удалось скачать ни одной зоны (ошибок: ${errs.length}). Проверь интернет/источник.`, true);
     } else if (upd.length === 0) {
@@ -1964,6 +2015,12 @@ const accessBehaviorSaving = ref(false);
 const accessIssueLeRunning = ref(false);
 const accessGenSsRunning = ref(false);
 const accessRemoveRunning = ref(false);
+const accessCutover = ref<PanelAccessCutoverView | null>(null);
+const accessCutoverMessage = ref('');
+const accessCutoverPending = computed(() =>
+  !!accessCutover.value &&
+  !['FINALIZED', 'ROLLED_BACK'].includes(accessCutover.value.state),
+);
 // Хранилище формы. `domain` редактируется юзером, остальное — отзеркаливание API state.
 const accessForm = reactive<AccessSettings & { leEmailDraft: string }>({
   domain: '',
@@ -1988,20 +2045,69 @@ const accessLive = reactive<AccessLive>({
 });
 const accessOriginalDomain = ref<string | null>(null);
 const accessDefaultEmail = ref<string | null>(null);
-// PANEL_PORT мы фронту не отдаём напрямую — но он есть в URL текущей страницы.
-const panelPort = computed(() => {
-  if (typeof window === 'undefined') return '';
-  return window.location.port || (window.location.protocol === 'https:' ? '443' : '80');
+const isRemotePanelAccess = computed(() => !serverStore.isLocal);
+const isFederatedRemotePanelAccess = computed(() =>
+  isRemotePanelAccess.value && serverStore.currentServer?.federation === true,
+);
+
+function remoteCapabilityEnabled(actionId: string): boolean {
+  const capability = serverStore.remoteContext?.capabilities[actionId];
+  return capability?.enabled === true;
+}
+
+const panelAccessUnavailableReason = computed(() => {
+  if (authStore.user?.role !== 'ADMIN') return 'Panel Access доступен только роли ADMIN.';
+  if (!isRemotePanelAccess.value) return null;
+  if (!isFederatedRemotePanelAccess.value) {
+    return 'Legacy target не поддерживает безопасный Panel Access cutover. Сначала обнови и enroll target.';
+  }
+  if (!serverStore.remoteContext) return 'Federation context target недоступен.';
+  if (!remoteCapabilityEnabled('http.get.panel-access')) {
+    return 'Target не объявил capability чтения Panel Access.';
+  }
+  return null;
 });
 
-const currentPanelUrl = computed(() => {
-  if (typeof window === 'undefined') return '';
-  return `${window.location.protocol}//${window.location.host}`;
+const remoteCutoverSupported = computed(() => {
+  if (!isFederatedRemotePanelAccess.value || !serverStore.remoteContext) return false;
+  return [
+    'http.post.panel-access-federation-cutovers',
+    'http.get.panel-access-federation-cutovers-cutover-id',
+    'http.post.panel-access-federation-cutovers-cutover-id-finalize',
+    'http.post.panel-access-federation-cutovers-cutover-id-rollback',
+    'http.get.operations-id',
+  ].every(remoteCapabilityEnabled);
 });
+
+const isRemoteDomainDraft = computed(() =>
+  isFederatedRemotePanelAccess.value &&
+  !!accessForm.domain &&
+  accessForm.domain !== accessOriginalDomain.value,
+);
+
+const selectedPanelOrigin = computed(() => {
+  if (typeof window === 'undefined') return '';
+  if (!isRemotePanelAccess.value) return window.location.origin;
+  if (isFederatedRemotePanelAccess.value) {
+    return serverStore.remoteContext?.browserPublicOrigin || '';
+  }
+  try { return new URL(serverStore.currentServer?.url || '').origin; } catch { return ''; }
+});
+
+const panelPort = computed(() => {
+  try {
+    const url = new URL(selectedPanelOrigin.value);
+    return url.port || (url.protocol === 'https:' ? '443' : '80');
+  } catch {
+    return '';
+  }
+});
+
+const currentPanelUrl = computed(() => selectedPanelOrigin.value);
 
 const accessProtocolHttps = computed(() => {
-  if (typeof window === 'undefined') return false;
-  return window.location.protocol === 'https:';
+  try { return new URL(selectedPanelOrigin.value).protocol === 'https:'; }
+  catch { return false; }
 });
 
 const certExpiryClass = computed(() => {
@@ -2018,14 +2124,23 @@ const certExpiryClass = computed(() => {
 // формой), email валиден, и DNS либо совпадает либо ещё не проверен.
 const accessLeReady = computed(() => {
   if (!accessForm.domain) return false;
-  if (accessForm.domain !== accessOriginalDomain.value) return false;
+  if (isFederatedRemotePanelAccess.value) {
+    if (!remoteCutoverSupported.value || !isRemoteDomainDraft.value) return false;
+  } else if (accessForm.domain !== accessOriginalDomain.value) return false;
   const email = (accessForm.leEmailDraft || '').trim();
   if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return false;
   return true;
 });
 
 const canDenyIpAccess = computed(() => {
-  return !!accessForm.domain && accessForm.certMode !== 'NONE';
+  return !!accessForm.domain &&
+    (accessForm.certMode !== 'NONE' || isRemoteDomainDraft.value);
+});
+
+const accessIssueButtonLabel = computed(() => {
+  if (accessIssueLeRunning.value) return accessCutoverMessage.value || 'Готовим candidate…';
+  if (isFederatedRemotePanelAccess.value) return 'Проверить и переключить endpoint';
+  return accessForm.certMode === 'LE' ? 'Перевыпустить cert' : 'Выпустить cert';
 });
 
 function formatAccessDate(iso: string | null): string {
@@ -2040,6 +2155,7 @@ function formatAccessDate(iso: string | null): string {
 async function loadPanelAccess() {
   accessLoading.value = true;
   try {
+    if (panelAccessUnavailableReason.value) return;
     const res = await api.get<{
       settings: AccessSettings;
       live: AccessLive;
@@ -2060,7 +2176,23 @@ async function loadPanelAccess() {
 }
 
 async function saveAccessDomain() {
-  const domain = (accessForm.domain || '').trim() || null;
+  const domain = (accessForm.domain || '').trim().toLowerCase() || null;
+  if (
+    domain &&
+    !/^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,}$/.test(domain)
+  ) {
+    showStatus('Домен невалиден', true);
+    return;
+  }
+  if (isFederatedRemotePanelAccess.value) {
+    accessForm.domain = domain || '';
+    showStatus(
+      domain === accessOriginalDomain.value
+        ? 'Это уже активный target endpoint'
+        : 'Candidate подготовлен в форме. Запусти проверку и переключение endpoint.',
+    );
+    return;
+  }
   accessSaving.value = true;
   try {
     const res = await api.put<{ settings: AccessSettings; live: AccessLive }>('/panel-access/domain', { domain });
@@ -2077,6 +2209,10 @@ async function saveAccessDomain() {
 }
 
 async function unbindAccessDomain() {
+  if (isRemotePanelAccess.value) {
+    showStatus('Удалённый federation endpoint нельзя отвязать без recovery cutover', true);
+    return;
+  }
   if (!confirm('Отвязать домен? Если есть сертификат — он будет снесён.')) return;
   accessForm.domain = '';
   await saveAccessDomain();
@@ -2087,6 +2223,10 @@ async function issueAccessLe() {
   const email = (accessForm.leEmailDraft || '').trim();
   accessIssueLeRunning.value = true;
   try {
+    if (isFederatedRemotePanelAccess.value) {
+      await runRemotePanelAccessCutover(email);
+      return;
+    }
     const res = await api.post<{ settings: AccessSettings; live: AccessLive }>('/panel-access/cert/le', { email });
     Object.assign(accessForm, res.settings);
     Object.assign(accessLive, res.live);
@@ -2103,6 +2243,10 @@ async function issueAccessLe() {
 }
 
 async function generateAccessSelfSigned() {
+  if (isRemotePanelAccess.value) {
+    showStatus('Self-signed для удалённого federation endpoint не поддерживается', true);
+    return;
+  }
   accessGenSsRunning.value = true;
   try {
     const res = await api.post<{ settings: AccessSettings; live: AccessLive }>('/panel-access/cert/selfsigned', {});
@@ -2118,6 +2262,10 @@ async function generateAccessSelfSigned() {
 }
 
 async function removeAccessCert() {
+  if (isRemotePanelAccess.value) {
+    showStatus('Нельзя снять TLS с активного federation endpoint', true);
+    return;
+  }
   if (!confirm('Снести сертификат? Панель станет доступна только по HTTP.')) return;
   accessRemoveRunning.value = true;
   try {
@@ -2134,12 +2282,18 @@ async function removeAccessCert() {
 }
 
 async function saveAccessBehavior() {
+  if (isRemoteDomainDraft.value) {
+    showStatus('Поведение будет применено вместе с candidate endpoint');
+    return;
+  }
   accessBehaviorSaving.value = true;
   try {
     const res = await api.put<{ settings: AccessSettings; live: AccessLive }>('/panel-access/behavior', {
       httpsRedirect: accessForm.httpsRedirect,
       denyIpAccess: accessForm.denyIpAccess,
-    });
+    }, isFederatedRemotePanelAccess.value
+      ? { headers: { 'Idempotency-Key': operationIdempotencyKey('panel-access-behavior') } }
+      : undefined);
     Object.assign(accessForm, res.settings);
     Object.assign(accessLive, res.live);
     showStatus('Настройки доступа применены');
@@ -2152,6 +2306,166 @@ async function saveAccessBehavior() {
   }
 }
 
+let accessCutoverController: AbortController | null = null;
+const accessCutoverStartKey = ref<string | null>(null);
+const accessCutoverBinding = ref<string | null>(null);
+
+function cutoverBinding(email: string): string {
+  return JSON.stringify({
+    serverId: serverStore.currentServerId,
+    domain: (accessForm.domain || '').trim().toLowerCase(),
+    email,
+    httpsRedirect: accessForm.httpsRedirect,
+    denyIpAccess: accessForm.denyIpAccess,
+  });
+}
+
+async function waitForAccessCutoverStage(
+  serverId: string,
+  initial: PanelAccessCutoverView,
+  signal: AbortSignal,
+): Promise<PanelAccessCutoverView> {
+  let current = initial;
+  const deadline = Date.parse(initial.deadlineAt) + 5_000;
+  while (!['STAGED', 'FINALIZED', 'ROLLED_BACK', 'NEEDS_ATTENTION'].includes(current.state)) {
+    if (signal.aborted) throw new DOMException('Aborted', 'AbortError');
+    if (Date.now() > deadline) throw new Error('Panel Access cutover превысил deadline');
+    await new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        signal.removeEventListener('abort', abort);
+        resolve();
+      }, 1_000);
+      const abort = () => {
+        clearTimeout(timer);
+        signal.removeEventListener('abort', abort);
+        reject(new DOMException('Aborted', 'AbortError'));
+      };
+      signal.addEventListener('abort', abort, { once: true });
+    });
+    current = validatePanelAccessCutoverView(
+      await masterApi.get(`/servers/${serverId}/panel-access/cutovers/${current.id}`, { signal }),
+      serverId,
+    );
+    accessCutover.value = current;
+    accessCutoverMessage.value = current.state === 'PREPARED'
+      ? 'Выпускаем сертификат…'
+      : 'Проверяем candidate…';
+  }
+  if (current.state === 'ROLLED_BACK') {
+    accessCutoverStartKey.value = null;
+    accessCutoverBinding.value = null;
+    throw new Error(`Cutover откатан${current.reasonCode ? `: ${current.reasonCode}` : ''}`);
+  }
+  if (current.state === 'NEEDS_ATTENTION') {
+    throw new Error(`Cutover требует ручной проверки${current.reasonCode ? `: ${current.reasonCode}` : ''}`);
+  }
+  return current;
+}
+
+async function runRemotePanelAccessCutover(email: string): Promise<void> {
+  const serverId = serverStore.currentServerId;
+  if (serverId === 'main' || !remoteCutoverSupported.value) {
+    throw new Error('Target не готов к безопасному Panel Access cutover');
+  }
+  const binding = cutoverBinding(email);
+  if (accessCutoverBinding.value && accessCutoverBinding.value !== binding) {
+    throw new Error('Незавершённый cutover связан с другими параметрами; сначала откати его');
+  }
+  accessCutoverBinding.value = binding;
+  accessCutoverStartKey.value ||= panelAccessCutoverIdempotencyKey('start');
+  accessCutoverController?.abort();
+  accessCutoverController = new AbortController();
+  const signal = accessCutoverController.signal;
+  accessCutoverMessage.value = 'Создаём durable operation…';
+  let view = validatePanelAccessCutoverView(
+    await masterApi.post(
+      `/servers/${serverId}/panel-access/cutovers`,
+      {
+        domain: (accessForm.domain || '').trim().toLowerCase(),
+        email,
+        httpsRedirect: accessForm.httpsRedirect,
+        denyIpAccess: accessForm.denyIpAccess,
+      },
+      {
+        signal,
+        headers: { 'Idempotency-Key': accessCutoverStartKey.value },
+      },
+    ),
+    serverId,
+  );
+  accessCutover.value = view;
+  view = await waitForAccessCutoverStage(serverId, view, signal);
+  if (view.state !== 'FINALIZED') {
+    if (!view.candidateOrigin) throw new Error('Target не вернул candidate origin');
+    accessCutoverMessage.value = 'Проверяем доступ из браузера…';
+    await probePanelAccessCandidate(view.candidateOrigin);
+    accessCutoverMessage.value = 'Переключаем registry и target…';
+    const confirmKey = panelAccessCutoverIdempotencyKey('confirm');
+    try {
+      view = validatePanelAccessCutoverView(
+        await masterApi.post(
+          `/servers/${serverId}/panel-access/cutovers/${view.id}/confirm-browser`,
+          { candidateOrigin: view.candidateOrigin },
+          {
+            signal,
+            headers: { 'Idempotency-Key': confirmKey },
+          },
+        ),
+        serverId,
+      );
+    } catch (confirmError) {
+      accessCutoverMessage.value = 'Сверяем lost acknowledgement…';
+      await new Promise((resolve) => setTimeout(resolve, 1_000));
+      const reconciled = validatePanelAccessCutoverView(
+        await masterApi.get(`/servers/${serverId}/panel-access/cutovers/${view.id}`, { signal }),
+        serverId,
+      );
+      accessCutover.value = reconciled;
+      if (reconciled.state !== 'FINALIZED') throw confirmError;
+      view = reconciled;
+    }
+  }
+  if (view.state !== 'FINALIZED') {
+    throw new Error(`Cutover завершился в неожиданном состоянии ${view.state}`);
+  }
+  accessCutover.value = view;
+  accessCutoverMessage.value = 'Endpoint переключён';
+  accessCutoverStartKey.value = null;
+  accessCutoverBinding.value = null;
+  await serverStore.loadServers();
+  await serverStore.refreshCurrentRemoteContext();
+  await loadPanelAccess();
+  showStatus('Target Panel Access endpoint переключён');
+}
+
+async function rollbackAccessCutover() {
+  const cutover = accessCutover.value;
+  const serverId = serverStore.currentServerId;
+  if (!cutover || serverId === 'main') return;
+  accessIssueLeRunning.value = true;
+  try {
+    const view = validatePanelAccessCutoverView(
+      await masterApi.post(
+        `/servers/${serverId}/panel-access/cutovers/${cutover.id}/rollback`,
+        {},
+        { headers: { 'Idempotency-Key': panelAccessCutoverIdempotencyKey('rollback') } },
+      ),
+      serverId,
+    );
+    accessCutover.value = view;
+    if (view.state === 'ROLLED_BACK') {
+      accessCutoverStartKey.value = null;
+      accessCutoverBinding.value = null;
+      accessCutoverMessage.value = 'Candidate откатан';
+      showStatus('Panel Access candidate откатан');
+    }
+  } catch (error) {
+    showStatus((error as Error).message || 'Не удалось откатить candidate', true);
+  } finally {
+    accessIssueLeRunning.value = false;
+  }
+}
+
 watch(activeTab, (tab) => loadDataForTab(tab));
 
 onMounted(() => {
@@ -2161,6 +2475,8 @@ onMounted(() => {
   // Грузим данные текущей вкладки (учитываем ?tab= в URL после F5/ссылки).
   loadDataForTab(activeTab.value);
 });
+
+onUnmounted(() => accessCutoverController?.abort());
 </script>
 
 <style scoped>
@@ -2921,6 +3237,76 @@ onMounted(() => {
 /* ── Access tab ──────────────────────────────────────────────────────── */
 .access-card { margin-bottom: 1rem; }
 
+.access-boundary {
+  position: relative;
+  overflow: hidden;
+  margin-bottom: 1rem;
+  border-color: color-mix(in srgb, var(--primary) 34%, var(--border));
+  background:
+    linear-gradient(115deg, color-mix(in srgb, var(--primary) 9%, transparent), transparent 52%),
+    var(--bg-surface);
+}
+.access-boundary::after {
+  content: '';
+  position: absolute;
+  inset: 0 0 0 auto;
+  width: 4px;
+  background: var(--primary);
+}
+.access-boundary--blocked {
+  border-color: rgba(239, 68, 68, 0.28);
+  background: rgba(239, 68, 68, 0.05);
+}
+.access-boundary--blocked::after { background: #ef4444; }
+.access-boundary p {
+  margin: 0.35rem 0 0;
+  max-width: 760px;
+  color: var(--text-secondary);
+  font-size: 0.84rem;
+  line-height: 1.55;
+}
+.access-boundary__eyebrow {
+  display: block;
+  color: var(--text-muted);
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.68rem;
+  font-weight: 700;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+}
+
+.access-cutover-card {
+  display: grid;
+  gap: 0.75rem;
+  margin-bottom: 1rem;
+  border-color: rgba(234, 179, 8, 0.25);
+  background: linear-gradient(135deg, rgba(234, 179, 8, 0.07), transparent 60%), var(--bg-surface);
+}
+.access-cutover-card__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+}
+.access-cutover-card__head strong {
+  display: block;
+  margin-top: 0.25rem;
+  color: var(--text-heading);
+  font-size: 0.92rem;
+}
+.access-cutover-card__origin {
+  width: fit-content;
+  max-width: 100%;
+  overflow-wrap: anywhere;
+  color: var(--text-secondary);
+  font-size: 0.78rem;
+}
+.access-cutover-card__reason {
+  color: #fca5a5;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.72rem;
+}
+
 .access-status {
   display: grid;
   grid-template-columns: 200px 1fr;
@@ -2990,6 +3376,11 @@ onMounted(() => {
   background: rgba(239, 68, 68, 0.06);
   border: 1px solid rgba(239, 68, 68, 0.2);
   color: #fca5a5;
+}
+.access-dns-row--pending {
+  background: rgba(234, 179, 8, 0.07);
+  border: 1px solid rgba(234, 179, 8, 0.2);
+  color: #fde68a;
 }
 
 .access-cert-option {

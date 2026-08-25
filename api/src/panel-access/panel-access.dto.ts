@@ -1,4 +1,14 @@
-import { IsBoolean, IsEmail, IsIn, IsOptional, IsString, Matches } from 'class-validator';
+import {
+  IsBoolean,
+  IsEmail,
+  IsISO8601,
+  IsIn,
+  IsOptional,
+  IsString,
+  IsUUID,
+  IsUrl,
+  Matches,
+} from 'class-validator';
 
 /**
  * DTO для обновления настроек доступа к панели (домен, redirect, deny-ip).
@@ -56,6 +66,36 @@ export class SetDomainDto {
   @IsOptional()
   @IsString()
   domain?: string | null;
+}
+
+export class StartPanelAccessCutoverDto {
+  @IsString()
+  @Matches(/^([a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)+[a-zA-Z]{2,}$/, {
+    message: 'domain должен быть валидным публичным DNS-именем',
+  })
+  domain!: string;
+
+  @IsEmail({}, { message: 'email обязателен и должен быть валидным' })
+  email!: string;
+
+  @IsBoolean()
+  httpsRedirect!: boolean;
+
+  @IsBoolean()
+  denyIpAccess!: boolean;
+}
+
+export class StageFederatedPanelAccessCutoverDto extends StartPanelAccessCutoverDto {
+  @IsUUID()
+  cutoverId!: string;
+
+  @IsISO8601({ strict: true })
+  deadlineAt!: string;
+}
+
+export class ConfirmPanelAccessCutoverDto {
+  @IsUrl({ protocols: ['https'], require_protocol: true, require_tld: false })
+  candidateOrigin!: string;
 }
 
 /** Допустимые значения certMode для type guards. */

@@ -49,6 +49,12 @@ import { JwtAuthGuard } from './common/guards/jwt-auth.guard';
 import { ProxyAuthGuard } from './common/guards/proxy-auth.guard';
 import { RolesGuard } from './common/guards/roles.guard';
 import { CustomThrottlerGuard } from './common/guards/throttler-tracker.guard';
+import { FederationModule } from './federation/federation.module';
+import { FederationDelegationGuard } from './federation/federation-delegation.guard';
+import { FederationEnrollmentBootstrapGuard } from './federation/federation-enrollment-bootstrap.guard';
+import { AdminerModule } from './adminer/adminer.module';
+import { TransfersModule } from './transfers/transfers.module';
+import { WebhooksModule } from './webhooks/webhooks.module';
 
 @Module({
   imports: [
@@ -85,6 +91,7 @@ import { CustomThrottlerGuard } from './common/guards/throttler-tracker.guard';
 
     // --- Core ---
     PrismaModule,
+    FederationModule,
     OperationsModule,
     GatewayModule,
     AuthModule,
@@ -124,6 +131,9 @@ import { CustomThrottlerGuard } from './common/guards/throttler-tracker.guard';
     AdminSecurityModule,
     VpnModule,
     SiteNodeModule,
+    AdminerModule,
+    TransfersModule,
+    WebhooksModule,
   ],
   providers: [
     {
@@ -133,6 +143,14 @@ import { CustomThrottlerGuard } from './common/guards/throttler-tracker.guard';
     // IP allowlist первым в цепочке — фильтрует ВСЕ запросы (включая
     // /auth/login и /auth/refresh), кроме явных исключений (loopback,
     // /api/proxy/* для master↔slave). Если allowlist выключен — пропускает.
+    {
+      provide: APP_GUARD,
+      useClass: FederationDelegationGuard,
+    },
+    {
+      provide: APP_GUARD,
+      useClass: FederationEnrollmentBootstrapGuard,
+    },
     {
       provide: APP_GUARD,
       useClass: IpAllowlistGuard,

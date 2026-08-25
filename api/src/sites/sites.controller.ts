@@ -11,6 +11,8 @@ import {
   GoneException,
   Headers,
   Req,
+  HttpCode,
+  HttpStatus,
 } from '@nestjs/common';
 import { Throttle } from '@nestjs/throttler';
 import { SitesService } from './sites.service';
@@ -104,6 +106,7 @@ export class SitesController {
   // 5 в минуту достаточно для нормальной работы и блокирует burst-DoS.
   @Post()
   @Roles(UserRole.ADMIN)
+  @HttpCode(HttpStatus.ACCEPTED)
   @Throttle({ default: { limit: 5, ttl: 60_000 } })
   async create(
     @Body() dto: CreateSiteRequestDto,
@@ -124,6 +127,7 @@ export class SitesController {
    */
   @Post(':id/duplicate')
   @Roles(UserRole.ADMIN)
+  @HttpCode(HttpStatus.ACCEPTED)
   @Throttle({ default: { limit: 3, ttl: 60_000 } })
   async duplicate(
     @Param('id', ParseUUIDPipe) id: string,
@@ -307,6 +311,7 @@ export class SitesController {
   // Удаление сайта = userdel / rm -rf. Только ADMIN.
   @Delete(':id')
   @Roles(UserRole.ADMIN)
+  @HttpCode(HttpStatus.ACCEPTED)
   async delete(
     @Param('id', ParseUUIDPipe) id: string,
     @CurrentUser('sub') userId: string,

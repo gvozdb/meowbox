@@ -226,7 +226,7 @@ RELEASE_DIR="$MEOWBOX_DIR/releases/$TARGET"
 # ----- Идемпотентность: если current уже = TARGET, нечего качать -----
 if [[ -L "$MEOWBOX_DIR/current" ]] && [[ "$(readlink -f "$MEOWBOX_DIR/current")" == "$RELEASE_DIR" ]]; then
   log "current → $TARGET уже установлен. Перезапускаю install.sh для актуализации."
-  exec bash "$MEOWBOX_DIR/current/install.sh" --release-mode
+  exec bash "$MEOWBOX_DIR/current/install.sh" --release-mode "$@"
 fi
 
 # ----- Download tarball + checksum -----

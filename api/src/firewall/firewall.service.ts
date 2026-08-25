@@ -9,6 +9,14 @@ import { PrismaService } from '../common/prisma.service';
 import { AgentRelayService } from '../gateway/agent-relay.service';
 import { CreateFirewallRuleDto, UpdateFirewallRuleDto } from './firewall.dto';
 
+export interface FirewallRuleSnapshot {
+  action: string;
+  protocol: string;
+  port: string | null;
+  sourceIp: string | null;
+  comment: string | null;
+}
+
 @Injectable()
 export class FirewallService {
   private readonly logger = new Logger('FirewallService');
@@ -165,6 +173,16 @@ export class FirewallService {
     }
 
     const rules = await this.prisma.firewallRule.findMany();
+    const result = await this.applyRuleSnapshots(rules);
+    this.logger.log(`Firewall sync: ${result.applied}/${result.total} rules applied`);
+  }
+
+  async applyRuleSnapshots(
+    rules: FirewallRuleSnapshot[],
+  ): Promise<{ applied: number; failed: number; total: number }> {
+    if (!this.agentRelay.isAgentConnected()) {
+      throw new InternalServerErrorException('Agent not connected');
+    }
     let applied = 0;
 
     for (const rule of rules) {
@@ -184,7 +202,7 @@ export class FirewallService {
       }
     }
 
-    this.logger.log(`Firewall sync: ${applied}/${rules.length} rules applied`);
+    return { applied, failed: rules.length - applied, total: rules.length };
   }
 
   // ===========================================================================

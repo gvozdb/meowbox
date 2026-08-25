@@ -4,6 +4,8 @@ import {
   BadRequestException,
   InternalServerErrorException,
   Logger,
+  OnModuleDestroy,
+  OnModuleInit,
 } from '@nestjs/common';
 import { AgentRelayService } from '../gateway/agent-relay.service';
 import { PrismaService } from '../common/prisma.service';
@@ -14,12 +16,86 @@ import type {
   QuickCommand,
   QuickCommandRunResult,
 } from '@meowbox/shared';
-import { SiteType } from '@meowbox/shared';
+import { QUICK_COMMAND_OUTPUT_MAX_BYTES, SiteType } from '@meowbox/shared';
 import { QuickCommandInputDto } from './site-node.dto';
 import { DomainContextService } from '../sites/domain-context.service';
+import { OperationAdmissionService } from '../operations/operation-admission.service';
+import {
+  OperationsWorkerService,
+  type OperationExecutionContext,
+} from '../operations/operations-worker.service';
+import { OperationNeedsAttentionError } from '../operations/operation-errors';
 
 const PROC_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,99}$/;
+const QUICK_COMMAND_TARGET_RE = /^[A-Za-z0-9][A-Za-z0-9_.:+-]{0,99}$/;
+const SITE_USER_RE = /^[a-z_][a-z0-9_-]{0,31}$/;
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+const QUICK_COMMAND_OPERATION_ACTION = 'site.node.quick_command';
+const QUICK_COMMAND_AGENT_ACTION = 'agent.node.quick_command';
 type ProcessAction = 'stop' | 'restart' | 'reload' | 'delete';
+
+interface QuickCommandOperationRequest {
+  siteId: string;
+  domainId: string;
+  commandId: string;
+  systemUser: string;
+  source: 'npm' | 'make';
+  target: string;
+  cwd: string;
+}
+
+function validateQuickCommandRequest(request: unknown): QuickCommandOperationRequest {
+  if (!request || typeof request !== 'object' || Array.isArray(request)) {
+    throw new BadRequestException('Quick command operation request is invalid');
+  }
+  const value = request as Record<string, unknown>;
+  if (
+    Object.keys(value).sort().join(',') !==
+      'commandId,cwd,domainId,siteId,source,systemUser,target' ||
+    typeof value.siteId !== 'string' ||
+    !UUID_RE.test(value.siteId) ||
+    typeof value.domainId !== 'string' ||
+    !UUID_RE.test(value.domainId) ||
+    typeof value.commandId !== 'string' ||
+    !UUID_RE.test(value.commandId) ||
+    typeof value.systemUser !== 'string' ||
+    !SITE_USER_RE.test(value.systemUser) ||
+    (value.source !== 'npm' && value.source !== 'make') ||
+    typeof value.target !== 'string' ||
+    !QUICK_COMMAND_TARGET_RE.test(value.target) ||
+    typeof value.cwd !== 'string' ||
+    value.cwd.length < 1 ||
+    value.cwd.length > 512 ||
+    !/^\/[^\0]*$/.test(value.cwd)
+  ) {
+    throw new BadRequestException('Quick command operation request is invalid');
+  }
+  return value as unknown as QuickCommandOperationRequest;
+}
+
+function validateQuickCommandResult(result: unknown): QuickCommandRunResult {
+  if (!result || typeof result !== 'object' || Array.isArray(result)) {
+    throw new OperationNeedsAttentionError('Quick command returned an invalid result');
+  }
+  const value = result as Record<string, unknown>;
+  if (
+    Object.keys(value).sort().join(',') !== 'durationMs,exitCode,output,truncated' ||
+    typeof value.exitCode !== 'number' ||
+    !Number.isInteger(value.exitCode) ||
+    value.exitCode < 0 ||
+    value.exitCode > 255 ||
+    typeof value.output !== 'string' ||
+    Buffer.byteLength(value.output, 'utf8') > QUICK_COMMAND_OUTPUT_MAX_BYTES ||
+    typeof value.durationMs !== 'number' ||
+    !Number.isInteger(value.durationMs) ||
+    value.durationMs < 0 ||
+    value.durationMs > 60 * 60_000 ||
+    typeof value.truncated !== 'boolean'
+  ) {
+    throw new OperationNeedsAttentionError('Quick command returned an invalid result');
+  }
+  return value as unknown as QuickCommandRunResult;
+}
 
 /**
  * Управление Node.js-приложениями сайта.
@@ -29,14 +105,29 @@ type ProcessAction = 'stop' | 'restart' | 'reload' | 'delete';
  * системного юзера сайта). Быстрые команды хранятся в БД (SiteQuickCommand).
  */
 @Injectable()
-export class SiteNodeService {
+export class SiteNodeService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger('SiteNodeService');
+  private unregisterOperationHandler: (() => void) | null = null;
 
   constructor(
     private readonly prisma: PrismaService,
     private readonly agent: AgentRelayService,
     private readonly domainContext: DomainContextService,
+    private readonly admission: OperationAdmissionService,
+    private readonly worker: OperationsWorkerService,
   ) {}
+
+  onModuleInit(): void {
+    this.unregisterOperationHandler = this.worker.registerHandler(
+      QUICK_COMMAND_OPERATION_ACTION,
+      (request, context) => this.executeQueuedQuickCommand(request, context),
+    );
+  }
+
+  onModuleDestroy(): void {
+    this.unregisterOperationHandler?.();
+    this.unregisterOperationHandler = null;
+  }
 
   private async siteCtx(
     siteId: string,
@@ -225,30 +316,69 @@ export class SiteNodeService {
     return this.listQuickCommands(siteId, domainId);
   }
 
-  async runQuickCommand(
+  async enqueueQuickCommand(
     siteId: string,
     domainId: string,
     commandId: string,
-  ): Promise<QuickCommandRunResult> {
+    actor: { userId: string; role: string },
+    idempotencyKey?: string,
+  ) {
     const ctx = await this.siteCtx(siteId, domainId);
     const cmd = await this.prisma.siteQuickCommand.findFirst({
       where: { id: commandId, siteId },
     });
     if (!cmd) throw new NotFoundException('Команда не найдена');
 
-    // Таймаут больше, чем handler-timeout агента (630s) — иначе API отвалится
-    // по таймауту раньше, чем агент успеет вернуть результат.
-    const result = await this.agent.emitToAgent<QuickCommandRunResult>(
-      'node:command-run',
+    const request = validateQuickCommandRequest({
+      siteId,
+      domainId,
+      commandId,
+      systemUser: ctx.systemUser,
+      source: cmd.source,
+      target: cmd.target,
+      cwd: cmd.cwd,
+    });
+    return this.admission.admit({
+      actionId: QUICK_COMMAND_OPERATION_ACTION,
+      type: 'SITE_NODE_QUICK_COMMAND',
+      idempotencyKey,
+      actor,
+      request,
+      deadlineMs: 15 * 60_000,
+      recoveryPolicy: 'RECONCILE_ONLY',
+      retryable: false,
+      siteId,
+      siteDomainId: domainId,
+      lockSite: true,
+    });
+  }
+
+  private async executeQueuedQuickCommand(
+    request: unknown,
+    context: OperationExecutionContext,
+  ): Promise<QuickCommandRunResult> {
+    const input = validateQuickCommandRequest(request);
+    await context.heartbeat('execute', 5);
+    const result = await this.agent.runAgentJob(
       {
-        systemUser: ctx.systemUser,
-        source: cmd.source,
-        target: cmd.target,
-        cwd: cmd.cwd,
+        operationId: context.operationId,
+        actionId: QUICK_COMMAND_AGENT_ACTION,
+        step: 'execute',
+        payload: {
+          systemUser: input.systemUser,
+          source: input.source,
+          target: input.target,
+          cwd: input.cwd,
+        },
+        deadlineAt: context.deadlineAt,
+        cancelSafe: false,
       },
-      660_000,
+      () => context.isCancellationRequested(),
     );
-    this.logger.log(`Site ${siteId}: quick command run ${cmd.source}:${cmd.target}`);
-    return this.unwrap(result, 'Не удалось выполнить команду');
+    const validated = validateQuickCommandResult(result);
+    this.logger.log(
+      `Site ${input.siteId}: quick command completed ${input.source}:${input.target}`,
+    );
+    return validated;
   }
 }

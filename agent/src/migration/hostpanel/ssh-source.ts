@@ -17,12 +17,12 @@
  *     (DTO regex). Здесь повторно проверяем длину/формат как defense-in-depth.
  */
 
-import { spawn } from 'child_process';
 import * as path from 'path';
 import { promises as fs, createWriteStream, WriteStream, openSync, closeSync } from 'fs';
 import * as os from 'os';
 
 import { CommandExecutor } from '../../command-executor';
+import { spawnOwned } from '../../process-registry';
 
 export interface SshSourceConfig {
   host: string;
@@ -301,14 +301,14 @@ export function pipeDump(args: PipeDumpArgs): Promise<{ exitCode: number; stderr
       `${cfg.user}@${cfg.host}`,
       args.remoteCommand,
     ];
-    const sshProc = spawn('sshpass', sshArgs, {
+    const sshProc = spawnOwned('sshpass', sshArgs, {
       env: { ...process.env, SSHPASS: cfg.password },
       stdio: ['ignore', 'pipe', 'pipe'],
-    });
-    const localProc = spawn(args.localCommand, args.localArgs, {
+    }, 'hostpanel-ssh-dump');
+    const localProc = spawnOwned(args.localCommand, args.localArgs, {
       env: { ...process.env },
       stdio: ['pipe', 'pipe', 'pipe'],
-    });
+    }, 'hostpanel-local-import');
 
     sshProc.stdout.pipe(localProc.stdin);
 
@@ -495,10 +495,10 @@ export function dumpToFile(args: DumpToFileArgs): Promise<{
       `${cfg.user}@${cfg.host}`,
       fullRemote,
     ];
-    const sshProc = spawn('sshpass', sshArgs, {
+    const sshProc = spawnOwned('sshpass', sshArgs, {
       env: { ...process.env, SSHPASS: cfg.password },
       stdio: ['ignore', 'pipe', 'pipe'],
-    });
+    }, 'hostpanel-ssh-gzip-dump');
     // Открываем выходной файл-стрим (создаём заново, не append).
     let fileStream: WriteStream;
     try {
@@ -805,12 +805,12 @@ function runGunzipToFile(args: GunzipToFileArgs): Promise<{
     // SQL_MYSQL8_COMPAT_SED) и пишет результат через redirect на fd.
     // Отдельного прохода по распакованному файлу нет — sed потоковый.
     const outFd = openSync(args.outputPath, 'w');
-    const gunzip = spawn('gunzip', ['-c', args.inputPath], {
+    const gunzip = spawnOwned('gunzip', ['-c', args.inputPath], {
       stdio: ['ignore', 'pipe', 'pipe'],
-    });
-    const sed = spawn('sed', ['-E', SQL_MYSQL8_COMPAT_SED], {
+    }, 'hostpanel-gunzip');
+    const sed = spawnOwned('sed', ['-E', SQL_MYSQL8_COMPAT_SED], {
       stdio: ['pipe', outFd, 'pipe'],
-    });
+    }, 'hostpanel-sql-compat');
     // stdio задан явно ('pipe') — потоки гарантированно не null.
     const gunzipOut = gunzip.stdout!;
     const sedIn = sed.stdin!;
@@ -901,10 +901,10 @@ function runLocalMariadbExec(args: RunLocalArgs): Promise<{
   stderr: string;
 }> {
   return new Promise((resolve, reject) => {
-    const localProc = spawn(args.command, args.argv, {
+    const localProc = spawnOwned(args.command, args.argv, {
       env: { ...process.env },
       stdio: ['ignore', 'pipe', 'pipe'], // НЕ pipe stdin — чтобы парсер не ломался
-    });
+    }, 'hostpanel-local-database');
 
     const STALL_DEFAULT_MS = 10 * 60 * 1000;
     const stallMs = args.stallTimeoutMs === undefined ? STALL_DEFAULT_MS : args.stallTimeoutMs;

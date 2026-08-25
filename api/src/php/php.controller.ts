@@ -1,4 +1,14 @@
-import { Controller, Get, Post, Delete, Param, Body } from '@nestjs/common';
+import {
+  Body,
+  Controller,
+  Delete,
+  Get,
+  Headers,
+  HttpCode,
+  HttpStatus,
+  Param,
+  Post,
+} from '@nestjs/common';
 import { Throttle } from '@nestjs/throttler';
 import { PhpService } from './php.service';
 import { Roles } from '../common/decorators/roles.decorator';
@@ -8,6 +18,7 @@ import {
   ExtensionNameDto,
   ToggleExtensionDto,
 } from './php.dto';
+import { CurrentUser } from '../common/decorators/current-user.decorator';
 
 @Controller('php')
 @Roles('ADMIN')
@@ -40,17 +51,37 @@ export class PhpController {
   }
 
   @Post('install')
+  @HttpCode(HttpStatus.ACCEPTED)
   @Throttle({ default: { limit: 2, ttl: 60000 } })
-  async installVersion(@Body() body: InstallPhpVersionDto) {
-    await this.phpService.installVersion(body.version);
-    return { success: true };
+  async installVersion(
+    @Body() body: InstallPhpVersionDto,
+    @CurrentUser('sub') userId: string,
+    @CurrentUser('role') role: string,
+    @Headers('idempotency-key') idempotencyKey?: string,
+  ) {
+    const data = await this.phpService.enqueueInstallVersion(
+      body.version,
+      { userId, role },
+      idempotencyKey,
+    );
+    return { success: true, data };
   }
 
   @Delete('uninstall/:version')
+  @HttpCode(HttpStatus.ACCEPTED)
   @Throttle({ default: { limit: 2, ttl: 60000 } })
-  async uninstallVersion(@Param('version') version: string) {
-    await this.phpService.uninstallVersion(version);
-    return { success: true };
+  async uninstallVersion(
+    @Param('version') version: string,
+    @CurrentUser('sub') userId: string,
+    @CurrentUser('role') role: string,
+    @Headers('idempotency-key') idempotencyKey?: string,
+  ) {
+    const data = await this.phpService.enqueueUninstallVersion(
+      version,
+      { userId, role },
+      idempotencyKey,
+    );
+    return { success: true, data };
   }
 
   @Get(':version/ini')
@@ -72,10 +103,22 @@ export class PhpController {
   }
 
   @Post(':version/extensions/install')
+  @HttpCode(HttpStatus.ACCEPTED)
   @Throttle({ default: { limit: 5, ttl: 60000 } })
-  async installExtension(@Param('version') version: string, @Body() body: ExtensionNameDto) {
-    await this.phpService.installExtension(version, body.name);
-    return { success: true };
+  async installExtension(
+    @Param('version') version: string,
+    @Body() body: ExtensionNameDto,
+    @CurrentUser('sub') userId: string,
+    @CurrentUser('role') role: string,
+    @Headers('idempotency-key') idempotencyKey?: string,
+  ) {
+    const data = await this.phpService.enqueueInstallExtension(
+      version,
+      body.name,
+      { userId, role },
+      idempotencyKey,
+    );
+    return { success: true, data };
   }
 
   @Post(':version/extensions/toggle')

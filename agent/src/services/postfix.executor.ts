@@ -1,8 +1,8 @@
 import { promises as fs } from 'fs';
 import * as os from 'os';
 import * as path from 'path';
-import { spawn } from 'child_process';
 import { CommandExecutor } from '../command-executor';
+import { spawnOwned } from '../process-registry';
 
 /**
  * Postfix executor — системная почта (relay через внешний SMTP).
@@ -439,10 +439,10 @@ export class PostfixExecutor {
     // Аргументы фиксированные (`-i -t`), инжекции невозможны — всё тело
     // передаётся через STDIN, postfix парсит заголовки и адресатов из него.
     await new Promise<void>((resolve, reject) => {
-      const child = spawn('/usr/sbin/sendmail', ['-i', '-t'], {
+      const child = spawnOwned('/usr/sbin/sendmail', ['-i', '-t'], {
         stdio: ['pipe', 'pipe', 'pipe'],
         env: { ...process.env, LC_ALL: 'C', LANG: 'C' },
-      });
+      }, 'postfix-sendmail');
       let stderr = '';
       child.stderr.on('data', (d: Buffer) => { stderr += d.toString('utf-8'); });
       child.on('error', (err) => reject(new Error(`sendmail spawn error: ${err.message}`)));

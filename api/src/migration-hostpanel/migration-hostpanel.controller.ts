@@ -3,6 +3,9 @@ import {
   Controller,
   Delete,
   Get,
+  Headers,
+  HttpCode,
+  HttpStatus,
   Param,
   ParseUUIDPipe,
   Patch,
@@ -22,6 +25,7 @@ import {
   UpdatePlanItemDto,
 } from './migration-hostpanel.dto';
 import { MigrationHostpanelService } from './migration-hostpanel.service';
+import { Roles } from '../common/decorators/roles.decorator';
 
 interface JwtUser {
   id: string;
@@ -29,6 +33,7 @@ interface JwtUser {
 }
 
 @Controller('admin/migrate-hostpanel')
+@Roles('ADMIN')
 export class MigrationHostpanelController {
   constructor(private readonly service: MigrationHostpanelService) {}
 
@@ -176,13 +181,22 @@ export class MigrationHostpanelController {
    * 409.
    */
   @Post(':id/items/:itemId/force-retry')
+  @Roles('ADMIN')
+  @HttpCode(HttpStatus.ACCEPTED)
   @Throttle({ default: { limit: 5, ttl: 60_000 } })
   async forceRetry(
     @Param('id', ParseUUIDPipe) id: string,
     @Param('itemId', ParseUUIDPipe) itemId: string,
     @CurrentUser() user?: JwtUser,
+    @Headers('idempotency-key') idempotencyKey?: string,
   ) {
-    const data = await this.service.forceRetryItem(id, itemId, user!.role);
+    const data = await this.service.forceRetryItem(
+      id,
+      itemId,
+      user!.id,
+      user!.role,
+      idempotencyKey,
+    );
     return { success: true, data };
   }
 

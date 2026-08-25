@@ -8,10 +8,14 @@ import {
   Query,
   Body,
   ParseUUIDPipe,
+  Headers,
+  HttpCode,
+  HttpStatus,
 } from '@nestjs/common';
 import { Throttle } from '@nestjs/throttler';
 import { SiteNodeService } from './site-node.service';
 import { Roles } from '../common/decorators/roles.decorator';
+import { CurrentUser } from '../common/decorators/current-user.decorator';
 import {
   EcosystemStartDto,
   AutostartDto,
@@ -166,13 +170,23 @@ export class SiteNodeController {
   }
 
   @Post('quick-commands/:id/run')
-  @Throttle({ default: { limit: 10, ttl: 60000 } })
+  @HttpCode(HttpStatus.ACCEPTED)
+  @Throttle({ default: { limit: 5, ttl: 60_000 } })
   async runQuickCommand(
     @Param('siteId', ParseUUIDPipe) siteId: string,
     @Param('domainId', ParseUUIDPipe) domainId: string,
     @Param('id', ParseUUIDPipe) id: string,
+    @CurrentUser('sub') userId: string,
+    @CurrentUser('role') role: string,
+    @Headers('idempotency-key') idempotencyKey?: string,
   ) {
-    const data = await this.siteNode.runQuickCommand(siteId, domainId, id);
+    const data = await this.siteNode.enqueueQuickCommand(
+      siteId,
+      domainId,
+      id,
+      { userId, role },
+      idempotencyKey,
+    );
     return { success: true, data };
   }
 }

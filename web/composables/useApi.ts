@@ -1,16 +1,66 @@
-interface ApiOptions {
+import {
+  resolveApiRequestScope,
+  type ApiRequestScope,
+} from '~/utils/api-request-scope';
+import {
+  assertSelectedTargetContext,
+  type SelectedTargetSnapshot,
+} from '~/utils/selected-target-context';
+import { evaluateRemoteCapability } from '~/utils/remote-capability';
+import { resolveRemoteHttpAction } from '~/utils/remote-action-resolver';
+
+export interface ApiCallOptions {
+  scope?: ApiRequestScope;
+  headers?: Record<string, string>;
+  signal?: AbortSignal;
+}
+
+interface ApiOptions extends ApiCallOptions {
   method?: 'GET' | 'POST' | 'PUT' | 'DELETE' | 'PATCH';
   body?: unknown;
   requireAuth?: boolean;
-  headers?: Record<string, string>;
-  signal?: AbortSignal;
-  /**
-   * Принудительно бить только в локальный мастер-API, игнорируя выбранный
-   * в сайдбаре slave. Нужно для master-only ресурсов (например, палитры
-   * серверов хранятся только на мастере, чтобы фича работала даже на
-   * старых slave-версиях).
-   */
-  noProxy?: boolean;
+}
+
+interface RemoteAbortHandle {
+  signal: AbortSignal | undefined;
+  release(): void;
+}
+
+interface ApiTransportContext {
+  prefix: string;
+  snapshot: SelectedTargetSnapshot | null;
+}
+
+interface ClientRemoteCapabilityError extends Error {
+  code: string;
+  reasonCode: string | null;
+  actionId: string | null;
+}
+
+const remoteAbortControllers = new Set<AbortController>();
+
+export function cancelRemoteApiRequests(): void {
+  for (const controller of remoteAbortControllers) controller.abort();
+  remoteAbortControllers.clear();
+}
+
+function remoteAbortHandle(
+  remote: boolean,
+  external: AbortSignal | undefined,
+): RemoteAbortHandle {
+  if (!remote) return { signal: external, release: () => undefined };
+  const controller = new AbortController();
+  remoteAbortControllers.add(controller);
+  const abort = () => controller.abort();
+  if (external?.aborted) controller.abort();
+  else external?.addEventListener('abort', abort, { once: true });
+  return {
+    signal: controller.signal,
+    release: () => {
+      external?.removeEventListener('abort', abort);
+      remoteAbortControllers.delete(controller);
+    },
+  };
 }
 
 // Shared singleton — один refresh на весь клиент, даже если useApi() вызвали в разных компонентах.
@@ -96,18 +146,85 @@ interface ApiResult<T> {
   };
 }
 
-export function useApi() {
+const MUTATION_METHODS = new Set(['DELETE', 'PATCH', 'POST', 'PUT']);
+
+function hasHeader(headers: Record<string, string>, expected: string): boolean {
+  return Object.keys(headers).some((name) => name.toLowerCase() === expected);
+}
+
+function newIdempotencyKey(): string {
+  const uuid = globalThis.crypto?.randomUUID?.();
+  if (!uuid) throw new Error('Secure idempotency key generation is unavailable');
+  return `web-${uuid}`;
+}
+
+function attachRemoteMutationIdempotency(
+  headers: Record<string, string>,
+  method: string,
+  remote: boolean,
+): void {
+  if (remote && MUTATION_METHODS.has(method) && !hasHeader(headers, 'idempotency-key')) {
+    headers['Idempotency-Key'] = newIdempotencyKey();
+  }
+}
+
+function assertRemoteActionAvailable(
+  endpoint: string,
+  method: string,
+  transport: ApiTransportContext,
+): void {
+  if (!transport.snapshot || transport.snapshot.registryGeneration === 0) return;
+  const action = resolveRemoteHttpAction(method, endpoint);
+  const store = useServerStore();
+  const decision = evaluateRemoteCapability({
+    isLocal: false,
+    context: store.remoteContext,
+    role: useAuthStore().user?.role ?? null,
+    requirement: {
+      actionId: action?.actionId ?? '__uncatalogued__',
+      transport: 'http',
+      mutation: MUTATION_METHODS.has(method),
+    },
+  });
+  if (action && decision.available) return;
+  const error = new Error(
+    action ? decision.message : 'Target не объявил capability для этого действия.',
+  ) as ClientRemoteCapabilityError;
+  error.name = 'RemoteCapabilityError';
+  error.code = decision.code ?? 'REMOTE_ACTION_UNSUPPORTED';
+  error.reasonCode = decision.reasonCode;
+  error.actionId = action?.actionId ?? null;
+  throw error;
+}
+
+export function useApi(defaultScope: ApiRequestScope = 'selected-target') {
   const config = useRuntimeConfig();
   const baseUrl = config.public.apiBase as string;
 
-  function getProxyPrefix(): string {
-    try {
-      const serverStore = useServerStore();
-      if (serverStore.isLocal) return '';
-      return `/proxy/${serverStore.currentServerId}`;
-    } catch {
-      return '';
+  function captureTransportContext(
+    endpoint: string,
+    requestedScope: ApiRequestScope,
+  ): ApiTransportContext {
+    if (resolveApiRequestScope(endpoint, requestedScope) === 'master') {
+      return { prefix: '', snapshot: null };
     }
+    const snapshot = useServerStore().captureRemoteRequestContext();
+    return snapshot
+      ? { prefix: `/proxy/${snapshot.transportServerId}`, snapshot }
+      : { prefix: '', snapshot: null };
+  }
+
+  function assertTransportContextCurrent(context: ApiTransportContext): void {
+    if (!context.snapshot) return;
+    const store = useServerStore();
+    const current = store.isRemoteRequestContextCurrent(context.snapshot)
+      ? store.captureRemoteRequestContext()
+      : null;
+    assertSelectedTargetContext(context.snapshot, current);
+  }
+
+  function requestedScope(endpoint: string, options: ApiCallOptions): ApiRequestScope {
+    return resolveApiRequestScope(endpoint, options.scope ?? defaultScope);
   }
 
   async function request<T>(endpoint: string, options: ApiOptions = {}): Promise<T> {
@@ -115,7 +232,6 @@ export function useApi() {
       method = 'GET',
       body,
       requireAuth = true,
-      noProxy = false,
       signal,
       headers: customHeaders,
     } = options;
@@ -132,19 +248,22 @@ export function useApi() {
       }
     }
 
-    // Proxy prefix for remote servers (skip for /servers and /proxy/* endpoints, либо явный noProxy)
-    const prefix = noProxy || endpoint.startsWith('/servers') || endpoint.startsWith('/proxy/')
-      ? ''
-      : getProxyPrefix();
+    const scope = requestedScope(endpoint, options);
+    const transport = captureTransportContext(endpoint, scope);
+    attachRemoteMutationIdempotency(headers, method, transport.snapshot !== null);
+    const abort = remoteAbortHandle(transport.snapshot !== null, signal);
 
     try {
-      const response = await $fetch<ApiResult<T>>(`${baseUrl}${prefix}${endpoint}`, {
+      assertTransportContextCurrent(transport);
+      assertRemoteActionAvailable(endpoint, method, transport);
+      const response = await $fetch<ApiResult<T>>(`${baseUrl}${transport.prefix}${endpoint}`, {
         method,
-        body: body ? JSON.stringify(body) : undefined,
+        body: body === undefined ? undefined : JSON.stringify(body),
         headers,
-        signal,
+        signal: abort.signal,
       });
 
+      assertTransportContextCurrent(transport);
       return response.data;
     } catch (err: unknown) {
       const fetchErr = err as { data?: { error?: { message?: string | string[] } }; statusCode?: number; response?: { status?: number } };
@@ -154,16 +273,19 @@ export function useApi() {
       if (status === 401 && requireAuth) {
         const refreshed = await tryRefreshToken();
         if (refreshed) {
+          assertTransportContextCurrent(transport);
+          assertRemoteActionAvailable(endpoint, method, transport);
           const newToken = localStorage.getItem('accessToken');
           if (newToken) {
             headers['Authorization'] = `Bearer ${newToken}`;
           }
-          const retryResponse = await $fetch<ApiResult<T>>(`${baseUrl}${prefix}${endpoint}`, {
+          const retryResponse = await $fetch<ApiResult<T>>(`${baseUrl}${transport.prefix}${endpoint}`, {
             method,
-            body: body ? JSON.stringify(body) : undefined,
+            body: body === undefined ? undefined : JSON.stringify(body),
             headers,
-            signal,
+            signal: abort.signal,
           });
+          assertTransportContextCurrent(transport);
           return retryResponse.data;
         } else {
           localStorage.removeItem('accessToken');
@@ -183,14 +305,23 @@ export function useApi() {
         throw apiError;
       }
       throw err;
+    } finally {
+      abort.release();
     }
   }
 
   async function requestWithMeta<T>(endpoint: string, options: ApiOptions = {}): Promise<{ data: T; meta: ApiResult<T>['meta'] }> {
-    const { method = 'GET', body, requireAuth = true } = options;
+    const {
+      method = 'GET',
+      body,
+      requireAuth = true,
+      headers: customHeaders,
+      signal,
+    } = options;
 
     const headers: Record<string, string> = {
       'Content-Type': 'application/json',
+      ...customHeaders,
     };
 
     if (requireAuth) {
@@ -200,15 +331,24 @@ export function useApi() {
       }
     }
 
-    const prefix = endpoint.startsWith('/servers') || endpoint.startsWith('/proxy/') ? '' : getProxyPrefix();
-
-    const response = await $fetch<ApiResult<T>>(`${baseUrl}${prefix}${endpoint}`, {
-      method,
-      body: body ? JSON.stringify(body) : undefined,
-      headers,
-    });
-
-    return { data: response.data, meta: response.meta };
+    const scope = requestedScope(endpoint, options);
+    const transport = captureTransportContext(endpoint, scope);
+    attachRemoteMutationIdempotency(headers, method, transport.snapshot !== null);
+    const abort = remoteAbortHandle(transport.snapshot !== null, signal);
+    try {
+      assertTransportContextCurrent(transport);
+      assertRemoteActionAvailable(endpoint, method, transport);
+      const response = await $fetch<ApiResult<T>>(`${baseUrl}${transport.prefix}${endpoint}`, {
+        method,
+        body: body === undefined ? undefined : JSON.stringify(body),
+        headers,
+        signal: abort.signal,
+      });
+      assertTransportContextCurrent(transport);
+      return { data: response.data, meta: response.meta };
+    } finally {
+      abort.release();
+    }
   }
 
   // Singleton-промис: при одновременном 401 с нескольких запросов refresh'имся ровно один раз.
@@ -281,50 +421,68 @@ export function useApi() {
    * Streams response for progress tracking and triggers browser download.
    * @param onProgress - optional callback receiving 0-100 progress percentage
    */
-  async function download(endpoint: string, filename: string, onProgress?: (pct: number) => void) {
+  async function download(
+    endpoint: string,
+    filename: string,
+    onProgress?: (pct: number) => void,
+    options: ApiCallOptions = {},
+  ) {
     const token = localStorage.getItem('accessToken');
-    const prefix = endpoint.startsWith('/servers') || endpoint.startsWith('/proxy/') ? '' : getProxyPrefix();
+    const scope = requestedScope(endpoint, options);
+    const transport = captureTransportContext(endpoint, scope);
+    const abort = remoteAbortHandle(transport.snapshot !== null, options.signal);
 
-    const response = await fetch(`${baseUrl}${prefix}${endpoint}`, {
-      headers: { Authorization: `Bearer ${token || ''}` },
-    });
+    try {
+      assertTransportContextCurrent(transport);
+      assertRemoteActionAvailable(endpoint, 'GET', transport);
+      const response = await fetch(`${baseUrl}${transport.prefix}${endpoint}`, {
+        headers: { Authorization: `Bearer ${token || ''}`, ...options.headers },
+        signal: abort.signal,
+      });
 
-    if (!response.ok) {
-      try {
-        const body = await response.json();
-        throw new Error(body?.error?.message || `Ошибка скачивания (${response.status})`);
-      } catch (err) {
-        if (err instanceof Error && err.message !== `Ошибка скачивания (${response.status})`) throw err;
-        throw new Error(`Ошибка скачивания (${response.status})`);
+      if (!response.ok) {
+        try {
+          const body = await response.json();
+          throw new Error(body?.error?.message || `Ошибка скачивания (${response.status})`);
+        } catch (err) {
+          if (err instanceof Error && err.message !== `Ошибка скачивания (${response.status})`) throw err;
+          throw new Error(`Ошибка скачивания (${response.status})`);
+        }
       }
-    }
+      assertTransportContextCurrent(transport);
 
-    const contentLength = parseInt(response.headers.get('Content-Length') || '0', 10);
+      const contentLength = parseInt(response.headers.get('Content-Length') || '0', 10);
 
-    // Only use streaming when we have progress callback, Content-Length, and a readable body
-    if (onProgress && contentLength && response.body) {
-      const reader = response.body.getReader();
-      const chunks: Uint8Array[] = [];
-      let received = 0;
+      // Only use streaming when we have progress callback, Content-Length, and a readable body
+      if (onProgress && contentLength && response.body) {
+        const reader = response.body.getReader();
+        const chunks: Uint8Array[] = [];
+        let received = 0;
 
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        chunks.push(value);
-        received += value.length;
-        onProgress(Math.min(99, Math.round((received / contentLength) * 100)));
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          assertTransportContextCurrent(transport);
+          chunks.push(value);
+          received += value.length;
+          onProgress(Math.min(99, Math.round((received / contentLength) * 100)));
+        }
+
+        const blob = new Blob(
+          chunks.map((chunk) => chunk.slice().buffer as ArrayBuffer),
+        );
+        assertTransportContextCurrent(transport);
+        onProgress(100);
+        triggerBlobDownload(blob, filename);
+      } else {
+        // Simple fallback: read entire response as blob
+        const blob = await response.blob();
+        assertTransportContextCurrent(transport);
+        onProgress?.(100);
+        triggerBlobDownload(blob, filename);
       }
-
-      const blob = new Blob(
-        chunks.map((chunk) => chunk.slice().buffer as ArrayBuffer),
-      );
-      onProgress(100);
-      triggerBlobDownload(blob, filename);
-    } else {
-      // Simple fallback: read entire response as blob
-      const blob = await response.blob();
-      onProgress?.(100);
-      triggerBlobDownload(blob, filename);
+    } finally {
+      abort.release();
     }
   }
 
@@ -346,10 +504,12 @@ export function useApi() {
     endpoint: string,
     file: File,
     extraFields?: Record<string, string>,
-    options?: { headers?: Record<string, string> },
+    options: ApiCallOptions = {},
   ): Promise<T> {
     const token = localStorage.getItem('accessToken');
-    const prefix = endpoint.startsWith('/servers') || endpoint.startsWith('/proxy/') ? '' : getProxyPrefix();
+    const scope = requestedScope(endpoint, options);
+    const transport = captureTransportContext(endpoint, scope);
+    const abort = remoteAbortHandle(transport.snapshot !== null, options.signal);
 
     const formData = new FormData();
     formData.append('file', file);
@@ -359,94 +519,124 @@ export function useApi() {
       }
     }
 
-    const response = await fetch(`${baseUrl}${prefix}${endpoint}`, {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${token || ''}`,
-        ...options?.headers,
-      },
-      body: formData,
-    });
+    try {
+      assertTransportContextCurrent(transport);
+      assertRemoteActionAvailable(endpoint, 'POST', transport);
+      const response = await fetch(`${baseUrl}${transport.prefix}${endpoint}`, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${token || ''}`,
+          ...options.headers,
+        },
+        body: formData,
+        signal: abort.signal,
+      });
 
-    if (!response.ok) {
-      try {
-        const body = await response.json();
-        throw new Error(body?.error?.message || `Ошибка загрузки (${response.status})`);
-      } catch (err) {
-        if (err instanceof Error) throw err;
-        throw new Error(`Ошибка загрузки (${response.status})`);
+      if (!response.ok) {
+        try {
+          const body = await response.json();
+          throw new Error(body?.error?.message || `Ошибка загрузки (${response.status})`);
+        } catch (err) {
+          if (err instanceof Error) throw err;
+          throw new Error(`Ошибка загрузки (${response.status})`);
+        }
       }
-    }
 
-    const json = await response.json();
-    return json.data;
+      const json = await response.json();
+      assertTransportContextCurrent(transport);
+      return json.data;
+    } finally {
+      abort.release();
+    }
   }
 
-  async function rawText(endpoint: string): Promise<string> {
-    const prefix = endpoint.startsWith('/servers') || endpoint.startsWith('/proxy/')
-      ? ''
-      : getProxyPrefix();
+  async function rawText(endpoint: string, options: ApiCallOptions = {}): Promise<string> {
+    const scope = requestedScope(endpoint, options);
+    const transport = captureTransportContext(endpoint, scope);
+    const abort = remoteAbortHandle(transport.snapshot !== null, options.signal);
     const fetchText = async () => {
+      assertTransportContextCurrent(transport);
+      assertRemoteActionAvailable(endpoint, 'GET', transport);
       const token = localStorage.getItem('accessToken');
-      return fetch(`${baseUrl}${prefix}${endpoint}`, {
-        headers: { Authorization: `Bearer ${token || ''}` },
+      return fetch(`${baseUrl}${transport.prefix}${endpoint}`, {
+        headers: { Authorization: `Bearer ${token || ''}`, ...options.headers },
         cache: 'no-store',
+        signal: abort.signal,
       });
     };
 
-    let response = await fetchText();
-    if (response.status === 401 && (await tryRefreshToken())) {
-      response = await fetchText();
-    }
-    if (!response.ok) {
-      let message = `Ошибка запроса (${response.status})`;
-      try {
-        const body = await response.json();
-        message = body?.error?.message || message;
-      } catch {
-        /* response is not JSON */
+    try {
+      let response = await fetchText();
+      if (response.status === 401 && (await tryRefreshToken())) {
+        response = await fetchText();
       }
-      throw new Error(Array.isArray(message) ? message.join(', ') : message);
+      if (!response.ok) {
+        let message = `Ошибка запроса (${response.status})`;
+        try {
+          const body = await response.json();
+          message = body?.error?.message || message;
+        } catch {
+          /* response is not JSON */
+        }
+        throw new Error(Array.isArray(message) ? message.join(', ') : message);
+      }
+      const text = await response.text();
+      assertTransportContextCurrent(transport);
+      return text;
+    } finally {
+      abort.release();
     }
-    return response.text();
   }
 
   return {
+    capability: (method: string, endpoint: string) => {
+      const scope = resolveApiRequestScope(endpoint, defaultScope);
+      const transport = captureTransportContext(endpoint, scope);
+      try {
+        assertRemoteActionAvailable(endpoint, method.toUpperCase(), transport);
+        return { available: true, code: null, reasonCode: null, actionId: resolveRemoteHttpAction(method, endpoint)?.actionId ?? null };
+      } catch (error) {
+        const denied = error as ClientRemoteCapabilityError;
+        return {
+          available: false,
+          code: denied.code ?? 'REMOTE_ACTION_UNSUPPORTED',
+          reasonCode: denied.reasonCode ?? null,
+          actionId: denied.actionId ?? null,
+          message: denied.message,
+        };
+      }
+    },
     get: <T>(
       endpoint: string,
-      opts?: { noProxy?: boolean; headers?: Record<string, string>; signal?: AbortSignal },
+      opts?: ApiCallOptions,
     ) => request<T>(endpoint, {
-      noProxy: opts?.noProxy,
-      headers: opts?.headers,
-      signal: opts?.signal,
+      ...opts,
     }),
     post: <T>(
       endpoint: string,
       body?: unknown,
-      opts?: { noProxy?: boolean; headers?: Record<string, string> },
+      opts?: ApiCallOptions,
     ) =>
       request<T>(endpoint, {
         method: 'POST',
         body,
-        noProxy: opts?.noProxy,
-        headers: opts?.headers,
+        ...opts,
       }),
     put: <T>(
       endpoint: string,
       body?: unknown,
-      opts?: { noProxy?: boolean; headers?: Record<string, string> },
+      opts?: ApiCallOptions,
     ) =>
       request<T>(endpoint, {
         method: 'PUT',
         body,
-        noProxy: opts?.noProxy,
-        headers: opts?.headers,
+        ...opts,
       }),
     del: <T>(
       endpoint: string,
       body?: unknown,
-      opts?: { headers?: Record<string, string> },
-    ) => request<T>(endpoint, { method: 'DELETE', body, headers: opts?.headers }),
+      opts?: ApiCallOptions,
+    ) => request<T>(endpoint, { method: 'DELETE', body, ...opts }),
     // alias `delete` для DRY: исторически было только `del` (зарезервированное
     // слово в JS как имя method-call было нормально, но кто-то по привычке
     // пишет `api.delete(...)` — раньше это давало "p.delete is not a function".
@@ -454,25 +644,26 @@ export function useApi() {
     delete: <T>(
       endpoint: string,
       body?: unknown,
-      opts?: { headers?: Record<string, string> },
-    ) => request<T>(endpoint, { method: 'DELETE', body, headers: opts?.headers }),
+      opts?: ApiCallOptions,
+    ) => request<T>(endpoint, { method: 'DELETE', body, ...opts }),
     patch: <T>(
       endpoint: string,
       body?: unknown,
-      opts?: { headers?: Record<string, string> },
-    ) => request<T>(endpoint, { method: 'PATCH', body, headers: opts?.headers }),
-    publicPost: <T>(endpoint: string, body?: unknown) =>
-      request<T>(endpoint, { method: 'POST', body, requireAuth: false }),
-    publicGet: <T>(endpoint: string) =>
-      request<T>(endpoint, { requireAuth: false }),
-    getWithMeta: <T>(endpoint: string) => requestWithMeta<T>(endpoint),
+      opts?: ApiCallOptions,
+    ) => request<T>(endpoint, { method: 'PATCH', body, ...opts }),
+    publicPost: <T>(endpoint: string, body?: unknown, opts?: ApiCallOptions) =>
+      request<T>(endpoint, { method: 'POST', body, requireAuth: false, ...opts }),
+    publicGet: <T>(endpoint: string, opts?: ApiCallOptions) =>
+      request<T>(endpoint, { requireAuth: false, ...opts }),
+    getWithMeta: <T>(endpoint: string, opts?: ApiCallOptions) =>
+      requestWithMeta<T>(endpoint, opts),
     download,
     rawText,
     upload: <T>(
       endpoint: string,
       file: File,
       extraFields?: Record<string, string>,
-      options?: { headers?: Record<string, string> },
+      options?: ApiCallOptions,
     ) => upload<T>(endpoint, file, extraFields, options),
   };
 }

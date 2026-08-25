@@ -1,208 +1,164 @@
 <?php
-/**
- * Meowbox Adminer SSO — общая библиотека для:
- *   - sso.php (обмен ticket → cookie)
- *   - index.php (загрузка credentials из cookie перед стартом Adminer)
- *
- * Криптография: AES-256-GCM, формат токена/куки = base64url(iv12 | tag16 | ct).
- * Полностью совместимо с Node-эквивалентом `api/src/common/crypto/adminer-cipher.ts`.
- *
- * Источники секретов:
- *   1. ENV `ADMINER_SSO_KEY` (передаётся через php-fpm pool env);
- *   2. Файл `state/.env` (`/opt/meowbox/state/.env`, парсим `ADMINER_SSO_KEY=...`).
- *
- * Куки: `meowbox_adminer_session`, HttpOnly, SameSite=Lax, Path=/adminer.
- * Secure ставится автоматически, если запрос пришёл по HTTPS.
- */
+/** Meowbox Adminer v2 fixed-lifetime session cookie consumer. */
 
-const MEOWBOX_COOKIE_NAME = 'meowbox_adminer_session';
+declare(strict_types=1);
+
+const MEOWBOX_COOKIE_NAME = '__Secure-meowbox_adminer_session';
 const MEOWBOX_COOKIE_PATH = '/adminer';
-const MEOWBOX_COOKIE_TTL = 1800; // 30 мин (sliding)
+const MEOWBOX_COOKIE_MAX_BYTES = 3800;
+const MEOWBOX_SESSION_MAX_MS = 900000;
 
-/**
- * Считывает ADMINER_SSO_KEY из ENV и /opt/meowbox/.env.
- * Возвращает массив 32-байтных raw-ключей (уникальных), чтобы decrypt мог
- * перебрать все доступные источники.
- *
- * Зачем массив, а не один ключ:
- *   - PHP-FPM pool хранит свой `env[ADMINER_SSO_KEY] = "..."`, .env — свой.
- *   - При апгрейде через master-key bootstrap эти два источника могут
- *     временно разъехаться (sync-pool-sso-key миграция не достучалась
- *     до старого pool без env[]-строки, php-fpm не успели перезапустить и т.д.).
- *   - Тикеты от API шифруются ОДНИМ из этих ключей — если попробуем оба,
- *     decrypt не упадёт молча с "tag mismatch".
- */
 function meowbox_load_keys(): array {
     $candidates = [];
-    $b64Env = getenv('ADMINER_SSO_KEY');
-    if (is_string($b64Env) && $b64Env !== '') {
-        $candidates[] = $b64Env;
-    }
-    // Читаем только state/.env (legacy /opt/meowbox/.env удалён в v0.6.x, не пытаемся
-    // даже is_readable — open_basedir всё равно даст warning).
+    $fromPool = getenv('ADMINER_SSO_KEY');
+    if (is_string($fromPool) && $fromPool !== '') $candidates[] = $fromPool;
     $envFile = '/opt/meowbox/state/.env';
     if (@is_readable($envFile)) {
         $contents = @file_get_contents($envFile);
         if ($contents !== false
-            && preg_match('/^\s*ADMINER_SSO_KEY\s*=\s*"?([A-Za-z0-9+\/=]+)"?\s*$/m', $contents, $m)) {
-            $candidates[] = $m[1];
+            && preg_match('/^\s*ADMINER_SSO_KEY\s*=\s*"?([A-Za-z0-9+\/=]+)"?\s*$/m', $contents, $match)) {
+            $candidates[] = $match[1];
         }
     }
     $keys = [];
     $seen = [];
-    foreach ($candidates as $b64) {
-        $raw = base64_decode($b64, true);
+    foreach ($candidates as $encoded) {
+        $raw = base64_decode($encoded, true);
         if ($raw === false || strlen($raw) !== 32) continue;
-        $h = sha1($raw, true);
-        if (isset($seen[$h])) continue;
-        $seen[$h] = true;
+        $fingerprint = hash('sha256', $raw);
+        if (isset($seen[$fingerprint])) continue;
+        $seen[$fingerprint] = true;
         $keys[] = $raw;
     }
-    if (!$keys) {
-        throw new RuntimeException('ADMINER_SSO_KEY is not configured (нет ни в php-fpm pool env, ни в state/.env)');
-    }
+    if (!$keys) throw new RuntimeException('ADMINER_SSO_KEY is not configured');
     return $keys;
 }
 
-/** Backwards-compat: первый валидный ключ (для encrypt). */
-function meowbox_load_key(): string {
-    $keys = meowbox_load_keys();
-    return $keys[0];
+function meowbox_diag_log(string $message): void {
+    @error_log('[meowbox-adminer] ' . $message);
 }
 
-/** Лог diagnostic'а в php error_log (попадает в /var/log/meowbox-adminer.error.log по pool conf). */
-function meowbox_diag_log(string $msg): void {
-    @error_log('[meowbox-sso] ' . $msg);
-}
-
-function meowbox_b64url_encode(string $bin): string {
-    return rtrim(strtr(base64_encode($bin), '+/', '-_'), '=');
-}
-
-function meowbox_b64url_decode(string $s): string {
-    $padded = strtr($s, '-_', '+/');
-    $pad = strlen($padded) % 4;
-    if ($pad) $padded .= str_repeat('=', 4 - $pad);
-    $raw = base64_decode($padded, true);
-    if ($raw === false) {
+function meowbox_b64url_decode(string $value): string {
+    if ($value === '' || !preg_match('/^[A-Za-z0-9_-]+$/D', $value)) {
         throw new RuntimeException('Invalid base64url');
     }
-    return $raw;
+    $encoded = strtr($value, '-_', '+/');
+    $remainder = strlen($encoded) % 4;
+    if ($remainder) $encoded .= str_repeat('=', 4 - $remainder);
+    $decoded = base64_decode($encoded, true);
+    if ($decoded === false) throw new RuntimeException('Invalid base64url');
+    $canonical = rtrim(strtr(base64_encode($decoded), '+/', '-_'), '=');
+    if (!hash_equals($canonical, $value)) throw new RuntimeException('Non-canonical base64url');
+    return $decoded;
 }
 
-/** Шифрует JSON-сериализуемое значение → base64url-токен. */
-function meowbox_encrypt(array $payload): string {
-    $key = meowbox_load_key();
-    $iv = random_bytes(12);
-    $tag = '';
-    $plaintext = json_encode($payload, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
-    $ct = openssl_encrypt($plaintext, 'aes-256-gcm', $key, OPENSSL_RAW_DATA, $iv, $tag, '', 16);
-    if ($ct === false) {
-        throw new RuntimeException('Encryption failed');
-    }
-    return meowbox_b64url_encode($iv . $tag . $ct);
+function meowbox_session_aad(string $targetInstallationId): string {
+    return "MEOWBOX-ADMINER-SESSION-V2\n{$targetInstallationId}\nadminer";
 }
 
-/**
- * Расшифровывает токен. Пробует ВСЕ доступные ключи (pool env + .env),
- * возвращает первый успешный decrypt. На fail логирует в error.log
- * диагностику (количество ключей, fingerprints — без раскрытия ключа).
- */
-function meowbox_decrypt(string $token): array {
-    $keys = meowbox_load_keys();
-    $bin = meowbox_b64url_decode($token);
-    if (strlen($bin) < 12 + 16 + 1) {
-        throw new RuntimeException('Token too short');
+function meowbox_decrypt_session(string $token): array {
+    if (strlen($token) > MEOWBOX_COOKIE_MAX_BYTES) {
+        throw new RuntimeException('Session cookie is too large');
     }
-    $iv = substr($bin, 0, 12);
-    $tag = substr($bin, 12, 16);
-    $ct = substr($bin, 28);
-
-    $tried = [];
-    foreach ($keys as $key) {
-        $plaintext = openssl_decrypt($ct, 'aes-256-gcm', $key, OPENSSL_RAW_DATA, $iv, $tag);
+    $parts = explode('.', $token);
+    if (count($parts) !== 3 || $parts[0] !== 'v2') {
+        throw new RuntimeException('Session cookie version is invalid');
+    }
+    $target = $parts[1];
+    if (!preg_match('/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/Di', $target)) {
+        throw new RuntimeException('Session target is invalid');
+    }
+    $binary = meowbox_b64url_decode($parts[2]);
+    if (strlen($binary) < 29 || strlen($binary) > 2076) {
+        throw new RuntimeException('Session ciphertext length is invalid');
+    }
+    $iv = substr($binary, 0, 12);
+    $tag = substr($binary, 12, 16);
+    $ciphertext = substr($binary, 28);
+    $aad = meowbox_session_aad($target);
+    $fingerprints = [];
+    foreach (meowbox_load_keys() as $key) {
+        $plaintext = openssl_decrypt(
+            $ciphertext,
+            'aes-256-gcm',
+            $key,
+            OPENSSL_RAW_DATA,
+            $iv,
+            $tag,
+            $aad,
+        );
         if ($plaintext !== false) {
-            $obj = json_decode($plaintext, true);
-            if (!is_array($obj)) {
-                throw new RuntimeException('Token payload is not JSON object');
+            if (strlen($plaintext) < 1 || strlen($plaintext) > 2048) {
+                throw new RuntimeException('Session plaintext length is invalid');
             }
-            return $obj;
+            $payload = json_decode($plaintext, true, 32, JSON_THROW_ON_ERROR);
+            if (!is_array($payload)) throw new RuntimeException('Session payload is invalid');
+            meowbox_validate_session($payload, $target);
+            return $payload;
         }
-        $tried[] = substr(sha1($key), 0, 8);
+        $fingerprints[] = substr(hash('sha256', $key), 0, 8);
     }
-    // Все ключи мимо — пишем диагностику.
-    meowbox_diag_log(sprintf(
-        'decrypt fail: tried %d key(s) with fingerprints [%s]; token_len=%d. '
-        . 'Проверь, что ADMINER_SSO_KEY в php-fpm pool совпадает с state/.env '
-        . '(см. tools/adminer-diag.sh).',
-        count($keys), implode(',', $tried), strlen($token),
-    ));
-    throw new RuntimeException('Decryption failed (bad key or tampered token)');
+    meowbox_diag_log('session decrypt failed; key_fingerprints=' . implode(',', $fingerprints));
+    throw new RuntimeException('Session authentication failed');
 }
 
-/** Ставит сессионную куку с зашифрованными credentials. TTL = MEOWBOX_COOKIE_TTL. */
-function meowbox_set_session_cookie(array $creds): void {
-    $now = time();
-    $session = meowbox_encrypt([
-        'v' => 1,
-        'kind' => 'session',
-        'driver' => $creds['driver'],
-        'host' => $creds['host'],
-        'port' => $creds['port'] ?? null,
-        'socket' => $creds['socket'] ?? null,
-        'user' => $creds['user'],
-        'pass' => $creds['pass'],
-        'database' => $creds['database'],
-        'service' => $creds['service'] ?? null,
-        'site' => $creds['site'] ?? null,
-        'uid' => $creds['uid'] ?? null,
-        'dbId' => $creds['dbId'] ?? null,
-        'iat' => $now,
-        'exp' => $now + MEOWBOX_COOKIE_TTL,
-    ]);
-
-    $secure = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off')
-        || (($_SERVER['HTTP_X_FORWARDED_PROTO'] ?? '') === 'https');
-
-    setcookie(MEOWBOX_COOKIE_NAME, $session, [
-        'expires' => $now + MEOWBOX_COOKIE_TTL,
-        'path' => MEOWBOX_COOKIE_PATH,
-        'domain' => '',
-        'secure' => $secure,
-        'httponly' => true,
-        'samesite' => 'Lax',
-    ]);
+function meowbox_validate_session(array $payload, string $target): void {
+    $now = (int)floor(microtime(true) * 1000);
+    $issuedAt = $payload['issuedAt'] ?? null;
+    $expiresAt = $payload['expiresAt'] ?? null;
+    if (($payload['v'] ?? null) !== 2
+        || ($payload['kind'] ?? null) !== 'session'
+        || ($payload['audience'] ?? null) !== 'adminer'
+        || ($payload['targetInstallationId'] ?? null) !== $target
+        || !in_array($payload['purpose'] ?? null, ['ADMINER', 'MANTICORE'], true)
+        || !is_string($payload['resourceKind'] ?? null)
+        || !preg_match('/^[A-Z][A-Z0-9_]{1,63}$/D', $payload['resourceKind'])
+        || !is_string($payload['resourceId'] ?? null)
+        || !preg_match('/^[A-Za-z0-9._:-]{1,256}$/D', $payload['resourceId'])
+        || !is_int($issuedAt)
+        || !is_int($expiresAt)
+        || $issuedAt > $now + 30000
+        || $expiresAt <= $now
+        || $expiresAt - $issuedAt > MEOWBOX_SESSION_MAX_MS
+        || !in_array($payload['driver'] ?? null, ['server', 'pgsql'], true)
+        || !is_string($payload['host'] ?? null)
+        || strlen($payload['host']) < 1
+        || strlen($payload['host']) > 255
+        || !is_string($payload['user'] ?? null)
+        || strlen($payload['user']) > 256
+        || !is_string($payload['pass'] ?? null)
+        || strlen($payload['pass']) > 1024
+        || !is_string($payload['database'] ?? null)
+        || strlen($payload['database']) > 256) {
+        throw new RuntimeException('Session payload validation failed');
+    }
+    $port = $payload['port'] ?? null;
+    $socket = $payload['socket'] ?? null;
+    $hasPort = is_int($port) && $port >= 1 && $port <= 65535;
+    $hasSocket = is_string($socket) && strlen($socket) >= 1 && strlen($socket) <= 512;
+    if ($hasPort === $hasSocket) throw new RuntimeException('Session endpoint is invalid');
 }
 
-/** Удаляет сессионную куку. */
 function meowbox_clear_session_cookie(): void {
     setcookie(MEOWBOX_COOKIE_NAME, '', [
         'expires' => time() - 3600,
         'path' => MEOWBOX_COOKIE_PATH,
+        'domain' => '',
+        'secure' => true,
         'httponly' => true,
         'samesite' => 'Lax',
     ]);
 }
 
-/**
- * Читает credentials из сессионной куки. Возвращает массив или null (нет/просрочка/ломаная).
- * Также продлевает TTL (sliding session) при успешном чтении, кроме случая, когда осталось
- * меньше 60 секунд — там продлевать смысла нет, юзер сейчас всё равно вылетит.
- */
+/** No renewal: absolute expiry from the Node-issued v2 payload is binding. */
 function meowbox_read_session(): ?array {
-    if (empty($_COOKIE[MEOWBOX_COOKIE_NAME])) return null;
+    $token = $_COOKIE[MEOWBOX_COOKIE_NAME] ?? null;
+    if (!is_string($token) || $token === '') return null;
     try {
-        $obj = meowbox_decrypt($_COOKIE[MEOWBOX_COOKIE_NAME]);
-    } catch (Throwable $e) {
+        return meowbox_decrypt_session($token);
+    } catch (Throwable $error) {
+        meowbox_diag_log('session rejected: ' . get_class($error));
+        meowbox_clear_session_cookie();
         return null;
     }
-    if (($obj['kind'] ?? '') !== 'session') return null;
-    if (!isset($obj['exp']) || $obj['exp'] < time()) return null;
-
-    // Sliding TTL: если осталось < половины TTL — пересохраняем куку.
-    $remaining = $obj['exp'] - time();
-    if ($remaining < MEOWBOX_COOKIE_TTL / 2) {
-        meowbox_set_session_cookie($obj);
-    }
-    return $obj;
 }

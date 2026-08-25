@@ -134,6 +134,10 @@ const loading = ref(false);
 const error = ref('');
 const success = ref(false);
 const focusedField = ref('');
+const api = useMasterApi();
+const serverStore = useServerStore();
+
+onMounted(() => serverStore.resetToMain());
 
 async function handleSetup() {
   loading.value = true;
@@ -151,7 +155,6 @@ async function handleSetup() {
   }
 
   try {
-    const api = useApi();
     await api.publicPost('/setup/init', {
       username: form.username,
       email: form.email,

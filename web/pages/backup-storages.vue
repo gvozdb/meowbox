@@ -206,7 +206,8 @@ interface StorageLocationOption {
   updatedAt?: string;
 }
 
-const api = useApi();
+const api = useRemoteApi();
+const { waitForOperation } = useOperation();
 const toast = useMbToast();
 
 const locations = ref<StorageLocationOption[]>([]);
@@ -334,12 +335,13 @@ async function deleteStorage(loc: StorageLocationOption) {
 async function testStorage(loc: StorageLocationOption) {
   toast.info(`Проверяю ${loc.name}…`);
   try {
-    const res = await api.post<{ success: boolean; error?: string }>(
+    const accepted = await api.post<AcceptedOperation>(
       `/storage-locations/${loc.id}/test?siteName=_connection-test_`,
-      {},
+      undefined,
+      { headers: { 'Idempotency-Key': operationIdempotencyKey('storage-location-test') } },
     );
-    if (res.success) toast.success(`${loc.name}: доступ есть`);
-    else toast.error(`${loc.name}: ${res.error || 'ошибка'}`);
+    await waitForOperation(accepted.operationId, { timeoutMs: 6 * 60_000 });
+    toast.success(`${loc.name}: доступ есть`);
   } catch (e) {
     toast.error((e as Error)?.message || 'Не удалось протестировать');
   }

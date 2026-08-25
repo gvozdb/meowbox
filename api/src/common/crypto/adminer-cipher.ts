@@ -30,6 +30,8 @@ const ENV_VAR = 'ADMINER_SSO_KEY';
 const IV_LEN = 12;
 const TAG_LEN = 16;
 const KEY_LEN = 32;
+const V2_PREFIX = 'v2';
+const SESSION_AUDIENCE = 'adminer';
 
 const DEFAULT_ENV_PATH = '/opt/meowbox/state/.env';
 const KEY_LINE_RE = /^\s*ADMINER_SSO_KEY\s*=\s*"?([A-Za-z0-9+/=]+)"?\s*$/m;
@@ -111,6 +113,112 @@ function toBase64Url(buf: Buffer): string {
 function fromBase64Url(s: string): Buffer {
   const pad = s.length % 4 === 0 ? '' : '='.repeat(4 - (s.length % 4));
   return Buffer.from(s.replace(/-/g, '+').replace(/_/g, '/') + pad, 'base64');
+}
+
+function fromStrictBase64Url(value: string): Buffer {
+  if (!/^[A-Za-z0-9_-]+$/.test(value)) throw new Error('Invalid base64url');
+  const decoded = fromBase64Url(value);
+  if (toBase64Url(decoded) !== value) throw new Error('Non-canonical base64url');
+  return decoded;
+}
+
+function encryptV2(payload: unknown, aad: string, maxPlaintextBytes: number): string {
+  const plaintext = Buffer.from(JSON.stringify(payload), 'utf8');
+  if (plaintext.length === 0 || plaintext.length > maxPlaintextBytes) {
+    throw new Error(`Adminer payload must be 1..${maxPlaintextBytes} bytes`);
+  }
+  const key = loadKey();
+  const iv = crypto.randomBytes(IV_LEN);
+  const cipher = crypto.createCipheriv('aes-256-gcm', key, iv);
+  cipher.setAAD(Buffer.from(aad, 'utf8'));
+  const ct = Buffer.concat([cipher.update(plaintext), cipher.final()]);
+  const tag = cipher.getAuthTag();
+  return toBase64Url(Buffer.concat([iv, tag, ct]));
+}
+
+function decryptV2<T>(token: string, aad: string, maxPlaintextBytes: number): T {
+  const key = loadKey();
+  const buf = fromStrictBase64Url(token);
+  if (buf.length < IV_LEN + TAG_LEN + 1 || buf.length > IV_LEN + TAG_LEN + maxPlaintextBytes) {
+    throw new Error('Adminer payload has invalid length');
+  }
+  const iv = buf.subarray(0, IV_LEN);
+  const tag = buf.subarray(IV_LEN, IV_LEN + TAG_LEN);
+  const ct = buf.subarray(IV_LEN + TAG_LEN);
+  const decipher = crypto.createDecipheriv('aes-256-gcm', key, iv);
+  decipher.setAAD(Buffer.from(aad, 'utf8'));
+  decipher.setAuthTag(tag);
+  const plaintext = Buffer.concat([decipher.update(ct), decipher.final()]);
+  if (plaintext.length === 0 || plaintext.length > maxPlaintextBytes) {
+    throw new Error('Adminer plaintext has invalid length');
+  }
+  return JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(plaintext)) as T;
+}
+
+export function adminerHandoffAad(input: {
+  targetInstallationId: string;
+  handoffId: string;
+  resourceKind: string;
+  resourceId: string;
+}): string {
+  return [
+    'MEOWBOX-ADMINER-HANDOFF-V2',
+    input.targetInstallationId,
+    input.handoffId,
+    input.resourceKind,
+    input.resourceId,
+  ].join('\n');
+}
+
+export function encryptAdminerHandoffPayload(
+  payload: unknown,
+  aad: string,
+): string {
+  return `${V2_PREFIX}.${encryptV2(payload, aad, 2048)}`;
+}
+
+export function decryptAdminerHandoffPayload<T>(
+  token: string,
+  aad: string,
+): T {
+  const [version, ciphertext, ...extra] = token.split('.');
+  if (version !== V2_PREFIX || !ciphertext || extra.length > 0) {
+    throw new Error('Adminer handoff payload version is invalid');
+  }
+  return decryptV2<T>(ciphertext, aad, 2048);
+}
+
+export function adminerSessionAad(targetInstallationId: string): string {
+  return [
+    'MEOWBOX-ADMINER-SESSION-V2',
+    targetInstallationId,
+    SESSION_AUDIENCE,
+  ].join('\n');
+}
+
+export function encryptAdminerSessionCookie(
+  payload: unknown,
+  targetInstallationId: string,
+): string {
+  return [
+    V2_PREFIX,
+    targetInstallationId,
+    encryptV2(payload, adminerSessionAad(targetInstallationId), 2048),
+  ].join('.');
+}
+
+/** Test/diagnostic counterpart for the PHP v2 cookie consumer. */
+export function decryptAdminerSessionCookie<T>(token: string): T {
+  const [version, targetInstallationId, ciphertext, ...extra] = token.split('.');
+  if (
+    version !== V2_PREFIX ||
+    !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(targetInstallationId || '') ||
+    !ciphertext ||
+    extra.length > 0
+  ) {
+    throw new Error('Adminer session cookie format is invalid');
+  }
+  return decryptV2<T>(ciphertext, adminerSessionAad(targetInstallationId), 2048);
 }
 
 /** Шифрует JSON-объект. Возвращает компактную base64url-строку. */

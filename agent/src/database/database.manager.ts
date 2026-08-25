@@ -1,8 +1,17 @@
 import { CommandExecutor } from '../command-executor';
 import * as fs from 'fs';
 import * as path from 'path';
-import { isUnderBackupStorage, DB_EXPORTS_DIR } from '../config';
+import { Transform, type Readable } from 'node:stream';
+import { createGunzip } from 'node:zlib';
+import {
+  DB_EXPORTS_DIR,
+  isUnderBackupStorage,
+  isUnderTransferArtifacts,
+} from '../config';
 import { pgDumpToFile } from '../backup/db-dump';
+
+const MAX_IMPORT_EXPANDED_BYTES = 100 * 1024 ** 3;
+const IMPORT_FILENAME = /^[A-Za-z0-9._-]{1,180}$/;
 
 /**
  * Валидация пути к SQL-дампу перед передачей в `mysql -e "source …"` /
@@ -17,19 +26,27 @@ function validateDumpPath(filePath: string): string {
   if (!/^[A-Za-z0-9_./-]+$/.test(abs)) {
     throw new Error('Invalid dump path: unsafe characters');
   }
-  if (!fs.existsSync(abs)) {
-    throw new Error(`Dump file not found: ${abs}`);
+  let fileState: fs.Stats;
+  try { fileState = fs.lstatSync(abs); } catch { throw new Error(`Dump file not found: ${abs}`); }
+  if (!fileState.isFile() || fileState.isSymbolicLink()) {
+    throw new Error('Dump path must be a regular non-symlink file');
   }
+  const real = fs.realpathSync.native(abs);
+  if (real !== abs) throw new Error('Dump path must not traverse symlinked directories');
   // Дополнительно ограничиваем набор локаций — только бэкап-хранилище и
   // тмп каталог меовбокса.
   const allowedPrefixes = [
     '/tmp/meowbox-',
     '/var/meowbox/',
   ];
-  if (!isUnderBackupStorage(abs) && !allowedPrefixes.some((p) => abs.startsWith(p))) {
+  if (
+    !isUnderBackupStorage(real) &&
+    !isUnderTransferArtifacts(real) &&
+    !allowedPrefixes.some((p) => real.startsWith(p))
+  ) {
     throw new Error(`Dump path not allowed: ${abs}`);
   }
-  return abs;
+  return real;
 }
 
 interface CreateDbParams {
@@ -149,27 +166,66 @@ export class DatabaseManager {
     }
   }
 
-  async importDatabase(name: string, type: string, filePath: string): Promise<DbResult> {
+  async importDatabase(
+    name: string,
+    type: string,
+    filePath: string,
+    originalFilename = path.basename(filePath),
+  ): Promise<DbResult> {
     let safePath: string;
     try {
       safePath = validateDumpPath(filePath);
     } catch (err) {
       return { success: false, error: (err as Error).message };
     }
-    if (type === 'POSTGRESQL') {
-      const result = await this.executor.execute('sudo', [
-        '-u', 'postgres', 'psql', '-d', name, '-f', safePath,
-      ], { timeout: 600_000, allowFailure: true });
+    try {
+      if (!['POSTGRESQL', 'MARIADB', 'MYSQL'].includes(type)) {
+        return { success: false, error: `Unknown database type: ${type}` };
+      }
+      const input = this.createImportStream(safePath, originalFilename);
+      const command = type === 'POSTGRESQL' ? 'sudo' : type === 'MARIADB' ? 'mariadb' : 'mysql';
+      const args = type === 'POSTGRESQL'
+        ? ['-u', 'postgres', 'psql', '-d', name]
+        : ['-u', 'root', name];
+      const result = await this.executor.executeWithInput(command, args, input, {
+        timeout: 4 * 60 * 60_000,
+        allowFailure: true,
+      });
       if (result.exitCode !== 0) return { success: false, error: result.stderr };
       return { success: true };
-    } else {
-      const cmd = type === 'MARIADB' ? 'mariadb' : 'mysql';
-      const result = await this.executor.execute(cmd, [
-        '-u', 'root', name, '-e', `source ${safePath}`,
-      ], { timeout: 600_000, allowFailure: true });
-      if (result.exitCode !== 0) return { success: false, error: result.stderr };
-      return { success: true };
+    } catch (error) {
+      return { success: false, error: (error as Error).message };
     }
+  }
+
+  private createImportStream(filePath: string, originalFilename: string): Readable {
+    if (!IMPORT_FILENAME.test(originalFilename)) {
+      throw new Error('Invalid database import filename');
+    }
+    const lower = originalFilename.toLowerCase();
+    if (!lower.endsWith('.sql') && !lower.endsWith('.sql.gz')) {
+      throw new Error('Database import supports only .sql and .sql.gz');
+    }
+    const fd = fs.openSync(filePath, 'r');
+    const magic = Buffer.alloc(2);
+    try { fs.readSync(fd, magic, 0, magic.length, 0); } finally { fs.closeSync(fd); }
+    const gzip = magic[0] === 0x1f && magic[1] === 0x8b;
+    if (lower.endsWith('.sql.gz') !== gzip) {
+      throw new Error('Database import compression does not match filename');
+    }
+    let expandedBytes = 0;
+    const meter = new Transform({
+      transform(chunk: Buffer, _encoding, callback) {
+        expandedBytes += chunk.length;
+        if (expandedBytes > MAX_IMPORT_EXPANDED_BYTES) {
+          callback(new Error('Expanded database import exceeds the safety limit'));
+          return;
+        }
+        callback(null, chunk);
+      },
+    });
+    const source = fs.createReadStream(filePath);
+    return (gzip ? source.pipe(createGunzip()) : source).pipe(meter);
   }
 
   /**

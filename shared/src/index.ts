@@ -275,6 +275,7 @@ export {
 export {
   NODE_COMMAND_SOURCES,
   PM2_ECOSYSTEM_FILENAMES,
+  QUICK_COMMAND_OUTPUT_MAX_BYTES,
 } from './node-app';
 export type {
   NodeCommandSource,
@@ -291,7 +292,15 @@ export type {
 } from './node-app';
 
 // WebSocket types
-export { WsEvents } from './ws';
+export {
+  WsEvents,
+  FEDERATED_WS_STATES,
+  FEDERATED_WS_MESSAGE_KINDS,
+  validateFederatedWsChannelAssertion,
+  validateFederatedWsEnvelope,
+  validateFederatedWsAck,
+  validateFederatedWsState,
+} from './ws';
 
 export type {
   WsEventName,
@@ -304,4 +313,21 @@ export type {
   WsNotificationPayload,
   ServerToClientEvents,
   ClientToServerEvents,
+  FederatedWsState,
+  FederatedWsMessageKind,
+  FederatedWsChannelAssertion,
+  FederatedWsEnvelope,
+  FederatedWsAckPayload,
+  FederatedWsStatePayload,
 } from './ws';
+
+// Remote-panel federation contracts
+export * from './federation-actions';
+export * from './federation';
+export * from './public-delivery';
+export * from './operation-contract';
+export * from './agent-job';
+export * from './service-operations';
+export * from './semver';
+export * from './vpn-federation';
+export * from './webhook-federation';

@@ -3,12 +3,11 @@ import { ValidationPipe, Logger } from '@nestjs/common';
 import helmet from 'helmet';
 import * as express from 'express';
 import { AppModule } from './app.module';
-import {
-  DEFAULT_API_JSON_LIMIT_MB,
-  DEFAULT_API_UPLOAD_LIMIT_MB,
-} from '@meowbox/shared';
+import { DEFAULT_API_JSON_LIMIT_MB } from '@meowbox/shared';
 import { assertCredentialKeyConfigured } from './common/crypto/credentials-cipher';
 import { isReleaseMaintenanceActive } from './common/release-maintenance';
+import { declaredContentLength, requestBodyBudget } from './common/http/payload-budget';
+import { hasFederationAssertionAttempt } from './federation/federation-delegation.guard';
 
 // Прогреваем DNS-credentials key до старта Nest. Если файла .dns-key нет —
 // он будет автогенерирован сейчас, чтобы первый запрос пользователя на /api/dns
@@ -184,23 +183,17 @@ async function bootstrap() {
   // --- Security: Limit payload size ---
   app.use(
     (
-      req: { url?: string; headers: Record<string, string | undefined> },
+      req: {
+        method?: string;
+        url?: string;
+        headers: Record<string, string | string[] | undefined>;
+      },
       res: { status: (code: number) => { json: (body: unknown) => void } },
       next: () => void,
     ) => {
-      // Proxy-роут пропускает любые типы тел (multipart, бинарь, JSON) —
-      // не ограничиваем JSON-лимитом, ориентируемся только на upload-лимит.
-      const isProxy = (req.url ?? '').startsWith('/api/proxy/');
-      const contentType = req.headers['content-type'] || '';
-      const contentLength = parseInt(req.headers['content-length'] || '0', 10);
-      // Allow larger payloads for file uploads (multipart/form-data).
-      // Переопределяется env API_JSON_LIMIT_MB / API_UPLOAD_LIMIT_MB.
-      const jsonLimitMb = Number(process.env.API_JSON_LIMIT_MB) || DEFAULT_API_JSON_LIMIT_MB;
-      const uploadLimitMb = Number(process.env.API_UPLOAD_LIMIT_MB) || DEFAULT_API_UPLOAD_LIMIT_MB;
-      const maxSize = isProxy || contentType.includes('multipart/form-data')
-        ? uploadLimitMb * 1024 * 1024
-        : jsonLimitMb * 1024 * 1024;
-      if (contentLength > maxSize) {
+      const contentLength = declaredContentLength(req.headers['content-length']);
+      const maxSize = requestBodyBudget(req);
+      if (contentLength !== null && contentLength > BigInt(maxSize)) {
         res.status(413).json({ success: false, error: { code: 'PAYLOAD_TOO_LARGE', message: 'Request body too large' } });
         return;
       }
@@ -212,22 +205,43 @@ async function bootstrap() {
   // Порядок важен: для /api/proxy/* — raw (Buffer); для остальных — json + urlencoded.
   // Лимиты совпадают с тем, что было в дефолтном парсере NestJS.
   const jsonLimitMb = Number(process.env.API_JSON_LIMIT_MB) || DEFAULT_API_JSON_LIMIT_MB;
-  const uploadLimitMb = Number(process.env.API_UPLOAD_LIMIT_MB) || DEFAULT_API_UPLOAD_LIMIT_MB;
 
-  // 1) Raw body для proxy: нужен ОРИГИНАЛЬНЫЙ Buffer с оригинальным
-  //    Content-Type, чтобы 1:1 ретранслировать на slave (multipart, бинарь, JSON).
-  //    inflate=false: если slave когда-нибудь будет gzip-ить запрос — мы
-  //    ретранслируем его как есть (без распаковки, с сохранением CE).
+  // 1) Signed target control requests must reach FederationDelegationGuard as
+  //    exact bounded bytes. The guard validates and only then JSON-decodes.
   app.use(
-    '/api/proxy',
     express.raw({
-      type: '*/*',
-      limit: `${uploadLimitMb}mb`,
+      type: (req) => hasFederationAssertionAttempt(req.headers),
+      limit: '1mb',
       inflate: false,
     }),
   );
 
-  // 2) Стандартный JSON для всего остального API. Multer (file-uploads) сам
+  // 2) Remote control bodies are bounded to the protocol-1 1 MiB contract.
+  //    Multipart, binary and large payloads require transfer sessions.
+  app.use(
+    '/api/proxy',
+    express.raw({
+      type: '*/*',
+      limit: '1mb',
+      inflate: false,
+    }),
+  );
+
+  // 3) Provider webhook signatures bind the exact request bytes. Capture
+  //    both the stable master ingress and the legacy direct-target route
+  //    before any JSON parser can normalize whitespace or Unicode escapes.
+  for (const webhookPath of ['/api/public/v1/webhooks', '/api/deploy/webhook']) {
+    app.use(
+      webhookPath,
+      express.raw({
+        type: '*/*',
+        limit: '64kb',
+        inflate: false,
+      }),
+    );
+  }
+
+  // 4) Стандартный JSON для всего остального API. Multer (file-uploads) сам
   //    обрабатывает multipart per-controller через FileInterceptor — поэтому
   //    json-парсер тут безопасен (он не трогает multipart bodies).
   app.use(express.json({ limit: `${jsonLimitMb}mb` }));

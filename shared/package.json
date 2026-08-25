@@ -7,7 +7,8 @@
   "types": "dist/index.d.ts",
   "scripts": {
     "build": "tsc",
-    "dev": "tsc --watch"
+    "dev": "tsc --watch",
+    "test:federation": "npm run build && node --test test/federation-actions.test.js test/federation-contracts.test.js test/semver.test.js"
   },
   "devDependencies": {
     "typescript": "^5.4.0"

@@ -176,6 +176,7 @@ interface UfwRule { to: string; action: string; from: string; }
 interface DisplayRule { id: string; action: string; protocol: string; port: string; sourceIp: string; comment: string; source: 'panel' | 'system'; }
 
 const api = useApi();
+const { waitForOperation } = useOperation();
 const rules = ref<FirewallRule[]>([]);
 const loading = ref(true);
 
@@ -300,7 +301,12 @@ async function loadPresets() {
 async function applyPreset(name: string) {
   applyingPreset.value = name;
   try {
-    await api.post(`/firewall/presets/${name}/apply`);
+    const accepted = await api.post<AcceptedOperation>(
+      `/firewall/presets/${name}/apply`,
+      {},
+      { headers: { 'Idempotency-Key': operationIdempotencyKey('firewall-preset') } },
+    );
+    await waitForOperation(accepted.operationId, { timeoutMs: 16 * 60_000 });
     showToast('Preset applied');
     await loadRules();
   } catch { showToast('Failed to apply preset', true); }
@@ -333,7 +339,12 @@ async function loadUfwStatus() {
 async function syncRules() {
   syncing.value = true;
   try {
-    await api.post('/firewall/sync');
+    const accepted = await api.post<AcceptedOperation>(
+      '/firewall/sync',
+      {},
+      { headers: { 'Idempotency-Key': operationIdempotencyKey('firewall-sync') } },
+    );
+    await waitForOperation(accepted.operationId, { timeoutMs: 16 * 60_000 });
     showToast('Rules synced to UFW');
     await loadUfwStatus();
   } catch { showToast('Sync failed', true); }

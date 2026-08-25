@@ -7,30 +7,22 @@ import {
   Body,
   Param,
   Query,
-  Res,
-  Header,
   ParseUUIDPipe,
-  NotFoundException,
-  StreamableFile,
-  UseInterceptors,
-  UploadedFile,
-  BadRequestException,
   Headers,
+  HttpCode,
+  GoneException,
 } from '@nestjs/common';
-import { FileInterceptor } from '@nestjs/platform-express';
 import { Throttle } from '@nestjs/throttler';
-import { Response } from 'express';
-import * as fs from 'fs';
-import * as path from 'path';
 import { DatabasesService } from './databases.service';
-import { CreateDatabaseDto, UpdateDatabaseDto } from './databases.dto';
+import { DatabaseOperationsService } from './database-operations.service';
+import {
+  CreateDatabaseDto,
+  CreateDatabaseImportSessionDto,
+  StartDatabaseImportDto,
+  UpdateDatabaseDto,
+} from './databases.dto';
 import { CurrentUser } from '../common/decorators/current-user.decorator';
 import { Roles } from '../common/decorators/roles.decorator';
-import { attachmentDisposition } from '../common/http/content-disposition';
-import {
-  assertSafeFilePath,
-  ALLOWED_DB_FILE_PREFIXES,
-} from '../common/validators/safe-path';
 
 interface JwtUser {
   id: string;
@@ -39,7 +31,10 @@ interface JwtUser {
 
 @Controller('sites/:siteId/domains/:domainId/databases')
 export class DatabasesController {
-  constructor(private readonly databasesService: DatabasesService) {}
+  constructor(
+    private readonly databasesService: DatabasesService,
+    private readonly databaseOperations: DatabaseOperationsService,
+  ) {}
 
   @Get()
   async findAll(
@@ -84,19 +79,21 @@ export class DatabasesController {
 
   @Post()
   @Roles('ADMIN')
+  @HttpCode(202)
   @Throttle({ default: { limit: 5, ttl: 60_000 } })
   async create(
     @Param('siteId', ParseUUIDPipe) siteId: string,
     @Param('domainId', ParseUUIDPipe) domainId: string,
     @Body() dto: CreateDatabaseDto,
     @CurrentUser() user?: JwtUser,
+    @Headers('idempotency-key') idempotencyKey?: string,
   ) {
-    const result = await this.databasesService.create(
+    const result = await this.databaseOperations.enqueueCreate(
       siteId,
       domainId,
       dto,
-      user!.id,
-      user!.role,
+      { userId: user!.id, role: user!.role },
+      idempotencyKey,
     );
     return { success: true, data: result };
   }
@@ -125,6 +122,7 @@ export class DatabasesController {
 
   @Delete(':id')
   @Roles('ADMIN')
+  @HttpCode(202)
   @Throttle({ default: { limit: 5, ttl: 60_000 } })
   async delete(
     @Param('siteId', ParseUUIDPipe) siteId: string,
@@ -133,12 +131,11 @@ export class DatabasesController {
     @CurrentUser() user?: JwtUser,
     @Headers('idempotency-key') idempotencyKey?: string,
   ) {
-    const result = await this.databasesService.delete(
+    const result = await this.databaseOperations.enqueueDelete(
       siteId,
       domainId,
       id,
-      user!.id,
-      user!.role,
+      { userId: user!.id, role: user!.role },
       idempotencyKey,
     );
     return { success: true, data: result };
@@ -146,19 +143,21 @@ export class DatabasesController {
 
   @Post(':id/reset-password')
   @Roles('ADMIN')
+  @HttpCode(202)
   @Throttle({ default: { limit: 3, ttl: 60_000 } })
   async resetPassword(
     @Param('siteId', ParseUUIDPipe) siteId: string,
     @Param('domainId', ParseUUIDPipe) domainId: string,
     @Param('id', ParseUUIDPipe) id: string,
     @CurrentUser() user?: JwtUser,
+    @Headers('idempotency-key') idempotencyKey?: string,
   ) {
-    const result = await this.databasesService.resetPassword(
+    const result = await this.databaseOperations.enqueueResetPassword(
       siteId,
       domainId,
       id,
-      user!.id,
-      user!.role,
+      { userId: user!.id, role: user!.role },
+      idempotencyKey,
     );
     return { success: true, data: result };
   }
@@ -185,12 +184,14 @@ export class DatabasesController {
   }
 
   @Post(':id/adminer-ticket')
+  @Roles('ADMIN', 'MANAGER')
   @Throttle({ default: { limit: 10, ttl: 60_000 } })
   async createAdminerTicket(
     @Param('siteId', ParseUUIDPipe) siteId: string,
     @Param('domainId', ParseUUIDPipe) domainId: string,
     @Param('id', ParseUUIDPipe) id: string,
     @CurrentUser() user?: JwtUser,
+    @Headers('idempotency-key') _idempotencyKey?: string,
   ) {
     const result = await this.databasesService.createAdminerTicket(
       siteId,
@@ -203,6 +204,7 @@ export class DatabasesController {
   }
 
   @Post(':id/export')
+  @HttpCode(202)
   @Roles('ADMIN')
   @Throttle({ default: { limit: 3, ttl: 300_000 } })
   async exportDatabase(
@@ -210,98 +212,85 @@ export class DatabasesController {
     @Param('domainId', ParseUUIDPipe) domainId: string,
     @Param('id', ParseUUIDPipe) id: string,
     @CurrentUser() user?: JwtUser,
+    @Headers('idempotency-key') idempotencyKey?: string,
   ) {
-    const result = await this.databasesService.exportDatabase(
+    const result = await this.databaseOperations.enqueueExport(
       siteId,
       domainId,
       id,
-      user!.id,
-      user!.role,
+      { userId: user!.id, role: user!.role },
+      idempotencyKey,
+    );
+    return { success: true, data: result };
+  }
+
+  @Post(':id/exports/:operationId/delivery')
+  @Roles('ADMIN')
+  @Throttle({ default: { limit: 5, ttl: 60_000 } })
+  async issueExportDelivery(
+    @Param('siteId', ParseUUIDPipe) siteId: string,
+    @Param('domainId', ParseUUIDPipe) domainId: string,
+    @Param('id', ParseUUIDPipe) id: string,
+    @Param('operationId', ParseUUIDPipe) operationId: string,
+    @CurrentUser() user?: JwtUser,
+    @Headers('idempotency-key') _idempotencyKey?: string,
+  ) {
+    const result = await this.databaseOperations.issueExportDelivery(
+      siteId,
+      domainId,
+      id,
+      operationId,
+      { userId: user!.id, role: user!.role },
     );
     return { success: true, data: result };
   }
 
   @Get(':id/download')
   @Roles('ADMIN')
-  @Header('Cache-Control', 'no-store')
-  async downloadExport(
+  downloadExport(): never {
+    throw new GoneException('Legacy path-based database downloads are disabled');
+  }
+
+  @Post(':id/import-session')
+  @Roles('ADMIN')
+  @Throttle({ default: { limit: 5, ttl: 60_000 } })
+  async createImportSession(
     @Param('siteId', ParseUUIDPipe) siteId: string,
     @Param('domainId', ParseUUIDPipe) domainId: string,
     @Param('id', ParseUUIDPipe) id: string,
-    @Query('filePath') filePath: string,
-    @Res({ passthrough: true }) res: Response,
+    @Body() dto: CreateDatabaseImportSessionDto,
     @CurrentUser() user?: JwtUser,
+    @Headers('idempotency-key') idempotencyKey?: string,
   ) {
-    // Validate user has access to this database
-    await this.databasesService.findById(
+    const result = await this.databaseOperations.createImportSession(
       siteId,
       domainId,
       id,
-      user!.id,
-      user!.role,
+      { userId: user!.id, role: user!.role },
+      dto,
+      idempotencyKey,
     );
-
-    // Safety: allowlist префиксов + защита от `..` + запрет symlink.
-    const safePath = assertSafeFilePath(filePath, ALLOWED_DB_FILE_PREFIXES, {
-      mustExist: true,
-      extensions: ['sql', 'gz', 'zip', 'bz2', 'xz'],
-    });
-
-    const stat = fs.statSync(safePath);
-    const filename = path.basename(safePath);
-
-    res.set({
-      'Content-Type': 'application/octet-stream',
-      'Content-Length': stat.size.toString(),
-      'Content-Disposition': attachmentDisposition(filename),
-    });
-
-    // Удаляем файл после успешной передачи. Дамп — одноразовая
-    // штука: каждое нажатие «Экспорт» создаёт новый файл с новым ts.
-    // Если соединение оборвалось (`close` без `finish`) — НЕ удаляем,
-    // чтобы юзер мог докачать; забытые файлы подберёт периодический
-    // cleanup в DatabasesService.
-    //
-    // Ставим listener только на `finish` response — он триггерится,
-    // когда весь body отправлен клиенту. Express прокидывает finish
-    // через writable stream — для StreamableFile это работает корректно.
-    const stream = fs.createReadStream(safePath);
-    res.on('finish', () => {
-      fs.unlink(safePath, () => {
-        // ENOENT/etc — игнорим: cleanup-таймер всё равно подметёт мусор.
-      });
-    });
-    // Если что-то порвётся на нашей стороне — уничтожаем стрим, файл оставляем.
-    res.on('close', () => {
-      if (!res.writableEnded) stream.destroy();
-    });
-
-    return new StreamableFile(stream);
+    return { success: true, data: result };
   }
 
   @Post(':id/import')
+  @HttpCode(202)
   @Roles('ADMIN')
   @Throttle({ default: { limit: 3, ttl: 300_000 } })
   async importDatabase(
     @Param('siteId', ParseUUIDPipe) siteId: string,
     @Param('domainId', ParseUUIDPipe) domainId: string,
     @Param('id', ParseUUIDPipe) id: string,
-    @Body() body: { filePath: string },
+    @Body() dto: StartDatabaseImportDto,
     @CurrentUser() user?: JwtUser,
     @Headers('idempotency-key') idempotencyKey?: string,
   ) {
-    // Safety: path traversal + symlink + extension guard.
-    const safePath = assertSafeFilePath(body?.filePath, ALLOWED_DB_FILE_PREFIXES, {
-      mustExist: true,
-      extensions: ['sql', 'gz', 'zip', 'bz2', 'xz'],
-    });
-    const result = await this.databasesService.importDatabase(
+    const result = await this.databaseOperations.enqueueImport(
       siteId,
       domainId,
       id,
-      user!.id,
-      user!.role,
-      safePath,
+      dto.uploadSessionId,
+      { userId: user!.id, role: user!.role },
       idempotencyKey,
     );
     return { success: true, data: result };
@@ -309,41 +298,7 @@ export class DatabasesController {
 
   @Post(':id/import-upload')
   @Roles('ADMIN')
-  @Throttle({ default: { limit: 3, ttl: 300_000 } })
-  @UseInterceptors(FileInterceptor('file', { limits: { fileSize: 100 * 1024 * 1024 } }))
-  async importUpload(
-    @Param('siteId', ParseUUIDPipe) siteId: string,
-    @Param('domainId', ParseUUIDPipe) domainId: string,
-    @Param('id', ParseUUIDPipe) id: string,
-    @UploadedFile() file: Express.Multer.File,
-    @CurrentUser() user?: JwtUser,
-    @Headers('idempotency-key') idempotencyKey?: string,
-  ) {
-    if (!file) {
-      throw new BadRequestException('SQL-файл не прикреплён');
-    }
-
-    // Разрешаем только дамп-форматы. `originalname` от клиента —
-    // для пользовательской валидации этого достаточно (дальше агент сам
-    // определит формат по магическому заголовку через mysql/gunzip).
-    const origName = String(file.originalname || '').toLowerCase();
-    const ALLOWED_DUMP_EXT = ['.sql', '.sql.gz', '.sql.bz2', '.sql.xz', '.sql.zip', '.gz', '.bz2', '.xz', '.zip'];
-    const ok = ALLOWED_DUMP_EXT.some((ext) => origName.endsWith(ext));
-    if (!ok) {
-      throw new BadRequestException(
-        'Допустимы только дампы БД: .sql, .sql.gz, .sql.bz2, .sql.xz, .sql.zip',
-      );
-    }
-
-    const result = await this.databasesService.importUpload(
-      siteId,
-      domainId,
-      id,
-      user!.id,
-      user!.role,
-      file,
-      idempotencyKey,
-    );
-    return { success: true, data: result };
+  importUpload(): never {
+    throw new GoneException('Legacy buffered database uploads are disabled');
   }
 }

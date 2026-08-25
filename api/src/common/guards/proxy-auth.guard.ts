@@ -11,6 +11,21 @@ import { Reflector } from '@nestjs/core';
 import { IS_PUBLIC_KEY } from '../decorators/public.decorator';
 import { PrismaService } from '../prisma.service';
 
+const LEGACY_STATIC_V0_ACTIONS = new Set([
+  'GET /api/dashboard/overview',
+  'GET /api/dashboard/summary',
+  'GET /api/system/metrics',
+  'GET /api/sites',
+  'GET /api/admin/update/status',
+  'GET /api/admin/update/version',
+  'POST /api/admin/update',
+]);
+
+export function isLegacyStaticV0Action(method: string, rawTarget: string): boolean {
+  const path = rawTarget.split('?', 1)[0];
+  return LEGACY_STATIC_V0_ACTIONS.has(`${method.toUpperCase()} ${path}`);
+}
+
 /**
  * Allows requests authenticated with X-Proxy-Token header.
  * This guard runs BEFORE the JWT guard. If a valid proxy token is present,
@@ -47,6 +62,9 @@ export class ProxyAuthGuard implements CanActivate {
       user?: unknown;
       proxyAuthenticated?: boolean;
       ip?: string;
+      originalUrl?: string;
+      url?: string;
+      method?: string;
     }>();
 
     const token = req.headers['x-proxy-token'];
@@ -66,10 +84,17 @@ export class ProxyAuthGuard implements CanActivate {
 
     if (!token) return true; // Let JWT guard handle it
 
+    if (!isLegacyStaticV0Action(req.method || '', req.originalUrl || req.url || '')) {
+      this.logger.warn(
+        `Legacy proxy token rejected outside upgrade allowlist (ip=${req.ip ?? 'unknown'})`,
+      );
+      throw new UnauthorizedException('Legacy proxy action is not allowed');
+    }
+
     // Constant-time comparison
     if (this.constantTimeCompare(token, this.proxyToken)) {
       const admin = await this.prisma.user.findFirst({
-        where: { role: 'ADMIN' },
+        where: { role: 'ADMIN', identityKind: 'LOCAL' },
         orderBy: { createdAt: 'asc' },
         select: { id: true, username: true, role: true },
       });

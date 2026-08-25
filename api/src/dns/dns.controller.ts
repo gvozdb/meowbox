@@ -1,16 +1,22 @@
 import {
-  Body, Controller, Delete, Get, GoneException, Param, ParseUUIDPipe, Patch, Post, Query,
+  Body, Controller, Delete, Get, GoneException, Headers, HttpCode, HttpStatus,
+  Param, ParseUUIDPipe, Patch, Post, Query,
 } from '@nestjs/common';
 import { Throttle } from '@nestjs/throttler';
 import { Roles } from '../common/decorators/roles.decorator';
+import { CurrentUser } from '../common/decorators/current-user.decorator';
 import { DnsService } from './dns.service';
+import { DnsOperationsService } from './dns-operations.service';
 import {
   ApplyTemplateDto, CreateProviderDto, CreateRecordDto, LinkSiteDto, UpdateRecordDto,
 } from './dns.dto';
 
 @Controller('dns')
 export class DnsController {
-  constructor(private readonly service: DnsService) {}
+  constructor(
+    private readonly service: DnsService,
+    private readonly operations: DnsOperationsService,
+  ) {}
 
   // ---- Providers ----
 
@@ -23,9 +29,19 @@ export class DnsController {
 
   @Post('providers')
   @Roles('ADMIN')
+  @HttpCode(HttpStatus.ACCEPTED)
   @Throttle({ medium: { ttl: 10000, limit: 50 } })
-  async createProvider(@Body() dto: CreateProviderDto) {
-    const data = await this.service.createProvider(dto);
+  async createProvider(
+    @Body() dto: CreateProviderDto,
+    @CurrentUser('sub') userId: string,
+    @CurrentUser('role') role: string,
+    @Headers('idempotency-key') idempotencyKey?: string,
+  ) {
+    const data = await this.operations.enqueueCreateProvider(
+      dto,
+      { userId, role },
+      idempotencyKey,
+    );
     return { success: true, data };
   }
 
@@ -39,19 +55,39 @@ export class DnsController {
 
   @Post('providers/:id/test')
   @Roles('ADMIN')
+  @HttpCode(HttpStatus.ACCEPTED)
   @Throttle({ medium: { ttl: 10000, limit: 50 } })
-  async testProvider(@Param('id', ParseUUIDPipe) id: string) {
-    const data = await this.service.testProvider(id);
+  async testProvider(
+    @Param('id', ParseUUIDPipe) id: string,
+    @CurrentUser('sub') userId: string,
+    @CurrentUser('role') role: string,
+    @Headers('idempotency-key') idempotencyKey?: string,
+  ) {
+    const data = await this.operations.enqueueProvider(
+      'TEST_PROVIDER',
+      id,
+      { userId, role },
+      idempotencyKey,
+    );
     return { success: true, data };
   }
 
   @Post('providers/:id/sync')
   @Roles('ADMIN')
+  @HttpCode(HttpStatus.ACCEPTED)
   @Throttle({ medium: { ttl: 10000, limit: 50 } })
-  async syncProvider(@Param('id', ParseUUIDPipe) id: string) {
-    // Полный sync: зоны + записи всех зон. Раньше тут был только syncZones —
-    // юзер видел зоны, но записи приходилось обновлять кнопкой "↻" в каждой.
-    const data = await this.service.syncProviderFull(id);
+  async syncProvider(
+    @Param('id', ParseUUIDPipe) id: string,
+    @CurrentUser('sub') userId: string,
+    @CurrentUser('role') role: string,
+    @Headers('idempotency-key') idempotencyKey?: string,
+  ) {
+    const data = await this.operations.enqueueProvider(
+      'SYNC_PROVIDER',
+      id,
+      { userId, role },
+      idempotencyKey,
+    );
     return { success: true, data };
   }
 
@@ -73,10 +109,20 @@ export class DnsController {
 
   @Post('zones/:id/refresh')
   @Roles('ADMIN')
+  @HttpCode(HttpStatus.ACCEPTED)
   @Throttle({ medium: { ttl: 10000, limit: 50 } })
-  async refreshRecords(@Param('id', ParseUUIDPipe) id: string) {
-    await this.service.refreshRecords(id);
-    return { success: true };
+  async refreshRecords(
+    @Param('id', ParseUUIDPipe) id: string,
+    @CurrentUser('sub') userId: string,
+    @CurrentUser('role') role: string,
+    @Headers('idempotency-key') idempotencyKey?: string,
+  ) {
+    const data = await this.operations.enqueueRefreshZone(
+      id,
+      { userId, role },
+      idempotencyKey,
+    );
+    return { success: true, data };
   }
 
   @Post('zones/:id/link-site')
@@ -131,12 +177,21 @@ export class DnsController {
 
   @Post('zones/:id/templates')
   @Roles('ADMIN')
+  @HttpCode(HttpStatus.ACCEPTED)
   @Throttle({ medium: { ttl: 10000, limit: 50 } })
   async applyTemplate(
     @Param('id', ParseUUIDPipe) id: string,
     @Body() dto: ApplyTemplateDto,
+    @CurrentUser('sub') userId: string,
+    @CurrentUser('role') role: string,
+    @Headers('idempotency-key') idempotencyKey?: string,
   ) {
-    const data = await this.service.applyMailTemplate(id, dto);
+    const data = await this.operations.enqueueApplyTemplate(
+      id,
+      dto,
+      { userId, role },
+      idempotencyKey,
+    );
     return { success: true, data };
   }
 

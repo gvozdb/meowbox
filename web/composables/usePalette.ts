@@ -69,8 +69,8 @@ function applyClass(palette: PaletteId, withTransition: boolean): void {
 }
 
 interface MinimalApi {
-  get: <T>(endpoint: string, opts?: { noProxy?: boolean }) => Promise<T>;
-  put: <T>(endpoint: string, body?: unknown, opts?: { noProxy?: boolean }) => Promise<T>;
+  get: <T>(endpoint: string) => Promise<T>;
+  put: <T>(endpoint: string, body?: unknown) => Promise<T>;
 }
 
 /** Все валидные ID палитр в одной строке через '|' — для inline-скрипта в <head>. */
@@ -113,14 +113,13 @@ export function usePalette() {
 
   /**
    * Подтянуть карту палитр всех серверов с мастер-API и засинхронизировать cache.
-   * Бьём ВСЕГДА в мастер (noProxy=true), даже если активный сервер — slave.
+   * Caller передаёт master-scoped facade, даже если активный сервер — target.
    * Возвращает карту { serverId → palette } (валидные значения только).
    */
   async function loadAllFromApi(api: MinimalApi): Promise<Record<string, PaletteId>> {
     try {
       const data = await api.get<{ palettes: Record<string, PaletteId> }>(
         '/panel-settings/appearance',
-        { noProxy: true },
       );
       const map = data?.palettes ?? {};
       for (const [sid, p] of Object.entries(map)) {
@@ -145,7 +144,6 @@ export function usePalette() {
       const data = await api.put<{ palettes: Record<string, PaletteId> }>(
         '/panel-settings/appearance',
         { serverId, palette },
-        { noProxy: true },
       );
       // Обновим cache по факту ответа сервера, чтобы не разъехаться.
       const map = data?.palettes ?? {};

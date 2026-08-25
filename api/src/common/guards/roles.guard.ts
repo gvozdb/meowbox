@@ -6,6 +6,7 @@ import {
 } from '@nestjs/common';
 import { Reflector } from '@nestjs/core';
 import { ROLES_KEY } from '../decorators/roles.decorator';
+import { isVerifiedFederationRequest } from '../../federation/federation-request-context';
 
 @Injectable()
 export class RolesGuard implements CanActivate {
@@ -22,6 +23,9 @@ export class RolesGuard implements CanActivate {
     }
 
     const request = context.switchToHttp().getRequest();
+    // FederationDelegationGuard already matched method + concrete path to the
+    // generated descriptor and applied the shared role/permission policy.
+    if (isVerifiedFederationRequest(request)) return true;
     const user = request.user;
 
     if (!user || !requiredRoles.includes(user.role)) {

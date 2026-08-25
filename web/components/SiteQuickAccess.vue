@@ -172,7 +172,8 @@ import type {
 
 const props = defineProps<{ siteId: string; domainId: string }>();
 
-const api = useApi();
+const api = useRemoteApi();
+const { waitForOperation } = useOperation();
 const toast = useMbToast();
 const nodeApi = computed(
   () => `/sites/${props.siteId}/domains/${props.domainId}/node`,
@@ -251,10 +252,18 @@ async function runCommand(cmd: QuickCommand) {
   resultModal.exitCode = 0;
   resultModal.durationMs = 0;
   try {
-    const res = await api.post<QuickCommandRunResult>(
+    const accepted = await api.post<AcceptedOperation>(
       `${nodeApi.value}/quick-commands/${cmd.id}/run`,
+      undefined,
+      { headers: { 'Idempotency-Key': operationIdempotencyKey('node-quick-command') } },
     );
-    resultModal.output = res.output;
+    const operation = await waitForOperation(accepted.operationId, {
+      timeoutMs: 16 * 60_000,
+    });
+    const res = requireQuickCommandResult(operation.result);
+    resultModal.output = res.truncated
+      ? `${res.output}\n\n[Вывод обрезан по безопасному лимиту]`
+      : res.output;
     resultModal.exitCode = res.exitCode;
     resultModal.durationMs = res.durationMs;
     resultModal.done = true;
@@ -268,6 +277,24 @@ async function runCommand(cmd: QuickCommand) {
   } finally {
     runningId.value = null;
   }
+}
+
+function requireQuickCommandResult(value: unknown): QuickCommandRunResult {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new Error('Сервер вернул некорректный результат команды');
+  }
+  const result = value as Partial<QuickCommandRunResult>;
+  if (
+    typeof result.exitCode !== 'number' ||
+    !Number.isInteger(result.exitCode) ||
+    typeof result.output !== 'string' ||
+    typeof result.durationMs !== 'number' ||
+    !Number.isInteger(result.durationMs) ||
+    typeof result.truncated !== 'boolean'
+  ) {
+    throw new Error('Сервер вернул некорректный результат команды');
+  }
+  return result as QuickCommandRunResult;
 }
 
 function closeResult() {

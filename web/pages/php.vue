@@ -209,7 +209,8 @@ function isLegacy(v: string): boolean {
   return LEGACY_VERSIONS.includes(v);
 }
 
-const api = useApi();
+const api = useRemoteApi();
+const { waitForOperation } = useOperation();
 const { connect: connectSocket, getSocket } = useSocket();
 const statuses = ref<PhpVersionStatus[]>([]);
 const loading = ref(true);
@@ -365,7 +366,12 @@ async function doInstall() {
   installing.value = true;
   startPhpInstallStream(ver);
   try {
-    await api.post('/php/install', { version: ver });
+    const accepted = await api.post<AcceptedOperation>(
+      '/php/install',
+      { version: ver },
+      { headers: { 'Idempotency-Key': operationIdempotencyKey('php-install') } },
+    );
+    await waitForOperation(accepted.operationId, { timeoutMs: 31 * 60_000 });
     showToast(`PHP ${ver} installed successfully`);
     installVersion.value = '';
     await loadStatuses();
@@ -390,7 +396,12 @@ async function doUninstall(version: string) {
   uninstalling.value = version;
   startPhpInstallStream(version);
   try {
-    await api.delete(`/php/uninstall/${version}`);
+    const accepted = await api.delete<AcceptedOperation>(
+      `/php/uninstall/${version}`,
+      undefined,
+      { headers: { 'Idempotency-Key': operationIdempotencyKey('php-uninstall') } },
+    );
+    await waitForOperation(accepted.operationId, { timeoutMs: 21 * 60_000 });
     showToast(`PHP ${version} uninstalled`);
     await loadStatuses();
   } catch (e: unknown) {
@@ -466,7 +477,12 @@ async function installExtension() {
   installingExt.value = true;
   startExtInstallStream(extVersion.value, name);
   try {
-    await api.post(`/php/${extVersion.value}/extensions/install`, { name });
+    const accepted = await api.post<AcceptedOperation>(
+      `/php/${extVersion.value}/extensions/install`,
+      { name },
+      { headers: { 'Idempotency-Key': operationIdempotencyKey('php-extension') } },
+    );
+    await waitForOperation(accepted.operationId, { timeoutMs: 11 * 60_000 });
     showToast(`${name} installed for PHP ${extVersion.value}`);
     newExtName.value = '';
     await loadExtensions(extVersion.value);

@@ -96,6 +96,14 @@ export const ACME_WEBROOT = '/var/www/meowbox-acme';
 /** Директория экспортов БД (dump'ы через UI). */
 export const DB_EXPORTS_DIR = path.resolve(env('DB_EXPORTS_DIR', '/var/meowbox/exports'));
 
+/** Immutable transfer artifacts staged by the local API for direct Agent jobs. */
+export const TRANSFER_ARTIFACTS_PATH = path.resolve(
+  env('MEOWBOX_STATE_DIR', '/opt/meowbox/state'),
+  'data',
+  'transfers',
+  'artifacts',
+);
+
 /**
  * Список префиксов, под которыми разрешено удалять файлы/директории.
  *
@@ -128,6 +136,11 @@ export function isUnderAllowedSiteRoot(p: string): boolean {
 export function isUnderBackupStorage(p: string): boolean {
   const abs = path.resolve(p);
   return abs === BACKUP_LOCAL_PATH || abs.startsWith(BACKUP_LOCAL_PATH + path.sep);
+}
+
+export function isUnderTransferArtifacts(p: string): boolean {
+  const abs = path.resolve(p);
+  return abs.startsWith(TRANSFER_ARTIFACTS_PATH + path.sep);
 }
 
 function envNumber(name: string, fallback: number): number {

@@ -71,10 +71,11 @@
                   <svg v-if="exporting !== db.id" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" /><polyline points="7,10 12,15 17,10" /><line x1="12" y1="15" x2="12" y2="3" /></svg>
                   <div v-else class="spinner-sm" />
                 </button>
-                <button class="row-action" title="Импорт SQL" @click="triggerImport(db)">
-                  <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" /><polyline points="17,8 12,3 7,8" /><line x1="12" y1="3" x2="12" y2="15" /></svg>
+                <button class="row-action" title="Импорт SQL" :disabled="importing === db.id" @click="triggerImport(db)">
+                  <svg v-if="importing !== db.id" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" /><polyline points="17,8 12,3 7,8" /><line x1="12" y1="3" x2="12" y2="15" /></svg>
+                  <div v-else class="spinner-sm" />
                 </button>
-                <input :ref="(el: any) => { if (el) importInputRefs[db.id] = el }" type="file" accept=".sql,.gz,.dump" style="display:none" @change="importFile($event, db)" />
+                <input :ref="(el: any) => { if (el) importInputRefs[db.id] = el }" type="file" accept=".sql,.sql.gz" :disabled="importing === db.id" style="display:none" @change="importFile($event, db)" />
                 <button class="row-action row-action--blue" title="Открыть в Adminer" :disabled="openingAdminer === db.id" @click="openAdminer(db)">
                   <svg v-if="openingAdminer !== db.id" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M3 5v14a9 3 0 0 0 18 0V5"/><path d="M3 12a9 3 0 0 0 18 0"/></svg>
                   <div v-else class="spinner-sm" />
@@ -211,6 +212,7 @@
 
 <script setup lang="ts">
 import { copyToClipboard } from '~/utils/clipboard';
+import { navigateAppHandoff, publicDeliveryIdempotencyKey } from '~/utils/public-delivery';
 
 definePageMeta({ middleware: 'auth' });
 
@@ -239,7 +241,10 @@ interface SiteItem {
   domains: SiteDomainItem[];
 }
 
-const api = useApi();
+const api = useRemoteApi();
+const { waitForOperation } = useOperation();
+const { waitForSensitiveResult } = useSensitiveOperationResult();
+const { exportDatabase, importDatabase } = useDatabaseTransfer();
 const databases = ref<DbItem[]>([]);
 const sites = ref<SiteItem[]>([]);
 const loading = ref(true);
@@ -388,14 +393,26 @@ async function createDatabase() {
   try {
     const body: Record<string, string> = { name: createForm.name, type: createForm.type };
     if (createForm.dbUser) body.dbUser = createForm.dbUser;
-    await api.post(
+    const accepted = await api.post<AcceptedOperation>(
       `/sites/${createForm.siteId}/domains/${createForm.domainId}/databases`,
       body,
+      { headers: { 'Idempotency-Key': operationIdempotencyKey('database-create') } },
     );
+    const credentials = await waitForSensitiveResult<{
+      databaseId: string;
+      name: string;
+      dbUser: string;
+      password: string;
+    }>(accepted, 'DATABASE_CREDENTIALS', 31 * 60_000);
     showCreateModal.value = false;
     createForm.name = '';
     createForm.dbUser = '';
     showToast('Database created');
+    newPassword.value = credentials.password;
+    passwordDbName.value = credentials.name;
+    passwordDbUser.value = credentials.dbUser;
+    passwordKind.value = 'reset';
+    showPlainPassword.value = true;
     await loadDatabases();
   } catch (error) {
     createError.value = (error as Error).message || 'Failed to create database';
@@ -412,9 +429,10 @@ async function doDelete() {
   if (!deleteTarget.value) return;
   deleting.value = true;
   try {
-    await api.del(databaseApi(deleteTarget.value), undefined, {
-      headers: { 'Idempotency-Key': `database-delete-${crypto.randomUUID()}` },
+    const accepted = await api.del<AcceptedOperation>(databaseApi(deleteTarget.value), undefined, {
+      headers: { 'Idempotency-Key': operationIdempotencyKey('database-delete') },
     });
+    await waitForOperation(accepted.operationId, { timeoutMs: 46 * 60_000 });
     showToast('Database deleted');
     deleteTarget.value = null;
     await loadDatabases();
@@ -427,10 +445,20 @@ async function doDelete() {
 
 async function resetPassword(db: DbItem) {
   try {
-    const data = await api.post<{ plainPassword: string }>(`${databaseApi(db)}/reset-password`);
-    newPassword.value = data.plainPassword;
-    passwordDbName.value = db.name;
-    passwordDbUser.value = db.dbUser || '';
+    const accepted = await api.post<AcceptedOperation>(
+      `${databaseApi(db)}/reset-password`,
+      {},
+      { headers: { 'Idempotency-Key': operationIdempotencyKey('database-reset-password') } },
+    );
+    const credentials = await waitForSensitiveResult<{
+      databaseId: string;
+      name: string;
+      dbUser: string;
+      password: string;
+    }>(accepted, 'DATABASE_CREDENTIALS', 31 * 60_000);
+    newPassword.value = credentials.password;
+    passwordDbName.value = credentials.name;
+    passwordDbUser.value = credentials.dbUser;
     passwordKind.value = 'reset';
     showPlainPassword.value = true;
   } catch {
@@ -477,14 +505,10 @@ async function openAdminer(db: DbItem) {
   // Window.open в обработчике клика разрешён, потом подменим location.
   const win = window.open('about:blank', '_blank');
   try {
-    const data = await api.post<{ url: string }>(`${databaseApi(db)}/adminer-ticket`);
-    if (!data?.url) throw new Error('No SSO url');
-    if (win) {
-      win.location.href = data.url;
-    } else {
-      // Popup blocker всё равно сработал — fallback на текущую вкладку.
-      window.location.href = data.url;
-    }
+    const delivery = await api.post<unknown>(`${databaseApi(db)}/adminer-ticket`, {}, {
+      headers: { 'Idempotency-Key': publicDeliveryIdempotencyKey('ADMINER') },
+    });
+    await navigateAppHandoff(delivery, win, 'ADMINER');
   } catch (err) {
     if (win) win.close();
     const msg = (err as Error).message || 'Не удалось открыть Adminer';
@@ -495,21 +519,14 @@ async function openAdminer(db: DbItem) {
 }
 
 const exporting = ref<string | null>(null);
+const importing = ref<string | null>(null);
 const importInputRefs = reactive<Record<string, HTMLInputElement>>({});
 
 async function exportDb(db: DbItem) {
   exporting.value = db.id;
   try {
-    // Trigger export on server
-    const data = await api.post<{ filePath: string }>(`${databaseApi(db)}/export`);
-    if (!data.filePath) {
-      showToast('Экспорт не вернул путь к файлу', true);
-      return;
-    }
-    // Download the exported file
-    const filename = data.filePath.split('/').pop() || `${db.name}.sql`;
-    await api.download(`${databaseApi(db)}/download?filePath=${encodeURIComponent(data.filePath)}`, filename);
-    showToast('Дамп скачан');
+    await exportDatabase(databaseApi(db));
+    showToast('Дамп готов к скачиванию');
   } catch (err: unknown) {
     showToast((err as Error).message || 'Ошибка экспорта', true);
   } finally {
@@ -518,6 +535,7 @@ async function exportDb(db: DbItem) {
 }
 
 function triggerImport(db: DbItem) {
+  if (importing.value === db.id) return;
   importInputRefs[db.id]?.click();
 }
 
@@ -527,19 +545,16 @@ async function importFile(event: Event, db: DbItem) {
 
   const file = input.files.item(0);
   if (!file) return;
+  importing.value = db.id;
   try {
-    showToast(`Импорт ${file.name}...`);
-    await api.upload(
-      `${databaseApi(db)}/import-upload`,
-      file,
-      undefined,
-      { headers: { 'Idempotency-Key': `database-import-${crypto.randomUUID()}` } },
-    );
+    showToast(`Загрузка и импорт ${file.name}…`);
+    await importDatabase(databaseApi(db), db.id, file);
     showToast('Импорт завершён');
     await loadDatabases();
   } catch (err: unknown) {
     showToast((err as Error).message || 'Ошибка импорта', true);
   } finally {
+    importing.value = null;
     input.value = '';
   }
 }

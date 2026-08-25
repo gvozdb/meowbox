@@ -8,6 +8,9 @@ import {
   Param,
   Query,
   ParseUUIDPipe,
+  Headers,
+  HttpCode,
+  HttpStatus,
 } from '@nestjs/common';
 import { ServerPathBackupService } from './server-path-backup.service';
 import {
@@ -55,7 +58,11 @@ export class ServerPathBackupController {
 
   @Post(':id/run')
   @Roles('ADMIN')
-  async triggerBackup(@Param('id', ParseUUIDPipe) id: string) {
+  @HttpCode(HttpStatus.ACCEPTED)
+  async triggerBackup(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Headers('idempotency-key') _idempotencyKey?: string,
+  ) {
     return { success: true, data: await this.svc.triggerBackup(id) };
   }
 

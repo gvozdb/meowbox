@@ -500,7 +500,7 @@ test('transaction contention fails closed as an operation conflict', async () =>
   );
 });
 
-test('restart recovery fails interrupted Site and domain transitions', async () => {
+test('restart recovery requires attention and preserves conflicting locks', async () => {
   const calls = {};
   const prisma = {
     operation: {
@@ -553,5 +553,7 @@ test('restart recovery fails interrupted Site and domain transitions', async () 
   assert.match(calls.site.data.errorMessage, /API restart/);
   assert.deepEqual(calls.siteDomain.where.id, { in: ['domain-1'] });
   assert.equal(calls.siteDomain.data.appStatus, 'ERROR');
-  assert.deepEqual(calls.lock.where.operationId, { in: ['operation-1'] });
+  assert.equal(calls.operation.data.status, 'NEEDS_ATTENTION');
+  assert.equal(calls.operation.data.completedAt instanceof Date, true);
+  assert.equal(calls.lock, undefined);
 });

@@ -4,7 +4,11 @@ import {
   ForbiddenException,
   BadRequestException,
   Logger,
+  OnModuleDestroy,
+  OnModuleInit,
 } from '@nestjs/common';
+import * as path from 'node:path';
+import { DOMAIN_REGEX } from '@meowbox/shared';
 import { SslStatus } from '../common/enums';
 import { PrismaService } from '../common/prisma.service';
 import { AgentRelayService } from '../gateway/agent-relay.service';
@@ -12,14 +16,141 @@ import { NotificationDispatcherService } from '../notifications/notification-dis
 import { parseStringArray, parseSiteAliases } from '../common/json-array';
 import { SiteDomainsService } from '../sites/site-domains.service';
 import { serializeSslCertificate } from '../sites/site-domains.helper';
+import { OperationAdmissionService } from '../operations/operation-admission.service';
+import {
+  OperationsWorkerService,
+  type OperationExecutionContext,
+} from '../operations/operations-worker.service';
+import { OperationNeedsAttentionError } from '../operations/operation-errors';
 
 /**
- * Timeout'ы certbot'а. Переопределяются env. В норме первый выпуск 1-3 мин,
- * revoke 10-30 сек, но на слабых VPS + больших SAN может затянуться.
+ * Inspection остаётся bounded read. Выпуск и отзыв выполняются через durable
+ * AgentJob, поэтому их время не связано с HTTP relay timeout.
  */
-const CERTBOT_ISSUE_TIMEOUT_MS = Number(process.env.CERTBOT_ISSUE_TIMEOUT_MS) || 180_000;
-const CERTBOT_REVOKE_TIMEOUT_MS = Number(process.env.CERTBOT_REVOKE_TIMEOUT_MS) || 90_000;
 const CERTBOT_INSPECT_TIMEOUT_MS = 300_000;
+const SSL_OPERATION_ACTIONS = {
+  ISSUE: 'ssl.issue',
+  REVOKE: 'ssl.revoke',
+} as const;
+const SSL_AGENT_ACTIONS = {
+  [SSL_OPERATION_ACTIONS.ISSUE]: 'agent.ssl.issue',
+  [SSL_OPERATION_ACTIONS.REVOKE]: 'agent.ssl.revoke',
+} as const;
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+interface SslIssueOperationRequest {
+  siteId: string;
+  domainId: string;
+}
+
+interface SslIssueAgentResult {
+  certPath: string;
+  keyPath: string;
+  expiresAt: string;
+  domains: string[];
+}
+
+function validateSslOperationRequest(request: unknown): SslIssueOperationRequest {
+  if (!request || typeof request !== 'object' || Array.isArray(request)) {
+    throw new BadRequestException('SSL operation request is invalid');
+  }
+  const value = request as Record<string, unknown>;
+  if (
+    Object.keys(value).sort().join(',') !== 'domainId,siteId' ||
+    typeof value.siteId !== 'string' ||
+    typeof value.domainId !== 'string' ||
+    !UUID.test(value.siteId) ||
+    !UUID.test(value.domainId)
+  ) {
+    throw new BadRequestException('SSL operation request is invalid');
+  }
+  return value as unknown as SslIssueOperationRequest;
+}
+
+function normalizeSanDomains(domain: string, aliases: string[]): string[] {
+  const normalized = Array.from(
+    new Set([domain, ...aliases].map((value) => value.trim().toLowerCase())),
+  );
+  if (
+    normalized.length < 1 ||
+    normalized.length > 65 ||
+    normalized.some((value) => value.length > 253 || !DOMAIN_REGEX.test(value))
+  ) {
+    throw new BadRequestException('SSL certificate domain set is invalid');
+  }
+  return normalized;
+}
+
+function isExpectedCertificatePath(value: string, domain: string, basename: string): boolean {
+  return (
+    value.length <= 4096 &&
+    path.posix.isAbsolute(value) &&
+    path.posix.normalize(value) === value &&
+    path.posix.basename(value) === basename &&
+    path.posix.basename(path.posix.dirname(value)) === domain
+  );
+}
+
+function validateIssueAgentResult(
+  result: unknown,
+  requestedDomains: string[],
+): SslIssueAgentResult {
+  if (!result || typeof result !== 'object' || Array.isArray(result)) {
+    throw new OperationNeedsAttentionError('SSL issuance returned an invalid result');
+  }
+  const value = result as Record<string, unknown>;
+  const allowedKeys = new Set(['certPath', 'keyPath', 'expiresAt', 'domains']);
+  const primaryDomain = requestedDomains[0];
+  if (
+    Object.keys(value).some((key) => !allowedKeys.has(key)) ||
+    typeof value.certPath !== 'string' ||
+    typeof value.keyPath !== 'string' ||
+    typeof value.expiresAt !== 'string' ||
+    !Array.isArray(value.domains) ||
+    value.domains.length < 1 ||
+    value.domains.length > 65 ||
+    value.domains.some((domain) => typeof domain !== 'string') ||
+    !isExpectedCertificatePath(value.certPath, primaryDomain, 'fullchain.pem') ||
+    !isExpectedCertificatePath(value.keyPath, primaryDomain, 'privkey.pem') ||
+    path.posix.dirname(value.certPath) !== path.posix.dirname(value.keyPath)
+  ) {
+    throw new OperationNeedsAttentionError('SSL issuance returned invalid certificate metadata');
+  }
+  const expiresAt = new Date(value.expiresAt);
+  const actualDomains = Array.from(
+    new Set((value.domains as string[]).map((domain) => domain.trim().toLowerCase())),
+  );
+  const actualSet = new Set(actualDomains);
+  if (
+    Number.isNaN(expiresAt.getTime()) ||
+    expiresAt.getTime() <= Date.now() ||
+    actualDomains.some((domain) => domain.length > 253 || !DOMAIN_REGEX.test(domain)) ||
+    requestedDomains.some((domain) => !actualSet.has(domain))
+  ) {
+    throw new OperationNeedsAttentionError('Issued certificate metadata does not match request');
+  }
+  return {
+    certPath: value.certPath,
+    keyPath: value.keyPath,
+    expiresAt: expiresAt.toISOString(),
+    domains: actualDomains,
+  };
+}
+
+function validateRevokeAgentResult(result: unknown): { removed: true; revoked: boolean } {
+  if (!result || typeof result !== 'object' || Array.isArray(result)) {
+    throw new OperationNeedsAttentionError('SSL revoke returned an invalid result');
+  }
+  const value = result as Record<string, unknown>;
+  if (
+    Object.keys(value).sort().join(',') !== 'removed,revoked' ||
+    value.removed !== true ||
+    typeof value.revoked !== 'boolean'
+  ) {
+    throw new OperationNeedsAttentionError('SSL revoke did not confirm artifact removal');
+  }
+  return { removed: true, revoked: value.revoked };
+}
 
 interface ExistingSslInspection {
   domain: string;
@@ -38,15 +169,35 @@ interface ExistingSslInspection {
  * пересобираем nginx всего сайта (через SiteDomainsService.regenerateNginx).
  */
 @Injectable()
-export class SslService {
+export class SslService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger('SslService');
+  private unregisterOperationHandlers: Array<() => void> = [];
 
   constructor(
     private readonly prisma: PrismaService,
     private readonly agentRelay: AgentRelayService,
     private readonly notifier: NotificationDispatcherService,
     private readonly siteDomains: SiteDomainsService,
+    private readonly admission: OperationAdmissionService,
+    private readonly worker: OperationsWorkerService,
   ) {}
+
+  onModuleInit(): void {
+    this.unregisterOperationHandlers.push(
+      this.worker.registerHandler(
+        SSL_OPERATION_ACTIONS.ISSUE,
+        (request, context) => this.executeIssuance(request, context),
+      ),
+      this.worker.registerHandler(
+        SSL_OPERATION_ACTIONS.REVOKE,
+        (request, context) => this.executeRevoke(request, context),
+      ),
+    );
+  }
+
+  onModuleDestroy(): void {
+    for (const unregister of this.unregisterOperationHandlers.splice(0)) unregister();
+  }
 
   // ===========================================================================
   // Overview (все сертификаты)
@@ -158,79 +309,84 @@ export class SslService {
   // Выпуск Let's Encrypt
   // ===========================================================================
 
-  async requestIssuance(siteId: string, domainId: string, userId: string, role: string) {
-    const domain = await this.requireDomain(siteId, domainId, userId, role);
-
-    // SAN = домен + ВСЕ его алиасы (включая redirect=true).
-    const sanAliases = parseSiteAliases(domain.aliases).map((a) => a.domain);
-    const domains = [domain.domain, ...sanAliases];
-
-    const cert = await this.ensureCertRecord(siteId, domainId, domains);
-    await this.prisma.sslCertificate.update({
-      where: { id: cert.id },
-      data: { status: SslStatus.PENDING },
+  async enqueueIssuance(
+    siteId: string,
+    domainId: string,
+    actor: { userId: string; role: string },
+    idempotencyKey?: string,
+  ) {
+    await this.requireDomain(siteId, domainId, actor.userId, actor.role);
+    return this.admission.admit({
+      actionId: SSL_OPERATION_ACTIONS.ISSUE,
+      type: 'SSL_ISSUE',
+      idempotencyKey,
+      actor,
+      request: { siteId, domainId },
+      deadlineMs: 10 * 60_000,
+      recoveryPolicy: 'RECONCILE_ONLY',
+      retryable: false,
+      siteId,
+      siteDomainId: domainId,
+      lockSite: true,
     });
-    try {
-      const raw = await this.agentRelay.emitToAgent<{
-        success: boolean;
-        certPath?: string;
-        keyPath?: string;
-        expiresAt?: string;
-        domains?: string[];
-        error?: string;
-      }>(
-        'ssl:issue',
-        {
-          domain: domain.domain,
-          domains,
-          // Backward compatibility for a previous agent during rolling restart.
-          // Current agents intentionally ignore these site-specific paths.
-          rootPath: domain.site.rootPath,
-          filesRelPath: domain.filesRelPath,
-        },
-        CERTBOT_ISSUE_TIMEOUT_MS,
-      );
+  }
 
-      const ack = raw as unknown as {
-        success?: boolean;
-        certPath?: string;
-        keyPath?: string;
-        expiresAt?: string;
-        domains?: string[];
-        error?: string;
-      };
-
-      if (ack.success) {
-        const effectiveDomains =
-          ack.domains && ack.domains.length ? ack.domains : domains;
-        await this.updateAfterIssuance(
-          cert.id,
-          siteId,
-          true,
-          ack.certPath,
-          ack.keyPath,
-          ack.expiresAt,
-          "Let's Encrypt",
-          effectiveDomains,
-        );
-        this.logger.log(`SSL issued for ${domain.domain} (SAN: ${effectiveDomains.join(', ')})`);
-        return { siteId, domainId, domain: domain.domain, domains: effectiveDomains };
-      } else {
-        await this.updateAfterIssuance(cert.id, siteId, false);
-        const errorMsg =
-          ack.error ||
-          raw.error ||
-          'Certbot failed (без деталей от агента — проверь pm2 logs meowbox-agent)';
-        this.logger.error(`SSL issuance failed for ${domain.domain}: ${errorMsg}`);
-        throw new BadRequestException(errorMsg);
-      }
-    } catch (err) {
-      if (err instanceof BadRequestException) throw err;
-      await this.updateAfterIssuance(cert.id, siteId, false);
-      const errorMsg = (err as Error).message;
-      this.logger.error(`SSL error for ${domain.domain}: ${errorMsg}`);
-      throw new BadRequestException(errorMsg);
+  private async executeIssuance(
+    request: unknown,
+    context: OperationExecutionContext,
+  ): Promise<unknown> {
+    const { siteId, domainId } = validateSslOperationRequest(request);
+    const domain = await this.prisma.siteDomain.findUnique({
+      where: { id: domainId },
+      include: {
+        site: { select: { id: true } },
+        sslCertificate: true,
+      },
+    });
+    if (!domain || domain.siteId !== siteId || domain.site.id !== siteId) {
+      throw new OperationNeedsAttentionError('SSL target domain no longer exists');
     }
+    const domains = normalizeSanDomains(
+      domain.domain,
+      parseSiteAliases(domain.aliases).map((alias) => alias.domain),
+    );
+    const cert = domain.sslCertificate ?? await this.ensureCertRecord(siteId, domainId, domains);
+
+    await context.throwIfCancellationRequested();
+    await context.heartbeat('certbot', 10);
+    const rawResult = await this.agentRelay.runAgentJob(
+      {
+        operationId: context.operationId,
+        actionId: SSL_AGENT_ACTIONS[SSL_OPERATION_ACTIONS.ISSUE],
+        step: 'certbot',
+        payload: { domain: domains[0], domains },
+        deadlineAt: context.deadlineAt,
+        cancelSafe: false,
+      },
+      () => context.isCancellationRequested(),
+    );
+    const result = validateIssueAgentResult(rawResult, domains);
+
+    await context.heartbeat('persist', 85);
+    await this.updateAfterIssuance(
+      cert.id,
+      siteId,
+      true,
+      result.certPath,
+      result.keyPath,
+      result.expiresAt,
+      "Let's Encrypt",
+      result.domains,
+      true,
+    );
+    this.logger.log(`SSL issued for ${domains[0]} (SAN: ${result.domains.join(', ')})`);
+    return {
+      siteId,
+      domainId,
+      domain: domains[0],
+      domains: result.domains,
+      expiresAt: result.expiresAt,
+    };
   }
 
   /** Пишет результат выпуска в БД + регенерирует nginx всего сайта. */
@@ -243,6 +399,7 @@ export class SslService {
     expiresAt?: string,
     issuer?: string,
     domains?: string[],
+    strictReconfigure = false,
   ) {
     if (!success) {
       await this.prisma.sslCertificate.update({
@@ -279,40 +436,86 @@ export class SslService {
 
     // Пересобираем nginx всего сайта (server-блок домена получает TLS +
     // HTTP→HTTPS редирект).
-    await this.siteDomains.regenerateNginx(siteId).catch((err) => {
-      this.logger.warn(`SSL reconfigure for site ${siteId} failed: ${(err as Error).message}`);
-    });
+    if (strictReconfigure) {
+      await this.siteDomains.regenerateNginx(siteId);
+    } else {
+      await this.siteDomains.regenerateNginx(siteId).catch((err) => {
+        this.logger.warn(`SSL reconfigure for site ${siteId} failed: ${(err as Error).message}`);
+      });
+    }
   }
 
   // ===========================================================================
   // Revoke
   // ===========================================================================
 
-  async revokeCertificate(siteId: string, domainId: string, userId: string, role: string) {
-    const domain = await this.requireDomain(siteId, domainId, userId, role);
+  async enqueueRevoke(
+    siteId: string,
+    domainId: string,
+    actor: { userId: string; role: string },
+    idempotencyKey?: string,
+  ) {
+    const domain = await this.requireDomain(siteId, domainId, actor.userId, actor.role);
     const cert = domain.sslCertificate;
     if (!cert || cert.status === SslStatus.NONE) {
       throw new BadRequestException('SSL certificate is not issued for this domain');
     }
-    if (!this.agentRelay.isAgentConnected()) {
-      throw new BadRequestException('Agent is offline — cannot revoke certificate');
+    return this.admission.admit({
+      actionId: SSL_OPERATION_ACTIONS.REVOKE,
+      type: 'SSL_REVOKE',
+      idempotencyKey,
+      actor,
+      request: { siteId, domainId },
+      deadlineMs: 10 * 60_000,
+      recoveryPolicy: 'RECONCILE_ONLY',
+      retryable: false,
+      siteId,
+      siteDomainId: domainId,
+      lockSite: true,
+    });
+  }
+
+  private async executeRevoke(
+    request: unknown,
+    context: OperationExecutionContext,
+  ): Promise<unknown> {
+    const { siteId, domainId } = validateSslOperationRequest(request);
+    const domain = await this.prisma.siteDomain.findUnique({
+      where: { id: domainId },
+      include: { sslCertificate: true },
+    });
+    if (!domain || domain.siteId !== siteId) {
+      throw new OperationNeedsAttentionError('SSL target domain no longer exists');
+    }
+    const normalizedDomain = normalizeSanDomains(domain.domain, [])[0];
+
+    if (!domain.sslCertificate || domain.sslCertificate.status === SslStatus.NONE) {
+      if (!context.recovering) {
+        throw new OperationNeedsAttentionError('SSL certificate state changed before revoke');
+      }
+      await context.heartbeat('nginx', 90);
+      await this.siteDomains.regenerateNginx(siteId);
+      return { siteId, domainId, domain: normalizedDomain, removed: true, reconciled: true };
     }
 
-    const raw = await this.agentRelay.emitToAgent<{ success?: boolean; error?: string }>(
-      'ssl:revoke',
-      { domain: domain.domain },
-      CERTBOT_REVOKE_TIMEOUT_MS,
+    await context.throwIfCancellationRequested();
+    await context.heartbeat('certbot-revoke', 10);
+    const rawResult = await this.agentRelay.runAgentJob(
+      {
+        operationId: context.operationId,
+        actionId: SSL_AGENT_ACTIONS[SSL_OPERATION_ACTIONS.REVOKE],
+        step: 'certbot-revoke',
+        payload: { domain: normalizedDomain },
+        deadlineAt: context.deadlineAt,
+        cancelSafe: false,
+      },
+      () => context.isCancellationRequested(),
     );
-    const ack = raw as unknown as { success?: boolean; error?: string };
-    const revokeOk = !!ack.success;
-    if (!revokeOk) {
-      this.logger.warn(
-        `ssl:revoke failed for ${domain.domain}: ${ack.error || raw.error || 'unknown'}`,
-      );
-    }
+    const result = validateRevokeAgentResult(rawResult);
 
+    await context.heartbeat('persist', 80);
     await this.prisma.sslCertificate.update({
-      where: { id: cert.id },
+      where: { id: domain.sslCertificate.id },
       data: {
         status: SslStatus.NONE,
         certPath: null,
@@ -323,15 +526,17 @@ export class SslService {
         issuer: '',
       },
     });
+    await context.heartbeat('nginx', 90);
+    await this.siteDomains.regenerateNginx(siteId);
 
-    await this.siteDomains.regenerateNginx(siteId).catch((err) => {
-      this.logger.warn(`Post-revoke reconfigure failed: ${(err as Error).message}`);
-    });
-
-    this.logger.log(`SSL revoked for ${domain.domain}`);
+    this.logger.log(`SSL artifacts removed for ${normalizedDomain}`);
     return {
-      revoked: revokeOk,
-      warning: revokeOk ? null : 'Certbot revoke не завершился чисто, но запись удалена',
+      siteId,
+      domainId,
+      domain: normalizedDomain,
+      removed: result.removed,
+      revoked: result.revoked,
+      warning: result.revoked ? null : 'Certificate removed locally; ACME revoke was not confirmed',
     };
   }
 

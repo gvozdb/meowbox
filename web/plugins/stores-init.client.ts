@@ -14,12 +14,21 @@
 import { useAuthStore } from '../stores/auth';
 import { useServerStore } from '../stores/server';
 
-export default defineNuxtPlugin(() => {
+export default defineNuxtPlugin(async () => {
   if (import.meta.server) return;
+  const authStore = useAuthStore();
+  const serverStore = useServerStore();
   try {
-    useAuthStore().initFromStorage();
+    authStore.initFromStorage();
   } catch { /* store can throw if pinia not ready — ignore, layout fallback */ }
   try {
-    useServerStore().initFromStorage();
+    serverStore.initFromStorage();
   } catch { /* как выше */ }
+  if (authStore.accessToken) {
+    try {
+      await serverStore.bootstrapSelection();
+    } catch {
+      // Selected target remains fail-closed; layout surfaces normal request errors.
+    }
+  }
 });

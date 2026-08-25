@@ -26,6 +26,7 @@ model User {
   username     String   @unique
   email        String   @unique
   passwordHash String   @map("password_hash")
+  identityKind String   @default("LOCAL") @map("identity_kind")
   role         String   @default("ADMIN") // UserRole
   totpEnabled  Boolean  @default(false) @map("totp_enabled")
   totpSecret   String?  @map("totp_secret")
@@ -38,7 +39,12 @@ model User {
   aiSessions           AiSession[]
   backupExports        BackupExport[]
   operations           Operation[]
+  remoteOperationLinks RemoteOperationLink[]
+  federatedVpnSubscriptions FederatedVpnSubscription[]
+  webhookRoutes        WebhookRoute[]
+  federatedPrincipal   FederatedPrincipal?
 
+  @@index([identityKind])
   @@map("users")
 }
 
@@ -278,8 +284,8 @@ model Database {
   createdAt      DateTime @default(now()) @map("created_at")
   updatedAt      DateTime @updatedAt @map("updated_at")
 
-  site       Site       @relation(fields: [siteId], references: [id], onDelete: Cascade)
-  siteDomain SiteDomain @relation(fields: [siteDomainId], references: [id], onDelete: Restrict)
+  site       Site        @relation(fields: [siteId], references: [id], onDelete: Cascade)
+  siteDomain SiteDomain  @relation(fields: [siteDomainId], references: [id], onDelete: Restrict)
   operations Operation[]
 
   @@unique([name, type])
@@ -637,7 +643,7 @@ model Backup {
 model BackupExport {
   id              String   @id @default(uuid())
   backupId        String   @map("backup_id")
-  mode            String   @default("STREAM") // BackupExportMode: STREAM | S3_PRESIGNED
+  mode            String   @default("STREAM") // BackupExportMode: STREAM | STAGED_ARTIFACT | S3_PRESIGNED
   status          String   @default("PENDING") // BackupExportStatus: PENDING | PROCESSING | READY | FAILED | EXPIRED
   // Для S3_PRESIGNED: ключ объекта в bucket (`exports/<uuid>.tar`).
   s3Key           String?  @map("s3_key")
@@ -647,17 +653,22 @@ model BackupExport {
   expiresAt       DateTime @map("expires_at")
   sizeBytes       BigInt?  @map("size_bytes")
   errorMessage    String?  @map("error_message")
+  // Durable preparation state for STAGED_ARTIFACT exports. Both links are
+  // nullable so old releases ignore additive federation/transfer state.
+  operationId     String?  @unique @map("operation_id")
+  artifactId      String?  @unique @map("artifact_id")
   // Юзер, инициировавший экспорт (для аудита и проверки прав на скачивание).
   createdByUserId String   @map("created_by_user_id")
   createdAt       DateTime @default(now()) @map("created_at")
   updatedAt       DateTime @updatedAt @map("updated_at")
 
-  backup        Backup @relation(fields: [backupId], references: [id], onDelete: Cascade)
-  createdByUser User   @relation(fields: [createdByUserId], references: [id], onDelete: Cascade)
+  backup        Backup            @relation(fields: [backupId], references: [id], onDelete: Cascade)
+  createdByUser User              @relation(fields: [createdByUserId], references: [id], onDelete: Cascade)
 
   @@index([backupId])
   @@index([status])
   @@index([expiresAt])
+  @@index([mode, status, createdAt])
   @@map("backup_exports")
 }
 
@@ -854,6 +865,21 @@ model Operation {
   createdByUserId   String    @map("created_by_user_id")
   currentStep       String?   @map("current_step")
   progress          Int       @default(0)
+  actionId          String?   @map("action_id")
+  executionMode     String    @default("INLINE") @map("execution_mode")
+  policySnapshot    String?   @map("policy_snapshot")
+  requestPayloadEnc String?   @map("request_payload_enc")
+  attempt           Int       @default(0)
+  maxAttempts       Int       @default(1) @map("max_attempts")
+  retryable         Boolean   @default(false)
+  recoveryPolicy    String    @default("MANUAL") @map("recovery_policy")
+  leaseOwner        String?   @map("lease_owner")
+  leaseExpiresAt    DateTime? @map("lease_expires_at")
+  heartbeatAt       DateTime? @map("heartbeat_at")
+  claimedAt         DateTime? @map("claimed_at")
+  deadlineAt        DateTime? @map("deadline_at")
+  cancelRequestedAt DateTime? @map("cancel_requested_at")
+  cancelOutcome     String?   @map("cancel_outcome")
   result            String? // JSON object, secrets forbidden
   errorMessage      String?   @map("error_message")
   startedAt         DateTime? @map("started_at")
@@ -868,6 +894,7 @@ model Operation {
   parentOperation Operation?      @relation("OperationHierarchy", fields: [parentOperationId], references: [id], onDelete: Cascade)
   childOperations Operation[]     @relation("OperationHierarchy")
   locks           OperationLock[]
+  agentJobs       AgentJob[]
   deployLog       DeployLog?
 
   @@index([siteId, status])
@@ -875,8 +902,72 @@ model Operation {
   @@index([databaseId, status])
   @@index([globalLockKey, status])
   @@index([parentOperationId, createdAt])
+  @@index([executionMode, status, leaseExpiresAt, createdAt])
+  @@index([createdByUserId, status, createdAt])
+  @@index([actionId, status])
   @@index([createdAt])
   @@map("operations")
+}
+
+/// Durable identity and result ledger for one operation step executed by the
+/// local agent. The deterministic ID prevents duplicate effects after API or
+/// Socket.IO reconnects.
+model AgentJob {
+  id                String    @id
+  operationId       String    @map("operation_id")
+  step              String
+  actionId          String    @map("action_id")
+  protocolVersion   Int       @default(1) @map("protocol_version")
+  state             String    @default("STARTING")
+  requestHash       String    @map("request_hash")
+  agentBootId       String?   @map("agent_boot_id")
+  sequence          Int       @default(0)
+  progress          Int       @default(0)
+  currentStep       String?   @map("current_step")
+  cancelSafe        Boolean   @default(false) @map("cancel_safe")
+  cancelRequestedAt DateTime? @map("cancel_requested_at")
+  cancelOutcome     String?   @map("cancel_outcome")
+  result            String?
+  errorMessage      String?   @map("error_message")
+  startedAt         DateTime? @map("started_at")
+  heartbeatAt       DateTime? @map("heartbeat_at")
+  completedAt       DateTime? @map("completed_at")
+  deadlineAt        DateTime  @map("deadline_at")
+  createdAt         DateTime  @default(now()) @map("created_at")
+  updatedAt         DateTime  @updatedAt @map("updated_at")
+
+  operation Operation @relation(fields: [operationId], references: [id], onDelete: Cascade)
+
+  @@unique([operationId, step])
+  @@index([operationId, state])
+  @@index([agentBootId, state])
+  @@index([state, heartbeatAt])
+  @@index([deadlineAt])
+  @@map("agent_jobs")
+}
+
+/// Master-side pointer to the canonical target Operation. It contains no
+/// duplicated execution state or target payload.
+model RemoteOperationLink {
+  id                String    @id @default(uuid())
+  remoteServerId    String    @map("remote_server_id")
+  targetOperationId String    @map("target_operation_id")
+  masterUserId      String    @map("master_user_id")
+  actionId          String    @map("action_id")
+  requestId         String    @map("request_id")
+  correlationId     String    @map("correlation_id")
+  lastPolledAt      DateTime? @map("last_polled_at")
+  createdAt         DateTime  @default(now()) @map("created_at")
+  updatedAt         DateTime  @updatedAt @map("updated_at")
+
+  remoteServer RemoteServer @relation(fields: [remoteServerId], references: [id], onDelete: Restrict)
+  masterUser   User         @relation(fields: [masterUserId], references: [id], onDelete: Restrict)
+
+  @@unique([remoteServerId, targetOperationId])
+  @@unique([remoteServerId, requestId])
+  @@index([masterUserId, createdAt])
+  @@index([correlationId])
+  @@map("remote_operation_links")
 }
 
 /// Accumulating resource locks for operations that touch several Sites/domains.
@@ -900,25 +991,469 @@ model OperationLock {
 //   - serverId/serverName — snapshot, чтобы при удалении сервера лог не терялся
 //   - быстрый отбор по серверу (в /servers покажем history последних действий)
 model ProxyAuditLog {
-  id         String   @id @default(uuid())
-  direction  String // "OUT" | "IN"
-  userId     String?  @map("user_id") // master-side: кто инициировал; slave-side: null
-  serverId   String?  @map("server_id") // master-side: цель; slave-side: null
-  serverName String?  @map("server_name") // snapshot имени на момент действия
-  method     String // HTTP метод (GET/POST/...)
-  path       String // path без префикса /api (e.g. "/sites/123")
-  statusCode Int?     @map("status_code") // HTTP-код ответа slave (или null если запрос упал на сети)
-  durationMs Int      @default(0) @map("duration_ms")
-  ipAddress  String   @map("ip_address") // IP клиента (master-side) / IP master (slave-side)
-  userAgent  String?  @map("user_agent")
-  errorMsg   String?  @map("error_msg") // сообщение об ошибке если запрос упал
-  createdAt  DateTime @default(now()) @map("created_at")
+  id                   String   @id @default(uuid())
+  direction            String // "OUT" | "IN"
+  userId               String?  @map("user_id") // master-side: кто инициировал; slave-side: null
+  serverId             String?  @map("server_id") // master-side: цель; slave-side: null
+  serverName           String?  @map("server_name") // snapshot имени на момент действия
+  method               String // HTTP метод (GET/POST/...)
+  path                 String // path без префикса /api (e.g. "/sites/123")
+  statusCode           Int?     @map("status_code") // HTTP-код ответа slave (или null если запрос упал на сети)
+  durationMs           Int      @default(0) @map("duration_ms")
+  ipAddress            String   @map("ip_address") // IP клиента (master-side) / IP master (slave-side)
+  userAgent            String?  @map("user_agent")
+  errorMsg             String?  @map("error_msg") // сообщение об ошибке если запрос упал
+  requestId            String?  @map("request_id")
+  actionId             String?  @map("action_id")
+  issuerInstallationId String?  @map("issuer_installation_id")
+  targetInstallationId String?  @map("target_installation_id")
+  targetPrincipalId    String?  @map("target_principal_id")
+  actorKind            String?  @map("actor_kind")
+  keyId                String?  @map("key_id")
+  operationId          String?  @map("operation_id")
+  peerIp               String?  @map("peer_ip")
+  browserIp            String?  @map("browser_ip")
+  createdAt            DateTime @default(now()) @map("created_at")
 
   @@index([direction])
   @@index([serverId])
   @@index([userId])
   @@index([createdAt])
+  @@index([requestId, direction])
+  @@index([actionId, createdAt])
   @@map("proxy_audit_logs")
+}
+
+// =============================================================================
+// Remote-panel federation control plane
+// =============================================================================
+
+/// Stable local installation identity. The singleton row uses id = "_".
+model PanelIdentity {
+  id                    String   @id @default("_")
+  installationId        String   @unique @map("installation_id")
+  installationRole      String   @default("MASTER") @map("installation_role")
+  manifestKid           String?  @map("manifest_kid")
+  manifestPublicKeySpki String?  @map("manifest_public_key_spki")
+  manifestPrivateKeyEnc String?  @map("manifest_private_key_enc")
+  createdAt             DateTime @default(now()) @map("created_at")
+  updatedAt             DateTime @updatedAt @map("updated_at")
+
+  @@map("panel_identities")
+}
+
+/// One-use, target-origin Adminer/Manticore launch. Credentials remain
+/// encrypted; the browser receives only the row ID and a 256-bit secret whose
+/// SHA-256 digest is stored here.
+model AdminerHandoff {
+  id                   String    @id @default(uuid())
+  targetInstallationId String    @map("target_installation_id")
+  purpose              String
+  resourceKind         String    @map("resource_kind")
+  resourceId           String    @map("resource_id")
+  secretHash           String    @unique @map("secret_hash")
+  payloadEnc           String    @map("payload_enc")
+  actorKind            String    @map("actor_kind")
+  actorSubjectHash     String    @map("actor_subject_hash")
+  actorRole            String    @map("actor_role")
+  expiresAt            DateTime  @map("expires_at")
+  consumedAt           DateTime? @map("consumed_at")
+  createdAt            DateTime  @default(now()) @map("created_at")
+
+  @@index([expiresAt, consumedAt])
+  @@index([targetInstallationId, createdAt])
+  @@index([actorSubjectHash, createdAt])
+  @@map("adminer_handoffs")
+}
+
+/// Fixed artifact metadata. The file path is always relative to the managed
+/// transfer spool and is exposed only through a validated TransferSession.
+model TransferArtifact {
+  id                   String    @id @default(uuid())
+  targetInstallationId String    @map("target_installation_id")
+  sourceKind           String    @map("source_kind")
+  resourceId           String    @map("resource_id")
+  state                String    @default("STAGING")
+  relativePath         String    @map("relative_path")
+  contentType          String    @map("content_type")
+  filename             String
+  sizeBytes            BigInt?   @map("size_bytes")
+  sha256               String?
+  createdByUserId      String    @map("created_by_user_id")
+  expiresAt            DateTime  @map("expires_at")
+  readyAt              DateTime? @map("ready_at")
+  deletedAt            DateTime? @map("deleted_at")
+  createdAt            DateTime  @default(now()) @map("created_at")
+  updatedAt            DateTime  @updatedAt @map("updated_at")
+
+  sessions TransferSession[]
+
+  @@index([state, expiresAt])
+  @@index([sourceKind, resourceId, createdAt])
+  @@index([createdByUserId, createdAt])
+  @@map("transfer_artifacts")
+}
+
+/// Short-lived direct delivery lease. The 256-bit browser secret is represented
+/// only by secretHash; generated streams are single-start and non-resumable.
+model TransferSession {
+  id                   String    @id @default(uuid())
+  targetInstallationId String    @map("target_installation_id")
+  purpose              String
+  sourceKind           String    @map("source_kind")
+  resourceId           String    @map("resource_id")
+  resourcePayloadEnc   String?   @map("resource_payload_enc")
+  transferMode         String    @map("transfer_mode")
+  secretHash           String    @unique @map("secret_hash")
+  actorUserId          String    @map("actor_user_id")
+  actorRole            String    @map("actor_role")
+  contentType          String    @map("content_type")
+  filename             String
+  artifactId           String?   @map("artifact_id")
+  contentLength        BigInt?   @map("content_length")
+  sha256               String?
+  expiresAt            DateTime  @map("expires_at")
+  startedAt            DateTime? @map("started_at")
+  completedAt          DateTime? @map("completed_at")
+  consumedAt           DateTime? @map("consumed_at")
+  failureCode          String?   @map("failure_code")
+  createdAt            DateTime  @default(now()) @map("created_at")
+
+  artifact TransferArtifact? @relation(fields: [artifactId], references: [id], onDelete: SetNull)
+
+  @@index([actorUserId, expiresAt, completedAt])
+  @@index([targetInstallationId, expiresAt, completedAt])
+  @@index([sourceKind, resourceId, createdAt])
+  @@index([artifactId, expiresAt])
+  @@index([expiresAt, consumedAt])
+  @@map("transfer_sessions")
+}
+
+/// Master-owned registry row. Existing legacy server IDs are preserved.
+model RemoteServer {
+  id                          String    @id
+  installationId              String?   @unique @map("installation_id")
+  displayName                 String    @unique @map("display_name")
+  registryGeneration          Int       @default(1) @map("registry_generation")
+  activationMode              String    @default("DISABLED") @map("activation_mode")
+  topologyMode                String    @default("PUBLIC") @map("topology_mode")
+  protocolVersion             Int?      @map("protocol_version")
+  manifestRevision            String?   @map("manifest_revision")
+  targetManifestKid           String?   @map("target_manifest_kid")
+  targetManifestPublicKeySpki String?   @map("target_manifest_public_key_spki")
+  targetManifestPinnedAt      DateTime? @map("target_manifest_pinned_at")
+  productVersion              String?   @map("product_version")
+  transportState              String    @default("UNKNOWN") @map("transport_state")
+  trustState                  String    @default("UNENROLLED") @map("trust_state")
+  capabilityState             String    @default("UNKNOWN") @map("capability_state")
+  browserState                String    @default("UNKNOWN") @map("browser_state")
+  reasonCode                  String?   @map("reason_code")
+  transportReasonCode         String?   @map("transport_reason_code")
+  trustReasonCode             String?   @map("trust_reason_code")
+  capabilityReasonCode        String?   @map("capability_reason_code")
+  browserReasonCode           String?   @map("browser_reason_code")
+  statusCheckedAt             DateTime? @map("status_checked_at")
+  transportFreshUntil         DateTime? @map("transport_fresh_until")
+  trustCheckedAt              DateTime? @map("trust_checked_at")
+  trustFreshUntil             DateTime? @map("trust_fresh_until")
+  manifestFetchedAt           DateTime? @map("manifest_fetched_at")
+  browserCheckedAt            DateTime? @map("browser_checked_at")
+  browserFreshUntil           DateTime? @map("browser_fresh_until")
+  activeEndpointGeneration    Int?      @map("active_endpoint_generation")
+  candidateEndpointGeneration Int?      @map("candidate_endpoint_generation")
+  previousEndpointGeneration  Int?      @map("previous_endpoint_generation")
+  httpEnabled                 Boolean   @default(false) @map("http_enabled")
+  wsEnabled                   Boolean   @default(false) @map("ws_enabled")
+  publicEnabled               Boolean   @default(false) @map("public_enabled")
+  legacyEnabled               Boolean   @default(false) @map("legacy_enabled")
+  rolloutStage                String    @default("DISABLED") @map("rollout_stage")
+  rolloutStageStartedAt       DateTime? @map("rollout_stage_started_at")
+  rolloutEvidenceJson         String?   @map("rollout_evidence_json")
+  rolloutApprovedAt           DateTime? @map("rollout_approved_at")
+  legacyUrl                   String?   @map("legacy_url")
+  legacyTokenEnc              String?   @map("legacy_token_enc")
+  mutationFrozenAt            DateTime? @map("mutation_frozen_at")
+  createdAt                   DateTime  @default(now()) @map("created_at")
+  updatedAt                   DateTime  @updatedAt @map("updated_at")
+
+  endpoints      RemoteEndpoint[]
+  manifests      RemoteManifestSnapshot[]
+  issuers        FederationIssuer[]
+  enrollments    FederationEnrollment[]
+  cutovers       RemoteEndpointCutover[]
+  operationLinks RemoteOperationLink[]
+  vpnSubscriptionSources FederatedVpnSubscriptionSource[]
+  webhookRoutes WebhookRoute[]
+
+  @@index([activationMode, transportState])
+  @@index([trustState, capabilityState])
+  @@index([rolloutStage, updatedAt])
+  @@index([updatedAt])
+  @@map("remote_servers")
+}
+
+model RemoteEndpoint {
+  id                   String    @id @default(uuid())
+  remoteServerId       String    @map("remote_server_id")
+  generation           Int
+  state                String    @default("CANDIDATE")
+  apiOrigin            String    @map("api_origin")
+  wsOrigin             String    @map("ws_origin")
+  wsPath               String    @default("/socket.io") @map("ws_path")
+  browserPublicOrigin  String?   @map("browser_public_origin")
+  directTransferOrigin String?   @map("direct_transfer_origin")
+  sshHost              String    @map("ssh_host")
+  sshPort              Int       @default(22) @map("ssh_port")
+  spkiSha256           String    @map("spki_sha256")
+  caCertificatePem     String?   @map("ca_certificate_pem")
+  normalizedHash       String    @map("normalized_hash")
+  verifiedAt           DateTime? @map("verified_at")
+  createdAt            DateTime  @default(now()) @map("created_at")
+  updatedAt            DateTime  @updatedAt @map("updated_at")
+
+  remoteServer RemoteServer @relation(fields: [remoteServerId], references: [id], onDelete: Cascade)
+
+  @@unique([remoteServerId, generation])
+  @@index([remoteServerId, state])
+  @@map("remote_endpoints")
+}
+
+model RemoteManifestSnapshot {
+  id                  String    @id @default(uuid())
+  remoteServerId      String    @map("remote_server_id")
+  schemaVersion       Int       @map("schema_version")
+  revision            String
+  catalogueSha256     String?   @map("catalogue_sha256")
+  protocolMode        String    @default("disabled") @map("protocol_mode")
+  protocolMin         Int       @map("protocol_min")
+  protocolMax         Int       @map("protocol_max")
+  acceptedMasterRange String    @map("accepted_master_range")
+  capabilitiesJson    String    @map("capabilities_json")
+  endpointState       String    @default("UNCONFIGURED") @map("endpoint_state")
+  endpointsJson       String    @map("endpoints_json")
+  signingKid          String    @map("signing_kid")
+  signature           String
+  validationState     String    @map("validation_state")
+  generatedAt         DateTime? @map("generated_at")
+  validUntil          DateTime  @map("valid_until")
+  fetchedAt           DateTime  @default(now()) @map("fetched_at")
+
+  remoteServer RemoteServer @relation(fields: [remoteServerId], references: [id], onDelete: Cascade)
+
+  @@unique([remoteServerId, revision])
+  @@index([remoteServerId, fetchedAt])
+  @@index([validUntil])
+  @@map("remote_manifest_snapshots")
+}
+
+/// Trust policy for one issuer/target relationship. Targets may have no local
+/// RemoteServer row, so remoteServerId remains optional.
+model FederationIssuer {
+  id                   String    @id @default(uuid())
+  remoteServerId       String?   @map("remote_server_id")
+  issuerInstallationId String    @map("issuer_installation_id")
+  targetInstallationId String    @map("target_installation_id")
+  state                String    @default("PENDING")
+  maxRole              String    @default("MANAGER") @map("max_role")
+  permissionPolicyJson String    @default("[]") @map("permission_policy_json")
+  principalVersion     Int       @default(1) @map("principal_version")
+  revokedAt            DateTime? @map("revoked_at")
+  createdAt            DateTime  @default(now()) @map("created_at")
+  updatedAt            DateTime  @updatedAt @map("updated_at")
+
+  remoteServer        RemoteServer?                  @relation(fields: [remoteServerId], references: [id], onDelete: SetNull)
+  keys                FederationKey[]
+  replays             FederationReplay[]
+  idempotencyReceipts FederationIdempotencyReceipt[]
+  federatedPrincipals FederatedPrincipal[]
+  servicePrincipals   ServicePrincipal[]
+
+  @@unique([issuerInstallationId, targetInstallationId])
+  @@index([remoteServerId, state])
+  @@index([state, updatedAt])
+  @@map("federation_issuers")
+}
+
+/// Human operator shadow identity. Authorization never uses User.role; it is
+/// derived from the verified assertion, issuer policy, and action descriptor.
+model FederatedPrincipal {
+  id               String    @id @default(uuid())
+  userId           String    @unique @map("user_id")
+  issuerId         String    @map("issuer_id")
+  subject          String
+  principalVersion Int       @default(1) @map("principal_version")
+  displayLabel     String?   @map("display_label")
+  tombstonedAt     DateTime? @map("tombstoned_at")
+  lastSeenAt       DateTime  @default(now()) @map("last_seen_at")
+  createdAt        DateTime  @default(now()) @map("created_at")
+  updatedAt        DateTime  @updatedAt @map("updated_at")
+
+  user   User             @relation(fields: [userId], references: [id], onDelete: Restrict)
+  issuer FederationIssuer @relation(fields: [issuerId], references: [id], onDelete: Restrict)
+
+  @@unique([issuerId, subject])
+  @@index([issuerId, tombstonedAt])
+  @@index([lastSeenAt])
+  @@map("federated_principals")
+}
+
+/// Non-human one-purpose actor. It never receives a User row or owns personal
+/// target data.
+model ServicePrincipal {
+  id               String    @id @default(uuid())
+  issuerId         String    @map("issuer_id")
+  subject          String
+  purposeNamespace String    @map("purpose_namespace")
+  state            String    @default("ACTIVE")
+  principalVersion Int       @default(1) @map("principal_version")
+  permissionsJson  String    @default("[]") @map("permissions_json")
+  deactivatedAt    DateTime? @map("deactivated_at")
+  lastSeenAt       DateTime  @default(now()) @map("last_seen_at")
+  createdAt        DateTime  @default(now()) @map("created_at")
+  updatedAt        DateTime  @updatedAt @map("updated_at")
+
+  issuer FederationIssuer @relation(fields: [issuerId], references: [id], onDelete: Restrict)
+
+  @@unique([issuerId, subject])
+  @@index([issuerId, state])
+  @@index([purposeNamespace, state])
+  @@map("service_principals")
+}
+
+model FederationKey {
+  id                  String    @id @default(uuid())
+  issuerId            String    @map("issuer_id")
+  kid                 String    @unique
+  publicKeySpki       String    @map("public_key_spki")
+  encryptedPrivateKey String?   @map("encrypted_private_key")
+  state               String    @default("ACTIVE")
+  validFrom           DateTime  @default(now()) @map("valid_from")
+  expiresAt           DateTime? @map("expires_at")
+  revokedAt           DateTime? @map("revoked_at")
+  createdAt           DateTime  @default(now()) @map("created_at")
+
+  issuer FederationIssuer @relation(fields: [issuerId], references: [id], onDelete: Cascade)
+
+  @@index([issuerId, state])
+  @@index([expiresAt])
+  @@map("federation_keys")
+}
+
+model FederationEnrollment {
+  id                    String    @id @default(uuid())
+  remoteServerId        String?   @map("remote_server_id")
+  enrollmentRole        String    @default("TARGET_BOOTSTRAP") @map("enrollment_role")
+  requestedByUserId     String?   @map("requested_by_user_id")
+  requestedDisplayName  String    @map("requested_display_name")
+  state                 String    @default("PREPARED")
+  sshHost               String    @map("ssh_host")
+  sshPort               Int       @default(22) @map("ssh_port")
+  sshFingerprint        String    @map("ssh_fingerprint")
+  bootstrapHash         String    @unique @map("bootstrap_hash")
+  bootstrapSecretEnc    String?   @map("bootstrap_secret_enc")
+  candidateEndpointJson String?   @map("candidate_endpoint_json")
+  targetInstallationId  String?   @map("target_installation_id")
+  targetManifestKid     String?   @map("target_manifest_kid")
+  targetManifestKeySpki String?   @map("target_manifest_key_spki")
+  delegationIssuerId    String?   @map("delegation_issuer_id")
+  sanitizedErrorCode    String?   @map("sanitized_error_code")
+  attemptCount          Int       @default(0) @map("attempt_count")
+  lastAttemptAt         DateTime? @map("last_attempt_at")
+  leaseUntil            DateTime? @map("lease_until")
+  expiresAt             DateTime  @map("expires_at")
+  completedAt           DateTime? @map("completed_at")
+  createdAt             DateTime  @default(now()) @map("created_at")
+  updatedAt             DateTime  @updatedAt @map("updated_at")
+
+  remoteServer RemoteServer? @relation(fields: [remoteServerId], references: [id], onDelete: SetNull)
+
+  @@index([state, updatedAt])
+  @@index([enrollmentRole, state, updatedAt])
+  @@index([remoteServerId])
+  @@index([requestedByUserId, createdAt])
+  @@index([delegationIssuerId])
+  @@index([enrollmentRole, leaseUntil])
+  @@index([expiresAt])
+  @@map("federation_enrollments")
+}
+
+/// Atomic replay tombstone. replayHash is a SHA-256 digest and contains no
+/// assertion, nonce, path, or credential material.
+model FederationReplay {
+  replayHash String   @id @map("replay_hash")
+  issuerId   String   @map("issuer_id")
+  kid        String
+  requestId  String   @map("request_id")
+  actionId   String   @map("action_id")
+  expiresAt  DateTime @map("expires_at")
+  createdAt  DateTime @default(now()) @map("created_at")
+
+  issuer FederationIssuer @relation(fields: [issuerId], references: [id], onDelete: Cascade)
+
+  @@unique([issuerId, requestId])
+  @@index([issuerId, expiresAt])
+  @@index([expiresAt])
+  @@map("federation_replays")
+}
+
+/// Hash-only mutation admission record. Protocol 1 blocks both conflicting
+/// reuse and blind replay until a later operation/result reconciles the claim.
+model FederationIdempotencyReceipt {
+  id                 String   @id @default(uuid())
+  issuerId           String   @map("issuer_id")
+  actorKind          String   @map("actor_kind")
+  subjectHash        String   @map("subject_hash")
+  actionId           String   @map("action_id")
+  idempotencyKeyHash String   @map("idempotency_key_hash")
+  requestHash        String   @map("request_hash")
+  requestId          String   @map("request_id")
+  state              String   @default("CLAIMED")
+  expiresAt          DateTime @map("expires_at")
+  createdAt          DateTime @default(now()) @map("created_at")
+  updatedAt          DateTime @updatedAt @map("updated_at")
+
+  issuer FederationIssuer @relation(fields: [issuerId], references: [id], onDelete: Cascade)
+
+  @@unique([issuerId, actorKind, subjectHash, actionId, idempotencyKeyHash])
+  @@index([issuerId, expiresAt])
+  @@index([expiresAt])
+  @@map("federation_idempotency_receipts")
+}
+
+model RegistryProjectionJournal {
+  id                 String    @id @default(uuid())
+  registryGeneration Int       @unique @map("registry_generation")
+  sourceDigest       String    @map("source_digest")
+  projectionDigest   String?   @map("projection_digest")
+  state              String    @default("PREPARED")
+  sanitizedErrorCode String?   @map("sanitized_error_code")
+  committedAt        DateTime? @map("committed_at")
+  createdAt          DateTime  @default(now()) @map("created_at")
+  updatedAt          DateTime  @updatedAt @map("updated_at")
+
+  @@index([state, updatedAt])
+  @@map("registry_projection_journal")
+}
+
+model RemoteEndpointCutover {
+  id                 String    @id @default(uuid())
+  remoteServerId     String    @map("remote_server_id")
+  fromGeneration     Int       @map("from_generation")
+  toGeneration       Int       @map("to_generation")
+  state              String    @default("PREPARED")
+  deadlineAt         DateTime  @map("deadline_at")
+  activatedAt        DateTime? @map("activated_at")
+  finalizedAt        DateTime? @map("finalized_at")
+  rolledBackAt       DateTime? @map("rolled_back_at")
+  sanitizedErrorCode String?   @map("sanitized_error_code")
+  createdAt          DateTime  @default(now()) @map("created_at")
+  updatedAt          DateTime  @updatedAt @map("updated_at")
+
+  remoteServer RemoteServer @relation(fields: [remoteServerId], references: [id], onDelete: Cascade)
+
+  @@index([remoteServerId, state])
+  @@index([deadlineAt])
+  @@map("remote_endpoint_cutovers")
 }
 
 model HealthCheckPing {
@@ -1384,4 +1919,164 @@ model VpnUserCreds {
   @@index([userId])
   @@index([serviceId])
   @@map("vpn_user_creds")
+}
+
+/// Master-owned stable public subscription. The public token is derived from
+/// the master key and id; only its SHA-256 digest is persisted.
+model FederatedVpnSubscription {
+  id              String    @id @default(uuid())
+  dedupeKey       String?   @unique @map("dedupe_key")
+  tokenHash       String    @unique @map("token_hash")
+  createdByUserId String    @map("created_by_user_id")
+  state           String    @default("ACTIVE")
+  maxStaleSeconds Int       @default(300) @map("max_stale_seconds")
+  revokedAt       DateTime? @map("revoked_at")
+  createdAt       DateTime  @default(now()) @map("created_at")
+  updatedAt       DateTime  @updatedAt @map("updated_at")
+
+  createdBy User                             @relation(fields: [createdByUserId], references: [id], onDelete: Restrict)
+  sources   FederatedVpnSubscriptionSource[]
+
+  @@index([createdByUserId, state, updatedAt])
+  @@index([state, revokedAt])
+  @@map("federated_vpn_subscriptions")
+}
+
+/// Explicit ordered target/user membership. `remoteServerId = null` is the
+/// control-plane installation itself; targetInstallationId remains immutable.
+model FederatedVpnSubscriptionSource {
+  id                   String    @id @default(uuid())
+  subscriptionId       String    @map("subscription_id")
+  remoteServerId       String?   @map("remote_server_id")
+  targetInstallationId String    @map("target_installation_id")
+  vpnUserId            String    @map("vpn_user_id")
+  position             Int
+  state                String    @default("ACTIVE")
+  invalidatedAt        DateTime? @map("invalidated_at")
+  lastSuccessAt        DateTime? @map("last_success_at")
+  lastFailureAt        DateTime? @map("last_failure_at")
+  lastFailureCode      String?   @map("last_failure_code")
+  createdAt            DateTime  @default(now()) @map("created_at")
+  updatedAt            DateTime  @updatedAt @map("updated_at")
+
+  subscription FederatedVpnSubscription       @relation(fields: [subscriptionId], references: [id], onDelete: Cascade)
+  remoteServer RemoteServer?                   @relation(fields: [remoteServerId], references: [id], onDelete: SetNull)
+  cache        FederatedVpnSubscriptionCache?
+
+  @@unique([subscriptionId, targetInstallationId, vpnUserId])
+  @@unique([subscriptionId, position])
+  @@index([remoteServerId, state])
+  @@index([targetInstallationId, state])
+  @@index([vpnUserId])
+  @@map("federated_vpn_subscription_sources")
+}
+
+/// Encrypted, target-signed source fragment. Cached plaintext never reaches
+/// SQLite; the bounded stale window is enforced from generatedAt/validUntil.
+model FederatedVpnSubscriptionCache {
+  id            String    @id @default(uuid())
+  sourceId      String    @unique @map("source_id")
+  epoch         String
+  payloadEnc    String    @map("payload_enc")
+  fingerprint   String
+  generatedAt   DateTime  @map("generated_at")
+  validUntil    DateTime  @map("valid_until")
+  invalidatedAt DateTime? @map("invalidated_at")
+  createdAt     DateTime  @default(now()) @map("created_at")
+  updatedAt     DateTime  @updatedAt @map("updated_at")
+
+  source FederatedVpnSubscriptionSource @relation(fields: [sourceId], references: [id], onDelete: Cascade)
+
+  @@index([validUntil, invalidatedAt])
+  @@index([fingerprint])
+  @@map("federated_vpn_subscription_cache")
+}
+
+/// Master-owned opaque ingress route. The public token is derived from the
+/// master key; only its digest and version are persisted. Provider verifier
+/// material is encrypted and bound to this route ID.
+model WebhookRoute {
+  id                   String    @id @default(uuid())
+  dedupeKey            String?   @unique @map("dedupe_key")
+  tokenVersion         Int       @default(1) @map("token_version")
+  tokenHash            String    @unique @map("token_hash")
+  createdByUserId      String    @map("created_by_user_id")
+  remoteServerId       String?   @map("remote_server_id")
+  targetInstallationId String    @map("target_installation_id")
+  targetSiteId         String    @map("target_site_id")
+  targetDomainId       String    @map("target_domain_id")
+  targetDomain         String    @map("target_domain")
+  provider             String
+  verifierEnc          String    @map("verifier_enc")
+  state                String    @default("ACTIVE")
+  revokedAt            DateTime? @map("revoked_at")
+  createdAt            DateTime  @default(now()) @map("created_at")
+  updatedAt            DateTime  @updatedAt @map("updated_at")
+
+  createdBy    User              @relation(fields: [createdByUserId], references: [id], onDelete: Restrict)
+  remoteServer RemoteServer?     @relation(fields: [remoteServerId], references: [id], onDelete: SetNull)
+  deliveries   WebhookDelivery[]
+
+  @@index([createdByUserId, state, updatedAt])
+  @@index([remoteServerId, state])
+  @@index([targetInstallationId, state])
+  @@map("webhook_routes")
+}
+
+/// Durable master delivery metadata. Provider bytes live only in the
+/// encrypted filesystem spool; SQLite keeps hashes, claims, retry state, and
+/// bounded results.
+model WebhookDelivery {
+  id                   String    @id @default(uuid())
+  routeId              String    @map("route_id")
+  providerDeliveryId   String    @map("provider_delivery_id")
+  event                String
+  bodySha256           String    @map("body_sha256")
+  spoolRelativePath    String    @map("spool_relative_path")
+  state                String    @default("ACCEPTED")
+  attempt              Int       @default(0)
+  maxAttempts          Int       @default(6) @map("max_attempts")
+  availableAt          DateTime  @default(now()) @map("available_at")
+  leaseOwner           String?   @map("lease_owner")
+  leaseExpiresAt       DateTime? @map("lease_expires_at")
+  lastAttemptAt        DateTime? @map("last_attempt_at")
+  targetRequestId      String?   @map("target_request_id")
+  result               String?
+  lastErrorCode        String?   @map("last_error_code")
+  acceptedAt           DateTime  @default(now()) @map("accepted_at")
+  deliveredAt          DateTime? @map("delivered_at")
+  dlqAt                DateTime? @map("dlq_at")
+  createdAt            DateTime  @default(now()) @map("created_at")
+  updatedAt            DateTime  @updatedAt @map("updated_at")
+
+  route WebhookRoute @relation(fields: [routeId], references: [id], onDelete: Restrict)
+
+  @@unique([routeId, providerDeliveryId])
+  @@index([state, availableAt, leaseExpiresAt])
+  @@index([routeId, createdAt])
+  @@index([dlqAt])
+  @@map("webhook_deliveries")
+}
+
+/// Target-side durable receipt. It makes delivery replay safe even when the
+/// master loses an acknowledgement and retries with a fresh transport
+/// idempotency key.
+model WebhookDeliveryReceipt {
+  id                   String    @id @default(uuid())
+  issuerInstallationId String    @map("issuer_installation_id")
+  deliveryId           String    @map("delivery_id")
+  routeId              String    @map("route_id")
+  requestHash          String    @map("request_hash")
+  state                String    @default("PROCESSING")
+  deployId             String?   @map("deploy_id")
+  result               String?
+  lastErrorCode        String?   @map("last_error_code")
+  receivedAt           DateTime  @default(now()) @map("received_at")
+  completedAt          DateTime? @map("completed_at")
+  updatedAt            DateTime  @updatedAt @map("updated_at")
+
+  @@unique([issuerInstallationId, deliveryId])
+  @@index([routeId, receivedAt])
+  @@index([state, updatedAt])
+  @@map("webhook_delivery_receipts")
 }

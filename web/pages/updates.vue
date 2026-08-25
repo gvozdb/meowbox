@@ -136,7 +136,8 @@ interface UpdatablePackage {
   section: string;
 }
 
-const api = useApi();
+const api = useRemoteApi();
+const { waitForOperation } = useOperation();
 
 const checking = ref(false);
 const installing = ref(false);
@@ -206,11 +207,18 @@ function formatRelative(iso: string): string {
 async function checkUpdates() {
   checking.value = true;
   try {
-    const data = await api.get<{ available: UpdatablePackage[]; lastChecked: string }>('/system/updates/check');
+    const accepted = await api.post<AcceptedOperation>(
+      '/system/updates/check',
+      undefined,
+      { headers: { 'Idempotency-Key': operationIdempotencyKey('updates-check') } },
+    );
+    const operation = await waitForOperation(accepted.operationId, { timeoutMs: 16 * 60_000 });
+    const data = operation.result as { available: UpdatablePackage[]; lastChecked: string };
     updates.value = data.available || [];
     lastChecked.value = data.lastChecked || new Date().toISOString();
-  } catch {
+  } catch (error: unknown) {
     updates.value = [];
+    installOutput.value = (error as Error)?.message || 'Update check failed';
   } finally {
     checking.value = false;
   }
@@ -220,15 +228,19 @@ async function installPackage(name: string) {
   if (installing.value) return;
   installing.value = true;
   try {
-    const data = await api.post<{ upgraded: string[]; failed: string[]; output: string }>('/system/updates/install', {
-      packages: [name],
-    });
+    const accepted = await api.post<AcceptedOperation>(
+      '/system/updates/install',
+      { packages: [name] },
+      { headers: { 'Idempotency-Key': operationIdempotencyKey('updates-install') } },
+    );
+    const operation = await waitForOperation(accepted.operationId, { timeoutMs: 61 * 60_000 });
+    const data = operation.result as { upgraded: string[]; failed: string[]; output: string };
     installOutput.value = data.output || '';
     // Re-check after install
     await checkUpdates();
     await loadVersions();
-  } catch {
-    // Install failed
+  } catch (error: unknown) {
+    installOutput.value = (error as Error)?.message || 'Package update failed';
   } finally {
     installing.value = false;
   }
@@ -238,13 +250,19 @@ async function upgradeAll() {
   if (installing.value) return;
   installing.value = true;
   try {
-    const data = await api.post<{ upgraded: string[]; failed: string[]; output: string }>('/system/updates/upgrade-all');
+    const accepted = await api.post<AcceptedOperation>(
+      '/system/updates/upgrade-all',
+      undefined,
+      { headers: { 'Idempotency-Key': operationIdempotencyKey('updates-upgrade-all') } },
+    );
+    const operation = await waitForOperation(accepted.operationId, { timeoutMs: 4 * 60 * 60_000 + 60_000 });
+    const data = operation.result as { upgraded: string[]; failed: string[]; output: string };
     installOutput.value = data.output || '';
     // Re-check after upgrade
     await checkUpdates();
     await loadVersions();
-  } catch {
-    // Upgrade failed
+  } catch (error: unknown) {
+    installOutput.value = (error as Error)?.message || 'System upgrade failed';
   } finally {
     installing.value = false;
   }

@@ -186,6 +186,7 @@ interface Zone {
 
 const route = useRoute();
 const api = useApi();
+const { waitForOperation } = useOperation();
 const toast = useMbToast();
 const confirm = useMbConfirm();
 
@@ -251,7 +252,12 @@ async function refresh() {
   busy.value = true;
   const before = zone.value?.recordsCount || 0;
   try {
-    await api.post(`/dns/zones/${zoneId.value}/refresh`);
+    const accepted = await api.post<AcceptedOperation>(
+      `/dns/zones/${zoneId.value}/refresh`,
+      {},
+      { headers: { 'Idempotency-Key': operationIdempotencyKey('dns-zone-refresh') } },
+    );
+    await waitForOperation(accepted.operationId, { timeoutMs: 11 * 60_000 });
     await load();
     const after = zone.value?.recordsCount || 0;
     if (before > 0 && after === 0) {
@@ -380,9 +386,15 @@ async function submitTemplate() {
     if (tplForm.value.dkimSelector.trim()) extras.dkimSelector = tplForm.value.dkimSelector.trim();
     const body: Record<string, unknown> = { template: tplForm.value.template };
     if (Object.keys(extras).length) body.extras = extras;
-    const res = await api.post<{ created: Array<{ type: string; name: string }>; skipped: Array<{ type: string; name: string; reason: string }> }>(
+    const accepted = await api.post<AcceptedOperation>(
       `/dns/zones/${zoneId.value}/templates`, body,
+      { headers: { 'Idempotency-Key': operationIdempotencyKey('dns-template') } },
     );
+    const operation = await waitForOperation(accepted.operationId, { timeoutMs: 16 * 60_000 });
+    const res = operation.result as {
+      created: Array<{ type: string; name: string }>;
+      skipped: Array<{ type: string; name: string; reason: string }>;
+    };
     toast.success(`Создано: ${res.created.length}, пропущено: ${res.skipped.length}`);
     templateModal.value = false;
     await load();

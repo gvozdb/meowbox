@@ -482,7 +482,7 @@ export function useDashboardOverview() {
   let timer: ReturnType<typeof setInterval> | null = null;
 
   function decorate(value: DashboardOverview, serverKey: string): DashboardOverview {
-    const selected = serverStore.servers.find((item) => item.id === serverKey);
+    const selected = serverStore.serverOptions.find((item) => item.id === serverKey);
     return {
       ...value,
       server: {

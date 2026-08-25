@@ -485,7 +485,8 @@ interface ServerSvc {
   sitesUsing: number;
 }
 
-const api = useApi();
+const api = useRemoteApi();
+const { waitForOperation } = useOperation();
 const toast = useMbToast();
 
 const items = ref<ServerSvc[]>([]);
@@ -982,9 +983,13 @@ async function saveAndRestart() {
     }
     editor.saveResult = lastResult;
     // Restart.
-    editor.restartResult = await api.post<RestartResult>(
+    const accepted = await api.post<AcceptedOperation>(
       `/services/${editor.serviceKey}/restart`,
+      undefined,
+      { headers: { 'Idempotency-Key': operationIdempotencyKey('service-restart') } },
     );
+    const operation = await waitForOperation(accepted.operationId, { timeoutMs: 16 * 60_000 });
+    editor.restartResult = operation.result as RestartResult;
     toast.success(`${editor.serviceName} перезапущен`);
   } catch (err) {
     editor.saveError = (err as Error).message || 'Не удалось сохранить / перезапустить';
@@ -1035,7 +1040,13 @@ async function installService(item: ServerSvc) {
   if (!confirm(`Установить «${item.catalog.name}» на сервер? Панель подготовит управляемый runtime и systemd-сервис.`)) return;
   busy[item.key] = 'install';
   try {
-    const updated = await api.post<ServerSvc>(`/services/${item.key}/install`);
+    const accepted = await api.post<AcceptedOperation>(
+      `/services/${item.key}/install`,
+      undefined,
+      { headers: { 'Idempotency-Key': operationIdempotencyKey('service-install') } },
+    );
+    await waitForOperation(accepted.operationId, { timeoutMs: 61 * 60_000 });
+    const updated = await api.get<ServerSvc>(`/services/${item.key}`);
     Object.assign(item, updated);
     toast.success(`${item.catalog.name} установлен (${item.version || ''})`);
   } catch (err) {
@@ -1049,7 +1060,12 @@ async function uninstallService(item: ServerSvc) {
   if (!confirm(`Удалить «${item.catalog.name}» с сервера?\n\nДанные сайтов НЕ удаляются автоматически — отключи сервис у каждого сайта заранее.`)) return;
   busy[item.key] = 'uninstall';
   try {
-    await api.del(`/services/${item.key}`);
+    const accepted = await api.del<AcceptedOperation>(
+      `/services/${item.key}`,
+      undefined,
+      { headers: { 'Idempotency-Key': operationIdempotencyKey('service-uninstall') } },
+    );
+    await waitForOperation(accepted.operationId, { timeoutMs: 61 * 60_000 });
     item.installed = false;
     item.version = null;
     item.installedAt = null;

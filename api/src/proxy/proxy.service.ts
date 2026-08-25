@@ -2,6 +2,7 @@ import {
   Injectable,
   Logger,
   OnModuleInit,
+  OnModuleDestroy,
   BadRequestException,
   NotFoundException,
 } from '@nestjs/common';
@@ -9,10 +10,17 @@ import { ConfigService } from '@nestjs/config';
 import { randomUUID } from 'crypto';
 import { readFile, writeFile, rename, mkdir, chmod } from 'fs/promises';
 import { existsSync } from 'fs';
-import { isIP } from 'net';
 import { join } from 'path';
-import { Agent as UndiciAgent, type Dispatcher } from 'undici';
-import { assertPublicHttpUrl } from '../common/validators/safe-url';
+import { type Dispatcher } from 'undici';
+import { RemoteRegistryService } from '../federation/remote-registry.service';
+import {
+  createValidatedTlsDispatcher,
+  PinnedFederationDispatcher,
+} from '../federation/pinned-dispatcher';
+import {
+  parseFederationOrigin,
+  resolveFederationOrigin,
+} from '../federation/endpoint-normalizer';
 
 export interface ServerConfig {
   id: string;
@@ -33,26 +41,59 @@ export interface ServerInfo extends ServerConfig {
   lastCheckedAt?: string;
   /** Если последняя проверка упала — причина. */
   lastError?: string;
+  federation?: boolean;
+  protocolVersion?: number | null;
+  activationMode?: string;
+  capabilityState?: string;
+  reasonCode?: string;
+  registryGeneration?: number;
+  fleetUpdateReady?: boolean;
+  fleetUpdateReason?: string | null;
 }
 
 const DATA_DIR = join(process.cwd(), '..', 'data');
 const SERVERS_FILE = join(DATA_DIR, 'servers.json');
+const LEGACY_BROWSER_HEADERS = new Set([
+  'accept',
+  'accept-language',
+  'content-type',
+  'if-match',
+  'if-modified-since',
+  'if-none-match',
+  'if-unmodified-since',
+]);
 
 @Injectable()
-export class ProxyService implements OnModuleInit {
+export class ProxyService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger('ProxyService');
   private servers: ServerConfig[] = [];
-  private readonly insecureIpTlsDispatcher = new UndiciAgent({
-    connect: { rejectUnauthorized: false },
-  });
+  private readonly legacyDispatchers = new Map<string, PinnedFederationDispatcher>();
 
-  constructor(private readonly config: ConfigService) {}
+  constructor(
+    private readonly config: ConfigService,
+    private readonly remoteRegistry: RemoteRegistryService,
+  ) {}
 
   async onModuleInit() {
     await this.loadServers();
   }
 
+  async onModuleDestroy() {
+    const dispatchers = [...this.legacyDispatchers.values()];
+    this.legacyDispatchers.clear();
+    await Promise.allSettled(dispatchers.map(({ close }) => close()));
+  }
+
   private async loadServers() {
+    const authority = await this.remoteRegistry.authority();
+    if (authority === 'DB' || authority === 'FROZEN') {
+      this.servers = await this.remoteRegistry.getLegacyServersFromDb();
+      this.logger.log(
+        `Loaded ${this.servers.length} server(s) from DB registry (${authority.toLowerCase()})`,
+      );
+      return;
+    }
+
     // Ensure data directory exists
     if (!existsSync(DATA_DIR)) {
       await mkdir(DATA_DIR, { recursive: true });
@@ -111,17 +152,32 @@ export class ProxyService implements OnModuleInit {
     return this.servers.find((s) => s.id === id);
   }
 
-  allowsInsecureTlsForIp(server: ServerConfig): boolean {
-    try {
-      const url = new URL(server.url);
-      return url.protocol === 'https:' && isIP(url.hostname.replace(/^\[|\]$/g, '')) !== 0;
-    } catch {
-      return false;
-    }
+  private getFetchDispatcher(server: ServerConfig): Dispatcher {
+    const origin = parseFederationOrigin(server.url).origin;
+    const existing = this.legacyDispatchers.get(origin);
+    if (existing) return existing.dispatcher;
+    const created = createValidatedTlsDispatcher(origin, { connectTimeoutMs: 5_000 });
+    this.legacyDispatchers.set(origin, created);
+    return created.dispatcher;
   }
 
-  private getFetchDispatcher(server: ServerConfig): Dispatcher | undefined {
-    return this.allowsInsecureTlsForIp(server) ? this.insecureIpTlsDispatcher : undefined;
+  private async validateLegacyOrigin(input: string): Promise<string> {
+    const origin = parseFederationOrigin(input);
+    await resolveFederationOrigin(origin);
+    return origin.origin;
+  }
+
+  private async clearLegacyDispatchers(): Promise<void> {
+    const dispatchers = [...this.legacyDispatchers.values()];
+    this.legacyDispatchers.clear();
+    await Promise.allSettled(dispatchers.map(({ close }) => close()));
+  }
+
+  private assertNoLegacyRedirect(response: Response): void {
+    if (response.status >= 300 && response.status < 400) {
+      void response.body?.cancel();
+      throw new Error('Legacy target redirect refused');
+    }
   }
 
   async addServer(
@@ -131,17 +187,23 @@ export class ProxyService implements OnModuleInit {
       throw new BadRequestException(`Server "${data.name}" already exists`);
     }
 
-    // Runtime-проверка URL: блокируем 127.0.0.1 / AWS IMDS / private-net.
-    // proxy-фичу легко превратить в SSRF-гаджет (forward-any-request),
-    // поэтому DNS-lookup + RFC1918-фильтр обязательны. Сам протокол —
-    // http или https: PROXY_TOKEN (HMAC) обеспечивает аутентификацию,
-    // TLS — рекомендация, но не requirement (slave может стоять на raw IP).
-    await assertPublicHttpUrl(data.url, { protocols: ['http:', 'https:'] });
+    const normalizedOrigin = await this.validateLegacyOrigin(data.url);
+
+    if (await this.remoteRegistry.authority() !== 'JSON') {
+      const created = await this.remoteRegistry.addLegacyServer({
+        id: data.id,
+        name: data.name,
+        url: normalizedOrigin,
+        token: data.token,
+      });
+      this.servers = await this.remoteRegistry.getLegacyServersFromDb();
+      return created;
+    }
 
     const server: ServerConfig = {
       id: data.id || randomUUID().slice(0, 8),
       name: data.name,
-      url: data.url.replace(/\/+$/, ''), // strip trailing slash
+      url: normalizedOrigin,
       token: data.token,
     };
 
@@ -161,25 +223,41 @@ export class ProxyService implements OnModuleInit {
     }
 
     if (data.url !== undefined) {
-      // Allow http для только что провижнящихся серверов (до выпуска TLS).
-      // Поверх — DTO контроллера уже требует https для добавления вручную,
-      // так что http-путь остаётся только внутреннему provision.
-      await assertPublicHttpUrl(data.url, { protocols: ['http:', 'https:'] });
+      data.url = await this.validateLegacyOrigin(data.url);
+    }
+
+    if (await this.remoteRegistry.authority() !== 'JSON') {
+      const updated = await this.remoteRegistry.updateLegacyServer(id, {
+        ...(data.name === undefined ? {} : { name: data.name }),
+        ...(data.url === undefined ? {} : { url: data.url }),
+        ...(data.token === undefined ? {} : { token: data.token }),
+      });
+      this.servers = await this.remoteRegistry.getLegacyServersFromDb();
+      this.statusCache.delete(id);
+      await this.clearLegacyDispatchers();
+      return updated;
     }
 
     if (data.name !== undefined) this.servers[idx].name = data.name;
     if (data.url !== undefined)
-      this.servers[idx].url = data.url.replace(/\/+$/, '');
+      this.servers[idx].url = data.url;
     if (data.token !== undefined) this.servers[idx].token = data.token;
 
     await this.saveServers();
     // URL/токен поменялись — статус мог стать невалидным. Инвалидируем кеш.
     this.statusCache.delete(id);
+    await this.clearLegacyDispatchers();
     this.logger.log(`Updated server "${this.servers[idx].name}" (${id})`);
     return this.servers[idx];
   }
 
   async removeServer(id: string): Promise<void> {
+    if (await this.remoteRegistry.authority() !== 'JSON') {
+      await this.remoteRegistry.removeLegacyServer(id);
+      this.servers = await this.remoteRegistry.getLegacyServersFromDb();
+      this.statusCache.delete(id);
+      return;
+    }
     const idx = this.servers.findIndex((s) => s.id === id);
     if (idx === -1) {
       throw new NotFoundException(`Server "${id}" not found`);
@@ -192,33 +270,7 @@ export class ProxyService implements OnModuleInit {
     this.logger.log(`Removed server "${name}" (${id})`);
   }
 
-  /**
-   * Endpoint-классы с увеличенным таймаутом — длинные операции, которые
-   * не дотянут за 30 секунд. Совпадение по startsWith.
-   */
-  private static readonly LONG_RUNNING_PATHS = [
-    '/backups/',           // start/restore — могут идти минуты
-    '/migration/',         // импорт/экспорт сайтов
-    '/sites/clone',
-    '/admin/update',       // panel-update (запускает spawn в фоне, но всё-таки)
-    '/system/updates/install',
-    '/system/updates/upgrade-all',
-    '/system/self-update',
-    '/database/import',
-    '/database/dump',
-    '/php/',               // install/uninstall PHP версий — apt-get тянет 60-180s по медленному каналу
-    '/services/',          // restart/install сервисов (mariadb/redis/nginx) могут быть >30s
-    '/firewall/',          // ufw enable/reload иногда заметно тормозит
-    '/ssl/issue',          // certbot до 60s по сети
-    '/sites/install',      // Wordpress/MODX install качает архив + setup БД
-    '/storage/auth',       // OAuth-флоу (Yandex) с редиректом на провайдера
-  ];
-
-  /** Таймаут в мс на основе path (smart-timeout). */
-  private getTimeoutMs(path: string): number {
-    const isLong = ProxyService.LONG_RUNNING_PATHS.some((p) => path.startsWith(p));
-    return isLong ? 600_000 : 30_000;
-  }
+  private static readonly LEGACY_REQUEST_TIMEOUT_MS = 30_000;
 
   /**
    * JSON-only прокси — для внутренних вызовов мастера (pingServer, updateBulk).
@@ -226,7 +278,7 @@ export class ProxyService implements OnModuleInit {
    * для пользовательских запросов через /proxy/:serverId/* — там нужен
    * raw pass-through (см. proxyRaw).
    *
-   * @param timeoutOverride — явный таймаут в мс (если не задан, выбирается smart по path)
+   * @param timeoutOverride — явный таймаут для узкого control-plane вызова.
    */
   async proxyRequest(
     server: ServerConfig,
@@ -248,23 +300,22 @@ export class ProxyService implements OnModuleInit {
     delete reqHeaders['authorization'];
     delete reqHeaders['Authorization'];
 
-    const timeoutMs = timeoutOverride ?? this.getTimeoutMs(path);
+    const timeoutMs = timeoutOverride ?? ProxyService.LEGACY_REQUEST_TIMEOUT_MS;
 
     const fetchOptions: RequestInit = {
       method,
       headers: reqHeaders,
       signal: AbortSignal.timeout(timeoutMs),
+      redirect: 'manual',
     };
-    const dispatcher = this.getFetchDispatcher(server);
-    if (dispatcher) {
-      (fetchOptions as RequestInit & { dispatcher: Dispatcher }).dispatcher = dispatcher;
-    }
+    (fetchOptions as RequestInit & { dispatcher: Dispatcher }).dispatcher = this.getFetchDispatcher(server);
 
     if (body && method !== 'GET' && method !== 'HEAD') {
       fetchOptions.body = JSON.stringify(body);
     }
 
     const response = await fetch(url, fetchOptions);
+    this.assertNoLegacyRedirect(response);
     const data = await response.json().catch(() => null);
 
     return { status: response.status, data };
@@ -282,11 +333,9 @@ export class ProxyService implements OnModuleInit {
    *
    * Никаких JSON.stringify/response.json — байты идут как есть.
    *
-   * TODO(3b): сейчас 50GB-экспорты идут потоком через мастер (он становится
-   * bottleneck по сети). В будущем — переделать на one-shot signed URLs:
-   * slave отдаёт фронту прямой URL на свой nginx (с короткоживущим токеном),
-   * фронт качает мимо мастера. Требует, чтобы slave-домен был доступен фронту,
-   * и расширения proxy-auth на nginx-слое slave.
+   * Этот адаптер обслуживает только legacy-static-v0 allowlist. Федерация v1
+   * использует action-specific connect/header/idle budgets и durable Operation
+   * вместо path-prefix total timeout.
    */
   async proxyRaw(
     server: ServerConfig,
@@ -306,18 +355,7 @@ export class ProxyService implements OnModuleInit {
     const reqHeaders: Record<string, string> = {};
     for (const [k, v] of Object.entries(headers)) {
       const lk = k.toLowerCase();
-      if (
-        lk === 'host' ||
-        lk === 'connection' ||
-        lk === 'authorization' ||
-        lk === 'cookie' ||
-        lk === 'content-length' ||
-        lk === 'transfer-encoding' ||
-        lk === 'x-proxy-token' // если фронт случайно пропустил — игнорируем
-      ) {
-        continue;
-      }
-      reqHeaders[k] = v;
+      if (LEGACY_BROWSER_HEADERS.has(lk)) reqHeaders[lk] = v;
     }
     reqHeaders['X-Proxy-Token'] = server.token;
     // Убираем accept-encoding: пусть undici возвращает ответ как есть
@@ -325,21 +363,17 @@ export class ProxyService implements OnModuleInit {
     delete reqHeaders['accept-encoding'];
     delete reqHeaders['Accept-Encoding'];
 
-    // Path для smart-timeout (без query)
-    const pathOnly = pathWithQuery.split('?')[0] || pathWithQuery;
-    const timeoutMs = timeoutOverride ?? this.getTimeoutMs(pathOnly);
+    const timeoutMs = timeoutOverride ?? ProxyService.LEGACY_REQUEST_TIMEOUT_MS;
 
     const fetchOptions: RequestInit = {
       method,
       headers: reqHeaders,
       signal: AbortSignal.timeout(timeoutMs),
+      redirect: 'manual',
       // duplex: 'half' нужен для streaming body, но мы передаём целиком Buffer
       // (контроллер уже собрал raw body), так что это не критично.
     };
-    const dispatcher = this.getFetchDispatcher(server);
-    if (dispatcher) {
-      (fetchOptions as RequestInit & { dispatcher: Dispatcher }).dispatcher = dispatcher;
-    }
+    (fetchOptions as RequestInit & { dispatcher: Dispatcher }).dispatcher = this.getFetchDispatcher(server);
 
     if (body && body.length > 0 && method !== 'GET' && method !== 'HEAD') {
       // node-fetch принимает Buffer — но lib.dom типы fetch BodyInit не
@@ -348,7 +382,9 @@ export class ProxyService implements OnModuleInit {
       (fetchOptions as any).body = body;
     }
 
-    return await fetch(url, fetchOptions);
+    const response = await fetch(url, fetchOptions);
+    this.assertNoLegacyRedirect(response);
+    return response;
   }
 
   /**
@@ -417,7 +453,7 @@ export class ProxyService implements OnModuleInit {
       }),
     );
 
-    return results.map((r, i) => {
+    const legacy = results.map((r, i) => {
       if (r.status === 'fulfilled') return r.value;
       const fallback = {
         online: false,
@@ -427,6 +463,7 @@ export class ProxyService implements OnModuleInit {
       this.statusCache.set(this.servers[i].id, fallback);
       return { ...this.servers[i], ...fallback, token: '***' } as ServerInfo;
     });
+    return [...legacy, ...await this.federatedServerInfo()];
   }
 
   /**
@@ -453,10 +490,35 @@ export class ProxyService implements OnModuleInit {
       );
     }
 
-    return this.servers.map((s) => {
+    const legacy = this.servers.map((s) => {
       const status = this.statusCache.get(s.id) ?? { online: false };
       return { ...s, ...status, token: '***' } as ServerInfo;
     });
+    return [...legacy, ...await this.federatedServerInfo()];
+  }
+
+  private async federatedServerInfo(): Promise<ServerInfo[]> {
+    const authority = await this.remoteRegistry.authority();
+    if (authority === 'JSON') return [];
+    const summaries = await this.remoteRegistry.listFederatedServerSummaries();
+    return summaries.map((summary) => ({
+      id: summary.id,
+      name: summary.name,
+      url: summary.publicOrigin,
+      token: '***',
+      online: summary.online,
+      version: summary.version,
+      lastCheckedAt: summary.lastCheckedAt,
+      lastError: summary.online ? undefined : summary.reasonCode,
+      federation: true,
+      protocolVersion: summary.protocolVersion,
+      activationMode: summary.activationMode,
+      capabilityState: summary.capabilityState,
+      reasonCode: summary.reasonCode,
+      registryGeneration: summary.registryGeneration,
+      fleetUpdateReady: summary.fleetUpdateReady,
+      fleetUpdateReason: summary.fleetUpdateReason,
+    }));
   }
 
   /** Очищает кеш статуса конкретного сервера (после edit/remove). */

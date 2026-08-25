@@ -152,7 +152,7 @@ class MeowboxAdminer extends Adminer {
         echo '<body style="font-family:system-ui;background:#0a0a0f;color:#cbd5e1;margin:0">';
         echo '<div style="max-width:480px;margin:5rem auto;padding:2rem;background:#1a1a2e;border-radius:14px;border:1px solid #2a2a3a">';
         echo '<h2 style="color:#f87171;margin:0 0 0.5rem">Сессия Adminer истекла</h2>';
-        echo '<p style="color:#94a3b8">Открой БД заново через Meowbox — там сгенерится новый одноразовый ticket.</p>';
+        echo '<p style="color:#94a3b8">Открой БД заново через Meowbox — там создастся новый одноразовый handoff.</p>';
         echo '<p style="margin-top:1.5rem"><a href="/" style="color:#60a5fa;background:linear-gradient(135deg,#fbbf24,#d97706);color:#0a0a0f;padding:0.5rem 1rem;border-radius:8px;text-decoration:none;font-weight:600">Открыть Meowbox</a></p>';
         echo '</div></body>';
     }

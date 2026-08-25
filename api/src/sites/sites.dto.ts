@@ -32,6 +32,12 @@ import { CreateSiteDomainDto } from './site-domains.dto';
 
 export { SiteAliasesValidator } from './site-aliases.validator';
 
+export class ConsumeModxLoginHandoffDto {
+  @IsString()
+  @Matches(/^[A-Za-z0-9_-]{43}$/)
+  token!: string;
+}
+
 export class CreateSiteRequestDto {
   @IsString()
   @IsNotEmpty()

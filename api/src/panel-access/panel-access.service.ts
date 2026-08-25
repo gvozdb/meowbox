@@ -351,7 +351,7 @@ export class PanelAccessService {
     if (s.leEmail) return s.leEmail;
     // Берём первого ADMIN-пользователя с заполненным email.
     const admin = await this.prisma.user.findFirst({
-      where: { role: 'ADMIN', email: { not: '' } },
+      where: { role: 'ADMIN', identityKind: 'LOCAL', email: { not: '' } },
       orderBy: { createdAt: 'asc' },
       select: { email: true },
     });

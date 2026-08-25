@@ -27,6 +27,11 @@ import * as path from 'path';
  *   - `meowbox:adminer-sso:v1` — Adminer SSO tickets (adminer-cipher; derived
  *                                ключ записывается в .env при bootstrap'е,
  *                                чтобы PHP-плагин читал готовое значение)
+ *   - `meowbox:federation:v1`  — enrollment and per-target trust material
+ *   - `meowbox:federated-vpn:v1` — cached signed VPN fragments
+ *   - `meowbox:webhook:v1`     — webhook verifier and spool payloads
+ *   - `meowbox:operations:v1`  — deterministic operation/agent-job material
+ *   - `meowbox:transfers:v1`   — direct transfer sessions and artifact grants
  *   - `meowbox:ssh:v1`         — Site.sshPasswordEnc (ssh-cipher)
  *   - `meowbox:cms:v1`         — SiteDomain.cmsAdminPasswordEnc (cms-cipher)
  *
@@ -45,6 +50,11 @@ export type KeyDomain =
   | 'databases'
   | 'migration'
   | 'adminer-sso'
+  | 'federation'
+  | 'federated-vpn'
+  | 'webhook'
+  | 'operations'
+  | 'transfers'
   | 'ssh'
   | 'cms';
 

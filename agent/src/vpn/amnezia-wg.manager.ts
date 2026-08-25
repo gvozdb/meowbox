@@ -16,6 +16,7 @@
 
 import * as crypto from 'crypto';
 import * as fsp from 'fs/promises';
+import { spawnOwned } from '../process-registry';
 import { CommandExecutor } from '../command-executor';
 import type {
   AmneziaInstallParams,
@@ -111,9 +112,13 @@ export class AmneziaWgManager {
 
   /** awg pubkey принимает priv через stdin. CommandExecutor этого не умеет — fallback через child_process. */
   private async derivePubKey(priv: string): Promise<string> {
-    const { spawn } = await import('child_process');
     return new Promise((resolve, reject) => {
-      const proc = spawn('awg', ['pubkey'], { stdio: ['pipe', 'pipe', 'pipe'] });
+      const proc = spawnOwned(
+        'awg',
+        ['pubkey'],
+        { stdio: ['pipe', 'pipe', 'pipe'] },
+        'amneziawg-pubkey',
+      );
       let out = '';
       let err = '';
       proc.stdout.on('data', (b) => (out += b.toString()));

@@ -1,0 +1,881 @@
+{
+  "schemaVersion": "meowbox.remote-panel-parity.action-overrides/v1",
+  "reviewedJsonReads": {
+    "sourceSetSha256": "eb10106eb687b821dc9158dbfc82e19f524f4a34152f142da4282c5934a4cd30",
+    "evidence": "T-READ-001 exact source-pinned bounded JSON reads; current AUTHENTICATED_ANY behavior is characterized as ADMIN/MANAGER/VIEWER",
+    "actionIds": [
+      "http.get.admin-ip-allowlist",
+      "http.get.admin-migrate-hostpanel",
+      "http.get.admin-migrate-hostpanel-check-domain",
+      "http.get.admin-migrate-hostpanel-check-name",
+      "http.get.admin-migrate-hostpanel-id",
+      "http.get.admin-migrate-hostpanel-id-items-item-id-force-retry-check",
+      "http.get.admin-migrate-hostpanel-id-log",
+      "http.get.admin-migrate-hostpanel-sources",
+      "http.get.ai-sessions",
+      "http.get.ai-sessions-id",
+      "http.get.audit-logs",
+      "http.get.backups-auto-settings",
+      "http.get.backups-history",
+      "http.get.backups-panel-data",
+      "http.get.backups-panel-data-id",
+      "http.get.backups-panel-data-id-backups",
+      "http.get.backups-server-paths",
+      "http.get.backups-server-paths-id",
+      "http.get.backups-server-paths-id-backups",
+      "http.get.backups-site-schedules",
+      "http.get.backups-site-schedules-id",
+      "http.get.country-block-rules",
+      "http.get.country-block-settings",
+      "http.get.country-block-status",
+      "http.get.databases",
+      "http.get.dns-providers",
+      "http.get.dns-sites-site-id",
+      "http.get.dns-sites-site-id-domains-domain-id",
+      "http.get.dns-zones",
+      "http.get.dns-zones-id",
+      "http.get.dns-zones-id-records",
+      "http.get.firewall",
+      "http.get.firewall-presets",
+      "http.get.firewall-status",
+      "http.get.health",
+      "http.get.health-site-id-domains-domain-id-pings",
+      "http.get.health-site-id-pings",
+      "http.get.logs-read",
+      "http.get.logs-sources",
+      "http.get.monitoring-current",
+      "http.get.monitoring-history",
+      "http.get.nginx-configs",
+      "http.get.nginx-configs-domain",
+      "http.get.nginx-global-config",
+      "http.get.nginx-status",
+      "http.get.notifications",
+      "http.get.panel-settings",
+      "http.get.panel-settings-backup-defaults",
+      "http.get.panel-settings-site-defaults",
+      "http.get.php-status",
+      "http.get.php-status-version",
+      "http.get.php-version-extensions",
+      "http.get.php-version-ini",
+      "http.get.php-versions",
+      "http.get.processes",
+      "http.get.processes-name",
+      "http.get.processes-name-logs",
+      "http.get.restic-checks-latest",
+      "http.get.services",
+      "http.get.services-fail2ban-client-status",
+      "http.get.services-fail2ban-presets",
+      "http.get.services-key",
+      "http.get.services-key-config",
+      "http.get.services-key-config-file",
+      "http.get.services-postfix-relay",
+      "http.get.sites",
+      "http.get.sites-id",
+      "http.get.sites-id-domains",
+      "http.get.sites-id-domains-domain-id-nginx-custom",
+      "http.get.sites-id-domains-domain-id-nginx-settings",
+      "http.get.sites-id-metrics",
+      "http.get.sites-id-php-pool-config",
+      "http.get.sites-id-ssh",
+      "http.get.sites-modx-versions",
+      "http.get.sites-site-id-backup-configs",
+      "http.get.sites-site-id-backups",
+      "http.get.sites-site-id-cron-jobs",
+      "http.get.sites-site-id-domains-domain-id-application",
+      "http.get.sites-site-id-domains-domain-id-databases",
+      "http.get.sites-site-id-domains-domain-id-databases-id",
+      "http.get.sites-site-id-domains-domain-id-deploys",
+      "http.get.sites-site-id-domains-domain-id-deploys-id",
+      "http.get.sites-site-id-domains-domain-id-files",
+      "http.get.sites-site-id-domains-domain-id-files-read",
+      "http.get.sites-site-id-domains-domain-id-logs",
+      "http.get.sites-site-id-domains-domain-id-logs-read",
+      "http.get.sites-site-id-domains-domain-id-metrics",
+      "http.get.sites-site-id-domains-domain-id-node-autostart",
+      "http.get.sites-site-id-domains-domain-id-node-commands-discover",
+      "http.get.sites-site-id-domains-domain-id-node-processes",
+      "http.get.sites-site-id-domains-domain-id-node-processes-name-logs",
+      "http.get.sites-site-id-domains-domain-id-node-quick-commands",
+      "http.get.sites-site-id-domains-domain-id-php-pool-config",
+      "http.get.sites-site-id-domains-domain-id-ssl",
+      "http.get.sites-site-id-restic-checks",
+      "http.get.sites-site-id-services",
+      "http.get.sites-site-id-services-key",
+      "http.get.sites-site-id-services-key-logs",
+      "http.get.ssl",
+      "http.get.storage",
+      "http.get.storage-locations",
+      "http.get.storage-server",
+      "http.get.storage-site-id-top-files",
+      "http.get.storage-site-id-trend",
+      "http.get.system-cron",
+      "http.get.system-status",
+      "http.get.system-versions",
+      "http.get.users",
+      "http.get.vpn-install-status",
+      "http.get.vpn-protocols",
+      "http.get.vpn-services",
+      "http.get.vpn-services-id",
+      "http.get.vpn-users",
+      "http.get.vpn-users-id",
+      "http.get.vpn-users-user-id-services-service-id-creds"
+    ]
+  },
+  "reviewedJsonMutations": {
+    "sourceSetSha256": "809ed31e089031e4ccb08a988bb54cc88f44eb685e99fb5400eccc8c725f359b",
+    "evidence": "T-CRUD-001 source-pinned bounded JSON mutations; target federation performs persistent at-most-once admission and remote VIEWER is denied",
+    "actionIds": [
+      "http.delete.admin-ip-allowlist-entries-cidr",
+      "http.delete.admin-migrate-hostpanel-sources-id",
+      "http.delete.ai-sessions-id",
+      "http.delete.backup-configs-id",
+      "http.delete.backups-panel-data-id",
+      "http.delete.backups-server-paths-id",
+      "http.delete.backups-site-schedules-id",
+      "http.delete.country-block-rules-id",
+      "http.delete.cron-jobs-id",
+      "http.delete.dns-providers-id",
+      "http.delete.dns-zones-id-records-rid",
+      "http.delete.firewall-id",
+      "http.delete.notifications-id",
+      "http.delete.sites-site-id-domains-domain-id-files",
+      "http.delete.sites-site-id-domains-domain-id-node-processes-name",
+      "http.delete.storage-locations-id",
+      "http.delete.system-cron-id",
+      "http.delete.users-id",
+      "http.delete.vpn-services-id",
+      "http.delete.vpn-users-id",
+      "http.delete.vpn-users-user-id-services-service-id",
+      "http.patch.admin-migrate-hostpanel-id-items-item-id",
+      "http.patch.ai-sessions-id",
+      "http.patch.backups-panel-data-id",
+      "http.patch.backups-server-paths-id",
+      "http.patch.backups-site-schedules-id",
+      "http.patch.country-block-rules-id",
+      "http.patch.country-block-settings",
+      "http.patch.dns-zones-id-records-rid",
+      "http.patch.storage-locations-id",
+      "http.patch.vpn-users-id",
+      "http.post.admin-ip-allowlist-entries",
+      "http.post.admin-ip-allowlist-reload",
+      "http.post.admin-migrate-hostpanel-discover",
+      "http.post.admin-migrate-hostpanel-id-cancel",
+      "http.post.admin-migrate-hostpanel-id-items-item-id-retry",
+      "http.post.admin-migrate-hostpanel-id-items-item-id-skip",
+      "http.post.admin-migrate-hostpanel-id-pause",
+      "http.post.admin-migrate-hostpanel-id-probe",
+      "http.post.admin-migrate-hostpanel-id-resume",
+      "http.post.admin-migrate-hostpanel-id-start",
+      "http.post.admin-migrate-hostpanel-sources",
+      "http.post.backup-configs",
+      "http.post.backups-auto-settings",
+      "http.post.backups-panel-data",
+      "http.post.backups-server-paths",
+      "http.post.backups-site-schedules",
+      "http.post.country-block-rules",
+      "http.post.cron-jobs",
+      "http.post.cron-jobs-id-toggle",
+      "http.post.dns-sites-site-id-domains-domain-id-relink",
+      "http.post.dns-zones-id-link-site",
+      "http.post.dns-zones-id-records",
+      "http.post.firewall",
+      "http.post.nginx-reload",
+      "http.post.nginx-test",
+      "http.post.notifications",
+      "http.post.notifications-id-test",
+      "http.post.php-restart-version",
+      "http.post.php-version-extensions-toggle",
+      "http.post.php-version-ini",
+      "http.post.processes-name-reload",
+      "http.post.processes-name-restart",
+      "http.post.processes-name-stop",
+      "http.post.services-fail2ban-presets",
+      "http.post.services-key-config-file",
+      "http.post.services-postfix-relay",
+      "http.post.services-postfix-test-email",
+      "http.post.sites-id-nginx-reload",
+      "http.post.sites-id-nginx-test",
+      "http.post.sites-id-restart",
+      "http.post.sites-id-ssh-password",
+      "http.post.sites-id-start",
+      "http.post.sites-id-stop",
+      "http.post.sites-site-id-domains-domain-id-databases-id-reveal-password",
+      "http.post.sites-site-id-domains-domain-id-files-create",
+      "http.post.sites-site-id-domains-domain-id-files-rename",
+      "http.post.sites-site-id-domains-domain-id-node-ecosystem-start",
+      "http.post.sites-site-id-domains-domain-id-node-processes-name-reload",
+      "http.post.sites-site-id-domains-domain-id-node-processes-name-restart",
+      "http.post.sites-site-id-domains-domain-id-node-processes-name-stop",
+      "http.post.sites-site-id-domains-domain-id-ssl-custom",
+      "http.post.sites-site-id-domains-domain-id-ssl-import",
+      "http.post.storage-locations",
+      "http.post.system-cron",
+      "http.post.system-cron-id-toggle",
+      "http.post.users",
+      "http.post.vpn-services",
+      "http.post.vpn-services-id-rotate-keys",
+      "http.post.vpn-services-id-rotate-sni",
+      "http.post.vpn-services-id-start",
+      "http.post.vpn-services-id-stop",
+      "http.post.vpn-users",
+      "http.post.vpn-users-id-regenerate-sub-token",
+      "http.post.vpn-users-id-services",
+      "http.post.vpn-validate-sni",
+      "http.put.admin-ip-allowlist",
+      "http.put.cron-jobs-id",
+      "http.put.firewall-id",
+      "http.put.nginx-global-config",
+      "http.put.panel-settings",
+      "http.put.panel-settings-backup-defaults",
+      "http.put.panel-settings-site-defaults",
+      "http.put.sites-id",
+      "http.put.sites-site-id-domains-domain-id-databases-id",
+      "http.put.sites-site-id-domains-domain-id-files-write",
+      "http.put.sites-site-id-domains-domain-id-node-autostart",
+      "http.put.sites-site-id-domains-domain-id-node-quick-commands",
+      "http.put.system-cron-id",
+      "http.put.users-id"
+    ]
+  },
+  "actions": {
+    "http.get.federation-v1-trust-keys": {
+      "sourceKey": "http|api/src/federation/federation-trust-target.controller.ts|FederationTrustTargetController|keys|GET|/api/federation/v1/trust/keys",
+      "remoteActivation": "ALLOW",
+      "evidence": "T-KEY-001 ADMIN-only signed key status for response-loss reconciliation"
+    },
+    "http.post.federation-v1-trust-keys": {
+      "sourceKey": "http|api/src/federation/federation-trust-target.controller.ts|FederationTrustTargetController|rotate|POST|/api/federation/v1/trust/keys",
+      "remoteActivation": "ALLOW",
+      "evidence": "T-KEY-001 Ed25519 rotation signed by the previous active relationship key with bounded dual-key grace"
+    },
+    "http.post.federation-v1-trust-revoke": {
+      "sourceKey": "http|api/src/federation/federation-trust-target.controller.ts|FederationTrustTargetController|revoke|POST|/api/federation/v1/trust/revoke",
+      "remoteActivation": "ALLOW",
+      "evidence": "T-KEY-002 no-grace issuer and relationship-key revocation with local kill-switch fallback"
+    },
+    "http.get.federation-v1-target-update-manifest": {
+      "sourceKey": "http|api/src/panel-update/federated-target-update.controller.ts|FederatedTargetUpdateController|manifest|GET|/api/federation/v1/target-update/manifest",
+      "remoteActivation": "ALLOW",
+      "evidence": "T-LEG-002 signed post-update manifest verification before fleet success"
+    },
+    "http.get.federation-v1-target-update-status": {
+      "sourceKey": "http|api/src/panel-update/federated-target-update.controller.ts|FederatedTargetUpdateController|status|GET|/api/federation/v1/target-update/status",
+      "remoteActivation": "ALLOW",
+      "evidence": "T-LEG-002 bounded target-owned async update status"
+    },
+    "http.post.federation-v1-target-update": {
+      "sourceKey": "http|api/src/panel-update/federated-target-update.controller.ts|FederatedTargetUpdateController|trigger|POST|/api/federation/v1/target-update",
+      "remoteActivation": "ALLOW",
+      "evidence": "T-LEG-002 ADMIN-only signed target update with transport idempotency and no legacy fallback"
+    },
+    "http.get.dashboard-overview": {
+      "sourceKey": "http|api/src/dashboard/dashboard.controller.ts|DashboardController|getOverview|GET|/api/dashboard/overview",
+      "remoteActivation": "ALLOW",
+      "evidence": "SP1 dashboard overview contract; ADMIN/MANAGER API and proxy tests"
+    },
+    "http.get.dashboard-summary": {
+      "sourceKey": "http|api/src/dashboard/dashboard.controller.ts|DashboardController|getSummary|GET|/api/dashboard/summary",
+      "remoteActivation": "ALLOW",
+      "evidence": "SP1 exact-404 legacy fallback; ADMIN-only read"
+    },
+    "http.post.dns-providers": {
+      "sourceKey": "http|api/src/dns/dns.controller.ts|DnsController|createProvider|POST|/api/dns/providers",
+      "remoteActivation": "ALLOW",
+      "evidence": "T-OPS-004 encrypted durable DNS provider enrollment; deterministic provider identity and reconcile-only recovery"
+    },
+    "http.post.dns-providers-id-test": {
+      "sourceKey": "http|api/src/dns/dns.controller.ts|DnsController|testProvider|POST|/api/dns/providers/:id/test",
+      "remoteActivation": "ALLOW",
+      "evidence": "T-OPS-004 durable provider credential test with provider-scoped lock and bounded result"
+    },
+    "http.post.dns-providers-id-sync": {
+      "sourceKey": "http|api/src/dns/dns.controller.ts|DnsController|syncProvider|POST|/api/dns/providers/:id/sync",
+      "remoteActivation": "ALLOW",
+      "evidence": "T-OPS-004/006 durable full DNS sync with provider-scoped lock and no blind recovery retry"
+    },
+    "http.post.dns-zones-id-refresh": {
+      "sourceKey": "http|api/src/dns/dns.controller.ts|DnsController|refreshRecords|POST|/api/dns/zones/:id/refresh",
+      "remoteActivation": "ALLOW",
+      "evidence": "T-OPS-004/006 durable DNS zone refresh serialized with provider mutations"
+    },
+    "http.post.dns-zones-id-templates": {
+      "sourceKey": "http|api/src/dns/dns.controller.ts|DnsController|applyTemplate|POST|/api/dns/zones/:id/templates",
+      "remoteActivation": "ALLOW",
+      "evidence": "T-OPS-004/006 durable mail-template application with frozen validated input and reconcile-only recovery"
+    },
+    "http.post.firewall-presets-name-apply": {
+      "sourceKey": "http|api/src/firewall/firewall.controller.ts|FirewallController|applyPreset|POST|/api/firewall/presets/:name/apply",
+      "remoteActivation": "ALLOW",
+      "evidence": "T-OPS-004/006 durable firewall preset application with exclusive runtime lock and no blind recovery retry"
+    },
+    "http.post.firewall-sync": {
+      "sourceKey": "http|api/src/firewall/firewall.controller.ts|FirewallController|syncRules|POST|/api/firewall/sync",
+      "remoteActivation": "ALLOW",
+      "evidence": "T-OPS-004/006 durable bounded firewall snapshot sync with exclusive runtime lock and no blind recovery retry"
+    },
+    "http.post.operations-id-sensitive-result": {
+      "sourceKey": "http|api/src/operations/operations.controller.ts|OperationsController|consumeSensitiveResult|POST|/api/operations/:id/sensitive-result",
+      "remoteActivation": "ALLOW",
+      "evidence": "T-OPS-007 owner-bound atomic one-time consume of encrypted operation output; ciphertext and plaintext are excluded from status/audit"
+    },
+    "http.post.backups-id-download-session": {
+      "sourceKey": "http|api/src/backups/backups.controller.ts|BackupsController|createBackupDownloadSession|POST|/api/backups/:id/download-session",
+      "remoteActivation": "ALLOW",
+      "evidence": "T-XFER direct actor-bound backup stream with no browser Blob, no master buffering, and idle timeout"
+    },
+    "http.post.sites-site-id-domains-domain-id-databases": {
+      "sourceKey": "http|api/src/databases/databases.controller.ts|DatabasesController|create|POST|/api/sites/:siteId/domains/:domainId/databases",
+      "remoteActivation": "ALLOW",
+      "evidence": "T-OPS-004/006 durable deterministic database create AgentJob with encrypted credentials, metadata commit, rollback and reconciliation"
+    },
+    "http.post.sites-site-id-domains-domain-id-databases-id-reset-password": {
+      "sourceKey": "http|api/src/databases/databases.controller.ts|DatabasesController|resetPassword|POST|/api/sites/:siteId/domains/:domainId/databases/:id/reset-password",
+      "remoteActivation": "ALLOW",
+      "evidence": "T-OPS-004/006 durable database password reset AgentJob with encrypted input, confirmed metadata commit and one-time result"
+    },
+    "http.post.sites-site-id-domains-domain-id-files-download-session": {
+      "sourceKey": "http|api/src/files/files.controller.ts|FilesController|createDownloadSession|POST|/api/sites/:siteId/domains/:domainId/files/download-session",
+      "remoteActivation": "ALLOW",
+      "evidence": "T-XFER direct actor/domain/path-bound generated stream with encrypted resource payload and idle timeout"
+    },
+    "http.post.sites-site-id-domains-domain-id-files-upload-session": {
+      "sourceKey": "http|api/src/files/files.controller.ts|FilesController|createUploadSession|POST|/api/sites/:siteId/domains/:domainId/files/upload-session",
+      "remoteActivation": "ALLOW",
+      "evidence": "T-XFER direct staged upload with exact length, target binding, disk admission, and hash-only browser contract"
+    },
+    "http.post.sites-site-id-domains-domain-id-files-upload-commit": {
+      "sourceKey": "http|api/src/files/files.controller.ts|FilesController|commitUpload|POST|/api/sites/:siteId/domains/:domainId/files/upload-commit",
+      "remoteActivation": "ALLOW",
+      "evidence": "T-OPS/T-XFER durable atomic upload commit with checksum postcondition, path lock, ownership reconciliation, and no blind retry"
+    },
+    "http.get.system-metrics": {
+      "sourceKey": "http|api/src/system/system.controller.ts|SystemController|getMetrics|GET|/api/system/metrics",
+      "remoteActivation": "ALLOW",
+      "evidence": "SP1 legacy dashboard metrics fallback; ADMIN-only read"
+    },
+    "http.post.country-block-sync": {
+      "sourceKey": "http|api/src/country-block/country-block.controller.ts|CountryBlockController|sync|POST|/api/country-block/sync",
+      "remoteActivation": "ALLOW",
+      "evidence": "T-OPS-004 durable country-block apply AgentJob with explicit idempotency and exclusive runtime lock"
+    },
+    "http.post.country-block-refresh-db": {
+      "sourceKey": "http|api/src/country-block/country-block.controller.ts|CountryBlockController|refreshDb|POST|/api/country-block/refresh-db",
+      "remoteActivation": "ALLOW",
+      "evidence": "T-OPS-004 durable country database refresh and reapply AgentJobs with explicit idempotency"
+    },
+    "http.post.storage-locations-id-test": {
+      "sourceKey": "http|api/src/storage-locations/storage-locations.controller.ts|StorageLocationsController|test|POST|/api/storage-locations/:id/test",
+      "remoteActivation": "ALLOW",
+      "evidence": "T-OPS-004 durable Restic storage test keeps credentials out of operation and AgentJob metadata"
+    },
+    "http.post.storage-site-id-top-files-scan": {
+      "sourceKey": "http|api/src/storage/storage.controller.ts|StorageController|scanTopFiles|POST|/api/storage/:siteId/top-files/scan",
+      "remoteActivation": "ALLOW",
+      "evidence": "T-OPS-004 owner-scoped top-files scan with bounded durable result and explicit idempotency"
+    },
+    "http.post.sites-site-id-domains-domain-id-node-quick-commands-id-run": {
+      "sourceKey": "http|api/src/site-node/site-node.controller.ts|SiteNodeController|runQuickCommand|POST|/api/sites/:siteId/domains/:domainId/node/quick-commands/:id/run",
+      "remoteActivation": "ALLOW",
+      "evidence": "T-OPS-004/006 durable quick-command AgentJob with frozen input, site lock, idempotency, redaction, and bounded result"
+    },
+    "http.post.sites-site-id-domains-domain-id-modx-update": {
+      "sourceKey": "http|api/src/sites/domain-applications.controller.ts|DomainApplicationsController|updateModx|POST|/api/sites/:siteId/domains/:domainId/modx/update",
+      "remoteActivation": "ALLOW",
+      "evidence": "T-OPS-004/005 durable MODX update with snapshot, deterministic AgentJobs, health confirmation, and verified rollback"
+    },
+    "http.post.vpn-install-protocol": {
+      "sourceKey": "http|api/src/vpn/vpn.controller.ts|VpnController|installRuntime|POST|/api/vpn/install/:protocol",
+      "remoteActivation": "ALLOW",
+      "evidence": "T-OPS-004 durable VPN runtime install AgentJob with protocol lock, idempotency, and bounded result"
+    },
+    "http.delete.vpn-install-protocol": {
+      "sourceKey": "http|api/src/vpn/vpn.controller.ts|VpnController|uninstallRuntime|DELETE|/api/vpn/install/:protocol",
+      "remoteActivation": "ALLOW",
+      "evidence": "T-OPS-004 durable VPN runtime uninstall AgentJob with service-reference recheck and protocol lock"
+    },
+    "http.post.backups-id-tree-query": {
+      "sourceKey": "http|api/src/backups/backups.controller.ts|BackupsController|enqueueBackupTree|POST|/api/backups/:id/tree/query",
+      "remoteActivation": "ALLOW",
+      "evidence": "T-OPS-004 owner-scoped Restic tree query through bounded durable AgentJob"
+    },
+    "http.post.sites-site-id-restic-snapshots-query": {
+      "sourceKey": "http|api/src/backups/backups.controller.ts|BackupsController|enqueueResticSnapshots|POST|/api/sites/:siteId/restic-snapshots/query",
+      "remoteActivation": "ALLOW",
+      "evidence": "T-OPS-004 durable Restic snapshot catalogue with result budget and no persisted repository credentials"
+    },
+    "http.post.sites-site-id-restic-snapshots-snapshot-id-tree-query": {
+      "sourceKey": "http|api/src/backups/backups.controller.ts|BackupsController|enqueueSnapshotTree|POST|/api/sites/:siteId/restic-snapshots/:snapshotId/tree/query",
+      "remoteActivation": "ALLOW",
+      "evidence": "T-OPS-004 durable arbitrary snapshot tree query with validated snapshot and storage scope"
+    },
+    "http.post.sites-site-id-restic-diff-snapshots": {
+      "sourceKey": "http|api/src/backups/backups.controller.ts|BackupsController|diffResticSnapshots|POST|/api/sites/:siteId/restic-diff/snapshots",
+      "remoteActivation": "ALLOW",
+      "evidence": "T-OPS-004 durable retry-safe Restic snapshot diff with bounded result"
+    },
+    "http.post.sites-site-id-restic-diff-live": {
+      "sourceKey": "http|api/src/backups/backups.controller.ts|BackupsController|diffResticLive|POST|/api/sites/:siteId/restic-diff/live",
+      "remoteActivation": "ALLOW",
+      "evidence": "T-OPS-004 durable retry-safe Restic live diff beyond the legacy 600-second request boundary"
+    },
+    "http.post.sites-site-id-restic-diff-file": {
+      "sourceKey": "http|api/src/backups/backups.controller.ts|BackupsController|diffResticFile|POST|/api/sites/:siteId/restic-diff/file",
+      "remoteActivation": "ALLOW",
+      "evidence": "T-OPS-004 owner- and root-scoped durable Restic file diff"
+    },
+    "http.post.sites-site-id-restic-diff-file-live": {
+      "sourceKey": "http|api/src/backups/backups.controller.ts|BackupsController|diffResticFileLive|POST|/api/sites/:siteId/restic-diff/file-live",
+      "remoteActivation": "ALLOW",
+      "evidence": "T-OPS-004 owner- and root-scoped durable Restic live file diff"
+    },
+    "http.delete.sites-site-id-domains-domain-id-databases-id": {
+      "sourceKey": "http|api/src/databases/databases.controller.ts|DatabasesController|delete|DELETE|/api/sites/:siteId/domains/:domainId/databases/:id",
+      "remoteActivation": "ALLOW",
+      "evidence": "T-OPS-004/005/006 durable database snapshot/drop with idempotency, confirmed rollback, and retained lock on ambiguous physical state"
+    },
+    "http.post.admin-migrate-hostpanel-id-items-item-id-force-retry": {
+      "sourceKey": "http|api/src/migration-hostpanel/migration-hostpanel.controller.ts|MigrationHostpanelController|forceRetry|POST|/api/admin/migrate-hostpanel/:id/items/:itemId/force-retry",
+      "remoteActivation": "ALLOW",
+      "evidence": "T-OPS-004 ADMIN-only durable hostpanel cleanup AgentJob with replay-safe postcondition before ordinary retry"
+    },
+    "http.post.sites-site-id-domains-domain-id-modx-doctor-scan": {
+      "sourceKey": "http|api/src/sites/domain-applications.controller.ts|DomainApplicationsController|scanModxDoctor|POST|/api/sites/:siteId/domains/:domainId/modx/doctor/scan",
+      "remoteActivation": "ALLOW",
+      "evidence": "T-OPS-004 bounded MODX doctor AgentJob and validated durable diagnostics"
+    },
+    "http.post.sites-site-id-domains-domain-id-modx-cleanup-setup": {
+      "sourceKey": "http|api/src/sites/domain-applications.controller.ts|DomainApplicationsController|cleanupSetup|POST|/api/sites/:siteId/domains/:domainId/modx/cleanup-setup",
+      "remoteActivation": "ALLOW",
+      "evidence": "T-OPS-004 durable MODX setup cleanup with explicit idempotency and domain lock"
+    },
+    "http.post.sites-site-id-domains-domain-id-permissions-normalize": {
+      "sourceKey": "http|api/src/sites/domain-applications.controller.ts|DomainApplicationsController|normalizePermissions|POST|/api/sites/:siteId/domains/:domainId/permissions/normalize",
+      "remoteActivation": "ALLOW",
+      "evidence": "T-OPS-004 durable permission normalization with bounded summary, idempotency, and domain lock"
+    },
+    "http.get.panel-access": {
+      "sourceKey": "http|api/src/panel-access/panel-access.controller.ts|PanelAccessController|getStatus|GET|/api/panel-access",
+      "remoteActivation": "ALLOW",
+      "evidence": "T-PA target Panel Access state read through delegated ADMIN action"
+    },
+    "http.put.panel-access-behavior": {
+      "sourceKey": "http|api/src/panel-access/panel-access.controller.ts|PanelAccessController|updateBehavior|PUT|/api/panel-access/behavior",
+      "remoteActivation": "ALLOW",
+      "evidence": "T-PA idempotent target-local redirect and IP behavior update"
+    },
+    "http.post.panel-access-federation-cutovers": {
+      "sourceKey": "http|api/src/panel-access/panel-access.controller.ts|PanelAccessController|startFederationCutover|POST|/api/panel-access/federation-cutovers",
+      "remoteActivation": "ALLOW",
+      "evidence": "T-PA durable target candidate stage operation with exclusive cutover lock"
+    },
+    "http.get.panel-access-federation-cutovers-cutover-id": {
+      "sourceKey": "http|api/src/panel-access/panel-access.controller.ts|PanelAccessController|getFederationCutover|GET|/api/panel-access/federation-cutovers/:cutoverId",
+      "remoteActivation": "ALLOW",
+      "evidence": "T-PA target cutover reconciliation state read"
+    },
+    "http.post.panel-access-federation-cutovers-cutover-id-finalize": {
+      "sourceKey": "http|api/src/panel-access/panel-access.controller.ts|PanelAccessController|finalizeFederationCutover|POST|/api/panel-access/federation-cutovers/:cutoverId/finalize",
+      "remoteActivation": "ALLOW",
+      "evidence": "T-PA idempotent target endpoint finalize after registry activation"
+    },
+    "http.post.panel-access-federation-cutovers-cutover-id-rollback": {
+      "sourceKey": "http|api/src/panel-access/panel-access.controller.ts|PanelAccessController|rollbackFederationCutover|POST|/api/panel-access/federation-cutovers/:cutoverId/rollback",
+      "remoteActivation": "ALLOW",
+      "evidence": "T-PA idempotent target endpoint rollback before deadline or by operator"
+    },
+    "http.get.operations": {
+      "sourceKey": "http|api/src/operations/operations.controller.ts|OperationsController|list|GET|/api/operations",
+      "remoteActivation": "ALLOW",
+      "evidence": "T-OPS scoped paginated target operation inventory"
+    },
+    "http.get.operations-id": {
+      "sourceKey": "http|api/src/operations/operations.controller.ts|OperationsController|get|GET|/api/operations/:id",
+      "remoteActivation": "ALLOW",
+      "evidence": "T-OPS owner-scoped durable target operation reconciliation"
+    },
+    "http.post.operations-id-cancel": {
+      "sourceKey": "http|api/src/operations/operations.controller.ts|OperationsController|cancel|POST|/api/operations/:id/cancel",
+      "remoteActivation": "ALLOW",
+      "evidence": "T-OPS idempotent owner-scoped cancellation request"
+    },
+    "http.post.php-version-extensions-install": {
+      "sourceKey": "http|api/src/php/php.controller.ts|PhpController|installExtension|POST|/api/php/:version/extensions/install",
+      "remoteActivation": "ALLOW",
+      "evidence": "T-OPS-004/006 durable PHP extension AgentJob with explicit idempotency and reconciliation"
+    },
+    "http.post.php-install": {
+      "sourceKey": "http|api/src/php/php.controller.ts|PhpController|installVersion|POST|/api/php/install",
+      "remoteActivation": "ALLOW",
+      "evidence": "T-OPS-004/006 durable PHP install AgentJob with explicit idempotency and apt lock"
+    },
+    "http.delete.php-uninstall-version": {
+      "sourceKey": "http|api/src/php/php.controller.ts|PhpController|uninstallVersion|DELETE|/api/php/uninstall/:version",
+      "remoteActivation": "ALLOW",
+      "evidence": "T-OPS-004/006 durable PHP uninstall AgentJob with explicit idempotency and apt lock"
+    },
+    "http.delete.sites-site-id-services-key": {
+      "sourceKey": "http|api/src/services/services.controller.ts|ServicesController|disable|DELETE|/api/sites/:siteId/services/:key",
+      "remoteActivation": "ALLOW",
+      "evidence": "T-OPS-004/006 durable target service disable with retained lock on ambiguous outcome"
+    },
+    "http.post.sites-site-id-services-key-enable": {
+      "sourceKey": "http|api/src/services/services.controller.ts|ServicesController|enable|POST|/api/sites/:siteId/services/:key/enable",
+      "remoteActivation": "ALLOW",
+      "evidence": "T-OPS-004/006 durable target service enable with explicit idempotency"
+    },
+    "http.post.services-key-install": {
+      "sourceKey": "http|api/src/services/services.controller.ts|ServicesController|install|POST|/api/services/:key/install",
+      "remoteActivation": "ALLOW",
+      "evidence": "T-OPS-004/006 durable global service install AgentJob with explicit idempotency"
+    },
+    "http.patch.sites-site-id-services-key": {
+      "sourceKey": "http|api/src/services/services.controller.ts|ServicesController|reconfigure|PATCH|/api/sites/:siteId/services/:key",
+      "remoteActivation": "ALLOW",
+      "evidence": "T-OPS-004/006 durable target service reconfiguration with validated input and idempotency"
+    },
+    "http.post.services-key-restart": {
+      "sourceKey": "http|api/src/services/services.controller.ts|ServicesController|restart|POST|/api/services/:key/restart",
+      "remoteActivation": "ALLOW",
+      "evidence": "T-OPS-004/006 durable global service restart with explicit idempotency"
+    },
+    "http.post.sites-site-id-services-key-start": {
+      "sourceKey": "http|api/src/services/services.controller.ts|ServicesController|start|POST|/api/sites/:siteId/services/:key/start",
+      "remoteActivation": "ALLOW",
+      "evidence": "T-OPS-004/006 durable target service start with explicit idempotency"
+    },
+    "http.post.sites-site-id-services-key-stop": {
+      "sourceKey": "http|api/src/services/services.controller.ts|ServicesController|stop|POST|/api/sites/:siteId/services/:key/stop",
+      "remoteActivation": "ALLOW",
+      "evidence": "T-OPS-004/006 durable target service stop with retained lock on ambiguous outcome"
+    },
+    "http.delete.services-key": {
+      "sourceKey": "http|api/src/services/services.controller.ts|ServicesController|uninstall|DELETE|/api/services/:key",
+      "remoteActivation": "ALLOW",
+      "evidence": "T-OPS-004/006 durable global service uninstall AgentJob with explicit idempotency"
+    },
+    "http.post.sites-site-id-domains-domain-id-ssl-issue": {
+      "sourceKey": "http|api/src/ssl/ssl.controller.ts|SslController|issueCertificate|POST|/api/sites/:siteId/domains/:domainId/ssl/issue",
+      "remoteActivation": "ALLOW",
+      "evidence": "T-OPS-004/006 durable SSL issuance with validated AgentJob result and idempotency"
+    },
+    "http.post.sites-site-id-domains-domain-id-ssl-revoke": {
+      "sourceKey": "http|api/src/ssl/ssl.controller.ts|SslController|revokeCertificate|POST|/api/sites/:siteId/domains/:domainId/ssl/revoke",
+      "remoteActivation": "ALLOW",
+      "evidence": "T-OPS-004/006 durable SSL revoke separating local removal from unconfirmed ACME revoke"
+    },
+    "http.post.system-updates-check": {
+      "sourceKey": "http|api/src/system/system.controller.ts|SystemController|checkUpdates|POST|/api/system/updates/check",
+      "remoteActivation": "ALLOW",
+      "evidence": "T-OPS-004/006 durable update check AgentJob under one apt lock"
+    },
+    "http.post.system-updates-install": {
+      "sourceKey": "http|api/src/system/system.controller.ts|SystemController|installUpdates|POST|/api/system/updates/install",
+      "remoteActivation": "ALLOW",
+      "evidence": "T-OPS-004/006 durable package install with no unsafe automatic retry"
+    },
+    "http.post.system-updates-upgrade-all": {
+      "sourceKey": "http|api/src/system/system.controller.ts|SystemController|upgradeAll|POST|/api/system/updates/upgrade-all",
+      "remoteActivation": "ALLOW",
+      "evidence": "T-OPS-004/006 durable full upgrade with no unsafe automatic retry"
+    },
+    "http.post.sites-site-id-domains-domain-id-databases-id-adminer-ticket": {
+      "sourceKey": "http|api/src/databases/databases.controller.ts|DatabasesController|createAdminerTicket|POST|/api/sites/:siteId/domains/:domainId/databases/:id/adminer-ticket",
+      "remoteActivation": "ALLOW",
+      "evidence": "T-ADM direct target one-time handoff with typed AppHandoff response"
+    },
+    "http.post.sites-site-id-domains-domain-id-databases-id-export": {
+      "sourceKey": "http|api/src/databases/databases.controller.ts|DatabasesController|exportDatabase|POST|/api/sites/:siteId/domains/:domainId/databases/:id/export",
+      "remoteActivation": "ALLOW",
+      "evidence": "T-OPS/T-XFER durable database export stages one immutable checksummed artifact"
+    },
+    "http.post.sites-site-id-domains-domain-id-databases-id-exports-operation-id-delivery": {
+      "sourceKey": "http|api/src/databases/databases.controller.ts|DatabasesController|issueExportDelivery|POST|/api/sites/:siteId/domains/:domainId/databases/:id/exports/:operationId/delivery",
+      "remoteActivation": "ALLOW",
+      "evidence": "T-XFER actor/database/operation-bound staged Range delivery"
+    },
+    "http.post.sites-site-id-domains-domain-id-databases-id-import-session": {
+      "sourceKey": "http|api/src/databases/databases.controller.ts|DatabasesController|createImportSession|POST|/api/sites/:siteId/domains/:domainId/databases/:id/import-session",
+      "remoteActivation": "ALLOW",
+      "evidence": "T-XFER hash-only one-shot direct upload session with exact length and resource binding"
+    },
+    "http.post.sites-site-id-domains-domain-id-databases-id-import": {
+      "sourceKey": "http|api/src/databases/databases.controller.ts|DatabasesController|importDatabase|POST|/api/sites/:siteId/domains/:domainId/databases/:id/import",
+      "remoteActivation": "ALLOW",
+      "evidence": "T-OPS/T-XFER durable import with snapshot rollback and unknown-outcome reconciliation"
+    },
+    "http.post.sites-site-id-services-manticore-adminer-ticket": {
+      "sourceKey": "http|api/src/services/services.controller.ts|ServicesController|manticoreAdminerTicket|POST|/api/sites/:siteId/services/manticore/adminer-ticket",
+      "remoteActivation": "ALLOW",
+      "evidence": "T-ADM direct target Manticore handoff with target-origin cookie"
+    },
+    "http.post.sites-site-id-domains-domain-id-modx-admin-login": {
+      "sourceKey": "http|api/src/sites/domain-applications.controller.ts|DomainApplicationsController|createAdminLogin|POST|/api/sites/:siteId/domains/:domainId/modx/admin-login",
+      "remoteActivation": "ALLOW",
+      "evidence": "T-MODX direct target one-time fragment handoff; master-origin document.write removed"
+    },
+    "http.post.backup-exports": {
+      "sourceKey": "http|api/src/backups/backup-exports.controller.ts|BackupExportsController|createExport|POST|/api/backup-exports",
+      "remoteActivation": "ALLOW",
+      "evidence": "T-XFER typed backup export creation with declared idempotency"
+    },
+    "http.post.backup-exports-staged": {
+      "sourceKey": "http|api/src/backups/backup-exports.controller.ts|BackupExportsController|createStagedExport|POST|/api/backup-exports/staged",
+      "remoteActivation": "ALLOW",
+      "evidence": "T-OPS/T-XFER durable staged Restic artifact with checksum and Range delivery"
+    },
+    "http.get.backup-exports-id": {
+      "sourceKey": "http|api/src/backups/backup-exports.controller.ts|BackupExportsController|getExport|GET|/api/backup-exports/:id",
+      "remoteActivation": "ALLOW",
+      "evidence": "T-XFER owner-scoped export status without delivery secret"
+    },
+    "http.get.backups-backup-id-exports": {
+      "sourceKey": "http|api/src/backups/backup-exports.controller.ts|BackupExportsController|listExports|GET|/api/backups/:backupId/exports",
+      "remoteActivation": "ALLOW",
+      "evidence": "T-XFER bounded owner-scoped export inventory without delivery secret"
+    },
+    "http.delete.backup-exports-id": {
+      "sourceKey": "http|api/src/backups/backup-exports.controller.ts|BackupExportsController|deleteExport|DELETE|/api/backup-exports/:id",
+      "remoteActivation": "ALLOW",
+      "evidence": "T-XFER idempotent owner-scoped artifact cleanup"
+    },
+    "http.post.backup-exports-id-delivery": {
+      "sourceKey": "http|api/src/backups/backup-exports.controller.ts|BackupExportsController|issueDelivery|POST|/api/backup-exports/:id/delivery",
+      "remoteActivation": "ALLOW",
+      "evidence": "T-XFER direct TransferSession or ExternalProvider delivery contract"
+    },
+    "http.get.federation-v1-vpn-fragments-vpn-user-id": {
+      "sourceKey": "http|api/src/vpn/federated-vpn-fragment.controller.ts|FederatedVpnFragmentController|getFragment|GET|/api/federation/v1/vpn/fragments/:vpnUserId",
+      "remoteActivation": "ALLOW",
+      "evidence": "T-VPN SERVICE-only target fragment with Ed25519 signature and bounded expiry"
+    },
+    "http.post.federation-v1-webhooks-deliveries-delivery-id": {
+      "sourceKey": "http|api/src/webhooks/webhook-target-delivery.controller.ts|WebhookTargetDeliveryController|deliver|POST|/api/federation/v1/webhooks/deliveries/:deliveryId",
+      "remoteActivation": "ALLOW",
+      "evidence": "T-WEB SERVICE-only durable target delivery with exact-byte binding and delivery receipt dedupe"
+    },
+    "http.post.backups-trigger": {
+      "sourceKey": "http|api/src/backups/backups.controller.ts|BackupsController|triggerBackup|POST|/api/backups/trigger",
+      "remoteActivation": "ALLOW",
+      "evidence": "SP3/T-OPS existing target Backup rows retain canonical asynchronous status; federation admission prevents duplicate launch"
+    },
+    "http.post.backups-id-restore": {
+      "sourceKey": "http|api/src/backups/backups.controller.ts|BackupsController|restoreBackup|POST|/api/backups/:id/restore",
+      "remoteActivation": "ALLOW",
+      "evidence": "T-OPS durable BACKUP_RESTORE operation with exact idempotency, lock, progress, and completion reconciliation"
+    },
+    "http.delete.backups-id": {
+      "sourceKey": "http|api/src/backups/backups.controller.ts|BackupsController|deleteBackup|DELETE|/api/backups/:id",
+      "remoteActivation": "ALLOW",
+      "evidence": "T-OPS durable BACKUP_DELETE worker with ownership, lock, cancellation boundary, and recovery postcondition"
+    },
+    "http.post.sites-site-id-restic-snapshots-snapshot-id-restore": {
+      "sourceKey": "http|api/src/backups/backups.controller.ts|BackupsController|restoreFromResticSnapshot|POST|/api/sites/:siteId/restic-snapshots/:snapshotId/restore",
+      "remoteActivation": "ALLOW",
+      "evidence": "T-OPS durable Restic restore through canonical target Backup and Operation state"
+    },
+    "http.post.sites-site-id-restic-checks": {
+      "sourceKey": "http|api/src/backups/backups.controller.ts|BackupsController|runResticCheck|POST|/api/sites/:siteId/restic-checks",
+      "remoteActivation": "ALLOW",
+      "evidence": "SP3 target ResticCheck row is canonical asynchronous status; federation admission prevents duplicate launch"
+    },
+    "http.post.backups-panel-data-id-run": {
+      "sourceKey": "http|api/src/backups/panel-data-backup.controller.ts|PanelDataBackupController|triggerBackup|POST|/api/backups/panel-data/:id/run",
+      "remoteActivation": "ALLOW",
+      "evidence": "SP3 target PanelDataBackup rows preserve asynchronous status and progress"
+    },
+    "http.post.backups-server-paths-id-run": {
+      "sourceKey": "http|api/src/backups/server-path-backup.controller.ts|ServerPathBackupController|triggerBackup|POST|/api/backups/server-paths/:id/run",
+      "remoteActivation": "ALLOW",
+      "evidence": "SP3 target ServerPathBackup rows preserve asynchronous status and progress"
+    },
+    "http.post.backups-site-schedules-id-run": {
+      "sourceKey": "http|api/src/backups/site-backup-schedule.controller.ts|SiteBackupScheduleController|triggerBackup|POST|/api/backups/site-schedules/:id/run",
+      "remoteActivation": "ALLOW",
+      "evidence": "SP3 scheduled launch creates canonical target Backup rows and does not duplicate a second remote job model"
+    },
+    "http.post.sites-site-id-domains-domain-id-deploy": {
+      "sourceKey": "http|api/src/deploy/deploy.controller.ts|DeployController|triggerDeploy|POST|/api/sites/:siteId/domains/:domainId/deploy",
+      "remoteActivation": "ALLOW",
+      "evidence": "T-OPS durable DOMAIN_DEPLOY operation linked to target DeployLog and agent completion"
+    },
+    "http.post.sites-site-id-domains-domain-id-deploys-id-rollback": {
+      "sourceKey": "http|api/src/deploy/deploy.controller.ts|DeployController|rollbackDeploy|POST|/api/sites/:siteId/domains/:domainId/deploys/:id/rollback",
+      "remoteActivation": "ALLOW",
+      "evidence": "T-OPS durable DOMAIN_DEPLOY_ROLLBACK operation with target lock and exact commit binding"
+    },
+    "http.post.sites-site-id-domains-domain-id-application-retry": {
+      "sourceKey": "http|api/src/sites/domain-applications.controller.ts|DomainApplicationsController|retryApplication|POST|/api/sites/:siteId/domains/:domainId/application/retry",
+      "remoteActivation": "ALLOW",
+      "evidence": "T-OPS durable DOMAIN_APPLICATION_RETRY operation and target-side completion state"
+    },
+    "http.put.sites-site-id-domains-domain-id-php-pool-config": {
+      "sourceKey": "http|api/src/sites/domain-applications.controller.ts|DomainApplicationsController|updatePhpPoolConfig|PUT|/api/sites/:siteId/domains/:domainId/php-pool-config",
+      "remoteActivation": "ALLOW",
+      "evidence": "T-OPS target Operation guards runtime apply, metadata commit, and rollback"
+    },
+    "http.post.sites-site-id-domains-domain-id-modx-admin-password": {
+      "sourceKey": "http|api/src/sites/domain-applications.controller.ts|DomainApplicationsController|changeAdminPassword|POST|/api/sites/:siteId/domains/:domainId/modx/admin-password",
+      "remoteActivation": "ALLOW",
+      "evidence": "T-OPS target Operation binds password change without persisting plaintext in operation metadata"
+    },
+    "http.post.sites": {
+      "sourceKey": "http|api/src/sites/sites.controller.ts|SitesController|create|POST|/api/sites",
+      "remoteActivation": "ALLOW",
+      "evidence": "SP3/T-OPS SITE_CREATE operation owns reservation, domain child operations, and idempotent reconciliation"
+    },
+    "http.post.sites-id-duplicate": {
+      "sourceKey": "http|api/src/sites/sites.controller.ts|SitesController|duplicate|POST|/api/sites/:id/duplicate",
+      "remoteActivation": "ALLOW",
+      "evidence": "SP3/T-OPS duplicate operation remains canonical and returns operation status"
+    },
+    "http.delete.sites-id": {
+      "sourceKey": "http|api/src/sites/sites.controller.ts|SitesController|delete|DELETE|/api/sites/:id",
+      "remoteActivation": "ALLOW",
+      "evidence": "T-OPS destructive SITE_DELETE operation requires confirmation, snapshot, lock, rollback, and idempotency"
+    },
+    "http.post.sites-id-domains": {
+      "sourceKey": "http|api/src/sites/site-domains.controller.ts|SiteDomainsController|create|POST|/api/sites/:id/domains",
+      "remoteActivation": "ALLOW",
+      "evidence": "T-OPS DOMAIN_CREATE operation reserves hostname and reports asynchronous provisioning status"
+    },
+    "http.put.sites-id-domains-domain-id": {
+      "sourceKey": "http|api/src/sites/site-domains.controller.ts|SiteDomainsController|update|PUT|/api/sites/:id/domains/:domainId",
+      "remoteActivation": "ALLOW",
+      "evidence": "T-OPS domain mutation operation snapshots metadata/runtime and rolls back on failure"
+    },
+    "http.delete.sites-id-domains-domain-id": {
+      "sourceKey": "http|api/src/sites/site-domains.controller.ts|SiteDomainsController|delete|DELETE|/api/sites/:id/domains/:domainId",
+      "remoteActivation": "ALLOW",
+      "evidence": "T-OPS destructive domain operation verifies confirmation, snapshots owned resources, and retains failure evidence"
+    },
+    "http.post.sites-id-domains-domain-id-make-primary": {
+      "sourceKey": "http|api/src/sites/site-domains.controller.ts|SiteDomainsController|makePrimary|POST|/api/sites/:id/domains/:domainId/make-primary",
+      "remoteActivation": "ALLOW",
+      "evidence": "T-OPS primary-domain operation atomically updates ordering and reconciles generated runtime"
+    },
+    "http.post.sites-nginx-rebuild-all": {
+      "sourceKey": "http|api/src/sites/sites-nginx.controller.ts|SitesNginxController|rebuildAll|POST|/api/sites/nginx/rebuild-all",
+      "remoteActivation": "ALLOW",
+      "evidence": "T-OPS retry-safe durable fleet Nginx rebuild with exclusive admission, bounded result, and partial-failure reconciliation"
+    },
+    "http.put.sites-id-domains-domain-id-aliases": {
+      "sourceKey": "http|api/src/sites/site-domains.controller.ts|SiteDomainsController|updateAliases|PUT|/api/sites/:id/domains/:domainId/aliases",
+      "remoteActivation": "ALLOW",
+      "evidence": "T-OPS alias operation binds hostname claims, target runtime, rollback, and idempotency"
+    },
+    "http.put.sites-id-domains-domain-id-nginx-settings": {
+      "sourceKey": "http|api/src/sites/sites-nginx.controller.ts|SitesNginxController|updateSettings|PUT|/api/sites/:id/domains/:domainId/nginx/settings",
+      "remoteActivation": "ALLOW",
+      "evidence": "T-OPS Nginx settings operation validates generated config and rolls metadata/runtime back together"
+    },
+    "http.put.sites-id-domains-domain-id-nginx-custom": {
+      "sourceKey": "http|api/src/sites/sites-nginx.controller.ts|SitesNginxController|updateCustom|PUT|/api/sites/:id/domains/:domainId/nginx/custom",
+      "remoteActivation": "ALLOW",
+      "evidence": "T-OPS custom Nginx operation validates and commits bounded target configuration with rollback"
+    },
+    "http.post.vpn-sni-health-check": {
+      "sourceKey": "http|api/src/vpn/vpn.controller.ts|VpnController|sniHealthCheck|POST|/api/vpn/sni-health-check",
+      "remoteActivation": "ALLOW",
+      "evidence": "T-OPS retry-safe durable VPN SNI validation with exclusive admission, progress, and transition-safe notifications"
+    },
+    "ws.browser-command.ai-message": {
+      "sourceKey": "socketio|browser-command|ai:message", "remoteActivation": "ALLOW", "evidence": "T-WS typed channel action policy; ready-only AI mutation"
+    },
+    "ws.browser-command.ai-start": {
+      "sourceKey": "socketio|browser-command|ai:start", "remoteActivation": "ALLOW", "evidence": "T-WS typed channel action policy; ready-only AI mutation"
+    },
+    "ws.browser-command.ai-stop": {
+      "sourceKey": "socketio|browser-command|ai:stop", "remoteActivation": "ALLOW", "evidence": "T-WS typed channel action policy; ready-only AI mutation"
+    },
+    "ws.browser-command.logs-tail-start": {
+      "sourceKey": "socketio|browser-command|logs:tail:start", "remoteActivation": "ALLOW", "evidence": "T-WS typed channel action policy; ready-only owned tail"
+    },
+    "ws.browser-command.logs-tail-stop": {
+      "sourceKey": "socketio|browser-command|logs:tail:stop", "remoteActivation": "ALLOW", "evidence": "T-WS typed channel action policy; ready-only owned tail"
+    },
+    "ws.browser-command.php-ext-install-subscribe": {
+      "sourceKey": "socketio|browser-command|php:ext-install:subscribe", "remoteActivation": "ALLOW", "evidence": "T-WS bounded idempotent subscription replay"
+    },
+    "ws.browser-command.php-ext-install-unsubscribe": {
+      "sourceKey": "socketio|browser-command|php:ext-install:unsubscribe", "remoteActivation": "ALLOW", "evidence": "T-WS bounded idempotent subscription replay"
+    },
+    "ws.browser-command.php-install-subscribe": {
+      "sourceKey": "socketio|browser-command|php:install:subscribe", "remoteActivation": "ALLOW", "evidence": "T-WS bounded idempotent subscription replay"
+    },
+    "ws.browser-command.php-install-unsubscribe": {
+      "sourceKey": "socketio|browser-command|php:install:unsubscribe", "remoteActivation": "ALLOW", "evidence": "T-WS bounded idempotent subscription replay"
+    },
+    "ws.browser-command.terminal-close": {
+      "sourceKey": "socketio|browser-command|terminal:close", "remoteActivation": "ALLOW", "evidence": "T-WS ADMIN ready-only terminal ownership"
+    },
+    "ws.browser-command.terminal-input": {
+      "sourceKey": "socketio|browser-command|terminal:input", "remoteActivation": "ALLOW", "evidence": "T-WS ADMIN ready-only terminal ownership"
+    },
+    "ws.browser-command.terminal-open": {
+      "sourceKey": "socketio|browser-command|terminal:open", "remoteActivation": "ALLOW", "evidence": "T-WS ADMIN ready-only terminal ownership"
+    },
+    "ws.browser-command.terminal-resize": {
+      "sourceKey": "socketio|browser-command|terminal:resize", "remoteActivation": "ALLOW", "evidence": "T-WS ADMIN ready-only terminal ownership"
+    },
+    "ws.browser-notification.ai-error": {
+      "sourceKey": "socketio|browser-notification|ai:error", "remoteActivation": "ALLOW", "evidence": "T-WS explicit target-to-browser allowlist"
+    },
+    "ws.browser-notification.ai-result": {
+      "sourceKey": "socketio|browser-notification|ai:result", "remoteActivation": "ALLOW", "evidence": "T-WS explicit target-to-browser allowlist"
+    },
+    "ws.browser-notification.ai-system": {
+      "sourceKey": "socketio|browser-notification|ai:system", "remoteActivation": "ALLOW", "evidence": "T-WS explicit target-to-browser allowlist"
+    },
+    "ws.browser-notification.ai-text": {
+      "sourceKey": "socketio|browser-notification|ai:text", "remoteActivation": "ALLOW", "evidence": "T-WS explicit target-to-browser allowlist"
+    },
+    "ws.browser-notification.ai-thinking": {
+      "sourceKey": "socketio|browser-notification|ai:thinking", "remoteActivation": "ALLOW", "evidence": "T-WS explicit target-to-browser allowlist"
+    },
+    "ws.browser-notification.ai-tool-result": {
+      "sourceKey": "socketio|browser-notification|ai:tool_result", "remoteActivation": "ALLOW", "evidence": "T-WS explicit target-to-browser allowlist"
+    },
+    "ws.browser-notification.ai-tool-use-done": {
+      "sourceKey": "socketio|browser-notification|ai:tool_use_done", "remoteActivation": "ALLOW", "evidence": "T-WS explicit target-to-browser allowlist"
+    },
+    "ws.browser-notification.ai-tool-use-input": {
+      "sourceKey": "socketio|browser-notification|ai:tool_use_input", "remoteActivation": "ALLOW", "evidence": "T-WS explicit target-to-browser allowlist"
+    },
+    "ws.browser-notification.ai-tool-use-start": {
+      "sourceKey": "socketio|browser-notification|ai:tool_use_start", "remoteActivation": "ALLOW", "evidence": "T-WS explicit target-to-browser allowlist"
+    },
+    "ws.browser-notification.backup-progress": {
+      "sourceKey": "socketio|browser-notification|backup:progress", "remoteActivation": "ALLOW", "evidence": "T-WS explicit target-to-browser allowlist"
+    },
+    "ws.browser-notification.backup-restore-progress": {
+      "sourceKey": "socketio|browser-notification|backup:restore:progress", "remoteActivation": "ALLOW", "evidence": "T-WS explicit target-to-browser allowlist"
+    },
+    "ws.browser-notification.logs-tail-data": {
+      "sourceKey": "socketio|browser-notification|logs:tail:data", "remoteActivation": "ALLOW", "evidence": "T-WS explicit owned tail delivery"
+    },
+    "ws.browser-notification.php-ext-install-log": {
+      "sourceKey": "socketio|browser-notification|php:ext-install:log", "remoteActivation": "ALLOW", "evidence": "T-WS explicit target-to-browser allowlist"
+    },
+    "ws.browser-notification.php-install-log": {
+      "sourceKey": "socketio|browser-notification|php:install:log", "remoteActivation": "ALLOW", "evidence": "T-WS explicit target-to-browser allowlist"
+    },
+    "ws.browser-notification.site-deploy-log": {
+      "sourceKey": "socketio|browser-notification|site:deploy:log", "remoteActivation": "ALLOW", "evidence": "T-WS explicit target-to-browser allowlist"
+    },
+    "ws.browser-notification.site-provision-done": {
+      "sourceKey": "socketio|browser-notification|site:provision:done", "remoteActivation": "ALLOW", "evidence": "T-WS explicit target-to-browser allowlist"
+    },
+    "ws.browser-notification.site-provision-log": {
+      "sourceKey": "socketio|browser-notification|site:provision:log", "remoteActivation": "ALLOW", "evidence": "T-WS explicit target-to-browser allowlist"
+    },
+    "ws.browser-notification.site-status": {
+      "sourceKey": "socketio|browser-notification|site:status", "remoteActivation": "ALLOW", "evidence": "T-WS explicit target-to-browser allowlist"
+    },
+    "ws.browser-notification.system-metrics": {
+      "sourceKey": "socketio|browser-notification|system:metrics", "remoteActivation": "ALLOW", "evidence": "T-WS explicit target-to-browser allowlist"
+    },
+    "ws.browser-notification.terminal-data": {
+      "sourceKey": "socketio|browser-notification|terminal:data", "remoteActivation": "ALLOW", "evidence": "T-WS explicit ADMIN terminal ownership"
+    }
+  }
+}

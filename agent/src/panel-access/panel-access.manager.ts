@@ -14,6 +14,7 @@ import * as dns from 'dns/promises';
 import * as fs from 'fs/promises';
 import * as path from 'path';
 import * as os from 'os';
+import { createHash, X509Certificate } from 'crypto';
 import { createConnection } from 'net';
 import { CommandExecutor } from '../command-executor';
 import { ACME_WEBROOT, LETSENCRYPT_LIVE_DIR } from '../config';
@@ -21,7 +22,11 @@ import { ACME_WEBROOT, LETSENCRYPT_LIVE_DIR } from '../config';
 const PANEL_NGINX_PATH = '/etc/nginx/sites-available/meowbox-panel';
 const PANEL_NGINX_ENABLED = '/etc/nginx/sites-enabled/meowbox-panel';
 const PANEL_NGINX_BAK = '/etc/nginx/sites-available/meowbox-panel.bak';
+const PANEL_CANDIDATE_PATH = '/etc/nginx/sites-available/meowbox-panel-candidate';
+const PANEL_CANDIDATE_ENABLED = '/etc/nginx/sites-enabled/meowbox-panel-candidate';
 const SELFSIGNED_DIR = '/etc/ssl/meowbox/panel';
+const CUTOVER_STATE_DIR = '/opt/meowbox/state/data/panel-access-cutovers';
+const CUTOVER_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 
 interface RenderSettings {
   domain: string | null;
@@ -30,6 +35,47 @@ interface RenderSettings {
   keyPath: string | null;
   httpsRedirect: boolean;
   denyIpAccess: boolean;
+}
+
+interface FederationEndpointSettings {
+  apiOrigin: string;
+  wsOrigin: string;
+  wsPath: string;
+  browserPublicOrigin: string;
+  directTransferOrigin: string;
+}
+
+export interface PanelAccessCutoverStageInput {
+  cutoverId: string;
+  domain: string;
+  email: string;
+  httpsRedirect: boolean;
+  denyIpAccess: boolean;
+  previousSettings: RenderSettings;
+  previousEndpoint: FederationEndpointSettings;
+}
+
+export interface PanelAccessCutoverStageResult {
+  cutoverId: string;
+  state: 'STAGED';
+  candidateOrigin: string;
+  spkiSha256: string;
+  candidateSettings: RenderSettings & {
+    certIssuedAt: string;
+    certExpiresAt: string | null;
+    leEmail: string;
+    leLastError: null;
+  };
+}
+
+type AgentCutoverState = 'STAGED' | 'FINALIZED' | 'ROLLED_BACK';
+
+interface AgentCutoverJournal extends Omit<PanelAccessCutoverStageResult, 'state'> {
+  schemaVersion: 1;
+  state: AgentCutoverState;
+  previousSettings: RenderSettings;
+  previousEndpoint: FederationEndpointSettings;
+  updatedAt: string;
 }
 
 export class PanelAccessManager {
@@ -340,26 +386,247 @@ export class PanelAccessManager {
     }
   }
 
+  async stageFederationCutover(
+    input: PanelAccessCutoverStageInput,
+  ): Promise<PanelAccessCutoverStageResult> {
+    this.assertCutoverInput(input);
+    await fs.mkdir(CUTOVER_STATE_DIR, { recursive: true, mode: 0o700 });
+    await fs.chmod(CUTOVER_STATE_DIR, 0o700);
+
+    const persisted = await this.readCutoverJournal(input.cutoverId);
+    if (persisted) {
+      this.assertJournalBinding(persisted, input);
+      if (persisted.state === 'ROLLED_BACK') {
+        throw new Error('Panel Access cutover was already rolled back');
+      }
+      if (persisted.state === 'STAGED') await fs.access(PANEL_CANDIDATE_PATH);
+      await fs.access(persisted.candidateSettings.certPath!);
+      await fs.access(persisted.candidateSettings.keyPath!);
+      return this.stageResult(persisted);
+    }
+
+    const env = await this.readPanelEnv();
+    await this.applyCandidateConfig(
+      input.cutoverId,
+      this.buildCandidateAcmeConf(input.cutoverId, input.domain),
+    );
+
+    const issued = await this.issueLeCert({ domain: input.domain, email: input.email });
+    if (!issued.success || !issued.certPath || !issued.keyPath) {
+      await this.removeCandidateConfig();
+      throw new Error(issued.error || 'Panel Access certificate issuance failed');
+    }
+
+    const certPem = await fs.readFile(issued.certPath);
+    const certificate = new X509Certificate(certPem);
+    const spki = certificate.publicKey.export({ type: 'spki', format: 'der' });
+    const spkiSha256 = `sha256/${createHash('sha256').update(spki).digest('base64')}`;
+    const panelPort = this.panelPort(env.PANEL_PORT);
+    const candidateOrigin = `https://${input.domain}${panelPort === 443 ? '' : `:${panelPort}`}`;
+    const issuedAt = new Date().toISOString();
+    const candidateSettings: PanelAccessCutoverStageResult['candidateSettings'] = {
+      domain: input.domain,
+      certMode: 'LE',
+      certPath: issued.certPath,
+      keyPath: issued.keyPath,
+      httpsRedirect: input.httpsRedirect,
+      denyIpAccess: input.denyIpAccess,
+      certIssuedAt: issuedAt,
+      certExpiresAt: issued.expiresAt || null,
+      leEmail: input.email,
+      leLastError: null,
+    };
+    await this.applyCandidateConfig(
+      input.cutoverId,
+      this.buildPanelNginxConf(candidateSettings, env, {
+        includeUpstreams: false,
+        candidateOnly: true,
+        cutoverId: input.cutoverId,
+      }),
+    );
+    const journal: AgentCutoverJournal = {
+      schemaVersion: 1,
+      cutoverId: input.cutoverId,
+      state: 'STAGED',
+      candidateOrigin,
+      spkiSha256,
+      candidateSettings,
+      previousSettings: input.previousSettings,
+      previousEndpoint: input.previousEndpoint,
+      updatedAt: new Date().toISOString(),
+    };
+    await this.writeCutoverJournal(journal);
+    return this.stageResult(journal);
+  }
+
+  async finalizeFederationCutover(input: {
+    cutoverId: string;
+    candidateOrigin: string;
+  }): Promise<{ success: boolean; reloadApi: boolean; error?: string }> {
+    try {
+      if (!CUTOVER_ID.test(input.cutoverId)) throw new Error('Invalid cutover ID');
+      const journal = await this.readCutoverJournal(input.cutoverId);
+      if (!journal || journal.candidateOrigin !== input.candidateOrigin) {
+        throw new Error('Panel Access cutover journal mismatch');
+      }
+      if (journal.state === 'FINALIZED') return { success: true, reloadApi: true };
+      if (journal.state !== 'STAGED') throw new Error(`Panel Access cutover cannot finalize from ${journal.state}`);
+      const env = await this.readPanelEnv();
+      const primaryBefore = await fs.readFile(PANEL_NGINX_PATH, 'utf8');
+      const envBefore = await this.readStateEnv();
+      const nextEndpoints = this.endpointForOrigin(
+        journal.candidateOrigin,
+        journal.previousEndpoint.wsPath,
+      );
+      try {
+        await this.writeFederationEndpoints(envBefore, nextEndpoints);
+        await this.writeAtomicFile(
+          PANEL_NGINX_PATH,
+          this.buildPanelNginxConf(journal.candidateSettings, env),
+          0o644,
+        );
+        await this.removeCandidateFilesOnly();
+        await this.assertNginxAndReload();
+        await this.writeCutoverJournal({
+          ...journal,
+          state: 'FINALIZED',
+          updatedAt: new Date().toISOString(),
+        });
+      } catch (error) {
+        await this.writeAtomicFile(PANEL_NGINX_PATH, primaryBefore, 0o644).catch(() => undefined);
+        await this.writeAtomicFile('/opt/meowbox/state/.env', envBefore, 0o600).catch(() => undefined);
+        await this.applyCandidateConfig(
+          input.cutoverId,
+          this.buildPanelNginxConf(journal.candidateSettings, env, {
+            includeUpstreams: false,
+            candidateOnly: true,
+            cutoverId: input.cutoverId,
+          }),
+        ).catch(() => undefined);
+        throw error;
+      }
+      return { success: true, reloadApi: true };
+    } catch (error) {
+      return { success: false, reloadApi: false, error: (error as Error).message };
+    }
+  }
+
+  async rollbackFederationCutover(input: {
+    cutoverId: string;
+  }): Promise<{ success: boolean; reloadApi: boolean; error?: string }> {
+    try {
+      if (!CUTOVER_ID.test(input.cutoverId)) throw new Error('Invalid cutover ID');
+      const journal = await this.readCutoverJournal(input.cutoverId);
+      if (!journal) {
+        await this.removeCandidateConfig();
+        return { success: true, reloadApi: false };
+      }
+      if (journal.state === 'ROLLED_BACK') return { success: true, reloadApi: true };
+      const env = await this.readPanelEnv();
+      const primaryBefore = await fs.readFile(PANEL_NGINX_PATH, 'utf8');
+      const envBefore = await this.readStateEnv();
+      try {
+        await this.writeFederationEndpoints(envBefore, journal.previousEndpoint);
+        await this.writeAtomicFile(
+          PANEL_NGINX_PATH,
+          this.buildPanelNginxConf(journal.previousSettings, env),
+          0o644,
+        );
+        await this.removeCandidateFilesOnly();
+        await this.assertNginxAndReload();
+        await this.writeCutoverJournal({
+          ...journal,
+          state: 'ROLLED_BACK',
+          updatedAt: new Date().toISOString(),
+        });
+      } catch (error) {
+        await this.writeAtomicFile('/opt/meowbox/state/.env', envBefore, 0o600).catch(() => undefined);
+        await this.writeAtomicFile(PANEL_NGINX_PATH, primaryBefore, 0o644).catch(() => undefined);
+        if (journal.state === 'STAGED') {
+          await this.applyCandidateConfig(
+            input.cutoverId,
+            this.buildPanelNginxConf(journal.candidateSettings, env, {
+              includeUpstreams: false,
+              candidateOnly: true,
+              cutoverId: input.cutoverId,
+            }),
+          ).catch(() => undefined);
+        } else {
+          await this.assertNginxAndReload().catch(() => undefined);
+        }
+        throw error;
+      }
+      return { success: true, reloadApi: true };
+    } catch (error) {
+      return { success: false, reloadApi: false, error: (error as Error).message };
+    }
+  }
+
+  async reloadApiEnvironment(): Promise<void> {
+    const result = await this.executor.execute(
+      'pm2',
+      ['reload', 'meowbox-api', '--update-env'],
+      { allowFailure: true, timeout: 60_000 },
+    );
+    if (result.exitCode !== 0) {
+      throw new Error(`meowbox-api reload failed: ${result.stderr || result.stdout}`);
+    }
+  }
+
+  async getFederationCutoverStatus(input: { cutoverId: string }): Promise<{
+    success: boolean;
+    state?: AgentCutoverState;
+    candidateOrigin?: string;
+    error?: string;
+  }> {
+    try {
+      if (!CUTOVER_ID.test(input.cutoverId)) throw new Error('Invalid cutover ID');
+      const journal = await this.readCutoverJournal(input.cutoverId);
+      if (!journal) return { success: false, error: 'Panel Access cutover journal not found' };
+      return {
+        success: true,
+        state: journal.state,
+        candidateOrigin: journal.candidateOrigin,
+      };
+    } catch (error) {
+      return { success: false, error: (error as Error).message };
+    }
+  }
+
   // ---------------------------------------------------------------------------
   // Internal: рендер шаблона
   // ---------------------------------------------------------------------------
 
   private buildPanelNginxConf(
     s: RenderSettings,
-    env: { PANEL_PORT: string; API_PORT: string; WEB_PORT: string; ADMINER_DIR: string },
+    env: {
+      PANEL_PORT: string;
+      API_PORT: string;
+      WEB_PORT: string;
+      ADMINER_DIR: string;
+      TRANSFER_RATE_LIMIT: string;
+    },
+    options: {
+      includeUpstreams?: boolean;
+      candidateOnly?: boolean;
+      cutoverId?: string;
+    } = {},
   ): string {
-    const { PANEL_PORT, API_PORT, WEB_PORT, ADMINER_DIR } = env;
+    const { PANEL_PORT, API_PORT, WEB_PORT, ADMINER_DIR, TRANSFER_RATE_LIMIT } = env;
     const serverNamePanel = s.domain || '_';
+    const includeUpstreams = options.includeUpstreams !== false;
+    const candidateOnly = options.candidateOnly === true;
 
     // ------- Общая шапка: upstreams + ACME challenge HTTP server (если есть domain)
     let conf = `# Generated by meowbox panel-access manager. DO NOT EDIT MANUALLY.
+${options.cutoverId ? `# federation-cutover: ${options.cutoverId}\n` : ''}${includeUpstreams ? `
 upstream meowbox_api {
     server 127.0.0.1:${API_PORT};
 }
 upstream meowbox_web {
     server 127.0.0.1:${WEB_PORT};
 }
-`;
+` : ''}`;
 
     // ------- HTTP :80 — только для ACME challenge + опциональный 301-редирект
     //
@@ -410,7 +677,9 @@ ${
 
     let serverNames: string;
     let defaultServerBlock = '';
-    if (s.denyIpAccess && s.domain) {
+    if (candidateOnly && s.domain) {
+      serverNames = `    server_name ${s.domain};`;
+    } else if (s.denyIpAccess && s.domain) {
       serverNames = `    server_name ${s.domain};`;
       // Default server: всё, что не <domain>, на этом порту — 444.
       // ВАЖНО: для default_server ssl нужен тот же cert (иначе TLS handshake
@@ -467,6 +736,73 @@ ${isHttps ? '    add_header Strict-Transport-Security "max-age=31536000; include
         proxy_send_timeout 900s;
     }
 
+    # Direct generated/staged transfer delivery. Timeouts are inactivity
+    # budgets; a progressing stream has no total Nginx deadline.
+    location ^~ /api/public/v1/transfers/ {
+        client_max_body_size 50g;
+        client_body_timeout 60s;
+        proxy_pass http://meowbox_api;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_buffering off;
+        proxy_request_buffering off;
+        proxy_max_temp_file_size 0;
+        proxy_read_timeout 60s;
+        proxy_send_timeout 60s;
+        send_timeout 60s;
+        limit_rate ${TRANSFER_RATE_LIMIT};
+        add_header Cache-Control "no-store" always;
+        add_header Referrer-Policy "no-referrer" always;
+        access_log off;
+        error_log /dev/null crit;
+    }
+
+    # Public webhook ingress. Provider signatures bind the exact request bytes;
+    # tokens and request bodies must never enter Nginx logs.
+    location ^~ /api/public/v1/webhooks/ {
+        client_max_body_size 64k;
+        client_body_buffer_size 64k;
+        proxy_pass http://meowbox_api;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_request_buffering on;
+        proxy_connect_timeout 5s;
+        proxy_read_timeout 15s;
+        proxy_send_timeout 15s;
+        send_timeout 15s;
+        add_header Cache-Control "no-store" always;
+        add_header Referrer-Policy "no-referrer" always;
+        access_log off;
+        error_log /dev/null crit;
+    }
+
+    # MODX login handoff keeps its one-time secret in the URL fragment and
+    # submits it in a bounded same-origin POST. Never log the consume route.
+    location ^~ /api/public/v1/modx/login {
+        client_max_body_size 4k;
+        client_body_buffer_size 4k;
+        proxy_pass http://meowbox_api;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_request_buffering on;
+        proxy_connect_timeout 5s;
+        proxy_read_timeout 15s;
+        proxy_send_timeout 15s;
+        add_header Cache-Control "no-store" always;
+        add_header Referrer-Policy "no-referrer" always;
+        access_log off;
+        error_log /dev/null crit;
+    }
+
     # API proxy
     location /api/ {
         proxy_pass http://meowbox_api;
@@ -508,6 +844,8 @@ ${isHttps ? '    add_header Strict-Transport-Security "max-age=31536000; include
 
         add_header X-Robots-Tag "noindex,nofollow" always;
         add_header X-Frame-Options "SAMEORIGIN" always;
+        add_header Referrer-Policy "no-referrer" always;
+        add_header Cache-Control "no-store" always;
         client_max_body_size 128m;
 
         try_files $uri $uri/ /adminer/index.php?$args;
@@ -517,7 +855,11 @@ ${isHttps ? '    add_header Strict-Transport-Security "max-age=31536000; include
             return 403;
         }
 
-        location ~ ^/adminer/(index|sso|adminer)\\.php$ {
+        location = /adminer/adminer.php {
+            return 404;
+        }
+
+        location ~ ^/adminer/(index|sso)\\.php$ {
             alias ${ADMINER_DIR}/;
             try_files /$1.php =404;
 
@@ -553,6 +895,243 @@ ${defaultServerBlock}`;
   // Helpers
   // ---------------------------------------------------------------------------
 
+  private assertCutoverInput(input: PanelAccessCutoverStageInput): void {
+    if (
+      !CUTOVER_ID.test(input.cutoverId) ||
+      !/^([a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)+[a-zA-Z]{2,}$/.test(input.domain) ||
+      !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(input.email) ||
+      input.previousSettings.certMode === 'NONE'
+    ) throw new Error('Panel Access cutover input is invalid');
+    for (const origin of [
+      input.previousEndpoint.apiOrigin,
+      input.previousEndpoint.wsOrigin,
+      input.previousEndpoint.browserPublicOrigin,
+      input.previousEndpoint.directTransferOrigin,
+    ]) {
+      const parsed = new URL(origin);
+      if (parsed.protocol !== 'https:' || parsed.origin !== origin) {
+        throw new Error('Previous federation endpoint is invalid');
+      }
+    }
+    if (!/^\/[A-Za-z0-9][A-Za-z0-9._/-]*\/?$/.test(input.previousEndpoint.wsPath)) {
+      throw new Error('Previous federation socket path is invalid');
+    }
+  }
+
+  private assertJournalBinding(
+    journal: AgentCutoverJournal,
+    input: PanelAccessCutoverStageInput,
+  ): void {
+    if (
+      journal.cutoverId !== input.cutoverId ||
+      journal.candidateSettings.domain !== input.domain ||
+      journal.candidateSettings.leEmail !== input.email ||
+      journal.candidateSettings.httpsRedirect !== input.httpsRedirect ||
+      journal.candidateSettings.denyIpAccess !== input.denyIpAccess ||
+      JSON.stringify(journal.previousSettings) !== JSON.stringify(input.previousSettings) ||
+      JSON.stringify(journal.previousEndpoint) !== JSON.stringify(input.previousEndpoint)
+    ) throw new Error('Panel Access cutover idempotency conflict');
+  }
+
+  private stageResult(journal: AgentCutoverJournal): PanelAccessCutoverStageResult {
+    return {
+      cutoverId: journal.cutoverId,
+      state: 'STAGED',
+      candidateOrigin: journal.candidateOrigin,
+      spkiSha256: journal.spkiSha256,
+      candidateSettings: journal.candidateSettings,
+    };
+  }
+
+  private cutoverJournalPath(cutoverId: string): string {
+    if (!CUTOVER_ID.test(cutoverId)) throw new Error('Invalid cutover ID');
+    return path.join(CUTOVER_STATE_DIR, `${cutoverId}.json`);
+  }
+
+  private async readCutoverJournal(cutoverId: string): Promise<AgentCutoverJournal | null> {
+    try {
+      const raw = await fs.readFile(this.cutoverJournalPath(cutoverId), 'utf8');
+      const value = JSON.parse(raw) as AgentCutoverJournal;
+      if (
+        value.schemaVersion !== 1 ||
+        value.cutoverId !== cutoverId ||
+        !(['STAGED', 'FINALIZED', 'ROLLED_BACK'] as const).includes(value.state) ||
+        typeof value.candidateOrigin !== 'string' ||
+        !/^sha256\/[A-Za-z0-9+/]{43}=$/.test(value.spkiSha256) ||
+        !value.candidateSettings ||
+        !value.previousSettings ||
+        !value.previousEndpoint
+      ) throw new Error('Panel Access cutover journal is invalid');
+      return value;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
+      throw error;
+    }
+  }
+
+  private async writeCutoverJournal(journal: AgentCutoverJournal): Promise<void> {
+    await fs.mkdir(CUTOVER_STATE_DIR, { recursive: true, mode: 0o700 });
+    await fs.chmod(CUTOVER_STATE_DIR, 0o700);
+    await this.writeAtomicFile(
+      this.cutoverJournalPath(journal.cutoverId),
+      `${JSON.stringify(journal)}\n`,
+      0o600,
+    );
+  }
+
+  private buildCandidateAcmeConf(cutoverId: string, domain: string): string {
+    return `# Generated by meowbox panel-access manager. DO NOT EDIT MANUALLY.
+# federation-cutover: ${cutoverId}
+server {
+    listen 80;
+    listen [::]:80;
+    server_name ${domain};
+
+    location ^~ /.well-known/acme-challenge/ {
+        root ${ACME_WEBROOT};
+        default_type "text/plain";
+        try_files $uri =404;
+    }
+
+    location / { return 404; }
+}
+`;
+  }
+
+  private async applyCandidateConfig(cutoverId: string, content: string): Promise<void> {
+    if (!content.includes(`# federation-cutover: ${cutoverId}`)) {
+      throw new Error('Candidate Nginx configuration is not cutover-bound');
+    }
+    const previous = await fs.readFile(PANEL_CANDIDATE_PATH, 'utf8').catch(() => null);
+    await this.writeAtomicFile(PANEL_CANDIDATE_PATH, content, 0o644);
+    try {
+      const stat = await fs.lstat(PANEL_CANDIDATE_ENABLED).catch(() => null);
+      if (stat) {
+        if (!stat.isSymbolicLink() || await fs.readlink(PANEL_CANDIDATE_ENABLED) !== PANEL_CANDIDATE_PATH) {
+          throw new Error('Panel candidate Nginx link is not managed by Meowbox');
+        }
+      } else {
+        await fs.symlink(PANEL_CANDIDATE_PATH, PANEL_CANDIDATE_ENABLED);
+      }
+      await this.assertNginxAndReload();
+    } catch (error) {
+      if (previous === null) await fs.rm(PANEL_CANDIDATE_PATH, { force: true });
+      else await this.writeAtomicFile(PANEL_CANDIDATE_PATH, previous, 0o644);
+      await this.assertNginxAndReload().catch(() => undefined);
+      throw error;
+    }
+  }
+
+  private async removeCandidateFilesOnly(): Promise<void> {
+    const stat = await fs.lstat(PANEL_CANDIDATE_ENABLED).catch(() => null);
+    if (stat) {
+      if (!stat.isSymbolicLink() || await fs.readlink(PANEL_CANDIDATE_ENABLED) !== PANEL_CANDIDATE_PATH) {
+        throw new Error('Panel candidate Nginx link is not managed by Meowbox');
+      }
+      await fs.rm(PANEL_CANDIDATE_ENABLED, { force: true });
+    }
+    await fs.rm(PANEL_CANDIDATE_PATH, { force: true });
+  }
+
+  private async removeCandidateConfig(): Promise<void> {
+    await this.removeCandidateFilesOnly();
+    await this.assertNginxAndReload();
+  }
+
+  private async assertNginxAndReload(): Promise<void> {
+    const tested = await this.executor.execute('nginx', ['-t'], {
+      allowFailure: true,
+      timeout: 15_000,
+    });
+    if (tested.exitCode !== 0) {
+      throw new Error(`nginx -t failed: ${tested.stderr || tested.stdout}`);
+    }
+    const reloaded = await this.executor.execute('systemctl', ['reload', 'nginx'], {
+      allowFailure: true,
+      timeout: 30_000,
+    });
+    if (reloaded.exitCode !== 0) {
+      throw new Error(`nginx reload failed: ${reloaded.stderr || reloaded.stdout}`);
+    }
+  }
+
+  private panelPort(raw: string): number {
+    const port = Number(raw);
+    if (!Number.isSafeInteger(port) || port < 1 || port > 65535) {
+      throw new Error('PANEL_PORT is invalid');
+    }
+    return port;
+  }
+
+  private endpointForOrigin(origin: string, wsPath: string): FederationEndpointSettings {
+    const parsed = new URL(origin);
+    if (parsed.protocol !== 'https:' || parsed.origin !== origin) {
+      throw new Error('Candidate federation endpoint is invalid');
+    }
+    return {
+      apiOrigin: origin,
+      wsOrigin: origin,
+      wsPath,
+      browserPublicOrigin: origin,
+      directTransferOrigin: origin,
+    };
+  }
+
+  private async readStateEnv(): Promise<string> {
+    const raw = await fs.readFile('/opt/meowbox/state/.env', 'utf8');
+    if (Buffer.byteLength(raw, 'utf8') > 1024 * 1024 || raw.includes('\0')) {
+      throw new Error('state/.env is invalid');
+    }
+    return raw;
+  }
+
+  private async writeFederationEndpoints(
+    current: string,
+    endpoint: FederationEndpointSettings,
+  ): Promise<void> {
+    const replacements: Record<string, string> = {
+      FEDERATION_API_ORIGIN: endpoint.apiOrigin,
+      FEDERATION_WS_ORIGIN: endpoint.wsOrigin,
+      FEDERATION_WS_PATH: endpoint.wsPath,
+      FEDERATION_BROWSER_PUBLIC_ORIGIN: endpoint.browserPublicOrigin,
+      FEDERATION_DIRECT_TRANSFER_ORIGIN: endpoint.directTransferOrigin,
+    };
+    const seen = new Set<string>();
+    const lines = current.split('\n').map((line) => {
+      const match = /^([A-Z0-9_]+)=/.exec(line);
+      if (!match || !(match[1] in replacements)) return line;
+      if (seen.has(match[1])) throw new Error(`Duplicate ${match[1]} in state/.env`);
+      seen.add(match[1]);
+      return `${match[1]}=${replacements[match[1]]}`;
+    });
+    for (const [key, value] of Object.entries(replacements)) {
+      if (!seen.has(key)) lines.push(`${key}=${value}`);
+    }
+    const next = `${lines.join('\n').replace(/\n+$/, '')}\n`;
+    await this.writeAtomicFile('/opt/meowbox/state/.env', next, 0o600);
+  }
+
+  private async writeAtomicFile(file: string, content: string, mode: number): Promise<void> {
+    const directory = path.dirname(file);
+    const temp = path.join(directory, `.${path.basename(file)}.${process.pid}.${Date.now()}.tmp`);
+    const handle = await fs.open(temp, 'wx', mode);
+    try {
+      await handle.writeFile(content, 'utf8');
+      await handle.sync();
+    } finally {
+      await handle.close();
+    }
+    try {
+      await fs.chmod(temp, mode);
+      await fs.rename(temp, file);
+      const dir = await fs.open(directory, 'r');
+      try { await dir.sync(); } finally { await dir.close(); }
+    } catch (error) {
+      await fs.rm(temp, { force: true }).catch(() => undefined);
+      throw error;
+    }
+  }
+
   /**
    * Читает PANEL_PORT/API_PORT/WEB_PORT/ADMINER_DIR из state/.env.
    * Если файла нет — fallback на process.env с дефолтами install.sh.
@@ -562,6 +1141,7 @@ ${defaultServerBlock}`;
     API_PORT: string;
     WEB_PORT: string;
     ADMINER_DIR: string;
+    TRANSFER_RATE_LIMIT: string;
   }> {
     const envFiles = [
       '/opt/meowbox/state/.env',
@@ -591,6 +1171,9 @@ ${defaultServerBlock}`;
       API_PORT: parsed.API_PORT || process.env.API_PORT || '11860',
       WEB_PORT: parsed.WEB_PORT || process.env.WEB_PORT || '11861',
       ADMINER_DIR: adminerDir,
+      TRANSFER_RATE_LIMIT: /^[1-9]\d*[kKmMgG]$/.test(parsed.TRANSFER_RATE_LIMIT || '')
+        ? parsed.TRANSFER_RATE_LIMIT
+        : '20m',
     };
   }
 

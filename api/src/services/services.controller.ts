@@ -3,6 +3,9 @@ import {
   Controller,
   Delete,
   Get,
+  Headers,
+  HttpCode,
+  HttpStatus,
   Param,
   ParseUUIDPipe,
   Post,
@@ -11,6 +14,7 @@ import {
 } from '@nestjs/common';
 import { Throttle } from '@nestjs/throttler';
 import { Roles } from '../common/decorators/roles.decorator';
+import { CurrentUser } from '../common/decorators/current-user.decorator';
 import { UserRole } from '../common/enums';
 import { ServicesService } from './services.service';
 import { EnableSiteServiceDto, ReconfigureSiteServiceDto, SERVICE_KEY_REGEX } from './services.dto';
@@ -44,21 +48,41 @@ export class ServicesController {
   }
 
   @Post('services/:key/install')
+  @HttpCode(HttpStatus.ACCEPTED)
   @Roles(UserRole.ADMIN)
   @Throttle({ default: { limit: 3, ttl: 60_000 } })
-  async install(@Param('key') key: string) {
+  async install(
+    @Param('key') key: string,
+    @CurrentUser('sub') userId: string,
+    @CurrentUser('role') role: string,
+    @Headers('idempotency-key') idempotencyKey?: string,
+  ) {
     validateKey(key);
-    const data = await this.services.installServerService(key);
+    const data = await this.services.enqueueInstallServerService(
+      key,
+      { userId, role },
+      idempotencyKey,
+    );
     return { success: true, data };
   }
 
   @Delete('services/:key')
+  @HttpCode(HttpStatus.ACCEPTED)
   @Roles(UserRole.ADMIN)
   @Throttle({ default: { limit: 3, ttl: 60_000 } })
-  async uninstall(@Param('key') key: string) {
+  async uninstall(
+    @Param('key') key: string,
+    @CurrentUser('sub') userId: string,
+    @CurrentUser('role') role: string,
+    @Headers('idempotency-key') idempotencyKey?: string,
+  ) {
     validateKey(key);
-    await this.services.uninstallServerService(key);
-    return { success: true };
+    const data = await this.services.enqueueUninstallServerService(
+      key,
+      { userId, role },
+      idempotencyKey,
+    );
+    return { success: true, data };
   }
 
   // ----- Server config editor -----
@@ -98,11 +122,21 @@ export class ServicesController {
   }
 
   @Post('services/:key/restart')
+  @HttpCode(HttpStatus.ACCEPTED)
   @Roles(UserRole.ADMIN)
   @Throttle({ default: { limit: 5, ttl: 60_000 } })
-  async restart(@Param('key') key: string) {
+  async restart(
+    @Param('key') key: string,
+    @CurrentUser('sub') userId: string,
+    @CurrentUser('role') role: string,
+    @Headers('idempotency-key') idempotencyKey?: string,
+  ) {
     validateKey(key);
-    const data = await this.services.restartServerService(key);
+    const data = await this.services.enqueueRestartServerService(
+      key,
+      { userId, role },
+      idempotencyKey,
+    );
     return { success: true, data };
   }
 
@@ -205,72 +239,124 @@ export class ServicesController {
   }
 
   @Post('sites/:siteId/services/:key/enable')
+  @HttpCode(HttpStatus.ACCEPTED)
   @Roles(UserRole.ADMIN)
   @Throttle({ default: { limit: 10, ttl: 60_000 } })
   async enable(
     @Param('siteId', ParseUUIDPipe) siteId: string,
     @Param('key') key: string,
     @Body() dto: EnableSiteServiceDto,
+    @CurrentUser('sub') userId: string,
+    @CurrentUser('role') role: string,
+    @Headers('idempotency-key') idempotencyKey?: string,
   ) {
     validateKey(key);
-    const data = await this.services.enableSiteService(siteId, key, dto.config || {});
+    const data = await this.services.enqueueEnableSiteService(
+      siteId,
+      key,
+      dto.config || {},
+      { userId, role },
+      idempotencyKey,
+    );
     return { success: true, data };
   }
 
   @Delete('sites/:siteId/services/:key')
+  @HttpCode(HttpStatus.ACCEPTED)
   @Roles(UserRole.ADMIN)
   @Throttle({ default: { limit: 10, ttl: 60_000 } })
   async disable(
     @Param('siteId', ParseUUIDPipe) siteId: string,
     @Param('key') key: string,
+    @CurrentUser('sub') userId: string,
+    @CurrentUser('role') role: string,
+    @Headers('idempotency-key') idempotencyKey?: string,
   ) {
     validateKey(key);
-    await this.services.disableSiteService(siteId, key);
-    return { success: true };
+    const data = await this.services.enqueueDisableSiteService(
+      siteId,
+      key,
+      { userId, role },
+      idempotencyKey,
+    );
+    return { success: true, data };
   }
 
   @Post('sites/:siteId/services/:key/start')
+  @HttpCode(HttpStatus.ACCEPTED)
   @Roles(UserRole.ADMIN)
   @Throttle({ default: { limit: 30, ttl: 60_000 } })
   async start(
     @Param('siteId', ParseUUIDPipe) siteId: string,
     @Param('key') key: string,
+    @CurrentUser('sub') userId: string,
+    @CurrentUser('role') role: string,
+    @Headers('idempotency-key') idempotencyKey?: string,
   ) {
     validateKey(key);
-    const data = await this.services.startSiteService(siteId, key);
+    const data = await this.services.enqueueStartSiteService(
+      siteId,
+      key,
+      { userId, role },
+      idempotencyKey,
+    );
     return { success: true, data };
   }
 
   @Post('sites/:siteId/services/:key/stop')
+  @HttpCode(HttpStatus.ACCEPTED)
   @Roles(UserRole.ADMIN)
   @Throttle({ default: { limit: 30, ttl: 60_000 } })
   async stop(
     @Param('siteId', ParseUUIDPipe) siteId: string,
     @Param('key') key: string,
+    @CurrentUser('sub') userId: string,
+    @CurrentUser('role') role: string,
+    @Headers('idempotency-key') idempotencyKey?: string,
   ) {
     validateKey(key);
-    const data = await this.services.stopSiteService(siteId, key);
+    const data = await this.services.enqueueStopSiteService(
+      siteId,
+      key,
+      { userId, role },
+      idempotencyKey,
+    );
     return { success: true, data };
   }
 
   @Patch('sites/:siteId/services/:key')
+  @HttpCode(HttpStatus.ACCEPTED)
   @Roles(UserRole.ADMIN)
   @Throttle({ default: { limit: 10, ttl: 60_000 } })
   async reconfigure(
     @Param('siteId', ParseUUIDPipe) siteId: string,
     @Param('key') key: string,
     @Body() dto: ReconfigureSiteServiceDto,
+    @CurrentUser('sub') userId: string,
+    @CurrentUser('role') role: string,
+    @Headers('idempotency-key') idempotencyKey?: string,
   ) {
     validateKey(key);
-    const data = await this.services.reconfigureSiteService(siteId, key, dto.config);
+    const data = await this.services.enqueueReconfigureSiteService(
+      siteId,
+      key,
+      dto.config,
+      { userId, role },
+      idempotencyKey,
+    );
     return { success: true, data };
   }
 
   @Post('sites/:siteId/services/manticore/adminer-ticket')
   @Roles(UserRole.ADMIN)
   @Throttle({ default: { limit: 30, ttl: 60_000 } })
-  async manticoreAdminerTicket(@Param('siteId', ParseUUIDPipe) siteId: string) {
-    const data = await this.services.createManticoreAdminerTicket(siteId);
+  async manticoreAdminerTicket(
+    @Param('siteId', ParseUUIDPipe) siteId: string,
+    @CurrentUser('sub') userId: string,
+    @CurrentUser('role') role: string,
+    @Headers('idempotency-key') _idempotencyKey?: string,
+  ) {
+    const data = await this.services.createManticoreAdminerTicket(siteId, userId, role);
     return { success: true, data };
   }
 

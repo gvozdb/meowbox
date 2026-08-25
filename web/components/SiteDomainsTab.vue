@@ -346,7 +346,10 @@ interface OperationResponse {
 
 interface OperationState {
   id: string;
-  status: 'PENDING' | 'RUNNING' | 'SUCCEEDED' | 'FAILED';
+  status:
+    | 'PENDING' | 'QUEUED' | 'CLAIMED' | 'RUNNING' | 'RECOVERING'
+    | 'CANCEL_REQUESTED' | 'CANCELLED' | 'SUCCEEDED' | 'FAILED'
+    | 'UNKNOWN_RECOVERY_REQUIRED' | 'NEEDS_ATTENTION';
   currentStep: string | null;
   progress: number;
   errorMessage: string | null;

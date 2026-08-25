@@ -1,0 +1,11 @@
+export const FEDERATED_VPN_FRAGMENT_ACTION_ID =
+  'http.get.federation-v1-vpn-fragments-vpn-user-id';
+export const FEDERATED_VPN_SERVICE_SUBJECT = 'vpn-subscription-gateway';
+export const FEDERATED_VPN_SERVICE_PURPOSE = FEDERATED_VPN_FRAGMENT_ACTION_ID;
+
+export const FEDERATED_VPN_SOURCE_FRESH_MS = 60_000;
+export const FEDERATED_VPN_SOURCE_MAX_STALE_MS = 5 * 60_000;
+export const FEDERATED_VPN_FRAGMENT_TTL_MS = 5 * 60_000;
+export const FEDERATED_VPN_MAX_SOURCES = 8;
+export const FEDERATED_VPN_MAX_AGGREGATE_BYTES = 1024 * 1024;
+export const FEDERATED_VPN_MAX_RESPONSE_BYTES = 384 * 1024;

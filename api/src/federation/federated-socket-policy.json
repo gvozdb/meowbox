@@ -1,0 +1,40 @@
+{
+  "schemaVersion": "meowbox.federated-socket-policy/v1",
+  "browserToApi": [
+    { "event": "ai:message", "roles": ["ADMIN", "MANAGER"], "readiness": "REQUIRE_READY" },
+    { "event": "ai:start", "roles": ["ADMIN", "MANAGER"], "readiness": "REQUIRE_READY" },
+    { "event": "ai:stop", "roles": ["ADMIN", "MANAGER"], "readiness": "REQUIRE_READY" },
+    { "event": "logs:tail:start", "roles": ["ADMIN", "MANAGER"], "readiness": "REQUIRE_READY" },
+    { "event": "logs:tail:stop", "roles": ["ADMIN", "MANAGER"], "readiness": "REQUIRE_READY" },
+    { "event": "php:ext-install:subscribe", "roles": ["ADMIN"], "readiness": "QUEUE_SUBSCRIPTION" },
+    { "event": "php:ext-install:unsubscribe", "roles": ["ADMIN"], "readiness": "QUEUE_SUBSCRIPTION" },
+    { "event": "php:install:subscribe", "roles": ["ADMIN"], "readiness": "QUEUE_SUBSCRIPTION" },
+    { "event": "php:install:unsubscribe", "roles": ["ADMIN"], "readiness": "QUEUE_SUBSCRIPTION" },
+    { "event": "terminal:close", "roles": ["ADMIN"], "readiness": "REQUIRE_READY" },
+    { "event": "terminal:input", "roles": ["ADMIN"], "readiness": "REQUIRE_READY" },
+    { "event": "terminal:open", "roles": ["ADMIN"], "readiness": "REQUIRE_READY" },
+    { "event": "terminal:resize", "roles": ["ADMIN"], "readiness": "REQUIRE_READY" }
+  ],
+  "apiToBrowser": [
+    { "event": "ai:error", "roles": ["ADMIN", "MANAGER"] },
+    { "event": "ai:result", "roles": ["ADMIN", "MANAGER"] },
+    { "event": "ai:system", "roles": ["ADMIN", "MANAGER"] },
+    { "event": "ai:text", "roles": ["ADMIN", "MANAGER"] },
+    { "event": "ai:thinking", "roles": ["ADMIN", "MANAGER"] },
+    { "event": "ai:tool_result", "roles": ["ADMIN", "MANAGER"] },
+    { "event": "ai:tool_use_done", "roles": ["ADMIN", "MANAGER"] },
+    { "event": "ai:tool_use_input", "roles": ["ADMIN", "MANAGER"] },
+    { "event": "ai:tool_use_start", "roles": ["ADMIN", "MANAGER"] },
+    { "event": "backup:progress", "roles": ["ADMIN", "MANAGER"] },
+    { "event": "backup:restore:progress", "roles": ["ADMIN", "MANAGER"] },
+    { "event": "logs:tail:data", "roles": ["ADMIN", "MANAGER"] },
+    { "event": "php:ext-install:log", "roles": ["ADMIN"] },
+    { "event": "php:install:log", "roles": ["ADMIN"] },
+    { "event": "site:deploy:log", "roles": ["ADMIN", "MANAGER"] },
+    { "event": "site:provision:done", "roles": ["ADMIN", "MANAGER"] },
+    { "event": "site:provision:log", "roles": ["ADMIN", "MANAGER"] },
+    { "event": "site:status", "roles": ["ADMIN", "MANAGER"] },
+    { "event": "system:metrics", "roles": ["ADMIN", "MANAGER"] },
+    { "event": "terminal:data", "roles": ["ADMIN"] }
+  ]
+}

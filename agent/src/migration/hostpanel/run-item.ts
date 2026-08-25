@@ -25,7 +25,6 @@
 
 import { promises as fs } from 'fs';
 import * as path from 'path';
-import { spawn } from 'child_process';
 import { randomBytes } from 'crypto';
 import type { Socket } from 'socket.io-client';
 
@@ -39,6 +38,7 @@ import { NginxManager } from '../../nginx/nginx.manager';
 import { PhpFpmManager } from '../../php/phpfpm.manager';
 import { CronManager } from '../../cron/cron.manager';
 import { CommandExecutor } from '../../command-executor';
+import { spawnOwned } from '../../process-registry';
 import { SITES_BASE_PATH, LETSENCRYPT_LIVE_DIR } from '../../config';
 import { isModxPreset, normalizeHostpanelPreset } from '@meowbox/shared';
 
@@ -1327,7 +1327,12 @@ function runStreaming(
   },
 ): Promise<void> {
   return new Promise((resolve, reject) => {
-    const proc = spawn(cmd, args, { env: opts.env, stdio: ['ignore', 'pipe', 'pipe'] });
+    const proc = spawnOwned(
+      cmd,
+      args,
+      { env: opts.env, stdio: ['ignore', 'pipe', 'pipe'] },
+      'hostpanel-command',
+    );
     let stderrBuf = '';
     let cancelled = false;
     let stalled = false;
@@ -1429,7 +1434,12 @@ function runStreaming(
  */
 function checkGzIntegrity(filePath: string): Promise<{ ok: boolean; error: string }> {
   return new Promise((resolve) => {
-    const proc = spawn('gzip', ['-t', filePath], { stdio: ['ignore', 'pipe', 'pipe'] });
+    const proc = spawnOwned(
+      'gzip',
+      ['-t', filePath],
+      { stdio: ['ignore', 'pipe', 'pipe'] },
+      'hostpanel-gzip-test',
+    );
     let stderr = '';
     proc.stderr?.on('data', (c: Buffer) => { stderr += c.toString(); });
     proc.on('exit', (code) => {

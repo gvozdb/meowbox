@@ -9,8 +9,15 @@ import { Observable, tap } from 'rxjs';
 import { Request } from 'express';
 import { PrismaService } from '../prisma.service';
 import { extractClientIp } from '../http/client-ip';
+import { getOrCreateNetworkContext, NetworkContextRequest } from '../http/network-context';
+import { isVerifiedFederationRequest } from '../../federation/federation-request-context';
 
 const AUDITED_METHODS = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
+const FEDERATION_READ_AUDIT_SUPPRESS = new Set([
+  '/api/dashboard/overview',
+  '/api/dashboard/summary',
+  '/api/system/metrics',
+]);
 
 @Injectable()
 export class AuditInterceptor implements NestInterceptor {
@@ -19,8 +26,18 @@ export class AuditInterceptor implements NestInterceptor {
 
   intercept(context: ExecutionContext, next: CallHandler): Observable<unknown> {
     const req = context.switchToHttp().getRequest<Request>();
+    const response = context.switchToHttp().getResponse<{ statusCode: number }>();
+    const requestState = req as Request & NetworkContextRequest & {
+      proxyAuthenticated?: boolean;
+    };
+    const federation = isVerifiedFederationRequest(requestState)
+      ? requestState.federationContext
+      : null;
 
-    if (!AUDITED_METHODS.has(req.method)) {
+    if (
+      !AUDITED_METHODS.has(req.method) &&
+      (!federation || FEDERATION_READ_AUDIT_SUPPRESS.has(req.path))
+    ) {
       return next.handle();
     }
 
@@ -28,6 +45,7 @@ export class AuditInterceptor implements NestInterceptor {
       | { sub: string; role: string }
       | undefined;
     const startTime = Date.now();
+    const network = getOrCreateNetworkContext(requestState);
 
     const writeLog = (status: 'SUCCESS' | 'FAILED', extra: Record<string, unknown>) => {
       if (!user?.sub) return;
@@ -36,12 +54,47 @@ export class AuditInterceptor implements NestInterceptor {
       const entity = this.resolveEntity(path);
       const entityId = req.params?.id || null;
 
+      if (federation) {
+        this.prisma.proxyAuditLog
+          .create({
+            data: {
+              direction: 'IN',
+              userId: federation.userId,
+              serverId: null,
+              serverName: null,
+              method: req.method,
+              path: req.path,
+              statusCode: status === 'SUCCESS'
+                ? response.statusCode
+                : (extra.status as number | undefined) ?? 500,
+              durationMs: Date.now() - startTime,
+              ipAddress: network.peerIp,
+              userAgent: (req.headers['user-agent'] || '').slice(0, 512),
+              errorMsg: status === 'FAILED' ? `HTTP_${(extra.status as number | undefined) ?? 500}` : null,
+              requestId: federation.requestId,
+              actionId: federation.actionId,
+              issuerInstallationId: federation.issuerInstallationId,
+              targetInstallationId: federation.targetInstallationId,
+              targetPrincipalId: federation.principalId,
+              actorKind: federation.actorKind,
+              keyId: federation.keyId,
+              operationId: federation.operationId,
+              peerIp: network.peerIp,
+              browserIp: network.browserIp,
+            },
+          })
+          .catch((err: unknown) => {
+            this.logger.warn(`federation-audit IN write failed: ${(err as Error).message}`);
+          });
+        return;
+      }
+
       // Proxy server-to-server вызовы имеют синтетического юзера (sub='proxy'),
       // у которого НЕТ записи в users. Пишем такие операции в отдельную таблицу
       // proxy_audit_logs с direction=IN (slave-сторона видит этот трафик
       // как входящий от чужой панели). Так есть полноценный журнал в БД,
       // а не warn в stdout.
-      if (user.sub === 'proxy') {
+      if (user.sub === 'proxy' || requestState.proxyAuthenticated === true) {
         this.prisma.proxyAuditLog
           .create({
             data: {
@@ -53,7 +106,9 @@ export class AuditInterceptor implements NestInterceptor {
               path: req.path,
               statusCode: status === 'SUCCESS' ? 200 : (extra.status as number | undefined) ?? 500,
               durationMs: Date.now() - startTime,
-              ipAddress: this.extractIp(req),
+              ipAddress: network.peerIp,
+              peerIp: network.peerIp,
+              browserIp: network.browserIp,
               userAgent: (req.headers['user-agent'] || '').slice(0, 512),
               errorMsg: status === 'FAILED' ? String(extra.error ?? '').slice(0, 1000) : null,
             },
@@ -78,7 +133,7 @@ export class AuditInterceptor implements NestInterceptor {
               durationMs: Date.now() - startTime,
               ...extra,
             }),
-            ipAddress: this.extractIp(req),
+            ipAddress: network.browserIp,
             userAgent: (req.headers['user-agent'] || '').slice(0, 512),
           },
         })

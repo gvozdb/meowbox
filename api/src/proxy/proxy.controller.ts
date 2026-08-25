@@ -2,6 +2,7 @@ import {
   Controller,
   All,
   Get,
+  Headers,
   Post,
   Put,
   Delete,
@@ -11,28 +12,36 @@ import {
   Req,
   Res,
   NotFoundException,
-  BadRequestException,
+  ForbiddenException,
+  GoneException,
   Logger,
 } from '@nestjs/common';
 import { Throttle } from '@nestjs/throttler';
 import { Request, Response as ExpressResponse } from 'express';
 import { Readable } from 'stream';
+import { randomUUID } from 'crypto';
 import { Roles } from '../common/decorators/roles.decorator';
 import { CurrentUser } from '../common/decorators/current-user.decorator';
+import { isLegacyStaticV0Action } from '../common/guards/proxy-auth.guard';
 import { dashboardOverviewMetricSamples } from '../common/dashboard-observability';
 import { ProxyService } from './proxy.service';
-import { ProvisionService } from './provision.service';
 import { ProxyAuditService } from './proxy-audit.service';
+import {
+  FederationDispatchError,
+  FederationDispatcherService,
+  FederationRouteTarget,
+} from '../federation/federation-dispatcher.service';
 import {
   AddServerDto,
   UpdateServerDto,
-  ProvisionServerDto,
   UpdateBulkDto,
 } from './proxy.dto';
+import { getOrCreateNetworkContext } from '../common/http/network-context';
+import { FederatedFleetUpdateService } from './federated-fleet-update.service';
 
 interface AuthCtx {
   id: string;
-  role: string;
+  role: 'ADMIN' | 'MANAGER' | 'VIEWER';
 }
 
 const DASHBOARD_PROXY_READ_PATHS = new Set([
@@ -48,28 +57,6 @@ export function shouldAuditProxyRequest(method: string, path: string): boolean {
   return !isRead || !DASHBOARD_PROXY_READ_PATHS.has(path);
 }
 
-/**
- * Сравнение semver-тегов вида "v0.4.0", "0.4.1", "v1.2.3-beta.4".
- * Возвращает: -1 (a<b), 0 (a==b), 1 (a>b).
- */
-function compareSemver(a: string, b: string): number {
-  const norm = (v: string) => v.replace(/^v/i, '').split(/[.-]/);
-  const aa = norm(a);
-  const bb = norm(b);
-  for (let i = 0; i < Math.max(aa.length, bb.length); i++) {
-    const ai = aa[i] ?? '0';
-    const bi = bb[i] ?? '0';
-    const an = Number(ai);
-    const bn = Number(bi);
-    if (!Number.isNaN(an) && !Number.isNaN(bn)) {
-      if (an !== bn) return an < bn ? -1 : 1;
-    } else {
-      if (ai !== bi) return ai < bi ? -1 : 1;
-    }
-  }
-  return 0;
-}
-
 @Controller()
 @Roles('ADMIN')
 export class ProxyController {
@@ -77,8 +64,9 @@ export class ProxyController {
 
   constructor(
     private readonly proxyService: ProxyService,
-    private readonly provisionService: ProvisionService,
     private readonly audit: ProxyAuditService,
+    private readonly federationDispatcher: FederationDispatcherService,
+    private readonly fleetUpdates: FederatedFleetUpdateService,
   ) {}
 
   /** List all configured servers with online status */
@@ -130,9 +118,10 @@ export class ProxyController {
   // Ограничиваем 2 запроса / 5 минут, чтобы оператор случайно не запустил
   // десяток параллельных установок и не положил сеть.
   @Throttle({ default: { limit: 2, ttl: 300_000 } })
-  async provisionServer(@Body() body: ProvisionServerDto) {
-    const result = await this.provisionService.provision(body);
-    return { success: true, data: result };
+  provisionServer() {
+    throw new GoneException(
+      'Legacy static-token provisioning is disabled; use /servers/enrollments',
+    );
   }
 
   /**
@@ -149,97 +138,39 @@ export class ProxyController {
     @Body() body: UpdateBulkDto,
     @CurrentUser() user: AuthCtx,
     @Req() req: Request,
+    @Headers('idempotency-key') idempotencyKey?: string,
   ) {
-    const allServers = this.proxyService.getServers();
-    const selected = body.serverIds
-      .map((id) => allServers.find((s) => s.id === id))
-      .filter((s): s is NonNullable<typeof s> => !!s);
-
-    if (selected.length === 0) {
-      throw new BadRequestException('Не найден ни один сервер из выбранных');
-    }
-
-    // Получаем актуальные версии всех выбранных серверов через свежий пинг
-    // (нельзя доверять кешу — может быть stale).
-    const versions = await Promise.all(
-      selected.map(async (s) => {
-        const ping = await this.proxyService.pingServer(s);
-        return { server: s, current: ping.version ?? null, online: ping.online };
-      }),
+    const network = getOrCreateNetworkContext(req);
+    const data = await this.fleetUpdates.triggerBulk(
+      body.serverIds,
+      body.version,
+      {
+        id: user.id,
+        role: user.role,
+        browserIp: network.browserIp,
+        peerIp: network.peerIp,
+        userAgent: (req.headers['user-agent'] as string | undefined) ?? null,
+      },
+      idempotencyKey,
     );
+    return { success: true, data };
+  }
 
-    const offline = versions.filter((v) => !v.online);
-    if (offline.length > 0) {
-      throw new BadRequestException(
-        `Сервера офлайн: ${offline.map((o) => o.server.name).join(', ')}. Обновление невозможно.`,
-      );
-    }
-
-    // Самая высокая версия среди выбранных. Целевая должна быть строго выше.
-    const knownVersions = versions
-      .map((v) => v.current)
-      .filter((v): v is string => !!v && v !== 'unknown');
-    if (knownVersions.length > 0) {
-      const maxCurrent = knownVersions.reduce((a, b) => (compareSemver(a, b) >= 0 ? a : b));
-      if (compareSemver(body.version, maxCurrent) <= 0) {
-        throw new BadRequestException(
-          `Целевая версия ${body.version} не выше максимальной текущей (${maxCurrent}). Downgrade запрещён.`,
-        );
-      }
-    }
-
-    const ip = (req.ip ?? 'unknown') as string;
-    const ua = (req.headers['user-agent'] as string | undefined) ?? null;
-
-    const results: Array<{ id: string; name: string; success: boolean; error?: string }> = [];
-
-    for (const { server } of versions) {
-      const t0 = Date.now();
-      try {
-        const { status, data } = await this.proxyService.proxyRequest(
-          server,
-          'POST',
-          '/admin/update',
-          { version: body.version },
-        );
-        const ok = status >= 200 && status < 300;
-        results.push({
-          id: server.id,
-          name: server.name,
-          success: ok,
-          error: !ok ? `HTTP ${status}: ${JSON.stringify(data)}` : undefined,
-        });
-        await this.audit.logOut({
-          userId: user.id,
-          serverId: server.id,
-          serverName: server.name,
-          method: 'POST',
-          path: '/admin/update',
-          statusCode: status,
-          durationMs: Date.now() - t0,
-          ipAddress: ip,
-          userAgent: ua,
-          errorMsg: !ok ? `HTTP ${status}` : null,
-        });
-      } catch (err) {
-        const msg = (err as Error).message;
-        results.push({ id: server.id, name: server.name, success: false, error: msg });
-        await this.audit.logOut({
-          userId: user.id,
-          serverId: server.id,
-          serverName: server.name,
-          method: 'POST',
-          path: '/admin/update',
-          statusCode: null,
-          durationMs: Date.now() - t0,
-          ipAddress: ip,
-          userAgent: ua,
-          errorMsg: msg,
-        });
-      }
-    }
-
-    return { success: true, data: { version: body.version, results } };
+  @Get('servers/:id/update-status')
+  async federatedUpdateStatus(
+    @Param('id') id: string,
+    @CurrentUser() user: AuthCtx,
+    @Req() req: Request,
+  ) {
+    const network = getOrCreateNetworkContext(req);
+    const data = await this.fleetUpdates.federatedStatus(id, {
+      id: user.id,
+      role: user.role,
+      browserIp: network.browserIp,
+      peerIp: network.peerIp,
+      userAgent: (req.headers['user-agent'] as string | undefined) ?? null,
+    });
+    return { success: true, data };
   }
 
   /** Audit-лог проксирующих запросов (для UI на /servers, вкладка "журнал"). */
@@ -275,6 +206,7 @@ export class ProxyController {
    * JSON-парсер. Без этого multipart/бинарь рушились бы на global JSON pipe.
    */
   @All('proxy/:serverId/*')
+  @Roles('ADMIN', 'MANAGER', 'VIEWER')
   @Throttle({ default: { limit: 120, ttl: 60_000 } })
   async proxyRequest(
     @Param('serverId') serverId: string,
@@ -282,6 +214,12 @@ export class ProxyController {
     @Res() res: ExpressResponse,
     @CurrentUser() user: AuthCtx,
   ) {
+    const routeTarget = await this.federationDispatcher.resolveRouteTarget(serverId);
+    if (routeTarget.kind === 'V1') {
+      await this.dispatchFederationRequest(routeTarget, req, res, user);
+      return;
+    }
+
     const server = this.proxyService.getServer(serverId);
     if (!server) {
       throw new NotFoundException(`Server "${serverId}" not found in config`);
@@ -295,6 +233,20 @@ export class ProxyController {
       : fullUrl;
     const targetPath = targetPathWithQuery.split('?')[0] || '/';
     const shouldAudit = shouldAuditProxyRequest(req.method, targetPath);
+
+    if (user.role !== 'ADMIN') {
+      throw new ForbiddenException('Legacy remote access is ADMIN-only');
+    }
+    if (!isLegacyStaticV0Action(req.method, `/api${targetPathWithQuery}`)) {
+      res.status(426).json({
+        success: false,
+        error: {
+          code: 'LEGACY_UPGRADE_REQUIRED',
+          message: 'This target must be upgraded before the action is available',
+        },
+      });
+      return;
+    }
 
     const ip = (req.ip ?? 'unknown') as string;
     const ua = (req.headers['user-agent'] as string | undefined) ?? null;
@@ -341,7 +293,7 @@ export class ProxyController {
           statusCode: 502,
           metrics: dashboardOverviewMetricSamples({
             durationMs: Date.now() - t0,
-            role: user.role === 'MANAGER' ? 'MANAGER' : 'ADMIN',
+            role: 'ADMIN',
             localOrProxy: 'proxy',
           }),
         }));
@@ -375,7 +327,9 @@ export class ProxyController {
         lk === 'keep-alive' ||
         lk === 'transfer-encoding' ||
         lk === 'content-encoding' || // мы не запрашивали gzip — slave не должен слать, но на всякий
-        lk === 'content-length' // длина может поменяться при ретрансляции; пусть Express сам выставит
+        lk === 'content-length' || // длина может поменяться при ретрансляции; пусть Express сам выставит
+        lk === 'set-cookie' ||
+        lk === 'location'
       ) {
         return;
       }
@@ -392,7 +346,7 @@ export class ProxyController {
         statusCode: upstream.status,
         metrics: dashboardOverviewMetricSamples({
           durationMs,
-          role: user.role === 'MANAGER' ? 'MANAGER' : 'ADMIN',
+          role: 'ADMIN',
           localOrProxy: 'proxy',
         }),
       }));
@@ -443,6 +397,139 @@ export class ProxyController {
       } else {
         res.end();
       }
+    }
+  }
+
+  private async dispatchFederationRequest(
+    routeTarget: Extract<FederationRouteTarget, { kind: 'V1' }>,
+    req: Request,
+    res: ExpressResponse,
+    user: AuthCtx,
+  ): Promise<void> {
+    const ip = (req.ip ?? 'unknown') as string;
+    const userAgent = (req.headers['user-agent'] as string | undefined) ?? null;
+    const startedAt = Date.now();
+    const abortController = new AbortController();
+    const body = req.method === 'GET' || req.method === 'HEAD'
+      ? Buffer.alloc(0)
+      : Buffer.isBuffer(req.body)
+        ? req.body
+        : req.body === undefined || req.body === null
+          ? Buffer.alloc(0)
+          : Buffer.from(typeof req.body === 'string' ? req.body : JSON.stringify(req.body));
+    const targetPath = (req.originalUrl || req.url)
+      .slice(`/api/proxy/${routeTarget.targetInstallationId}`.length)
+      .split('?', 1)[0] || '/';
+    const auditRequest = shouldAuditProxyRequest(req.method, targetPath);
+
+    try {
+      const upstream = await this.federationDispatcher.dispatch({
+        targetInstallationId: routeTarget.targetInstallationId,
+        inboundTarget: req.originalUrl || req.url,
+        method: req.method,
+        rawHeaders: req.rawHeaders,
+        body,
+        actor: {
+          id: user.id,
+          role: user.role as 'ADMIN' | 'MANAGER' | 'VIEWER',
+        },
+        browserIp: ip,
+        signal: abortController.signal,
+      });
+      for (const [name, value] of Object.entries(upstream.headers)) {
+        res.setHeader(name, Array.isArray(value) ? [...value] : value);
+      }
+      res.setHeader('X-Request-Id', upstream.requestId);
+      res.status(upstream.statusCode);
+
+      if (targetPath === '/dashboard/overview') {
+        const durationMs = Date.now() - startedAt;
+        this.logger.log(JSON.stringify({
+          event: 'dashboard_overview_proxy_complete',
+          durationMs,
+          role: user.role,
+          statusCode: upstream.statusCode,
+          protocol: 1,
+          metrics: dashboardOverviewMetricSamples({
+            durationMs,
+            role: user.role === 'MANAGER' ? 'MANAGER' : 'ADMIN',
+            localOrProxy: 'proxy',
+          }),
+        }));
+      }
+      if (auditRequest) {
+        await this.audit.logOut({
+          userId: user.id,
+          serverId: routeTarget.serverId,
+          serverName: routeTarget.displayName,
+          method: req.method,
+          path: targetPath,
+          statusCode: upstream.statusCode,
+          durationMs: Date.now() - startedAt,
+          ipAddress: ip,
+          userAgent,
+          requestId: upstream.requestId,
+          actionId: upstream.actionId,
+          issuerInstallationId: upstream.issuerInstallationId,
+          targetInstallationId: upstream.targetInstallationId,
+          actorKind: 'OPERATOR',
+          keyId: upstream.keyId,
+          peerIp: ip,
+          browserIp: ip,
+        });
+      }
+
+      upstream.body.on('error', (error: Error) => {
+        this.logger.warn(`Federation response stream failed (${upstream.requestId}): ${error.message}`);
+        if (!res.headersSent) {
+          res.status(502).json({
+            success: false,
+            error: { code: 'REMOTE_IDLE_TIMEOUT', message: 'Remote response stream failed' },
+          });
+        } else {
+          res.destroy(error);
+        }
+      });
+      res.on('close', () => {
+        if (!res.writableEnded) abortController.abort();
+        upstream.body.destroy();
+      });
+      upstream.body.pipe(res);
+    } catch (error) {
+      abortController.abort();
+      const dispatchError = error instanceof FederationDispatchError ? error : null;
+      const contract = dispatchError?.contract ?? {
+        code: 'REMOTE_OFFLINE',
+        message: 'Remote transport failed',
+        requestId: randomUUID(),
+        targetInstallationId: routeTarget.targetInstallationId,
+        actionId: null,
+        retryable: false,
+        retryAfterSeconds: null,
+        targetStatus: null,
+      };
+      this.logger.warn(`Federation dispatch failed (${contract.requestId}, ${contract.code})`);
+      if (auditRequest) {
+        await this.audit.logOut({
+          userId: user.id,
+          serverId: routeTarget.serverId,
+          serverName: routeTarget.displayName,
+          method: req.method,
+          path: targetPath,
+          statusCode: dispatchError?.httpStatus ?? 502,
+          durationMs: Date.now() - startedAt,
+          ipAddress: ip,
+          userAgent,
+          errorMsg: contract.code,
+          requestId: contract.requestId,
+          actionId: contract.actionId,
+          targetInstallationId: contract.targetInstallationId,
+          actorKind: 'OPERATOR',
+          peerIp: ip,
+          browserIp: ip,
+        });
+      }
+      res.status(dispatchError?.httpStatus ?? 502).json({ success: false, error: contract });
     }
   }
 }

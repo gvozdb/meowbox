@@ -4,6 +4,10 @@ import {
   MaxLength,
   IsIn,
   Matches,
+  IsInt,
+  Min,
+  Max,
+  IsUUID,
 } from 'class-validator';
 
 /**
@@ -48,6 +52,43 @@ export class RenameItemDto {
   @IsNotEmpty()
   @MaxLength(PATH_MAX)
   newPath!: string;
+}
+
+export class CreateFileDownloadSessionDto {
+  @IsString()
+  @IsNotEmpty()
+  @MaxLength(PATH_MAX)
+  @Matches(/^(?!.*\x00).+$/s, { message: 'Path contains null byte' })
+  path!: string;
+}
+
+export class CreateFileUploadSessionDto {
+  @IsString()
+  @IsNotEmpty()
+  @MaxLength(PATH_MAX)
+  @Matches(/^(?!.*\x00).+$/s, { message: 'Path contains null byte' })
+  targetDir!: string;
+
+  @IsString()
+  @IsNotEmpty()
+  @MaxLength(255)
+  filename!: string;
+
+  @IsInt()
+  @Min(1)
+  @Max(50 * 1024 ** 3)
+  contentLength!: number;
+}
+
+export class CommitFileUploadDto {
+  @IsUUID()
+  uploadSessionId!: string;
+
+  @IsString()
+  @IsNotEmpty()
+  @MaxLength(PATH_MAX)
+  @Matches(/^(?!.*\x00).+$/s, { message: 'Path contains null byte' })
+  targetDir!: string;
 }
 
 // Небольшой runtime-хелпер для чек-элементов, не вписывающихся в class-validator.

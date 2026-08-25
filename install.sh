@@ -21,12 +21,21 @@ LOG_FILE="${LOG_FILE:-/var/log/meowbox-install.log}"
 PROXY_TOKEN=""
 RELEASE_MODE="auto"  # auto | release | legacy
 BUILD_FROM_SOURCE=0  # 1 = full npm ci + build (вместо `npm ci --omit=dev`)
+INSTALLATION_ROLE="MASTER"
 
 # Parse arguments
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --proxy-token)
       PROXY_TOKEN="$2"
+      shift 2
+      ;;
+    --installation-role)
+      INSTALLATION_ROLE="${2^^}"
+      if [[ "$INSTALLATION_ROLE" != "MASTER" && "$INSTALLATION_ROLE" != "TARGET" ]]; then
+        echo "--installation-role must be master or target" >&2
+        exit 2
+      fi
       shift 2
       ;;
     --release-mode)
@@ -502,6 +511,40 @@ NODE_ENV="production"
 # for short diagnostics; keep disabled on running panels.
 PRISMA_LOG_QUERIES=false
 
+# Federation protocol ships disabled. Enrollment activates target capabilities
+# only after trust, manifest and pinned-endpoint checks pass.
+MEOWBOX_INSTALLATION_ROLE="${INSTALLATION_ROLE}"
+FEDERATION_PROTOCOL_MODE=disabled
+FEDERATION_MAX_ACTIVE_REPLAYS_PER_ISSUER=10000
+# Empty origins keep the target manifest UNCONFIGURED. Enrollment writes
+# canonical HTTPS origins only after TLS/SPKI and browser-route checks pass.
+FEDERATION_API_ORIGIN=
+FEDERATION_WS_ORIGIN=
+FEDERATION_BROWSER_PUBLIC_ORIGIN=
+FEDERATION_DIRECT_TRANSFER_ORIGIN=
+FEDERATION_WS_PATH=/socket.io
+
+# Direct transfer budgets. Generated streams use idle, never total, timeout.
+TRANSFER_FIRST_BYTE_TTL_MS=900000
+TRANSFER_GENERATED_STREAM_IDLE_MS=60000
+TRANSFER_STAGED_LEASE_TTL_MS=14400000
+TRANSFER_MAX_ARTIFACT_BYTES=53687091200
+TRANSFER_DISK_RESERVE_BYTES=10737418240
+TRANSFER_DISK_RESERVE_PERCENT=10
+TRANSFER_RATE_LIMIT=20m
+TRANSFER_NEW_PER_MINUTE_PER_ACTOR=5
+TRANSFER_ACTIVE_PER_ACTOR=2
+TRANSFER_ACTIVE_PER_TARGET=4
+BACKUP_EXPORT_PRESIGNED_TTL_SEC=3600
+BACKUP_EXPORT_STAGED_MAX_BYTES=53687091200
+
+# Federated webhook ingress and durable delivery.
+WEBHOOK_QUEUE_LIMIT=1000
+WEBHOOK_WORKER_CONCURRENCY=4
+WEBHOOK_SPOOL_RESERVE_BYTES=1073741824
+WEBHOOK_SPOOL_RESERVE_PERCENT=10
+WEBHOOK_DLQ_RETENTION_MS=604800000
+
 # Site storage base path (per-site user home directories created here)
 SITES_BASE_PATH="/var/www"
 
@@ -960,6 +1003,7 @@ PANEL_DOMAIN="${PANEL_DOMAIN:-localhost}"
 PANEL_PORT="${PANEL_PORT:-11862}"
 API_PORT="${API_PORT:-11860}"
 WEB_PORT="${WEB_PORT:-11861}"
+TRANSFER_RATE_LIMIT="${TRANSFER_RATE_LIMIT:-20m}"
 
 cat > /etc/nginx/sites-available/meowbox-panel << NGINX
 upstream meowbox_api {
@@ -990,6 +1034,73 @@ server {
         proxy_set_header X-Forwarded-Proto \$scheme;
         proxy_read_timeout 900s;
         proxy_send_timeout 900s;
+    }
+
+    # Direct generated/staged transfer delivery. Timeouts are inactivity
+    # budgets; a progressing stream has no total Nginx deadline.
+    location ^~ /api/public/v1/transfers/ {
+        client_max_body_size 50g;
+        client_body_timeout 60s;
+        proxy_pass http://meowbox_api;
+        proxy_http_version 1.1;
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+        proxy_buffering off;
+        proxy_request_buffering off;
+        proxy_max_temp_file_size 0;
+        proxy_read_timeout 60s;
+        proxy_send_timeout 60s;
+        send_timeout 60s;
+        limit_rate ${TRANSFER_RATE_LIMIT};
+        add_header Cache-Control "no-store" always;
+        add_header Referrer-Policy "no-referrer" always;
+        access_log off;
+        error_log /dev/null crit;
+    }
+
+    # Public webhook ingress. Provider signatures bind the exact request bytes;
+    # tokens and request bodies must never enter Nginx logs.
+    location ^~ /api/public/v1/webhooks/ {
+        client_max_body_size 64k;
+        client_body_buffer_size 64k;
+        proxy_pass http://meowbox_api;
+        proxy_http_version 1.1;
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+        proxy_request_buffering on;
+        proxy_connect_timeout 5s;
+        proxy_read_timeout 15s;
+        proxy_send_timeout 15s;
+        send_timeout 15s;
+        add_header Cache-Control "no-store" always;
+        add_header Referrer-Policy "no-referrer" always;
+        access_log off;
+        error_log /dev/null crit;
+    }
+
+    # MODX login handoff keeps its one-time secret in the URL fragment and
+    # submits it in a bounded same-origin POST. Never log the consume route.
+    location ^~ /api/public/v1/modx/login {
+        client_max_body_size 4k;
+        client_body_buffer_size 4k;
+        proxy_pass http://meowbox_api;
+        proxy_http_version 1.1;
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+        proxy_request_buffering on;
+        proxy_connect_timeout 5s;
+        proxy_read_timeout 15s;
+        proxy_send_timeout 15s;
+        add_header Cache-Control "no-store" always;
+        add_header Referrer-Policy "no-referrer" always;
+        access_log off;
+        error_log /dev/null crit;
     }
 
     # API proxy
@@ -1028,8 +1139,8 @@ server {
 
     # ---------------------------------------------------------------------
     # Adminer (встроенный, /adminer/) — отдельный PHP-FPM пул
-    # /adminer/sso.php — обмен одноразового SSO-ticket'а на сессионную куку
-    # /adminer/        — сам Adminer (читает credentials из куки)
+    # /adminer/#handoff=... — fragment-bootstrap обменивает grant через Nest.
+    # /adminer/sso.php      — legacy ticket endpoint, всегда 410 (кроме logout).
     # ---------------------------------------------------------------------
     location ^~ /adminer/ {
         alias ${ADMINER_DIR}/;
@@ -1038,6 +1149,8 @@ server {
         # Запрет браузерной/поисковой индексации.
         add_header X-Robots-Tag "noindex,nofollow" always;
         add_header X-Frame-Options "SAMEORIGIN" always;
+        add_header Referrer-Policy "no-referrer" always;
+        add_header Cache-Control "no-store" always;
 
         # Лимит на тело POST (Adminer-импорты дампов и т.п.).
         client_max_body_size 128m;
@@ -1050,9 +1163,14 @@ server {
             return 403;
         }
 
-        # Обработка PHP — фронт-контроллер /adminer/index.php или /adminer/sso.php.
-        # Маршрутизируем оба, остальные .php-файлы внутри adminer/ запрещены.
-        location ~ ^/adminer/(index|sso|adminer)\.php\$ {
+        # Standalone binary подключается только из index.php; прямой URL
+        # обошёл бы target-bound session wrapper.
+        location = /adminer/adminer.php {
+            return 404;
+        }
+
+        # Обработка PHP — только wrapper и legacy-logout/410 endpoint.
+        location ~ ^/adminer/(index|sso)\.php\$ {
             alias ${ADMINER_DIR}/;
             try_files /\$1.php =404;
 

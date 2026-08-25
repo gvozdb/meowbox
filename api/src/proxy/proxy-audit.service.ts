@@ -2,6 +2,19 @@ import { Injectable, Logger } from '@nestjs/common';
 
 import { PrismaService } from '../common/prisma.service';
 
+interface FederationAuditFields {
+  requestId?: string | null;
+  actionId?: string | null;
+  issuerInstallationId?: string | null;
+  targetInstallationId?: string | null;
+  targetPrincipalId?: string | null;
+  actorKind?: string | null;
+  keyId?: string | null;
+  operationId?: string | null;
+  peerIp?: string | null;
+  browserIp?: string | null;
+}
+
 /**
  * Журнал прокси-операций (вход и выход).
  *
@@ -18,7 +31,7 @@ export class ProxyAuditService {
 
   constructor(private readonly prisma: PrismaService) {}
 
-  async logOut(params: {
+  async logOut(params: FederationAuditFields & {
     userId: string | null;
     serverId: string;
     serverName: string;
@@ -44,6 +57,16 @@ export class ProxyAuditService {
           ipAddress: params.ipAddress,
           userAgent: params.userAgent ?? null,
           errorMsg: params.errorMsg ?? null,
+          requestId: params.requestId ?? null,
+          actionId: params.actionId ?? null,
+          issuerInstallationId: params.issuerInstallationId ?? null,
+          targetInstallationId: params.targetInstallationId ?? null,
+          targetPrincipalId: params.targetPrincipalId ?? null,
+          actorKind: params.actorKind ?? null,
+          keyId: params.keyId ?? null,
+          operationId: params.operationId ?? null,
+          peerIp: params.peerIp ?? params.ipAddress,
+          browserIp: params.browserIp ?? params.ipAddress,
         },
       });
     } catch (err) {
@@ -52,7 +75,7 @@ export class ProxyAuditService {
     }
   }
 
-  async logIn(params: {
+  async logIn(params: FederationAuditFields & {
     method: string;
     path: string;
     statusCode: number | null;
@@ -75,6 +98,16 @@ export class ProxyAuditService {
           ipAddress: params.ipAddress,
           userAgent: params.userAgent ?? null,
           errorMsg: params.errorMsg ?? null,
+          requestId: params.requestId ?? null,
+          actionId: params.actionId ?? null,
+          issuerInstallationId: params.issuerInstallationId ?? null,
+          targetInstallationId: params.targetInstallationId ?? null,
+          targetPrincipalId: params.targetPrincipalId ?? null,
+          actorKind: params.actorKind ?? null,
+          keyId: params.keyId ?? null,
+          operationId: params.operationId ?? null,
+          peerIp: params.peerIp ?? params.ipAddress,
+          browserIp: params.browserIp ?? params.ipAddress,
         },
       });
     } catch (err) {

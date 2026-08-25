@@ -1,12 +1,14 @@
 import {
   BadRequestException,
   ConflictException,
+  ForbiddenException,
   Injectable,
   Logger,
   NotFoundException,
+  OnModuleDestroy,
   OnModuleInit,
 } from '@nestjs/common';
-import { randomBytes, randomUUID } from 'crypto';
+import { createHash, randomBytes, randomUUID } from 'crypto';
 import {
   VpnProtocol,
   VpnServiceStatus,
@@ -38,17 +40,123 @@ import {
 import {
   buildVlessUrl,
 } from './providers/xray-reality.provider';
+import { OperationAdmissionService } from '../operations/operation-admission.service';
+import {
+  OperationsWorkerService,
+  type OperationExecutionContext,
+} from '../operations/operations-worker.service';
+import { OperationNeedsAttentionError } from '../operations/operation-errors';
+
+const VPN_RUNTIME_OPERATION_ACTIONS = {
+  INSTALL: 'vpn.runtime.install',
+  UNINSTALL: 'vpn.runtime.uninstall',
+  SNI_HEALTH_CHECK: 'vpn.sni_health_check',
+} as const;
+
+const VPN_RUNTIME_AGENT_ACTIONS = {
+  INSTALL_XRAY: 'agent.vpn.runtime.install_xray',
+  INSTALL_AMNEZIA: 'agent.vpn.runtime.install_amnezia',
+  UNINSTALL_XRAY: 'agent.vpn.runtime.uninstall_xray',
+  UNINSTALL_AMNEZIA: 'agent.vpn.runtime.uninstall_amnezia',
+} as const;
+
+interface VpnRuntimeOperationRequest {
+  protocol: VpnProtocol;
+}
+
+function validateVpnRuntimeRequest(request: unknown): VpnRuntimeOperationRequest {
+  if (!request || typeof request !== 'object' || Array.isArray(request)) {
+    throw new OperationNeedsAttentionError('VPN runtime request is invalid');
+  }
+  const value = request as Record<string, unknown>;
+  if (
+    Object.keys(value).sort().join(',') !== 'protocol' ||
+    (value.protocol !== VpnProtocol.VLESS_REALITY &&
+      value.protocol !== VpnProtocol.AMNEZIA_WG)
+  ) {
+    throw new OperationNeedsAttentionError('VPN runtime request is invalid');
+  }
+  return value as unknown as VpnRuntimeOperationRequest;
+}
+
+function validateVpnRuntimeInstallResult(result: unknown): {
+  installed: true;
+  version: string | null;
+} {
+  if (!result || typeof result !== 'object' || Array.isArray(result)) {
+    throw new OperationNeedsAttentionError('VPN runtime install result is invalid');
+  }
+  const value = result as Record<string, unknown>;
+  if (
+    Object.keys(value).some((key) => !['installed', 'version', 'details'].includes(key)) ||
+    value.installed !== true ||
+    (value.version !== null &&
+      (typeof value.version !== 'string' || value.version.length > 128)) ||
+    (value.details !== undefined &&
+      (typeof value.details !== 'string' || value.details.length > 1_024))
+  ) {
+    throw new OperationNeedsAttentionError('VPN runtime install result is invalid');
+  }
+  return { installed: true, version: value.version as string | null };
+}
+
+function validateVpnRuntimeUninstallResult(result: unknown): {
+  uninstalled: true;
+} {
+  if (!result || typeof result !== 'object' || Array.isArray(result)) {
+    throw new OperationNeedsAttentionError('VPN runtime uninstall result is invalid');
+  }
+  const value = result as Record<string, unknown>;
+  if (Object.keys(value).sort().join(',') !== 'uninstalled' || value.uninstalled !== true) {
+    throw new OperationNeedsAttentionError('VPN runtime uninstall was not confirmed');
+  }
+  return { uninstalled: true };
+}
 
 interface PublicHostInfo {
   publicIp: string | null;
 }
 
+interface SubscriptionEntry {
+  fingerprint: string;
+  content: string;
+}
+
+interface SubscriptionUser {
+  id: string;
+  name: string;
+  enabled: boolean;
+  updatedAt: Date;
+  creds: Array<{
+    id: string;
+    serviceId: string;
+    credsBlob: string;
+    updatedAt: Date;
+    service: {
+      id: string;
+      label: string | null;
+      protocol: string;
+      port: number;
+      status: string;
+      configBlob: string;
+      updatedAt: Date;
+    };
+  }>;
+}
+
+export interface FederatedVpnSubscriptionSourceSnapshot {
+  sourceId: string;
+  epoch: string;
+  entries: readonly SubscriptionEntry[];
+}
+
 @Injectable()
-export class VpnService implements OnModuleInit {
+export class VpnService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger('VpnService');
   /** Кеш определённого через агент публичного IP. Сбрасывается раз в час. */
   private hostInfoCache: { publicIp: string | null; cachedAt: number } | null = null;
   private static readonly HOST_INFO_TTL_MS = 60 * 60 * 1000;
+  private unregisterOperationHandlers: Array<() => void> = [];
 
   constructor(
     private readonly prisma: PrismaService,
@@ -57,6 +165,8 @@ export class VpnService implements OnModuleInit {
     private readonly xrayReality: XrayRealityProvider,
     private readonly amneziaWg: AmneziaWgProvider,
     private readonly notifications: NotificationDispatcherService,
+    private readonly admission: OperationAdmissionService,
+    private readonly worker: OperationsWorkerService,
   ) {}
 
   // =========================================================================
@@ -86,26 +196,34 @@ export class VpnService implements OnModuleInit {
     return r.data;
   }
 
-  async installRuntime(protocol: VpnProtocol): Promise<{ installed: boolean; version: string | null }> {
+  async installRuntime(
+    protocol: VpnProtocol,
+    userId: string,
+    role: string,
+    idempotencyKey?: string,
+  ) {
     if (!this.relay.isAgentConnected()) {
       throw new BadRequestException('Агент не подключён');
     }
-    const event =
-      protocol === VpnProtocol.VLESS_REALITY
-        ? 'vpn:installer:install-xray'
-        : 'vpn:installer:install-amnezia';
-    const r = await this.relay.emitToAgent<{ installed: boolean; version: string | null }>(
-      event,
-      {},
-      600_000,
-    );
-    if (!r.success || !r.data) {
-      throw new BadRequestException(r.error || 'install failed');
-    }
-    return r.data;
+    return this.admission.admit({
+      actionId: VPN_RUNTIME_OPERATION_ACTIONS.INSTALL,
+      type: 'VPN_RUNTIME_INSTALL',
+      idempotencyKey,
+      actor: { userId, role },
+      request: { protocol },
+      deadlineMs: 11 * 60_000,
+      recoveryPolicy: 'RECONCILE_ONLY',
+      retryable: false,
+      globalLockKey: `vpn-runtime:${protocol.toLowerCase().replaceAll('_', '-')}`,
+    });
   }
 
-  async uninstallRuntime(protocol: VpnProtocol): Promise<void> {
+  async uninstallRuntime(
+    protocol: VpnProtocol,
+    userId: string,
+    role: string,
+    idempotencyKey?: string,
+  ) {
     if (!this.relay.isAgentConnected()) {
       throw new BadRequestException('Агент не подключён');
     }
@@ -116,15 +234,34 @@ export class VpnService implements OnModuleInit {
         `Нельзя удалить runtime: на сервере ${count} активных сервисов этого типа. Удали их сначала.`,
       );
     }
-    const event =
-      protocol === VpnProtocol.VLESS_REALITY
-        ? 'vpn:installer:uninstall-xray'
-        : 'vpn:installer:uninstall-amnezia';
-    const r = await this.relay.emitToAgent(event, {}, 600_000);
-    if (!r.success) throw new BadRequestException(r.error || 'uninstall failed');
+    return this.admission.admit({
+      actionId: VPN_RUNTIME_OPERATION_ACTIONS.UNINSTALL,
+      type: 'VPN_RUNTIME_UNINSTALL',
+      idempotencyKey,
+      actor: { userId, role },
+      request: { protocol },
+      deadlineMs: 11 * 60_000,
+      recoveryPolicy: 'RECONCILE_ONLY',
+      retryable: false,
+      globalLockKey: `vpn-runtime:${protocol.toLowerCase().replaceAll('_', '-')}`,
+    });
   }
 
   async onModuleInit(): Promise<void> {
+    this.unregisterOperationHandlers.push(
+      this.worker.registerHandler(
+        VPN_RUNTIME_OPERATION_ACTIONS.INSTALL,
+        (request, context) => this.executeRuntimeInstall(request, context),
+      ),
+      this.worker.registerHandler(
+        VPN_RUNTIME_OPERATION_ACTIONS.UNINSTALL,
+        (request, context) => this.executeRuntimeUninstall(request, context),
+      ),
+      this.worker.registerHandler(
+        VPN_RUNTIME_OPERATION_ACTIONS.SNI_HEALTH_CHECK,
+        (request, context) => this.executeSniHealthCheck(request, context),
+      ),
+    );
     // Прогреваем мастер-ключ — авто-создаст файл если нужно.
     try {
       assertVpnSecretConfigured();
@@ -135,6 +272,64 @@ export class VpnService implements OnModuleInit {
           `2026-05-09-001-vpn-secret-bootstrap или env VPN_SECRET_KEY.`,
       );
     }
+  }
+
+  onModuleDestroy(): void {
+    for (const unregister of this.unregisterOperationHandlers.splice(0)) unregister();
+  }
+
+  private async executeRuntimeInstall(
+    request: unknown,
+    context: OperationExecutionContext,
+  ) {
+    const input = validateVpnRuntimeRequest(request);
+    await context.heartbeat('install-runtime', 5);
+    const actionId = input.protocol === VpnProtocol.VLESS_REALITY
+      ? VPN_RUNTIME_AGENT_ACTIONS.INSTALL_XRAY
+      : VPN_RUNTIME_AGENT_ACTIONS.INSTALL_AMNEZIA;
+    const result = await this.relay.runAgentJob(
+      {
+        operationId: context.operationId,
+        actionId,
+        step: 'install-runtime',
+        payload: {},
+        deadlineAt: context.deadlineAt,
+        cancelSafe: false,
+      },
+      () => context.isCancellationRequested(),
+    );
+    return validateVpnRuntimeInstallResult(result);
+  }
+
+  private async executeRuntimeUninstall(
+    request: unknown,
+    context: OperationExecutionContext,
+  ) {
+    const input = validateVpnRuntimeRequest(request);
+    const count = await this.prisma.vpnService.count({
+      where: { protocol: input.protocol },
+    });
+    if (count > 0) {
+      throw new OperationNeedsAttentionError(
+        `VPN runtime is still referenced by ${count} service(s)`,
+      );
+    }
+    await context.heartbeat('uninstall-runtime', 5);
+    const actionId = input.protocol === VpnProtocol.VLESS_REALITY
+      ? VPN_RUNTIME_AGENT_ACTIONS.UNINSTALL_XRAY
+      : VPN_RUNTIME_AGENT_ACTIONS.UNINSTALL_AMNEZIA;
+    const result = await this.relay.runAgentJob(
+      {
+        operationId: context.operationId,
+        actionId,
+        step: 'uninstall-runtime',
+        payload: {},
+        deadlineAt: context.deadlineAt,
+        cancelSafe: false,
+      },
+      () => context.isCancellationRequested(),
+    );
+    return validateVpnRuntimeUninstallResult(result);
   }
 
   // =========================================================================
@@ -654,59 +849,134 @@ export class VpnService implements OnModuleInit {
   async buildSubscription(subToken: string): Promise<string> {
     const u = await this.prisma.vpnUser.findUnique({
       where: { subToken },
-      include: {
-        creds: {
-          include: { service: true },
-        },
-      },
+      include: { creds: { include: { service: true }, orderBy: [{ createdAt: 'asc' }, { id: 'asc' }] } },
     });
     if (!u) throw new NotFoundException();
-    if (!u.enabled) {
-      // отдадим пустую подписку — клиент очистит локальный список
-      return Buffer.from('', 'utf-8').toString('base64');
-    }
+    const entries = await this.renderSubscriptionEntries(u);
+    return Buffer.from(entries.map((entry) => entry.content).join('\n'), 'utf8').toString('base64');
+  }
+
+  async buildFederatedSubscriptionSource(
+    vpnUserId: string,
+  ): Promise<FederatedVpnSubscriptionSourceSnapshot> {
+    const user = await this.prisma.vpnUser.findUnique({
+      where: { id: vpnUserId },
+      include: { creds: { include: { service: true }, orderBy: [{ createdAt: 'asc' }, { id: 'asc' }] } },
+    });
+    if (!user) throw new NotFoundException();
+    const entries = await this.renderSubscriptionEntries(user);
+    const epoch = createHash('sha256').update(JSON.stringify({
+      userId: user.id,
+      userUpdatedAt: user.updatedAt.toISOString(),
+      enabled: user.enabled,
+      credentials: user.creds.map((credential) => ({
+        id: credential.id,
+        updatedAt: credential.updatedAt.toISOString(),
+        serviceId: credential.serviceId,
+        serviceUpdatedAt: credential.service.updatedAt.toISOString(),
+        serviceStatus: credential.service.status,
+      })),
+      fingerprints: entries.map((entry) => entry.fingerprint),
+    }), 'utf8').digest('hex');
+    return { sourceId: user.id, epoch, entries };
+  }
+
+  private async renderSubscriptionEntries(user: SubscriptionUser): Promise<SubscriptionEntry[]> {
+    if (!user.enabled) return [];
     const host = await this.resolvePublicHost();
-    const lines: string[] = [];
-    for (const c of u.creds) {
+    const entries: SubscriptionEntry[] = [];
+    for (const c of user.creds) {
       if (c.service.status !== VpnServiceStatus.RUNNING) continue;
       const cfg = decryptVpnJson<VpnServiceConfig>(c.service.configBlob);
       const creds = decryptVpnJson<VpnUserCreds>(c.credsBlob);
-      const label = c.service.label ? `${u.name} @ ${c.service.label}` : u.name;
+      const label = c.service.label ? `${user.name} @ ${c.service.label}` : user.name;
+      let content: string;
       if (cfg.protocol === VpnProtocol.VLESS_REALITY && creds.protocol === VpnProtocol.VLESS_REALITY) {
-        lines.push(
-          buildVlessUrl({
-            uuid: creds.uuid,
-            host,
-            port: c.service.port,
-            sniMask: cfg.sniMask,
-            pubKey: cfg.pubKey,
-            shortId: cfg.shortId,
-            fingerprint: cfg.fingerprint,
-            flow: creds.flow,
-            label,
-          }),
-        );
+        content = buildVlessUrl({
+          uuid: creds.uuid,
+          host,
+          port: c.service.port,
+          sniMask: cfg.sniMask,
+          pubKey: cfg.pubKey,
+          shortId: cfg.shortId,
+          fingerprint: cfg.fingerprint,
+          flow: creds.flow,
+          label,
+        });
       } else if (cfg.protocol === VpnProtocol.AMNEZIA_WG && creds.protocol === VpnProtocol.AMNEZIA_WG) {
-        // wg-quick конфиг в подписке клиенты-универсалы (Streisand, FoXray)
-        // не понимают, поэтому WG-юзеры лучше через QR. Для совместимости
-        // включаем как комментарий: клиент проигнорирует, но при ручной
-        // загрузке файла подписки получится текст.
-        lines.push('# AmneziaWG config (импортируй вручную в Amnezia клиент):');
-        lines.push(...buildWgQuickConfig({
+        content = [
+          '# AmneziaWG config (импортируй вручную в Amnezia клиент):',
+          ...buildWgQuickConfig({
           cfg,
           creds,
           publicHost: host,
           port: c.service.port,
           label,
-        }).split('\n').map((l) => '# ' + l));
-      }
+          }).split('\n').map((line) => `# ${line}`),
+        ].join('\n');
+      } else continue;
+      entries.push({
+        fingerprint: createHash('sha256').update(content, 'utf8').digest('hex'),
+        content,
+      });
     }
-    return Buffer.from(lines.join('\n'), 'utf-8').toString('base64');
+    return entries;
   }
 
   // =========================================================================
   // SNI auto-check
   // =========================================================================
+
+  async enqueueSniHealthCheck(
+    userId: string,
+    role: string,
+    idempotencyKey?: string,
+  ) {
+    if (role !== 'ADMIN') {
+      throw new ForbiddenException('Only ADMIN can run VPN SNI health checks');
+    }
+    if (!this.relay.isAgentConnected()) {
+      throw new ConflictException('Agent is offline; VPN SNI health check is unavailable');
+    }
+    return this.admission.admit({
+      actionId: VPN_RUNTIME_OPERATION_ACTIONS.SNI_HEALTH_CHECK,
+      type: 'VPN_SNI_HEALTH_CHECK',
+      idempotencyKey,
+      actor: { userId, role },
+      request: {},
+      deadlineMs: 2 * 60 * 60_000,
+      recoveryPolicy: 'RETRY_SAFE',
+      retryable: true,
+      maxAttempts: 3,
+      globalLockKey: 'vpn:sni-health-check',
+    });
+  }
+
+  private async executeSniHealthCheck(
+    request: unknown,
+    context: OperationExecutionContext,
+  ): Promise<{ checked: number; failed: number }> {
+    if (
+      !request ||
+      typeof request !== 'object' ||
+      Array.isArray(request) ||
+      Object.keys(request as Record<string, unknown>).length !== 0
+    ) {
+      throw new OperationNeedsAttentionError('VPN SNI health request is invalid');
+    }
+    if (context.actor.role !== 'ADMIN') {
+      throw new OperationNeedsAttentionError('VPN SNI health actor is not ADMIN');
+    }
+    if (!this.relay.isAgentConnected()) {
+      throw new Error('Agent disconnected before VPN SNI health check');
+    }
+    await context.throwIfCancellationRequested();
+    return this.runSniHealthCheck(async (checked, total) => {
+      await context.throwIfCancellationRequested();
+      const progress = total === 0 ? 95 : 5 + Math.floor((checked / total) * 90);
+      await context.heartbeat('validate-sni', progress);
+    });
+  }
 
   /**
    * Прогоняет проверку SNI для всех VLESS+Reality сервисов. Вызывается из cron.
@@ -715,13 +985,19 @@ export class VpnService implements OnModuleInit {
    * (или при первой неудачной проверке, если предыдущего значения не было).
    * Это исключает дубль-уведомления каждые 6 часов на одну и ту же проблему.
    */
-  async runSniHealthCheck(): Promise<{ checked: number; failed: number }> {
+  async runSniHealthCheck(
+    onProgress?: (checked: number, total: number) => Promise<void>,
+  ): Promise<{ checked: number; failed: number }> {
     if (!this.relay.isAgentConnected()) return { checked: 0, failed: 0 };
     const services = await this.prisma.vpnService.findMany({
-      where: { protocol: VpnProtocol.VLESS_REALITY },
+      where: {
+        protocol: VpnProtocol.VLESS_REALITY,
+        sniMask: { not: null },
+      },
     });
     let checked = 0;
     let failed = 0;
+    await onProgress?.(0, services.length);
     for (const s of services) {
       if (!s.sniMask) continue;
       const result = await this.xrayReality.validateSni(s.sniMask);
@@ -753,6 +1029,7 @@ export class VpnService implements OnModuleInit {
           this.logger.warn(`notify VPN_SNI_FAILED failed: ${(err as Error).message}`);
         }
       }
+      await onProgress?.(checked, services.length);
     }
     return { checked, failed };
   }

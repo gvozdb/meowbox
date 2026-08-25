@@ -93,6 +93,9 @@ export enum BackupExportMode {
   // API сама спавнит restic dump --archive tar и стримит stdout в HTTP response.
   // Без диска, без сокетов. Single-host инсталляции.
   STREAM = 'STREAM',
+  // Restic dump first becomes an immutable target-local artifact. The
+  // resulting direct delivery lease supports checksum verification and Range.
+  STAGED_ARTIFACT = 'STAGED_ARTIFACT',
   // Агент дампит в S3 как exports/<id>.tar → API возвращает pre-signed URL.
   // Браузер качает напрямую из S3, минуя VPS. Только для S3-хранилищ.
   S3_PRESIGNED = 'S3_PRESIGNED',

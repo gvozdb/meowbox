@@ -50,11 +50,11 @@ jobs:
       # ----- Install + build всех пакетов -----
       - name: Install shared
         working-directory: shared
-        run: npm ci && npm run build
+        run: npm ci && npm run test:federation
 
       - name: Install + build agent
         working-directory: agent
-        run: npm ci && npm run build && npm run test:restic-retention && npm run test:redis-executor && npm run test:application-root-preflight && npm run test:xray-port-reservation
+        run: npm ci && npm run build && npm run test:restic-retention && npm run test:redis-executor && npm run test:application-root-preflight && npm run test:xray-port-reservation && npm run test:federation
 
       - name: Install + build api
         working-directory: api
@@ -69,10 +69,15 @@ jobs:
           npm run test:domain-mutation-rollback
           npm run test:vpn-port-reservation
           npm run test:prisma-logging
+          npm run test:dashboard
+          npm run test:federation
+
+      - name: Test remote-panel fleet fixtures
+        run: node --test e2e/remote-panel-parity/test/*.test.mjs
 
       - name: Install + build web
         working-directory: web
-        run: npm ci && npm run test:contracts && npx nuxi typecheck && npx nuxt build
+        run: npm ci && npm run test:contracts && npm run typecheck && npm run build
 
       - name: Install + build migrations
         working-directory: migrations
@@ -91,6 +96,9 @@ jobs:
           test -f node_modules/@prisma/client/index.js || (echo "prisma client not found"; exit 1)
           npm run test:release
 
+      - name: Verify remote-panel implementation gate
+        run: node tools/remote-panel-release-gate.mjs --mode implementation
+
       # ----- Сборка tarball -----
       - name: Pack release tarball
         run: |
@@ -99,6 +107,7 @@ jobs:
 
           # Версия — кладём в файл, чтобы панель могла прочитать на проде
           echo "${{ steps.ver.outputs.version }}" > "$STAGE/VERSION"
+          echo "${GITHUB_SHA}" > "$STAGE/RELEASE_COMMIT"
           cp CHANGELOG.md "$STAGE/" 2>/dev/null || true
           cp Makefile "$STAGE/"
           cp ecosystem.config.js "$STAGE/"
@@ -106,6 +115,9 @@ jobs:
           cp install.sh "$STAGE/"
           cp bootstrap.sh "$STAGE/"
           cp -r tools "$STAGE/"
+          cp -r docs "$STAGE/"
+          mkdir -p "$STAGE/specs"
+          cp -r specs/remote-panel-parity "$STAGE/specs/"
 
           # api: prisma + dist + node_modules production
           mkdir -p "$STAGE/api"
@@ -145,6 +157,8 @@ jobs:
           test -f "$STAGE/api/prisma/legacy-panel-update-bridge.json"
           test -f "$STAGE/api/scripts/prisma-legacy-bridge.cjs"
           grep -q 'bootstrap-release-update.sh' "$STAGE/api/dist/panel-update/panel-update.service.js"
+          test -f "$STAGE/docs/runbook/remote-panel-rollout.md"
+          test -f "$STAGE/specs/remote-panel-parity/activation-gates.spec.ctx"
 
           # Архив
           mkdir -p dist

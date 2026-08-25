@@ -58,7 +58,7 @@
           </button>
           <label class="btn btn--ghost btn--sm" :class="{ 'btn--disabled': busy[db.id] === 'import' }">
             <span>{{ busy[db.id] === 'import' ? 'Импорт…' : 'Импорт' }}</span>
-            <input type="file" accept=".sql,.gz" hidden @change="importFile($event, db)" />
+            <input type="file" accept=".sql,.sql.gz" :disabled="busy[db.id] === 'import'" hidden @change="importFile($event, db)" />
           </label>
           <button class="btn btn--ghost btn--sm" :disabled="busy[db.id] === 'reveal'" @click="revealPassword(db)">
             {{ busy[db.id] === 'reveal' ? 'Загружаю…' : 'Показать пароль' }}
@@ -172,6 +172,7 @@
 
 <script setup lang="ts">
 import { copyToClipboard } from '~/utils/clipboard';
+import { navigateAppHandoff, publicDeliveryIdempotencyKey } from '~/utils/public-delivery';
 
 const props = defineProps<{
   siteId: string;
@@ -186,7 +187,10 @@ const emit = defineEmits<{
   (e: 'changed'): void;
 }>();
 
-const api = useApi();
+const api = useRemoteApi();
+const { waitForOperation } = useOperation();
+const { waitForSensitiveResult } = useSensitiveOperationResult();
+const { exportDatabase, importDatabase } = useDatabaseTransfer();
 const toast = useMbToast();
 const databasesApi = computed(
   () => `/sites/${props.siteId}/domains/${props.domainId}/databases`,
@@ -296,9 +300,22 @@ async function createDatabase() {
       type: createForm.type,
     };
     if (createForm.dbUser) body.dbUser = createForm.dbUser;
-    await api.post(databasesApi.value, body);
+    const accepted = await api.post<AcceptedOperation>(databasesApi.value, body, {
+      headers: { 'Idempotency-Key': operationIdempotencyKey('database-create') },
+    });
+    const credentials = await waitForSensitiveResult<{
+      databaseId: string;
+      name: string;
+      dbUser: string;
+      password: string;
+    }>(accepted, 'DATABASE_CREDENTIALS', 31 * 60_000);
     showCreate.value = false;
     toast.success('База данных создана');
+    newPassword.value = credentials.password;
+    passwordDbName.value = credentials.name;
+    passwordDbUser.value = credentials.dbUser;
+    passwordKind.value = 'reset';
+    showPlainPassword.value = true;
     await loadDatabases();
     emit('changed');
   } catch (err) {
@@ -312,15 +329,16 @@ async function doDelete() {
   if (!deleteTarget.value) return;
   deleting.value = true;
   try {
-    await api.del(
+    const accepted = await api.del<AcceptedOperation>(
       `${databasesApi.value}/${deleteTarget.value.id}`,
       undefined,
       {
         headers: {
-          'Idempotency-Key': `database-delete-${crypto.randomUUID()}`,
+          'Idempotency-Key': operationIdempotencyKey('database-delete'),
         },
       },
     );
+    await waitForOperation(accepted.operationId, { timeoutMs: 46 * 60_000 });
     toast.success('БД удалена');
     deleteTarget.value = null;
     await loadDatabases();
@@ -337,10 +355,10 @@ async function openAdminer(db: DbItem) {
   // window.open в синхронном click-handler — иначе popup-blocker зарежет.
   const win = window.open('about:blank', '_blank');
   try {
-    const data = await api.post<{ url: string }>(`${databasesApi.value}/${db.id}/adminer-ticket`);
-    if (!data?.url) throw new Error('Пустой URL от SSO');
-    if (win) win.location.href = data.url;
-    else window.location.href = data.url;
+    const delivery = await api.post<unknown>(`${databasesApi.value}/${db.id}/adminer-ticket`, {}, {
+      headers: { 'Idempotency-Key': publicDeliveryIdempotencyKey('ADMINER') },
+    });
+    await navigateAppHandoff(delivery, win, 'ADMINER');
   } catch (err) {
     if (win) win.close();
     toast.error((err as Error).message || 'Не удалось открыть Adminer');
@@ -352,17 +370,8 @@ async function openAdminer(db: DbItem) {
 async function exportDb(db: DbItem) {
   busy[db.id] = 'export';
   try {
-    const data = await api.post<{ filePath: string }>(`${databasesApi.value}/${db.id}/export`);
-    if (!data.filePath) {
-      toast.error('Экспорт не вернул путь к файлу');
-      return;
-    }
-    const filename = data.filePath.split('/').pop() || `${db.name}.sql`;
-    await api.download(
-      `${databasesApi.value}/${db.id}/download?filePath=${encodeURIComponent(data.filePath)}`,
-      filename,
-    );
-    toast.success('Дамп скачан');
+    await exportDatabase(`${databasesApi.value}/${db.id}`);
+    toast.success('Дамп готов к скачиванию');
   } catch (err) {
     toast.error((err as Error).message || 'Ошибка экспорта');
   } finally {
@@ -376,17 +385,8 @@ async function importFile(event: Event, db: DbItem) {
   if (!file) return;
   busy[db.id] = 'import';
   try {
-    toast.success(`Импорт ${file.name}...`);
-    await api.upload(
-      `${databasesApi.value}/${db.id}/import-upload`,
-      file,
-      undefined,
-      {
-        headers: {
-          'Idempotency-Key': `database-import-${crypto.randomUUID()}`,
-        },
-      },
-    );
+    toast.success(`Загрузка и импорт ${file.name}…`);
+    await importDatabase(`${databasesApi.value}/${db.id}`, db.id, file);
     toast.success('Импорт завершён');
     await loadDatabases();
   } catch (err) {
@@ -399,12 +399,20 @@ async function importFile(event: Event, db: DbItem) {
 
 async function resetPassword(db: DbItem) {
   try {
-    const data = await api.post<{ plainPassword: string }>(
+    const accepted = await api.post<AcceptedOperation>(
       `${databasesApi.value}/${db.id}/reset-password`,
+      {},
+      { headers: { 'Idempotency-Key': operationIdempotencyKey('database-reset-password') } },
     );
-    newPassword.value = data.plainPassword;
-    passwordDbName.value = db.name;
-    passwordDbUser.value = db.dbUser || '';
+    const credentials = await waitForSensitiveResult<{
+      databaseId: string;
+      name: string;
+      dbUser: string;
+      password: string;
+    }>(accepted, 'DATABASE_CREDENTIALS', 31 * 60_000);
+    newPassword.value = credentials.password;
+    passwordDbName.value = credentials.name;
+    passwordDbUser.value = credentials.dbUser;
     passwordKind.value = 'reset';
     showPlainPassword.value = true;
   } catch (err) {

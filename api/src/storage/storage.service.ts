@@ -1,6 +1,55 @@
-import { Injectable, ForbiddenException, NotFoundException } from '@nestjs/common';
+import {
+  BadRequestException,
+  Injectable,
+  ForbiddenException,
+  NotFoundException,
+  OnModuleDestroy,
+  OnModuleInit,
+} from '@nestjs/common';
 import { PrismaService } from '../common/prisma.service';
 import { AgentRelayService } from '../gateway/agent-relay.service';
+import { OperationAdmissionService } from '../operations/operation-admission.service';
+import { OperationsWorkerService } from '../operations/operations-worker.service';
+
+const TOP_FILES_OPERATION_ACTION = 'storage.top_files.scan';
+const TOP_FILES_AGENT_ACTION = 'agent.storage.top_files';
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+
+function validateTopFilesRequest(request: unknown): { siteId: string } {
+  if (!request || typeof request !== 'object' || Array.isArray(request)) {
+    throw new BadRequestException('Storage scan operation request is invalid');
+  }
+  const value = request as Record<string, unknown>;
+  if (
+    Object.keys(value).join(',') !== 'siteId' ||
+    typeof value.siteId !== 'string' ||
+    !UUID.test(value.siteId)
+  ) throw new BadRequestException('Storage scan operation request is invalid');
+  return value as { siteId: string };
+}
+
+function validateTopFilesResult(value: unknown): TopFile[] {
+  if (!Array.isArray(value) || value.length > 20) {
+    throw new BadRequestException('Storage scan result is invalid');
+  }
+  return value.map((entry) => {
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) {
+      throw new BadRequestException('Storage scan result is invalid');
+    }
+    const file = entry as Record<string, unknown>;
+    if (
+      Object.keys(file).sort().join(',') !== 'path,size' ||
+      typeof file.path !== 'string' ||
+      file.path.length === 0 ||
+      file.path.length > 4096 ||
+      /[\0-\x1f\x7f]/.test(file.path) ||
+      typeof file.size !== 'number' ||
+      !Number.isSafeInteger(file.size) ||
+      file.size < 0
+    ) throw new BadRequestException('Storage scan result is invalid');
+    return file as unknown as TopFile;
+  });
+}
 
 export interface SiteStorageInfo {
   siteId: string;
@@ -34,11 +83,27 @@ export interface DiskTrendPoint {
 }
 
 @Injectable()
-export class StorageService {
+export class StorageService implements OnModuleInit, OnModuleDestroy {
+  private unregisterHandler: (() => void) | null = null;
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly agentRelay: AgentRelayService,
+    private readonly admission: OperationAdmissionService,
+    private readonly worker: OperationsWorkerService,
   ) {}
+
+  onModuleInit(): void {
+    this.unregisterHandler = this.worker.registerHandler(
+      TOP_FILES_OPERATION_ACTION,
+      (request, context) => this.executeQueuedTopFilesScan(request, context),
+    );
+  }
+
+  onModuleDestroy(): void {
+    this.unregisterHandler?.();
+    this.unregisterHandler = null;
+  }
 
   async getAllSitesStorage(userId: string, role: string): Promise<SiteStorageInfo[]> {
     const where = role === 'ADMIN' ? {} : { userId };
@@ -116,16 +181,7 @@ export class StorageService {
   }
 
   async getSiteTopFiles(siteId: string, userId: string, role: string): Promise<TopFile[]> {
-    const site = await this.prisma.site.findUnique({
-      where: { id: siteId },
-      select: {
-        rootPath: true,
-        userId: true,
-        domains: { select: { filesRelPath: true } },
-      },
-    });
-    if (!site) throw new NotFoundException('Site not found');
-    if (role !== 'ADMIN' && site.userId !== userId) throw new ForbiddenException();
+    const site = await this.authorizedSiteStorageScope(siteId, userId, role);
 
     const res = await this.agentRelay.emitToAgent<TopFile[]>(
       'site:top-files',
@@ -139,6 +195,27 @@ export class StorageService {
       60_000,
     );
     return res.success && res.data ? res.data : [];
+  }
+
+  async enqueueSiteTopFilesScan(
+    siteId: string,
+    actor: { userId: string; role: string },
+    idempotencyKey?: string,
+  ) {
+    validateTopFilesRequest({ siteId });
+    await this.authorizedSiteStorageScope(siteId, actor.userId, actor.role);
+    return this.admission.admit({
+      actionId: TOP_FILES_OPERATION_ACTION,
+      type: 'STORAGE_TOP_FILES_SCAN',
+      idempotencyKey,
+      actor,
+      request: { siteId },
+      deadlineMs: 10 * 60_000,
+      recoveryPolicy: 'RECONCILE_ONLY',
+      retryable: false,
+      globalLockKey: `storage-scan:${siteId}`,
+      siteId,
+    });
   }
 
   async getServerDisk(): Promise<ServerDisk> {
@@ -169,5 +246,58 @@ export class StorageService {
       dbBytes: Number(s.dbBytes),
       totalBytes: Number(s.wwwBytes) + Number(s.logsBytes) + Number(s.tmpBytes) + Number(s.dbBytes),
     }));
+  }
+
+  private async authorizedSiteStorageScope(
+    siteId: string,
+    userId: string,
+    role: string,
+  ) {
+    const site = await this.prisma.site.findUnique({
+      where: { id: siteId },
+      select: {
+        rootPath: true,
+        userId: true,
+        domains: { select: { filesRelPath: true } },
+      },
+    });
+    if (!site) throw new NotFoundException('Site not found');
+    if (role !== 'ADMIN' && site.userId !== userId) throw new ForbiddenException();
+    return site;
+  }
+
+  private async executeQueuedTopFilesScan(
+    request: unknown,
+    context: {
+      operationId: string;
+      deadlineAt: Date;
+      actor: { userId: string; role: string };
+      isCancellationRequested(): Promise<boolean>;
+    },
+  ): Promise<TopFile[]> {
+    const input = validateTopFilesRequest(request);
+    const site = await this.authorizedSiteStorageScope(
+      input.siteId,
+      context.actor.userId,
+      context.actor.role,
+    );
+    const result = await this.agentRelay.runAgentJob(
+      {
+        operationId: context.operationId,
+        actionId: TOP_FILES_AGENT_ACTION,
+        step: 'scan',
+        payload: {
+          rootPath: site.rootPath,
+          limit: 20,
+          filesRelPaths: [
+            ...new Set(site.domains.map((domain) => domain.filesRelPath)),
+          ],
+        },
+        deadlineAt: context.deadlineAt,
+        cancelSafe: false,
+      },
+      () => context.isCancellationRequested(),
+    );
+    return validateTopFilesResult(result);
   }
 }

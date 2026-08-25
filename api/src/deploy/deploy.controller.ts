@@ -8,15 +8,21 @@ import {
   Headers,
   Req,
   HttpCode,
+  HttpStatus,
   ParseUUIDPipe,
+  ServiceUnavailableException,
 } from '@nestjs/common';
 import { Throttle } from '@nestjs/throttler';
-import { createHmac, timingSafeEqual } from 'crypto';
 import { ConfigService } from '@nestjs/config';
 import { DeployService } from './deploy.service';
 import { TriggerDeployDto } from './deploy.dto';
 import { CurrentUser } from '../common/decorators/current-user.decorator';
 import { Public } from '../common/decorators/public.decorator';
+import { Roles } from '../common/decorators/roles.decorator';
+import {
+  detectWebhookProvider,
+  verifyWebhookProviderDelivery,
+} from '../webhooks/webhook-provider';
 
 interface JwtUser {
   id: string;
@@ -34,6 +40,8 @@ export class DeployController {
    * Trigger a manual deploy.
    */
   @Post('sites/:siteId/domains/:domainId/deploy')
+  @Roles('ADMIN', 'MANAGER')
+  @HttpCode(HttpStatus.ACCEPTED)
   @Throttle({ default: { limit: 5, ttl: 60000 } })
   async triggerDeploy(
     @Body() dto: TriggerDeployDto,
@@ -67,6 +75,8 @@ export class DeployController {
    * Rollback to a specific deploy.
    */
   @Post('sites/:siteId/domains/:domainId/deploys/:id/rollback')
+  @Roles('ADMIN', 'MANAGER')
+  @HttpCode(HttpStatus.ACCEPTED)
   @Throttle({ default: { limit: 5, ttl: 60000 } })
   async rollbackDeploy(
     @Param('siteId', ParseUUIDPipe) siteId: string,
@@ -102,43 +112,25 @@ export class DeployController {
   @Throttle({ default: { limit: 30, ttl: 60000 } })
   async webhook(
     @Param('domain') domain: string,
-    @Headers('x-hub-signature-256') signature: string | undefined,
-    @Headers('x-github-event') event: string | undefined,
-    @Req() req: { body: unknown; rawBody?: Buffer },
+    @Req() req: { body: unknown; rawHeaders?: string[] },
   ) {
-    // Only respond to push events
-    if (event && event !== 'push') {
-      return { success: true, message: 'Event ignored' };
-    }
-
     const webhookSecret = this.config.get<string>('WEBHOOK_SECRET');
     if (!webhookSecret) {
-      return { success: false, message: 'Webhook not configured' };
+      throw new ServiceUnavailableException('Webhook not configured');
     }
-
-    // Verify HMAC signature if present
-    if (signature) {
-      const rawBody = req.rawBody || Buffer.from(JSON.stringify(req.body));
-      const expectedSig =
-        'sha256=' +
-        createHmac('sha256', webhookSecret).update(rawBody).digest('hex');
-
-      const sigBuffer = Buffer.from(signature);
-      const expectedBuffer = Buffer.from(expectedSig);
-
-      if (
-        sigBuffer.length !== expectedBuffer.length ||
-        !timingSafeEqual(sigBuffer, expectedBuffer)
-      ) {
-        return { success: false, message: 'Invalid signature' };
-      }
-    } else {
-      // No signature — verify via shared secret in URL is not safe enough
-      // Require HMAC
-      return { success: false, message: 'Missing signature' };
+    if (!Buffer.isBuffer(req.body) || !Array.isArray(req.rawHeaders)) {
+      throw new ServiceUnavailableException('Exact webhook bytes are unavailable');
     }
-
-    const body = req.body as {
+    const verified = verifyWebhookProviderDelivery(
+      detectWebhookProvider(req.rawHeaders),
+      webhookSecret,
+      req.rawHeaders,
+      req.body,
+    );
+    if (verified.event !== 'push') {
+      return { success: true, message: 'Event ignored' };
+    }
+    const body = verified.payload as {
       ref?: string;
       head_commit?: { id?: string; message?: string };
       repository?: { clone_url?: string; ssh_url?: string };

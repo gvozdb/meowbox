@@ -11,24 +11,29 @@ import { DomainContextService } from './domain-context.service';
 import { DomainApplicationsService } from './domain-applications.service';
 import { SiteDuplicateService } from './site-duplicate.service';
 import {
-  DomainApplicationLoginController,
   DomainApplicationsController,
+  LegacyDomainApplicationLoginController,
+  ModxLoginHandoffController,
 } from './domain-applications.controller';
 import { BackupArtifactsModule } from '../backups/backup-artifacts.module';
+import { PublicDeliveryModule } from '../public-delivery/public-delivery.module';
+import { SitesNginxOperationsService } from './sites-nginx-operations.service';
 
 @Module({
-  imports: [PanelSettingsModule, BackupArtifactsModule],
+  imports: [PanelSettingsModule, BackupArtifactsModule, PublicDeliveryModule],
   controllers: [
     SitesController,
     SitesNginxController,
     SiteDomainsController,
     DomainApplicationsController,
-    DomainApplicationLoginController,
+    LegacyDomainApplicationLoginController,
+    ModxLoginHandoffController,
   ],
   providers: [
     SitesService,
     ModxVersionsService,
     SitesNginxService,
+    SitesNginxOperationsService,
     SiteDomainsService,
     DomainContextService,
     DomainApplicationsService,

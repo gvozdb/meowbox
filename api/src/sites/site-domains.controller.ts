@@ -8,6 +8,8 @@ import {
   Post,
   Put,
   ParseUUIDPipe,
+  HttpCode,
+  HttpStatus,
 } from '@nestjs/common';
 import { Throttle } from '@nestjs/throttler';
 
@@ -47,6 +49,7 @@ export class SiteDomainsController {
 
   @Post()
   @Roles(UserRole.ADMIN, UserRole.MANAGER)
+  @HttpCode(HttpStatus.ACCEPTED)
   @Throttle({ default: { limit: 10, ttl: 60_000 } })
   async create(
     @Param('id', new ParseUUIDPipe()) id: string,
@@ -66,6 +69,7 @@ export class SiteDomainsController {
 
   @Put(':domainId')
   @Roles(UserRole.ADMIN, UserRole.MANAGER)
+  @HttpCode(HttpStatus.ACCEPTED)
   async update(
     @Param('id', new ParseUUIDPipe()) id: string,
     @Param('domainId', new ParseUUIDPipe()) domainId: string,
@@ -86,6 +90,7 @@ export class SiteDomainsController {
 
   @Delete(':domainId')
   @Roles(UserRole.ADMIN, UserRole.MANAGER)
+  @HttpCode(HttpStatus.ACCEPTED)
   async delete(
     @Param('id', new ParseUUIDPipe()) id: string,
     @Param('domainId', new ParseUUIDPipe()) domainId: string,
@@ -106,6 +111,7 @@ export class SiteDomainsController {
 
   @Post(':domainId/make-primary')
   @Roles(UserRole.ADMIN, UserRole.MANAGER)
+  @HttpCode(HttpStatus.ACCEPTED)
   async makePrimary(
     @Param('id', new ParseUUIDPipe()) id: string,
     @Param('domainId', new ParseUUIDPipe()) domainId: string,
@@ -124,6 +130,7 @@ export class SiteDomainsController {
 
   @Put(':domainId/aliases')
   @Roles(UserRole.ADMIN, UserRole.MANAGER)
+  @HttpCode(HttpStatus.ACCEPTED)
   async updateAliases(
     @Param('id', new ParseUUIDPipe()) id: string,
     @Param('domainId', new ParseUUIDPipe()) domainId: string,

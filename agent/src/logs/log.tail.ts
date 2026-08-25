@@ -1,8 +1,9 @@
-import { spawn, ChildProcess } from 'child_process';
+import type { ChildProcess } from 'child_process';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
 import { PHP_LOG_DIR } from '../config';
+import { spawnOwned } from '../process-registry';
 
 const MAX_TAIL_SESSIONS = parseInt(process.env.LOG_TAIL_MAX_SESSIONS || '', 10) || 10;
 const NGINX_LOG_DIR = process.env.NGINX_LOG_DIR || '/var/log/nginx';
@@ -66,9 +67,9 @@ export class LogTailManager {
       return { success: false, error: 'Path not allowed for tailing' };
     }
 
-    const proc = spawn('tail', ['-f', '-n', '0', resolvedPath], {
+    const proc = spawnOwned('tail', ['-f', '-n', '0', resolvedPath], {
       stdio: ['ignore', 'pipe', 'ignore'],
-    });
+    }, 'log-tail');
 
     let buffer = '';
     proc.stdout!.on('data', (chunk: Buffer) => {

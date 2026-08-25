@@ -162,7 +162,7 @@ if ! $SKIP_MIGRATE && ($NEED_MIGRATE || $FORCE); then
       "$PANEL_DIR/migrations/node_modules/@prisma/client"
     # `up` обязателен: без аргумента runner.js дефолтит в `status` и ничего не применяет.
     (cd "$PANEL_DIR/migrations" && npx tsc && node dist/runner.js up) \
-      || say "⚠ system migrations упали — проверь логи"
+      || abort "system migrations failed"
   fi
 fi
 

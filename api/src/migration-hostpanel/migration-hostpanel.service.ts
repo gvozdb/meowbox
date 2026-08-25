@@ -8,6 +8,7 @@ import {
   InternalServerErrorException,
   Logger,
   NotFoundException,
+  OnModuleDestroy,
   OnModuleInit,
 } from '@nestjs/common';
 import { randomBytes } from 'crypto';
@@ -48,6 +49,17 @@ import {
   PlanItemCronJob,
   ShortlistResult,
 } from './plan-item.types';
+import { OperationAdmissionService } from '../operations/operation-admission.service';
+import {
+  OperationCancelledError,
+  OperationsWorkerService,
+  type OperationExecutionContext,
+} from '../operations/operations-worker.service';
+import {
+  OperationFailedError,
+  OperationNeedsAttentionError,
+} from '../operations/operation-errors';
+import { safeErrorMessage } from '@meowbox/shared';
 
 interface SourceStored {
   host: string;
@@ -84,9 +96,17 @@ const ITEM_LOG_TAIL_LIMIT = 200_000; // 200 KB
 // item помечается orphan FAILED. Buffer + ловля ошибок устраняют каскад.
 const LOG_FLUSH_INTERVAL_MS = 750;
 const LOG_BUFFER_MAX_PER_KEY = 256_000; // hard cap, чтобы не съесть RAM
+const HOSTPANEL_FORCE_CLEANUP_ACTION = 'hostpanel.force_cleanup';
+const HOSTPANEL_FORCE_CLEANUP_AGENT_ACTION = 'agent.hostpanel.force_cleanup_name';
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+interface HostpanelForceCleanupRequest {
+  migrationId: string;
+  itemId: string;
+}
 
 @Injectable()
-export class MigrationHostpanelService implements OnModuleInit {
+export class MigrationHostpanelService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger('MigrationHostpanelService');
 
   // In-memory флаги паузы — pause останавливает запуск следующих items.
@@ -97,6 +117,7 @@ export class MigrationHostpanelService implements OnModuleInit {
   private readonly migrationLogBuffer = new Map<string, string>();
   private logFlushTimer: NodeJS.Timeout | null = null;
   private logFlushInFlight: Promise<void> | null = null;
+  private unregisterOperationHandler: (() => void) | null = null;
 
   constructor(
     private readonly prisma: PrismaService,
@@ -104,9 +125,15 @@ export class MigrationHostpanelService implements OnModuleInit {
     private readonly servicesService: ServicesService,
     @Inject(forwardRef(() => AgentGateway))
     private readonly agentGateway: AgentGateway,
+    private readonly operationAdmission: OperationAdmissionService,
+    private readonly operationsWorker: OperationsWorkerService,
   ) {}
 
   onModuleInit() {
+    this.unregisterOperationHandler = this.operationsWorker.registerHandler(
+      HOSTPANEL_FORCE_CLEANUP_ACTION,
+      (request, context) => this.executeForceCleanupRetrySafe(request, context),
+    );
     try {
       assertMigrationSecretConfigured();
     } catch (e) {
@@ -125,6 +152,11 @@ export class MigrationHostpanelService implements OnModuleInit {
         `Orphan reconciliation failed: ${(e as Error).message}`,
       ),
     );
+  }
+
+  onModuleDestroy(): void {
+    this.unregisterOperationHandler?.();
+    this.unregisterOperationHandler = null;
   }
 
   private async reconcileOrphanRunningOnStartup(): Promise<void> {
@@ -787,13 +819,18 @@ export class MigrationHostpanelService implements OnModuleInit {
     if (item.status !== 'FAILED') {
       return {
         canForceRetry: false,
+        reasonCode: 'ITEM_STATUS' as const,
         reason: `Item в статусе ${item.status} — force-retry доступен только для FAILED`,
       };
     }
     const plan = JSON.parse(item.plan) as { newName: string; newDomain?: string; phpVersion?: string };
     const name = plan.newName;
     if (!name || !/^[a-z][a-z0-9_-]{0,31}$/.test(name)) {
-      return { canForceRetry: false, reason: `Невалидное name: ${name}` };
+      return {
+        canForceRetry: false,
+        reasonCode: 'INVALID_NAME' as const,
+        reason: `Невалидное name: ${name}`,
+      };
     }
     // 1. Реально занятый Site с таким именем — НЕЛЬЗЯ
     const realSite = await this.prisma.site.findUnique({
@@ -803,6 +840,7 @@ export class MigrationHostpanelService implements OnModuleInit {
     if (realSite) {
       return {
         canForceRetry: false,
+        reasonCode: 'REAL_SITE_EXISTS' as const,
         reason: `Имя '${name}' уже принадлежит реальному сайту в meowbox (status=${realSite.status}). Это не leak — это работающий сайт.`,
       };
     }
@@ -822,6 +860,7 @@ export class MigrationHostpanelService implements OnModuleInit {
     if (runningOther) {
       return {
         canForceRetry: false,
+        reasonCode: 'ACTIVE_MIGRATION' as const,
         reason: `Активная другая миграция (${runningOther.migrationId}) сейчас обрабатывает '${name}'. Дождись её или отмени, потом повтори.`,
       };
     }
@@ -850,7 +889,11 @@ export class MigrationHostpanelService implements OnModuleInit {
     }
     // 3. Запрашиваем агента: есть ли реальные артефакты на slave?
     if (!this.agentRelay.isAgentConnected()) {
-      return { canForceRetry: false, reason: 'Agent оффлайн — нечем проверять артефакты' };
+      return {
+        canForceRetry: false,
+        reasonCode: 'AGENT_OFFLINE' as const,
+        reason: 'Agent оффлайн — нечем проверять артефакты',
+      };
     }
     let leakSources: string[] = [];
     try {
@@ -865,16 +908,22 @@ export class MigrationHostpanelService implements OnModuleInit {
         if (probe.data.dbExists) leakSources.push('mariadb-db');
       }
     } catch {
-      return { canForceRetry: false, reason: 'Agent не ответил на check-leak за 10s' };
+      return {
+        canForceRetry: false,
+        reasonCode: 'PROBE_UNAVAILABLE' as const,
+        reason: 'Agent не ответил на check-leak за 10s',
+      };
     }
     if (leakSources.length === 0) {
       return {
         canForceRetry: false,
+        reasonCode: 'NO_LEAKS' as const,
         reason: `На slave нет leak'нутых артефактов с именем '${name}' — обычного retry должно хватить`,
       };
     }
     return {
       canForceRetry: true,
+      reasonCode: 'READY' as const,
       name,
       leakSources,
     };
@@ -885,42 +934,152 @@ export class MigrationHostpanelService implements OnModuleInit {
    * стандартный retry. Защищён от того же набора кейсов, что и
    * `checkForceRetry`.
    */
-  async forceRetryItem(id: string, itemId: string, role: string) {
+  async forceRetryItem(
+    id: string,
+    itemId: string,
+    userId: string,
+    role: string,
+    idempotencyKey?: string,
+  ) {
     this.assertAdmin(role);
     const check = await this.checkForceRetry(id, itemId, role);
     if (!check.canForceRetry) {
       throw new BadRequestException(check.reason || 'Force-retry заблокирован');
     }
-    const item = await this.prisma.hostpanelMigrationItem.findUnique({
-      where: { id: itemId },
+    return this.operationAdmission.admit({
+      actionId: HOSTPANEL_FORCE_CLEANUP_ACTION,
+      type: 'HOSTPANEL_FORCE_CLEANUP',
+      idempotencyKey,
+      actor: { userId, role },
+      request: { migrationId: id, itemId },
+      deadlineMs: 5 * 60_000,
+      recoveryPolicy: 'RETRY_SAFE',
+      retryable: true,
+      maxAttempts: 3,
+      globalLockKey: `hostpanel:${itemId}`,
     });
-    if (!item) throw new NotFoundException('Item not found');
-    const plan = JSON.parse(item.plan) as {
-      newName: string;
-      newDomain?: string;
-      phpVersion?: string;
-    };
+  }
 
-    // Cleanup на агенте — синхронно (timeout 60s, как в handler'е)
-    const cleanup = await this.agentRelay.emitToAgent<{ log: string[] }>(
-      'migrate:hostpanel:force-cleanup-name',
-      {
-        name: plan.newName,
-        domain: plan.newDomain,
-        phpVersion: plan.phpVersion,
-      },
-      90_000,
+  private async executeForceCleanupRetrySafe(
+    request: unknown,
+    context: OperationExecutionContext,
+  ): Promise<unknown> {
+    try {
+      return await this.executeForceCleanup(request, context);
+    } catch (error) {
+      if (
+        error instanceof OperationNeedsAttentionError ||
+        error instanceof OperationFailedError ||
+        error instanceof OperationCancelledError ||
+        context.attempt < 3
+      ) throw error;
+      throw new OperationFailedError(safeErrorMessage(error));
+    }
+  }
+
+  private async executeForceCleanup(
+    request: unknown,
+    context: OperationExecutionContext,
+  ): Promise<{ migrationId: string; itemId: string; cleaned: true; steps: number }> {
+    const input = this.parseForceCleanupRequest(request);
+    if (context.actor.role !== 'ADMIN') {
+      throw new OperationNeedsAttentionError('Hostpanel force cleanup requires ADMIN');
+    }
+    const check = await this.checkForceRetry(
+      input.migrationId,
+      input.itemId,
+      context.actor.role,
     );
-    if (!cleanup.success) {
-      throw new InternalServerErrorException(
-        `Force-cleanup упал: ${cleanup.error || 'unknown'}`,
+    if (!check.canForceRetry) {
+      if (check.reasonCode === 'NO_LEAKS') {
+        return { ...input, cleaned: true, steps: 0 };
+      }
+      if (
+        check.reasonCode === 'AGENT_OFFLINE' ||
+        check.reasonCode === 'PROBE_UNAVAILABLE'
+      ) throw new Error(check.reason);
+      throw new OperationFailedError(check.reason || 'Force cleanup is blocked');
+    }
+
+    const item = await this.prisma.hostpanelMigrationItem.findUnique({
+      where: { id: input.itemId },
+      select: { migrationId: true, status: true, plan: true },
+    });
+    if (
+      !item ||
+      item.migrationId !== input.migrationId ||
+      item.status !== 'FAILED'
+    ) throw new OperationFailedError('Hostpanel migration item is no longer eligible');
+    const plan = normalizeHostpanelPlan(JSON.parse(item.plan) as PlanItem);
+    await context.throwIfCancellationRequested();
+    const result = await this.agentRelay.runAgentJob(
+      {
+        operationId: context.operationId,
+        actionId: HOSTPANEL_FORCE_CLEANUP_AGENT_ACTION,
+        step: `cleanup:${context.attempt}`,
+        payload: {
+          name: plan.newName,
+          domain: plan.newDomain,
+          phpVersion: plan.phpVersion,
+        },
+        deadlineAt: context.deadlineAt,
+        cancelSafe: false,
+      },
+      () => context.isCancellationRequested(),
+    );
+    const steps = this.validateForceCleanupResult(result);
+    const after = await this.checkForceRetry(
+      input.migrationId,
+      input.itemId,
+      context.actor.role,
+    );
+    if (after.reasonCode !== 'NO_LEAKS') {
+      if (
+        after.reasonCode === 'AGENT_OFFLINE' ||
+        after.reasonCode === 'PROBE_UNAVAILABLE'
+      ) throw new Error(after.reason);
+      throw new OperationFailedError(
+        after.reason || 'Force cleanup postcondition was not confirmed',
       );
     }
-    this.logger.log(
-      `[force-retry ${itemId}] cleanup OK (${(cleanup.data?.log || []).length} steps): ${(cleanup.data?.log || []).join(' | ')}`,
-    );
-    // Дальше — обычный retry
-    return this.retryItem(id, itemId, role);
+    this.logger.log(`[force-cleanup ${input.itemId}] cleanup confirmed (${steps} steps)`);
+    return { ...input, cleaned: true, steps };
+  }
+
+  private parseForceCleanupRequest(value: unknown): HostpanelForceCleanupRequest {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) {
+      throw new OperationNeedsAttentionError('Hostpanel force cleanup request is invalid');
+    }
+    const input = value as Record<string, unknown>;
+    if (
+      Object.keys(input).sort().join(',') !== 'itemId,migrationId' ||
+      typeof input.migrationId !== 'string' ||
+      typeof input.itemId !== 'string' ||
+      !UUID.test(input.migrationId) ||
+      !UUID.test(input.itemId)
+    ) throw new OperationNeedsAttentionError('Hostpanel force cleanup request is invalid');
+    return input as unknown as HostpanelForceCleanupRequest;
+  }
+
+  private validateForceCleanupResult(value: unknown): number {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) {
+      throw new OperationNeedsAttentionError('Hostpanel force cleanup result is invalid');
+    }
+    const result = value as Record<string, unknown>;
+    if (Object.keys(result).sort().join(',') !== 'log' || !Array.isArray(result.log)) {
+      throw new OperationNeedsAttentionError('Hostpanel force cleanup result is invalid');
+    }
+    if (result.log.length > 64) {
+      throw new OperationNeedsAttentionError('Hostpanel force cleanup result is too large');
+    }
+    for (const line of result.log) {
+      if (
+        typeof line !== 'string' ||
+        line.length > 512 ||
+        /[\0\r\n]/.test(line)
+      ) throw new OperationNeedsAttentionError('Hostpanel force cleanup result is invalid');
+    }
+    return result.log.length;
   }
 
   async retryItem(id: string, itemId: string, role: string) {

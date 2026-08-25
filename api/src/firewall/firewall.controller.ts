@@ -7,16 +7,24 @@ import {
   Body,
   Param,
   ParseUUIDPipe,
+  Headers,
+  HttpCode,
+  HttpStatus,
 } from '@nestjs/common';
 import { Throttle } from '@nestjs/throttler';
 import { FirewallService } from './firewall.service';
 import { CreateFirewallRuleDto, UpdateFirewallRuleDto } from './firewall.dto';
 import { Roles } from '../common/decorators/roles.decorator';
+import { CurrentUser } from '../common/decorators/current-user.decorator';
+import { FirewallOperationsService } from './firewall-operations.service';
 
 @Controller('firewall')
 @Roles('ADMIN')
 export class FirewallController {
-  constructor(private readonly firewallService: FirewallService) {}
+  constructor(
+    private readonly firewallService: FirewallService,
+    private readonly operations: FirewallOperationsService,
+  ) {}
 
   @Get()
   async findAll() {
@@ -53,11 +61,16 @@ export class FirewallController {
   }
 
   @Post('sync')
+  @HttpCode(HttpStatus.ACCEPTED)
   // Полный пересбор ufw: дороговато, не чаще 5/мин чтобы кнопку не зажевали.
   @Throttle({ default: { limit: 5, ttl: 60_000 } })
-  async syncRules() {
-    await this.firewallService.syncRulesToUfw();
-    return { success: true };
+  async syncRules(
+    @CurrentUser('sub') userId: string,
+    @CurrentUser('role') role: string,
+    @Headers('idempotency-key') idempotencyKey?: string,
+  ) {
+    const data = await this.operations.enqueueSync({ userId, role }, idempotencyKey);
+    return { success: true, data };
   }
 
   @Get('presets')
@@ -67,9 +80,15 @@ export class FirewallController {
   }
 
   @Post('presets/:name/apply')
+  @HttpCode(HttpStatus.ACCEPTED)
   @Throttle({ default: { limit: 5, ttl: 60000 } })
-  async applyPreset(@Param('name') name: string) {
-    const rules = await this.firewallService.applyPreset(name);
-    return { success: true, data: rules };
+  async applyPreset(
+    @Param('name') name: string,
+    @CurrentUser('sub') userId: string,
+    @CurrentUser('role') role: string,
+    @Headers('idempotency-key') idempotencyKey?: string,
+  ) {
+    const data = await this.operations.enqueuePreset(name, { userId, role }, idempotencyKey);
+    return { success: true, data };
   }
 }

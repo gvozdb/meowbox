@@ -6,6 +6,10 @@ import {
   MaxLength,
   Matches,
   IsIn,
+  IsInt,
+  IsUUID,
+  Max,
+  Min,
 } from 'class-validator';
 
 enum DatabaseType {
@@ -43,4 +47,20 @@ export class UpdateDatabaseDto {
   @IsOptional()
   @IsIn(['APP_PRIMARY', 'AUXILIARY'])
   purpose?: 'APP_PRIMARY' | 'AUXILIARY';
+}
+
+export class CreateDatabaseImportSessionDto {
+  @IsString()
+  @Matches(/^[A-Za-z0-9._-]{1,180}$/)
+  filename!: string;
+
+  @IsInt()
+  @Min(1)
+  @Max(50 * 1024 ** 3)
+  contentLength!: number;
+}
+
+export class StartDatabaseImportDto {
+  @IsUUID()
+  uploadSessionId!: string;
 }

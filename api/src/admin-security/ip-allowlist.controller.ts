@@ -14,13 +14,14 @@ import { Body, Controller, Delete, Get, Param, Post, Put, Req, BadRequestExcepti
 
 import { Roles } from '../common/decorators/roles.decorator';
 import { UserRole } from '../common/enums';
+import {
+  getOrCreateNetworkContext,
+  type NetworkContextRequest,
+} from '../common/http/network-context';
 
 import { IpAllowlistEntry, IpAllowlistConfig, IpAllowlistService } from './ip-allowlist.service';
 
-interface ReqLike {
-  ip?: string;
-  socket?: { remoteAddress?: string };
-}
+type ReqLike = NetworkContextRequest;
 
 @Controller('admin/ip-allowlist')
 @Roles(UserRole.ADMIN)
@@ -107,7 +108,7 @@ export class IpAllowlistController {
   // ── helpers ────────────────────────────────────────────────────────────
 
   private clientIp(req: ReqLike): string {
-    return req.ip || req.socket?.remoteAddress || '';
+    return getOrCreateNetworkContext(req).browserIp;
   }
 
   /**

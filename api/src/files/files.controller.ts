@@ -7,29 +7,33 @@ import {
   Param,
   Query,
   Body,
-  Res,
-  Header,
+  Headers,
+  HttpCode,
+  HttpStatus,
+  GoneException,
   ParseUUIDPipe,
-  StreamableFile,
-  UseInterceptors,
-  UploadedFile,
-  BadRequestException,
 } from '@nestjs/common';
-import { FileInterceptor } from '@nestjs/platform-express';
 import { Throttle } from '@nestjs/throttler';
-import { Response } from 'express';
-import * as path from 'path';
 import { Roles } from '../common/decorators/roles.decorator';
 import { CurrentUser } from '../common/decorators/current-user.decorator';
 import { FilesService } from './files.service';
-import { attachmentDisposition } from '../common/http/content-disposition';
-import { WriteFileDto, CreateItemDto, RenameItemDto } from './files.dto';
-import { UPLOAD_BLOCKED_EXTENSIONS } from '@meowbox/shared';
+import {
+  CommitFileUploadDto,
+  CreateFileDownloadSessionDto,
+  CreateFileUploadSessionDto,
+  WriteFileDto,
+  CreateItemDto,
+  RenameItemDto,
+} from './files.dto';
+import { FileTransferService } from './file-transfer.service';
 
 @Controller('sites/:siteId/domains/:domainId/files')
 @Roles('ADMIN', 'MANAGER')
 export class FilesController {
-  constructor(private readonly filesService: FilesService) {}
+  constructor(
+    private readonly filesService: FilesService,
+    private readonly fileTransfers: FileTransferService,
+  ) {}
 
   @Get()
   async list(
@@ -68,77 +72,73 @@ export class FilesController {
   }
 
   @Get('download')
-  @Header('Cache-Control', 'no-store')
-  async download(
+  download() {
+    throw new GoneException('Use POST /download-session');
+  }
+
+  @Post('download-session')
+  @Throttle({ default: { limit: 5, ttl: 60_000 } })
+  async createDownloadSession(
     @Param('siteId', ParseUUIDPipe) siteId: string,
     @Param('domainId', ParseUUIDPipe) domainId: string,
-    @Query('path') filePath: string,
-    @Res({ passthrough: true }) res: Response,
+    @Body() body: CreateFileDownloadSessionDto,
     @CurrentUser('sub') userId: string,
     @CurrentUser('role') role: string,
   ) {
-    const file = await this.filesService.openDownloadFile(
+    const data = await this.fileTransfers.issueDownload(
       siteId,
       domainId,
-      userId,
-      role,
-      filePath,
+      body.path,
+      { userId, role },
     );
-
-    res.set({
-      'Content-Type': 'application/octet-stream',
-      'Content-Length': file.size.toString(),
-      'Content-Disposition': attachmentDisposition(file.filename),
-    });
-
-    return new StreamableFile(file.stream);
+    return { success: true, data };
   }
 
   @Post('upload')
-  @Throttle({ default: { limit: 20, ttl: 60_000 } })
-  @UseInterceptors(FileInterceptor('file', { limits: { fileSize: 100 * 1024 * 1024 } }))
-  async upload(
+  upload() {
+    throw new GoneException('Use POST /upload-session and POST /upload-commit');
+  }
+
+  @Post('upload-session')
+  @Throttle({ default: { limit: 5, ttl: 60_000 } })
+  async createUploadSession(
     @Param('siteId', ParseUUIDPipe) siteId: string,
     @Param('domainId', ParseUUIDPipe) domainId: string,
-    @Query('path') targetDir: string,
-    @UploadedFile() file: Express.Multer.File,
+    @Body() body: CreateFileUploadSessionDto,
     @CurrentUser('sub') userId: string,
     @CurrentUser('role') role: string,
+    @Headers('idempotency-key') idempotencyKey?: string,
   ) {
-    if (!file) {
-      throw new BadRequestException('Файл не прикреплён');
-    }
-
-    // Блокировка исполняемых расширений: загрузка в www/ делает файл
-    // доступным через HTTP, а PHP-FPM с радостью его выполнит. RCE через
-    // upload — топ-1 вектор на shared-хостингах. Блэклист по расширению,
-    // потому что MIME из multipart — клиентский, ему доверять нельзя.
-    const origName = String(file.originalname || '').toLowerCase();
-    const ext = path.extname(origName).replace(/^\./, '');
-    // Блокируем и двойные расширения вида shell.php.jpg: проверяем все
-    // сегменты после первой точки.
-    const segments = origName.split('.').slice(1);
-    for (const seg of segments) {
-      if ((UPLOAD_BLOCKED_EXTENSIONS as readonly string[]).includes(seg)) {
-        throw new BadRequestException(
-          `Загрузка файлов с расширением .${seg} запрещена по соображениям безопасности`,
-        );
-      }
-    }
-    // Пустое расширение — тоже подозрительно в контексте web-root. Не блокируем
-    // жёстко (туда же текстовые README/Makefile без расширения льют), но логируем
-    // в сервисе. ext уже проверили выше через segments.
-    void ext;
-
-    await this.filesService.uploadFile(
+    const data = await this.fileTransfers.issueUpload(
       siteId,
       domainId,
-      userId,
-      role,
-      targetDir || '/',
-      file,
+      body,
+      { userId, role },
+      idempotencyKey,
     );
-    return { success: true };
+    return { success: true, data };
+  }
+
+  @Post('upload-commit')
+  @HttpCode(HttpStatus.ACCEPTED)
+  @Throttle({ default: { limit: 5, ttl: 60_000 } })
+  async commitUpload(
+    @Param('siteId', ParseUUIDPipe) siteId: string,
+    @Param('domainId', ParseUUIDPipe) domainId: string,
+    @Body() body: CommitFileUploadDto,
+    @CurrentUser('sub') userId: string,
+    @CurrentUser('role') role: string,
+    @Headers('idempotency-key') idempotencyKey?: string,
+  ) {
+    const data = await this.fileTransfers.enqueueUploadCommit(
+      siteId,
+      domainId,
+      body.uploadSessionId,
+      body.targetDir,
+      { userId, role },
+      idempotencyKey,
+    );
+    return { success: true, data };
   }
 
   @Put('write')

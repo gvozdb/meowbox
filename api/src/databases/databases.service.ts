@@ -13,24 +13,20 @@ import { DatabaseType } from '../common/enums';
 import { randomBytes } from 'crypto';
 import { hashPassword } from '../common/crypto/argon2.helper';
 import { encryptJson, decryptJson } from '../common/crypto/credentials-cipher';
-import { encryptToken } from '../common/crypto/adminer-cipher';
 import * as fs from 'fs/promises';
-import * as os from 'os';
 import * as path from 'path';
 import { PrismaService } from '../common/prisma.service';
 import { AgentRelayService } from '../gateway/agent-relay.service';
 import { CreateDatabaseDto, UpdateDatabaseDto } from './databases.dto';
 import { DomainContextService } from '../sites/domain-context.service';
 import { OperationsService } from '../operations/operations.service';
-import { safeErrorMessage } from '@meowbox/shared';
+import { AdminerHandoffService } from '../adminer/adminer-handoff.service';
+import { getDatabaseExportsDir } from './database-paths';
 
 /**
  * Где агент создаёт ручные дампы БД для скачивания (db:export → /var/meowbox/exports/...).
  * Должен совпадать с DB_EXPORTS_DIR в agent/src/config.ts (default `/var/meowbox/exports`).
  */
-const DB_EXPORTS_DIR =
-  (process.env.DB_EXPORTS_DIR || '/var/meowbox/exports').replace(/\/+$/, '');
-
 /**
  * TTL для забытых файлов экспорта. Если юзер нажал «Экспорт», но не скачал
  * (или скачивание оборвалось), файл должен сам уехать в /dev/null через сутки.
@@ -68,6 +64,7 @@ export class DatabasesService implements OnModuleInit, OnModuleDestroy {
     private readonly agentRelay: AgentRelayService,
     private readonly domainContext: DomainContextService,
     private readonly operations: OperationsService,
+    private readonly adminerHandoffs: AdminerHandoffService,
   ) {}
 
   async onModuleInit(): Promise<void> {
@@ -118,15 +115,16 @@ export class DatabasesService implements OnModuleInit, OnModuleDestroy {
    * Идемпотентно. Не падает, если папки нет (агент мог ещё не создать).
    */
   private async cleanupStaleExports(): Promise<void> {
+    const exportsDir = getDatabaseExportsDir();
     try {
-      const entries = await fs.readdir(DB_EXPORTS_DIR).catch((err: NodeJS.ErrnoException) => {
+      const entries = await fs.readdir(exportsDir).catch((err: NodeJS.ErrnoException) => {
         if (err.code === 'ENOENT') return [] as string[];
         throw err;
       });
       const cutoff = Date.now() - EXPORT_TTL_MS;
       let removed = 0;
       for (const name of entries) {
-        const full = path.join(DB_EXPORTS_DIR, name);
+        const full = path.join(exportsDir, name);
         try {
           const st = await fs.lstat(full);
           // Только обычные файлы — без рекурсии, без symlink-traversal.
@@ -141,7 +139,7 @@ export class DatabasesService implements OnModuleInit, OnModuleDestroy {
         }
       }
       if (removed > 0) {
-        this.logger.log(`Cleaned up ${removed} stale DB export(s) from ${DB_EXPORTS_DIR}`);
+        this.logger.log(`Cleaned up ${removed} stale DB export(s) from ${exportsDir}`);
       }
     } catch (err) {
       this.logger.warn(`cleanupStaleExports failed: ${(err as Error).message}`);
@@ -271,35 +269,8 @@ export class DatabasesService implements OnModuleInit, OnModuleDestroy {
     userId: string,
     role: string,
   ) {
-    await this.domainContext.requireOwnedSiteDomain(
-      siteId,
-      domainId,
-      userId,
-      role,
-    );
+    await this.assertCreateAllowed(siteId, domainId, dto, userId, role);
     const purpose = dto.purpose || 'AUXILIARY';
-    if (purpose === 'APP_PRIMARY') {
-      const existingPrimary = await this.prisma.database.findFirst({
-        where: { siteDomainId: domainId, purpose: 'APP_PRIMARY' },
-        select: { id: true },
-      });
-      if (existingPrimary) {
-        throw new ConflictException('Domain already has an APP_PRIMARY database');
-      }
-    }
-    // Имя уникально в рамках движка (см. @@unique([name, type]) в schema).
-    // MariaDB и PostgreSQL — разные namespace на сервере, имя БД может совпадать.
-    const existing = await this.prisma.database.findFirst({
-      where: { name: dto.name, type: dto.type },
-      select: { id: true },
-    });
-    if (existing) {
-      throw new ConflictException(`Database "${dto.name}" (${dto.type}) already exists`);
-    }
-
-    // Движок должен быть установлен на сервере. ServerService — синхронизированный
-    // снимок (пишется при заходе на /services и при install/uninstall).
-    await this.assertEngineInstalled(dto.type);
 
     // Generate credentials
     const dbUser = dto.dbUser || `u_${dto.name}`.substring(0, 32);
@@ -353,6 +324,39 @@ export class DatabasesService implements OnModuleInit, OnModuleDestroy {
       ...database,
       plainPassword,
     };
+  }
+
+  async assertCreateAllowed(
+    siteId: string,
+    domainId: string,
+    dto: CreateDatabaseDto,
+    userId: string,
+    role: string,
+  ): Promise<void> {
+    await this.domainContext.requireOwnedSiteDomain(
+      siteId,
+      domainId,
+      userId,
+      role,
+    );
+    const purpose = dto.purpose || 'AUXILIARY';
+    if (purpose === 'APP_PRIMARY') {
+      const existingPrimary = await this.prisma.database.findFirst({
+        where: { siteDomainId: domainId, purpose: 'APP_PRIMARY' },
+        select: { id: true },
+      });
+      if (existingPrimary) {
+        throw new ConflictException('Domain already has an APP_PRIMARY database');
+      }
+    }
+    const existing = await this.prisma.database.findFirst({
+      where: { name: dto.name, type: dto.type },
+      select: { id: true },
+    });
+    if (existing) {
+      throw new ConflictException(`Database "${dto.name}" (${dto.type}) already exists`);
+    }
+    await this.assertEngineInstalled(dto.type);
   }
 
   async update(
@@ -420,210 +424,6 @@ export class DatabasesService implements OnModuleInit, OnModuleDestroy {
       await this.operations.fail(operation.id, error).catch(() => undefined);
       throw error;
     }
-  }
-
-  async delete(
-    siteId: string,
-    domainId: string,
-    id: string,
-    userId: string,
-    role: string,
-    idempotencyKey?: string,
-  ) {
-    const db = await this.findById(siteId, domainId, id, userId, role);
-    if (
-      db.purpose === 'APP_PRIMARY' &&
-      (db.siteDomain.preset === 'MODX_REVO' || db.siteDomain.preset === 'MODX_3')
-    ) {
-      throw new ConflictException(
-        'Delete or convert the managed MODX application before its primary database',
-      );
-    }
-    if (!this.agentRelay.isAgentConnected()) {
-      throw new ConflictException('Agent is offline; database deletion is unavailable');
-    }
-    const password = this.getPlainPassword(db);
-    const operation = await this.operations.begin({
-      idempotencyKey,
-      type: 'DATABASE_DELETE',
-      siteId,
-      siteDomainId: domainId,
-      databaseId: id,
-      lockSite: false,
-      userId,
-      request: { databaseId: id, name: db.name, type: db.type },
-    });
-    if (operation.replayed) {
-      return {
-        operationId: operation.id,
-        operationStatus: operation.status,
-      };
-    }
-    await this.operations.start(operation.id, 'snapshot');
-
-    let snapshotPath: string | null = null;
-    let dropped = false;
-    try {
-      const snapshot = await this.agentRelay.emitToAgent<{ filePath?: string }>(
-        'db:export',
-        {
-          operationId: operation.id,
-          siteDomainId: domainId,
-          name: db.name,
-          type: db.type,
-        },
-        600_000,
-      );
-      if (!snapshot.success || !snapshot.data?.filePath) {
-        throw new InternalServerErrorException(
-          snapshot.error || 'Database deletion snapshot failed',
-        );
-      }
-      snapshotPath = snapshot.data.filePath;
-      await this.operations.step(operation.id, 'drop', 45);
-
-      const droppedResult = await this.agentRelay.emitToAgent(
-        'db:drop',
-        {
-          operationId: operation.id,
-          siteDomainId: domainId,
-          name: db.name,
-          type: db.type,
-          dbUser: db.dbUser,
-        },
-        600_000,
-      );
-      if (!droppedResult.success) {
-        throw new InternalServerErrorException(
-          droppedResult.error || 'Database deletion failed',
-        );
-      }
-      dropped = true;
-      await this.operations.step(operation.id, 'commit-metadata', 80);
-
-      await this.prisma.$transaction(async (tx) => {
-        await tx.database.delete({ where: { id } });
-        const completed = await tx.operation.updateMany({
-          where: { id: operation.id, status: 'RUNNING' },
-          data: {
-            status: 'SUCCEEDED',
-            currentStep: null,
-            progress: 100,
-            result: JSON.stringify({ databaseId: id }),
-            errorMessage: null,
-            completedAt: new Date(),
-          },
-        });
-        if (completed.count !== 1) {
-          throw new ConflictException('Database deletion operation is not running');
-        }
-        await tx.operationLock.deleteMany({
-          where: { operationId: operation.id },
-        });
-      });
-      this.logger.log(`Database "${db.name}" (${db.type}) deleted`);
-      return {
-        operationId: operation.id,
-        operationStatus: 'SUCCEEDED',
-      };
-    } catch (error) {
-      if (dropped && snapshotPath) {
-        const rollbackErrors: string[] = [];
-        const recreated = await this.agentRelay
-          .emitToAgent(
-            'db:create',
-            {
-              operationId: operation.id,
-              siteDomainId: domainId,
-              name: db.name,
-              type: db.type,
-              dbUser: db.dbUser,
-              password,
-            },
-            600_000,
-          )
-          .catch((rollbackError) => ({
-            success: false,
-            error: safeErrorMessage(rollbackError, 'database create failed'),
-          }));
-        if (!recreated.success) {
-          rollbackErrors.push(
-            safeErrorMessage(recreated.error, 'database create failed'),
-          );
-        } else {
-          const restored = await this.agentRelay
-            .emitToAgent(
-              'db:import',
-              {
-                operationId: operation.id,
-                siteDomainId: domainId,
-                name: db.name,
-                type: db.type,
-                filePath: snapshotPath,
-              },
-              600_000,
-            )
-            .catch((rollbackError) => ({
-              success: false,
-              error: safeErrorMessage(rollbackError, 'database import failed'),
-            }));
-          if (!restored.success) {
-            rollbackErrors.push(
-              safeErrorMessage(restored.error, 'database import failed'),
-            );
-          }
-        }
-        if (rollbackErrors.length > 0) {
-          const failure = new InternalServerErrorException(
-            `${safeErrorMessage(error, 'Database deletion failed')}; rollback failed: ${rollbackErrors.join('; ')}`,
-          );
-          await this.operations.fail(operation.id, failure).catch(() => undefined);
-          throw failure;
-        }
-      }
-      await this.operations.fail(operation.id, error).catch(() => undefined);
-      throw error;
-    }
-  }
-
-  async exportDatabase(siteId: string, domainId: string, id: string, userId: string, role: string) {
-    const db = await this.findById(siteId, domainId, id, userId, role);
-
-    const result = await this.agentRelay.emitToAgent<{ filePath: string }>('db:export', {
-      name: db.name,
-      type: db.type,
-    }, 600_000);
-
-    if (!result.success) {
-      throw new InternalServerErrorException(result.error || 'Export failed');
-    }
-
-    return { filePath: result.data?.filePath };
-  }
-
-  async importDatabase(
-    siteId: string,
-    domainId: string,
-    id: string,
-    userId: string,
-    role: string,
-    filePath: string,
-    idempotencyKey?: string,
-  ) {
-    const db = await this.findById(siteId, domainId, id, userId, role);
-    return this.runDatabaseImport(
-      siteId,
-      domainId,
-      {
-        id: db.id,
-        name: db.name,
-        type: db.type,
-      },
-      filePath,
-      { source: 'server-file', filePath },
-      userId,
-      idempotencyKey,
-    );
   }
 
   async resetPassword(siteId: string, domainId: string, id: string, userId: string, role: string) {
@@ -729,7 +529,7 @@ export class DatabasesService implements OnModuleInit, OnModuleDestroy {
    * Возвращает плейн-пароль БД, расшифровывая `dbPasswordEnc`.
    * Бросает 400, если пароль не сохранён в зашифрованном виде (legacy-запись).
    */
-  private getPlainPassword(db: { dbPasswordEnc: string | null; name: string }): string {
+  getPlainPassword(db: { dbPasswordEnc: string | null; name: string }): string {
     if (!db.dbPasswordEnc) {
       throw new BadRequestException(
         `У базы "${db.name}" пароль не сохранён в зашифрованном виде. ` +
@@ -750,22 +550,11 @@ export class DatabasesService implements OnModuleInit, OnModuleDestroy {
     }
   }
 
-  /**
-   * Возвращает короткоживущий ticket для входа в Adminer без ввода данных.
-   * Ticket — AES-256-GCM зашифрованный JSON, валидируется PHP-плагином.
-   *
-   * Безопасность:
-   *   - TTL 60 секунд (одноразовый short-lived токен).
-   *   - В query-строке. На SSO-эндпоинте PHP сразу обменивает на HttpOnly cookie
-   *     и редиректит на чистый URL — пароль в браузере истории не остаётся.
-   *   - Доступ проверяется ровно так же, как у любых других databases-эндпоинтов
-   *     (роль + ownership через findById).
-   */
-  async createAdminerTicket(siteId: string, domainId: string, id: string, userId: string, role: string): Promise<{ url: string }> {
+  async createAdminerTicket(siteId: string, domainId: string, id: string, userId: string, role: string) {
     const db = await this.findById(siteId, domainId, id, userId, role);
     const password = this.getPlainPassword(db);
 
-    const driverByType: Record<string, string> = {
+    const driverByType: Record<string, 'server' | 'pgsql'> = {
       MARIADB: 'server',
       MYSQL: 'server',
       POSTGRESQL: 'pgsql',
@@ -780,185 +569,21 @@ export class DatabasesService implements OnModuleInit, OnModuleDestroy {
       throw new BadRequestException(`Adminer не поддерживает тип БД ${db.type}`);
     }
 
-    const now = Math.floor(Date.now() / 1000);
-    const ticket = encryptToken({
-      v: 1,
-      kind: 'sso',
-      dbId: db.id,
+    return this.adminerHandoffs.create({
+      purpose: 'ADMINER',
+      resourceKind: 'DATABASE',
+      resourceId: db.id,
+      actor: { userId, role },
+      credentials: {
       driver,
       host: '127.0.0.1',
       port: portByType[db.type],
+      socket: null,
       user: db.dbUser,
       pass: password,
       database: db.name,
-      uid: userId,
-      iat: now,
-      exp: now + 60,
-    });
-
-    return { url: `/adminer/sso.php?ticket=${ticket}` };
-  }
-
-  async importUpload(
-    siteId: string,
-    domainId: string,
-    id: string,
-    userId: string,
-    role: string,
-    file: Express.Multer.File,
-    idempotencyKey?: string,
-  ) {
-    const db = await this.findById(siteId, domainId, id, userId, role);
-
-    // Save uploaded file to a temp location. `file.originalname` — клиентский,
-    // санируем до basename + только безопасные символы, иначе `../etc/evil.sql`
-    // попадёт в путь (теоретически не выходит за mkdtemp, но defense in depth).
-    const safeName = path
-      .basename(String(file.originalname || 'import.sql'))
-      .replace(/[^a-zA-Z0-9._-]/g, '_')
-      .slice(0, 128) || 'import.sql';
-    const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'meowbox-dbimport-'));
-    const tmpFile = path.join(tmpDir, safeName);
-
-    try {
-      await fs.writeFile(tmpFile, file.buffer);
-      return await this.runDatabaseImport(
-        siteId,
-        domainId,
-        {
-          id: db.id,
-          name: db.name,
-          type: db.type,
-        },
-        tmpFile,
-        {
-          source: 'upload',
-          filename: safeName,
-          size: file.size,
-        },
-        userId,
-        idempotencyKey,
-      );
-    } finally {
-      // Cleanup temp file
-      try { await fs.rm(tmpDir, { recursive: true }); } catch { /* ignore */ }
-    }
-  }
-
-  private async runDatabaseImport(
-    siteId: string,
-    domainId: string,
-    database: { id: string; name: string; type: string },
-    filePath: string,
-    request: Record<string, unknown>,
-    userId: string,
-    idempotencyKey?: string,
-  ): Promise<{
-    success: true;
-    operationId: string;
-    operationStatus: string;
-  }> {
-    if (!this.agentRelay.isAgentConnected()) {
-      throw new ConflictException('Agent is offline; database import is unavailable');
-    }
-    const operation = await this.operations.begin({
-      idempotencyKey,
-      type: 'DATABASE_IMPORT',
-      siteId,
-      siteDomainId: domainId,
-      databaseId: database.id,
-      lockSite: false,
-      userId,
-      request: {
-        databaseId: database.id,
-        ...request,
       },
     });
-    if (operation.replayed) {
-      return {
-        success: true,
-        operationId: operation.id,
-        operationStatus: operation.status,
-      };
-    }
-    await this.operations.start(operation.id, 'snapshot');
-
-    let snapshotPath: string | null = null;
-    let importStarted = false;
-    try {
-      const snapshot = await this.agentRelay.emitToAgent<{ filePath?: string }>(
-        'db:export',
-        {
-          operationId: operation.id,
-          siteDomainId: domainId,
-          name: database.name,
-          type: database.type,
-        },
-        600_000,
-      );
-      if (!snapshot.success || !snapshot.data?.filePath) {
-        throw new InternalServerErrorException(
-          snapshot.error || 'Database import snapshot failed',
-        );
-      }
-      snapshotPath = snapshot.data.filePath;
-      await this.operations.step(operation.id, 'import', 35);
-      importStarted = true;
-      const imported = await this.agentRelay.emitToAgent(
-        'db:import',
-        {
-          operationId: operation.id,
-          siteDomainId: domainId,
-          name: database.name,
-          type: database.type,
-          filePath,
-        },
-        600_000,
-      );
-      if (!imported.success) {
-        throw new InternalServerErrorException(
-          imported.error || 'Database import failed',
-        );
-      }
-      await this.operations.succeed(operation.id, {
-        databaseId: database.id,
-      });
-      return {
-        success: true,
-        operationId: operation.id,
-        operationStatus: 'SUCCEEDED',
-      };
-    } catch (error) {
-      if (importStarted && snapshotPath) {
-        const restored = await this.agentRelay
-          .emitToAgent(
-            'db:import',
-            {
-              operationId: operation.id,
-              siteDomainId: domainId,
-              name: database.name,
-              type: database.type,
-              filePath: snapshotPath,
-            },
-            600_000,
-          )
-          .catch((rollbackError) => ({
-            success: false,
-            error: safeErrorMessage(rollbackError, 'database restore failed'),
-          }));
-        if (!restored.success) {
-          const failure = new InternalServerErrorException(
-            `${safeErrorMessage(error, 'Database import failed')}; rollback failed: ${safeErrorMessage(
-              restored.error,
-              'database restore failed',
-            )}`,
-          );
-          await this.operations.fail(operation.id, failure).catch(() => undefined);
-          throw failure;
-        }
-      }
-      await this.operations.fail(operation.id, error).catch(() => undefined);
-      throw error;
-    }
   }
+
 }

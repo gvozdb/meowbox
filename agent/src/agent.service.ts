@@ -71,9 +71,60 @@ import {
   isUnderBackupStorage,
   TIMEOUTS,
 } from './config';
-import { DASHBOARD_LIMITS, DEFAULT_PHP_VERSION, SiteType } from '@meowbox/shared';
+import {
+  DASHBOARD_LIMITS,
+  DEFAULT_PHP_VERSION,
+  SERVICE_AGENT_JOB_ACTIONS,
+  SiteType,
+  resolveServiceAgentCall,
+} from '@meowbox/shared';
+import { AgentJobRuntime } from './agent-job.runtime';
 
 type Callback = (result: unknown) => void;
+type RegisteredRpcHandler = (
+  params: unknown,
+  callback: Callback,
+) => Promise<void>;
+
+export const DURABLE_AGENT_ACTIONS = {
+  'agent.php.install': 'php:install',
+  'agent.php.uninstall': 'php:uninstall',
+  'agent.php.extension.install': 'php:extension-install',
+  'agent.system.updates.check': 'updates:check',
+  'agent.system.updates.install': 'updates:install',
+  'agent.system.updates.upgrade_all': 'updates:upgrade-all',
+  'agent.ssl.issue': 'ssl:issue',
+  'agent.ssl.revoke': 'ssl:revoke',
+  'agent.country_block.apply': 'country-block:apply',
+  'agent.country_block.refresh_db': 'country-block:refresh-db',
+  'agent.storage.restic_test': 'restic:test',
+  'agent.storage.top_files': 'site:top-files',
+  'agent.node.quick_command': 'node:command-run',
+  'agent.application.snapshot': 'application:snapshot',
+  'agent.application.restore_snapshot': 'application:restore-snapshot',
+  'agent.modx.update': 'site:update-modx',
+  'agent.site.health_check': 'site:health-check',
+  'agent.vpn.runtime.install_xray': 'vpn:installer:install-xray',
+  'agent.vpn.runtime.install_amnezia': 'vpn:installer:install-amnezia',
+  'agent.vpn.runtime.uninstall_xray': 'vpn:installer:uninstall-xray',
+  'agent.vpn.runtime.uninstall_amnezia': 'vpn:installer:uninstall-amnezia',
+  'agent.restic.snapshots': 'restic:snapshots',
+  'agent.restic.list_tree': 'restic:list-tree',
+  'agent.restic.diff_snapshots': 'restic:diff-snapshots',
+  'agent.restic.diff_live': 'restic:diff-live',
+  'agent.restic.diff_file': 'restic:diff-file',
+  'agent.restic.diff_file_live': 'restic:diff-file-live',
+  'agent.hostpanel.force_cleanup_name': 'migrate:hostpanel:force-cleanup-name',
+  'agent.database.export': 'db:export',
+  'agent.database.drop': 'db:drop',
+  'agent.database.create': 'db:create',
+  'agent.database.reset_password': 'db:reset-password',
+  'agent.database.import': 'db:import',
+  'agent.modx.doctor': 'site:modx-doctor',
+  'agent.modx.cleanup_setup': 'site:cleanup-setup-dir',
+  'agent.domain.permissions_normalize': 'site:normalize-permissions',
+  'agent.panel_access.cutover_stage': 'panel-access:stage-cutover',
+} as const;
 
 interface PendingEvent {
   event: string;
@@ -102,7 +153,9 @@ const PENDING_EVENT_MAX_QUEUE = envInt('PENDING_EVENT_MAX_QUEUE', 100, 1);
 
 export class AgentService {
   private socket: Socket | null = null;
+  private readonly jobRuntime = new AgentJobRuntime();
   private pendingEvents: PendingEvent[] = [];
+  private readonly rpcHandlers = new Map<string, RegisteredRpcHandler>();
   private nginx: NginxManager;
   private php: PhpFpmManager;
   private pm2: Pm2Manager;
@@ -204,7 +257,7 @@ export class AgentService {
     }
 
     this.socket = io(apiUrl, {
-      auth: { secret: agentSecret },
+      auth: { secret: agentSecret, bootId: this.jobRuntime.bootId },
       reconnection: true,
       reconnectionDelay: 5000,
       reconnectionAttempts: Infinity,
@@ -227,10 +280,13 @@ export class AgentService {
     });
 
     this.registerHandlers();
+    this.registerDurableJobHandlers();
+    this.jobRuntime.attach(this.socket);
     console.log('[Agent] Started, connecting to API...');
   }
 
   stop() {
+    this.jobRuntime.detach();
     this.stopMetricsStream();
     this.terminal.destroy();
     this.tailManager.stopAll();
@@ -259,6 +315,10 @@ export class AgentService {
     handler: (params: P, cb: Callback) => Promise<void>,
     timeoutMs: number = TIMEOUTS.SOCKET_HANDLER,
   ): void {
+    if (this.rpcHandlers.has(event)) {
+      throw new Error(`Duplicate agent RPC handler: ${event}`);
+    }
+    this.rpcHandlers.set(event, handler as RegisteredRpcHandler);
     s.on(event, async (params: P, cb: Callback) => {
       let settled = false;
       const safeCb: Callback = (result) => {
@@ -284,6 +344,53 @@ export class AgentService {
         console.error(`[Agent] Handler "${event}" threw: ${(err as Error).message}`);
         safeCb({ success: false, error: (err as Error).message });
       }
+    });
+  }
+
+  private registerDurableJobHandlers(): void {
+    for (const [actionId, event] of Object.entries(DURABLE_AGENT_ACTIONS)) {
+      this.jobRuntime.registerHandler(actionId, (payload) =>
+        this.invokeRpcHandler(event, payload));
+    }
+    for (const actionId of Object.values(SERVICE_AGENT_JOB_ACTIONS)) {
+      this.jobRuntime.registerHandler(actionId, (payload) => {
+        const call = resolveServiceAgentCall(actionId, payload);
+        return this.invokeRpcHandler(call.event, call.payload);
+      });
+    }
+  }
+
+  private invokeRpcHandler(event: string, payload: unknown): Promise<unknown> {
+    const handler = this.rpcHandlers.get(event);
+    if (!handler) throw new Error(`Agent RPC handler is not registered: ${event}`);
+    return new Promise((resolve, reject) => {
+      let settled = false;
+      const callback: Callback = (raw) => {
+        if (settled) return;
+        settled = true;
+        if (raw && typeof raw === 'object') {
+          const response = raw as Record<string, unknown>;
+          if (response.success === false) {
+            reject(new Error(
+              typeof response.error === 'string' ? response.error : `${event} failed`,
+            ));
+            return;
+          }
+          if (Object.prototype.hasOwnProperty.call(response, 'data')) {
+            resolve(response.data);
+            return;
+          }
+          const { success: _success, error: _error, ...result } = response;
+          resolve(Object.keys(result).length > 0 ? result : null);
+          return;
+        }
+        resolve(raw ?? null);
+      };
+      void handler(payload, callback).catch((error) => {
+        if (settled) return;
+        settled = true;
+        reject(error);
+      });
     });
   }
 
@@ -751,9 +858,19 @@ export class AgentService {
       }
     });
 
-    this.safeOn(s, 'db:import', async (params: { name: string; type: string; filePath: string }, cb: Callback) => {
+    this.safeOn(s, 'db:import', async (params: {
+      name: string;
+      type: string;
+      filePath: string;
+      originalFilename?: string;
+    }, cb: Callback) => {
       try {
-        cb(await this.db.importDatabase(params.name, params.type, params.filePath));
+        cb(await this.db.importDatabase(
+          params.name,
+          params.type,
+          params.filePath,
+          params.originalFilename,
+        ));
       } catch (err) {
         cb({ success: false, error: (err as Error).message });
       }
@@ -884,6 +1001,42 @@ export class AgentService {
       } catch (err) {
         cb({ success: false, error: (err as Error).message });
       }
+    });
+
+    this.safeOn(s, 'panel-access:stage-cutover', async (params: Parameters<PanelAccessManager['stageFederationCutover']>[0], cb: Callback) => {
+      try {
+        cb(await this.panelAccess.stageFederationCutover(params));
+      } catch (err) {
+        cb({ success: false, error: (err as Error).message });
+      }
+    }, 300_000);
+
+    this.safeOn(s, 'panel-access:finalize-cutover', async (params: Parameters<PanelAccessManager['finalizeFederationCutover']>[0], cb: Callback) => {
+      const result = await this.panelAccess.finalizeFederationCutover(params);
+      cb(result);
+      if (result.success && result.reloadApi) {
+        setTimeout(() => {
+          void this.panelAccess.reloadApiEnvironment().catch((error) => {
+            console.error(`[Agent] Panel Access API reload failed: ${(error as Error).message}`);
+          });
+        }, 2_000).unref();
+      }
+    });
+
+    this.safeOn(s, 'panel-access:rollback-cutover', async (params: Parameters<PanelAccessManager['rollbackFederationCutover']>[0], cb: Callback) => {
+      const result = await this.panelAccess.rollbackFederationCutover(params);
+      cb(result);
+      if (result.success && result.reloadApi) {
+        setTimeout(() => {
+          void this.panelAccess.reloadApiEnvironment().catch((error) => {
+            console.error(`[Agent] Panel Access rollback API reload failed: ${(error as Error).message}`);
+          });
+        }, 2_000).unref();
+      }
+    });
+
+    this.safeOn(s, 'panel-access:cutover-status', async (params: Parameters<PanelAccessManager['getFederationCutoverStatus']>[0], cb: Callback) => {
+      cb(await this.panelAccess.getFederationCutoverStatus(params));
     });
 
     // -- Backup --
@@ -2145,7 +2298,9 @@ export class AgentService {
           params.snapshotPath,
         );
         cb({
-          ...result,
+          success: result.success,
+          error: result.error,
+          data: result.success ? { restored: true } : undefined,
           operationId: params.operationId,
           siteDomainId: params.siteDomainId,
         });
@@ -2354,7 +2509,9 @@ export class AgentService {
         cb({
           success: result.success,
           error: result.error,
-          data: result.version ? { version: result.version } : undefined,
+          data: result.success
+            ? { version: result.version || params.targetVersion }
+            : undefined,
           siteDomainId,
           operationId: params.operationId,
         });
@@ -2399,7 +2556,7 @@ export class AgentService {
         cb({
           success: result.success,
           error: result.error,
-          data: { steps: result.steps, modxCorePath },
+          data: { stepCount: result.steps.length, modxCorePath },
         });
       } catch (err) {
         cb({ success: false, error: (err as Error).message });
@@ -2454,7 +2611,7 @@ export class AgentService {
         }
         // fs.rm с force handles root-owned files (мы под root)
         await fsp.rm(setupDir, { recursive: true, force: true });
-        cb({ success: true, data: { removed: true, path: setupDir } });
+        cb({ success: true, data: { removed: true } });
       } catch (err) {
         cb({ success: false, error: (err as Error).message });
       }
@@ -3542,7 +3699,7 @@ export class AgentService {
     }, 600_000);
     this.safeOn(s, 'vpn:installer:uninstall-xray', async (_p: Record<string, never>, cb: Callback) => {
       await this.vpnInstaller.uninstallXray();
-      cb({ success: true });
+      cb({ success: true, data: { uninstalled: true } });
     }, 60_000);
     this.safeOn(s, 'vpn:installer:install-amnezia', async (_p: Record<string, never>, cb: Callback) => {
       const data = await this.vpnInstaller.installAmnezia();
@@ -3550,7 +3707,7 @@ export class AgentService {
     }, 600_000);
     this.safeOn(s, 'vpn:installer:uninstall-amnezia', async (_p: Record<string, never>, cb: Callback) => {
       await this.vpnInstaller.uninstallAmnezia();
-      cb({ success: true });
+      cb({ success: true, data: { uninstalled: true } });
     }, 600_000);
 
     // -- Общие порты-проверки и host detect для UI --

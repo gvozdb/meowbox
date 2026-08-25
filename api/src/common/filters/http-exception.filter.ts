@@ -20,6 +20,7 @@ export class GlobalExceptionFilter implements ExceptionFilter {
     let code = 'INTERNAL_ERROR';
     let message = 'An unexpected error occurred';
     let details: Record<string, string[]> | undefined;
+    let contractExtras: Record<string, unknown> | undefined;
 
     if (exception instanceof HttpException) {
       status = exception.getStatus();
@@ -29,8 +30,45 @@ export class GlobalExceptionFilter implements ExceptionFilter {
         message = exceptionResponse;
       } else if (typeof exceptionResponse === 'object' && exceptionResponse !== null) {
         const resp = exceptionResponse as Record<string, unknown>;
-        message = (resp.message as string) || message;
-        code = (resp.error as string) || code;
+        const nestedError = typeof resp.error === 'object' && resp.error !== null
+          ? resp.error as Record<string, unknown>
+          : null;
+        if (
+          nestedError &&
+          typeof nestedError.code === 'string' &&
+          typeof nestedError.message === 'string'
+        ) {
+          code = nestedError.code.slice(0, 128);
+          message = nestedError.message.slice(0, 1024);
+          const requestId = nestedError.requestId;
+          const targetInstallationId = nestedError.targetInstallationId;
+          const actionId = nestedError.actionId;
+          if (
+            typeof requestId === 'string' &&
+            /^[0-9a-f-]{36}$/.test(requestId) &&
+            (targetInstallationId === null ||
+              (typeof targetInstallationId === 'string' && /^[0-9a-f-]{36}$/.test(targetInstallationId))) &&
+            (actionId === null ||
+              (typeof actionId === 'string' && /^[a-z][a-z0-9.-]{1,255}$/.test(actionId))) &&
+            typeof nestedError.retryable === 'boolean'
+          ) {
+            contractExtras = {
+              requestId,
+              targetInstallationId,
+              actionId,
+              retryable: nestedError.retryable,
+              retryAfterSeconds: typeof nestedError.retryAfterSeconds === 'number'
+                ? nestedError.retryAfterSeconds
+                : null,
+              targetStatus: typeof nestedError.targetStatus === 'number'
+                ? nestedError.targetStatus
+                : null,
+            };
+          }
+        } else {
+          message = typeof resp.message === 'string' ? resp.message : message;
+          code = typeof resp.error === 'string' ? resp.error : code;
+        }
 
         // class-validator errors
         if (Array.isArray(resp.message)) {
@@ -49,6 +87,7 @@ export class GlobalExceptionFilter implements ExceptionFilter {
       error: {
         code,
         message,
+        ...(contractExtras ?? {}),
         ...(details ? { details } : {}),
       },
     });

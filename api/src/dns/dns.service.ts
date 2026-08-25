@@ -110,7 +110,7 @@ export class DnsService {
     return rows.map((r) => this.toProviderView(r));
   }
 
-  async createProvider(dto: CreateProviderDto): Promise<MaskedProviderView> {
+  async createProvider(dto: CreateProviderDto, requestedId?: string): Promise<MaskedProviderView> {
     assertCredentialKeyConfigured();
     this.validateProviderInputs(dto);
 
@@ -144,6 +144,7 @@ export class DnsService {
     const credentialsEnc = encryptJson(credentials);
     const account = await this.prisma.dnsProviderAccount.create({
       data: {
+        ...(requestedId ? { id: requestedId } : {}),
         type: dto.type,
         label: dto.label.trim(),
         credentialsEnc,

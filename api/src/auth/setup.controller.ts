@@ -16,7 +16,7 @@ export class SetupController {
   @Get('status')
   async getSetupStatus() {
     const adminExists = await this.prisma.user.findFirst({
-      where: { role: 'ADMIN' },
+      where: { role: 'ADMIN', identityKind: 'LOCAL' },
       select: { id: true },
     });
 
@@ -36,7 +36,7 @@ export class SetupController {
     try {
       const user = await this.prisma.$transaction(async (tx) => {
         const adminExists = await tx.user.findFirst({
-          where: { role: 'ADMIN' },
+          where: { role: 'ADMIN', identityKind: 'LOCAL' },
           select: { id: true },
         });
         if (adminExists) {

@@ -1,8 +1,11 @@
 import {
   Injectable, NotFoundException, BadRequestException, ConflictException,
+  OnModuleDestroy, OnModuleInit,
 } from '@nestjs/common';
 import { PrismaService } from '../common/prisma.service';
 import { AgentRelayService } from '../gateway/agent-relay.service';
+import { OperationAdmissionService } from '../operations/operation-admission.service';
+import { OperationsWorkerService } from '../operations/operations-worker.service';
 import {
   CreateStorageLocationDto, UpdateStorageLocationDto,
 } from './storage-locations.dto';
@@ -10,6 +13,25 @@ import {
 // Хранилища, которые поддерживают движок Restic.
 // SFTP добавлен — restic умеет sftp:user@host:/path репы нативно (через ssh).
 const RESTIC_TYPES = new Set(['LOCAL', 'S3', 'SFTP']);
+const STORAGE_TEST_ACTION = 'storage.location.test';
+const STORAGE_TEST_AGENT_ACTION = 'agent.storage.restic_test';
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+const SITE_NAME = /^(?:_connection-test_|[a-z][a-z0-9_-]{0,31})$/;
+
+function validateStorageTestRequest(request: unknown): { id: string; siteName: string } {
+  if (!request || typeof request !== 'object' || Array.isArray(request)) {
+    throw new BadRequestException('Storage test operation request is invalid');
+  }
+  const value = request as Record<string, unknown>;
+  if (
+    Object.keys(value).sort().join(',') !== 'id,siteName' ||
+    typeof value.id !== 'string' ||
+    !UUID.test(value.id) ||
+    typeof value.siteName !== 'string' ||
+    !SITE_NAME.test(value.siteName)
+  ) throw new BadRequestException('Storage test operation request is invalid');
+  return value as { id: string; siteName: string };
+}
 
 export interface StorageLocationView {
   id: string;
@@ -23,11 +45,27 @@ export interface StorageLocationView {
 }
 
 @Injectable()
-export class StorageLocationsService {
+export class StorageLocationsService implements OnModuleInit, OnModuleDestroy {
+  private unregisterHandler: (() => void) | null = null;
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly agentRelay: AgentRelayService,
+    private readonly admission: OperationAdmissionService,
+    private readonly worker: OperationsWorkerService,
   ) {}
+
+  onModuleInit(): void {
+    this.unregisterHandler = this.worker.registerHandler(
+      STORAGE_TEST_ACTION,
+      (request, context) => this.executeQueuedTest(request, context),
+    );
+  }
+
+  onModuleDestroy(): void {
+    this.unregisterHandler?.();
+    this.unregisterHandler = null;
+  }
 
   async list(): Promise<StorageLocationView[]> {
     const rows = await this.prisma.storageLocation.findMany({
@@ -186,6 +224,66 @@ export class StorageLocationsService {
     if (!res.success) {
       return { success: false, error: res.error || 'test failed' };
     }
+    return { success: true };
+  }
+
+  async enqueueTest(
+    id: string,
+    siteName: string,
+    actor: { userId: string; role: string },
+    idempotencyKey?: string,
+  ) {
+    const request = validateStorageTestRequest({ id, siteName });
+    const row = await this.getById(request.id);
+    if (!row.resticEnabled || !row.resticPassword) {
+      throw new BadRequestException(
+        'Тест реализован только для Restic-совместимых хранилищ (LOCAL/S3/SFTP)',
+      );
+    }
+    return this.admission.admit({
+      actionId: STORAGE_TEST_ACTION,
+      type: 'STORAGE_LOCATION_TEST',
+      idempotencyKey,
+      actor,
+      request,
+      deadlineMs: 5 * 60_000,
+      recoveryPolicy: 'RECONCILE_ONLY',
+      retryable: false,
+      globalLockKey: `storage-location:${id}`,
+    });
+  }
+
+  private async executeQueuedTest(
+    request: unknown,
+    context: {
+      operationId: string;
+      deadlineAt: Date;
+      isCancellationRequested(): Promise<boolean>;
+    },
+  ): Promise<{ success: true }> {
+    const input = validateStorageTestRequest(request);
+    const row = await this.getById(input.id);
+    if (!row.resticEnabled || !row.resticPassword) {
+      throw new BadRequestException('Storage location is no longer Restic-compatible');
+    }
+    await this.agentRelay.runAgentJob(
+      {
+        operationId: context.operationId,
+        actionId: STORAGE_TEST_AGENT_ACTION,
+        step: 'test',
+        payload: {
+          siteName: input.siteName,
+          storage: {
+            type: row.type as 'LOCAL' | 'S3' | 'SFTP',
+            config: this.safeParseConfig(row.config),
+            password: row.resticPassword,
+          },
+        },
+        deadlineAt: context.deadlineAt,
+        cancelSafe: false,
+      },
+      () => context.isCancellationRequested(),
+    );
     return { success: true };
   }
 

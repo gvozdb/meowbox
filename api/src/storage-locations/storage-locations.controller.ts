@@ -1,8 +1,10 @@
 import {
   Controller, Get, Post, Patch, Delete, Body, Param, ParseUUIDPipe,
-  Query,
+  Query, Headers, HttpCode, HttpStatus,
 } from '@nestjs/common';
+import { Throttle } from '@nestjs/throttler';
 import { Roles } from '../common/decorators/roles.decorator';
+import { CurrentUser } from '../common/decorators/current-user.decorator';
 import { StorageLocationsService } from './storage-locations.service';
 import { CreateStorageLocationDto, UpdateStorageLocationDto } from './storage-locations.dto';
 
@@ -47,15 +49,22 @@ export class StorageLocationsController {
 
   @Post(':id/test')
   @Roles('ADMIN')
+  @HttpCode(HttpStatus.ACCEPTED)
+  @Throttle({ default: { limit: 5, ttl: 60_000 } })
   async test(
     @Param('id', ParseUUIDPipe) id: string,
-    @Query('siteName') siteName?: string,
+    @Query('siteName') siteName: string | undefined,
+    @CurrentUser('sub') userId: string,
+    @CurrentUser('role') role: string,
+    @Headers('idempotency-key') idempotencyKey?: string,
   ) {
-    // Для теста используем имя-placeholder, если не указано (в репе появится тест-сабдир)
     const name = siteName || '_connection-test_';
-    const res = await this.service.test(id, name);
-    // Заворачиваем в стандартный конверт {success, data}, иначе клиент получит undefined
-    // после `response.data` в useApi — и словит «Cannot read properties of undefined».
-    return { success: true, data: res };
+    const data = await this.service.enqueueTest(
+      id,
+      name,
+      { userId, role },
+      idempotencyKey,
+    );
+    return { success: true, data };
   }
 }

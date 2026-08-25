@@ -109,6 +109,7 @@ interface Zone {
 }
 
 const api = useApi();
+const { waitForOperation } = useOperation();
 const toast = useMbToast();
 
 const providers = ref<Provider[]>([]);
@@ -165,7 +166,12 @@ async function refreshAll() {
 async function refreshZone(zoneId: string) {
   refreshingId.value = zoneId;
   try {
-    await api.post(`/dns/zones/${zoneId}/refresh`);
+    const accepted = await api.post<AcceptedOperation>(
+      `/dns/zones/${zoneId}/refresh`,
+      {},
+      { headers: { 'Idempotency-Key': operationIdempotencyKey('dns-zone-refresh') } },
+    );
+    await waitForOperation(accepted.operationId, { timeoutMs: 11 * 60_000 });
     toast.success('Записи обновлены');
     await refreshAll();
   } catch (e) {

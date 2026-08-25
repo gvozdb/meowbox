@@ -338,6 +338,11 @@ export class RestoreResticSnapshotDto {
   databaseIds?: string[];
 }
 
+export class ResticLocationQueryDto {
+  @IsUUID()
+  locationId!: string;
+}
+
 export class RunResticCheckDto {
   @IsUUID()
   locationId!: string;

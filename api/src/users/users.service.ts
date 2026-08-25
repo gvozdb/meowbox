@@ -1,4 +1,4 @@
-import { Injectable, Inject, forwardRef, ConflictException, NotFoundException, UnauthorizedException, Logger } from '@nestjs/common';
+import { Injectable, Inject, forwardRef, ConflictException, ForbiddenException, NotFoundException, UnauthorizedException, Logger } from '@nestjs/common';
 import { UserRole } from '../common/enums';
 import { Prisma } from '@prisma/client';
 import { PrismaService } from '../common/prisma.service';
@@ -6,6 +6,18 @@ import { BackupExportsService } from '../backups/backup-exports.service';
 import { hashPassword, verifyPassword } from '../common/crypto/argon2.helper';
 
 type PrismaTx = Prisma.TransactionClient;
+const LOCAL_IDENTITY_KIND = 'LOCAL';
+const RESERVED_FEDERATED_USERNAME_PREFIX = '__meowbox_federated_';
+const RESERVED_FEDERATED_EMAIL_DOMAIN = '@federation.invalid';
+
+function assertLocalIdentityNames(username?: string, email?: string): void {
+  if (
+    username?.toLowerCase().startsWith(RESERVED_FEDERATED_USERNAME_PREFIX) ||
+    email?.toLowerCase().endsWith(RESERVED_FEDERATED_EMAIL_DOMAIN)
+  ) {
+    throw new ConflictException('Username or email is reserved');
+  }
+}
 
 @Injectable()
 export class UsersService {
@@ -18,14 +30,14 @@ export class UsersService {
   ) {}
 
   async findByUsername(username: string) {
-    return this.prisma.user.findUnique({
-      where: { username },
+    return this.prisma.user.findFirst({
+      where: { username, identityKind: LOCAL_IDENTITY_KIND },
     });
   }
 
   async findById(id: string) {
-    return this.prisma.user.findUnique({
-      where: { id },
+    return this.prisma.user.findFirst({
+      where: { id, identityKind: LOCAL_IDENTITY_KIND },
     });
   }
 
@@ -46,6 +58,7 @@ export class UsersService {
     tx: PrismaService | PrismaTx,
     data: { username: string; email: string; password: string; role: string },
   ) {
+    assertLocalIdentityNames(data.username, data.email);
     const existing = await tx.user.findFirst({
       where: {
         OR: [{ username: data.username }, { email: data.email }],
@@ -63,6 +76,7 @@ export class UsersService {
         username: data.username,
         email: data.email,
         passwordHash,
+        identityKind: LOCAL_IDENTITY_KIND,
         role: data.role as UserRole,
       },
       select: {
@@ -79,6 +93,7 @@ export class UsersService {
 
   async findAll() {
     return this.prisma.user.findMany({
+      where: { identityKind: LOCAL_IDENTITY_KIND },
       select: {
         id: true,
         username: true,
@@ -107,6 +122,7 @@ export class UsersService {
   }
 
   async update(id: string, data: { username?: string; email?: string; role?: string; password?: string }) {
+    assertLocalIdentityNames(data.username, data.email);
     const user = await this.findById(id);
     if (!user) {
       throw new NotFoundException('User not found');
@@ -127,6 +143,14 @@ export class UsersService {
     // один падал с UNIQUE constraint (500 вместо 409). Теперь проверка и update
     // в одной транзакции — гонка невозможна.
     return this.prisma.$transaction(async (tx) => {
+      if (user.role === UserRole.ADMIN && data.role && data.role !== UserRole.ADMIN) {
+        const localAdminCount = await tx.user.count({
+          where: { identityKind: LOCAL_IDENTITY_KIND, role: UserRole.ADMIN },
+        });
+        if (localAdminCount <= 1) {
+          throw new ForbiddenException('Cannot demote the last local admin');
+        }
+      }
       if (data.username && data.username !== user.username) {
         const exists = await tx.user.findUnique({ where: { username: data.username }, select: { id: true } });
         if (exists && exists.id !== id) {
@@ -156,30 +180,36 @@ export class UsersService {
   }
 
   async updateTotpSecret(id: string, secret: string) {
-    await this.prisma.user.update({
-      where: { id },
+    const result = await this.prisma.user.updateMany({
+      where: { id, identityKind: LOCAL_IDENTITY_KIND },
       data: { totpSecret: secret },
     });
+    if (result.count !== 1) throw new NotFoundException('User not found');
   }
 
   async enableTotp(id: string) {
-    await this.prisma.user.update({
-      where: { id },
+    const result = await this.prisma.user.updateMany({
+      where: { id, identityKind: LOCAL_IDENTITY_KIND },
       data: { totpEnabled: true },
     });
+    if (result.count !== 1) throw new NotFoundException('User not found');
   }
 
   async disableTotp(id: string) {
-    await this.prisma.user.update({
-      where: { id },
+    const result = await this.prisma.user.updateMany({
+      where: { id, identityKind: LOCAL_IDENTITY_KIND },
       data: { totpEnabled: false, totpSecret: null },
     });
+    if (result.count !== 1) throw new NotFoundException('User not found');
   }
 
-  async delete(id: string) {
+  async delete(id: string, actorId: string) {
     const user = await this.findById(id);
     if (!user) {
       throw new NotFoundException('User not found');
+    }
+    if (id === actorId) {
+      throw new ForbiddenException('Cannot delete the current local user');
     }
 
     // Чистим S3-объекты экспортов до cascade-удаления.
@@ -191,6 +221,21 @@ export class UsersService {
       this.logger.warn(`Failed to cleanup export artifacts for user ${id}: ${(err as Error).message}`);
     }
 
-    await this.prisma.user.delete({ where: { id } });
+    await this.prisma.$transaction(async (tx) => {
+      const current = await tx.user.findFirst({
+        where: { id, identityKind: LOCAL_IDENTITY_KIND },
+        select: { id: true, role: true },
+      });
+      if (!current) throw new NotFoundException('User not found');
+      if (current.role === UserRole.ADMIN) {
+        const localAdminCount = await tx.user.count({
+          where: { identityKind: LOCAL_IDENTITY_KIND, role: UserRole.ADMIN },
+        });
+        if (localAdminCount <= 1) {
+          throw new ForbiddenException('Cannot delete the last local admin');
+        }
+      }
+      await tx.user.delete({ where: { id } });
+    });
   }
 }

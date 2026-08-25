@@ -1,4 +1,15 @@
-import { Controller, Get, Param, Query, ParseUUIDPipe } from '@nestjs/common';
+import {
+  Controller,
+  Get,
+  Headers,
+  HttpCode,
+  HttpStatus,
+  Param,
+  ParseUUIDPipe,
+  Post,
+  Query,
+} from '@nestjs/common';
+import { Throttle } from '@nestjs/throttler';
 import { Roles } from '../common/decorators/roles.decorator';
 import { CurrentUser } from '../common/decorators/current-user.decorator';
 import { StorageService } from './storage.service';
@@ -27,6 +38,23 @@ export class StorageController {
     @CurrentUser('role') role: string,
   ) {
     const data = await this.storageService.getSiteTopFiles(siteId, userId, role);
+    return { success: true, data };
+  }
+
+  @Post(':siteId/top-files/scan')
+  @HttpCode(HttpStatus.ACCEPTED)
+  @Throttle({ default: { limit: 5, ttl: 60_000 } })
+  async scanTopFiles(
+    @Param('siteId', ParseUUIDPipe) siteId: string,
+    @CurrentUser('id') userId: string,
+    @CurrentUser('role') role: string,
+    @Headers('idempotency-key') idempotencyKey?: string,
+  ) {
+    const data = await this.storageService.enqueueSiteTopFilesScan(
+      siteId,
+      { userId, role },
+      idempotencyKey,
+    );
     return { success: true, data };
   }
 

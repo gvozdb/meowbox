@@ -7,6 +7,9 @@ import {
   Body,
   Param,
   ParseUUIDPipe,
+  Headers,
+  HttpCode,
+  HttpStatus,
 } from '@nestjs/common';
 import { SiteBackupScheduleService } from './site-backup-schedule.service';
 import {
@@ -54,7 +57,11 @@ export class SiteBackupScheduleController {
 
   @Post(':id/run')
   @Roles('ADMIN')
-  async triggerBackup(@Param('id', ParseUUIDPipe) id: string) {
+  @HttpCode(HttpStatus.ACCEPTED)
+  async triggerBackup(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Headers('idempotency-key') _idempotencyKey?: string,
+  ) {
     return { success: true, data: await this.svc.triggerForAllSites(id) };
   }
 }

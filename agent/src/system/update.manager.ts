@@ -17,6 +17,24 @@ export interface UpdateInstallResult {
   upgraded: string[];
   failed: string[];
   output: string;
+  outputTruncated: boolean;
+}
+
+const MAX_UPDATE_OUTPUT_BYTES = 256 * 1024;
+
+function boundedUpdateOutput(stdout: string, stderr: string): {
+  output: string;
+  outputTruncated: boolean;
+} {
+  const complete = `${stdout}\n${stderr}`.trim();
+  const encoded = Buffer.from(complete, 'utf8');
+  if (encoded.length <= MAX_UPDATE_OUTPUT_BYTES) {
+    return { output: complete, outputTruncated: false };
+  }
+  return {
+    output: encoded.subarray(encoded.length - MAX_UPDATE_OUTPUT_BYTES).toString('utf8'),
+    outputTruncated: true,
+  };
 }
 
 /** Packages we care about — mapped to their logical section */
@@ -45,7 +63,7 @@ export class UpdateManager {
   async check(): Promise<{ success: boolean; data?: UpdateCheckResult; error?: string }> {
     try {
       // Update package index
-      const aptUpdate = await this.cmd.execute('apt-get', ['update', '-qq'], { timeout: 120_000, allowFailure: true });
+      const aptUpdate = await this.cmd.execute('apt-get', ['update', '-qq'], { timeout: 600_000, allowFailure: true });
       if (aptUpdate.exitCode !== 0 && !aptUpdate.stderr.includes('WARNING')) {
         return { success: false, error: `apt-get update failed: ${aptUpdate.stderr}` };
       }
@@ -109,7 +127,11 @@ export class UpdateManager {
         ...packageNames,
       ];
 
-      const result = await this.cmd.execute('apt-get', args, { timeout: 300_000, allowFailure: true });
+      const result = await this.cmd.execute('apt-get', args, { timeout: 3_600_000, allowFailure: true });
+
+      if (result.exitCode !== 0) {
+        return { success: false, error: `apt-get install failed with exit code ${result.exitCode}` };
+      }
 
       const upgraded: string[] = [];
       const failed: string[] = [];
@@ -125,12 +147,13 @@ export class UpdateManager {
         }
       }
 
+      const bounded = boundedUpdateOutput(result.stdout, result.stderr);
       return {
         success: true,
         data: {
           upgraded,
           failed,
-          output: (result.stdout + '\n' + result.stderr).trim(),
+          ...bounded,
         },
       };
     } catch (err) {
@@ -146,8 +169,12 @@ export class UpdateManager {
       const result = await this.cmd.execute(
         'apt-get',
         ['-y', 'upgrade'],
-        { timeout: 600_000, allowFailure: true },
+        { timeout: 14_400_000, allowFailure: true },
       );
+
+      if (result.exitCode !== 0) {
+        return { success: false, error: `apt-get upgrade failed with exit code ${result.exitCode}` };
+      }
 
       const upgraded: string[] = [];
       for (const line of result.stdout.split('\n')) {
@@ -157,12 +184,13 @@ export class UpdateManager {
         }
       }
 
+      const bounded = boundedUpdateOutput(result.stdout, result.stderr);
       return {
         success: true,
         data: {
           upgraded,
           failed: [],
-          output: (result.stdout + '\n' + result.stderr).trim(),
+          ...bounded,
         },
       };
     } catch (err) {

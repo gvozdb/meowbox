@@ -209,6 +209,8 @@
 </template>
 
 <script setup lang="ts">
+import { navigateAppHandoff, publicDeliveryIdempotencyKey } from '~/utils/public-delivery';
+
 const props = defineProps<{ siteId: string; active: boolean }>();
 
 interface CatalogEntry {
@@ -239,7 +241,8 @@ interface SvcDetail {
   };
 }
 
-const api = useApi();
+const api = useRemoteApi();
+const { waitForOperation } = useOperation();
 const toast = useMbToast();
 
 const items = ref<SvcItem[]>([]);
@@ -325,7 +328,12 @@ async function enableService(item: SvcItem) {
     if (hasMemoryControl(item.key)) {
       config.memoryMaxMb = memInputs[item.key] || MEM_DEFAULTS[item.key]?.def || 128;
     }
-    await api.post(`/sites/${props.siteId}/services/${item.key}/enable`, { config });
+    const accepted = await api.post<AcceptedOperation>(
+      `/sites/${props.siteId}/services/${item.key}/enable`,
+      { config },
+      { headers: { 'Idempotency-Key': operationIdempotencyKey('site-service-enable') } },
+    );
+    await waitForOperation(accepted.operationId, { timeoutMs: 16 * 60_000 });
     toast.success(`${item.catalog.name} активирован`);
     await loadAll();
   } catch (err) {
@@ -341,7 +349,12 @@ async function disableService(item: SvcItem) {
   if (!confirm(`Отключить «${item.catalog.name}»? ${warning}`)) return;
   busy[item.key] = 'disable';
   try {
-    await api.del(`/sites/${props.siteId}/services/${item.key}`);
+    const accepted = await api.del<AcceptedOperation>(
+      `/sites/${props.siteId}/services/${item.key}`,
+      undefined,
+      { headers: { 'Idempotency-Key': operationIdempotencyKey('site-service-disable') } },
+    );
+    await waitForOperation(accepted.operationId, { timeoutMs: 16 * 60_000 });
     toast.success(`${item.catalog.name} отключён`);
     delete detail[item.key];
     await loadAll();
@@ -355,7 +368,12 @@ async function disableService(item: SvcItem) {
 async function startService(item: SvcItem) {
   busy[item.key] = 'start';
   try {
-    await api.post(`/sites/${props.siteId}/services/${item.key}/start`);
+    const accepted = await api.post<AcceptedOperation>(
+      `/sites/${props.siteId}/services/${item.key}/start`,
+      undefined,
+      { headers: { 'Idempotency-Key': operationIdempotencyKey('site-service-start') } },
+    );
+    await waitForOperation(accepted.operationId, { timeoutMs: 16 * 60_000 });
     item.status = 'RUNNING';
     await fetchDetail(item.key);
     toast.success(`${item.catalog.name} запущен`);
@@ -370,7 +388,12 @@ async function stopService(item: SvcItem) {
   if (!confirm(`Остановить «${item.catalog.name}»? Данные сохранятся, демон просто перестанет принимать запросы.`)) return;
   busy[item.key] = 'stop';
   try {
-    await api.post(`/sites/${props.siteId}/services/${item.key}/stop`);
+    const accepted = await api.post<AcceptedOperation>(
+      `/sites/${props.siteId}/services/${item.key}/stop`,
+      undefined,
+      { headers: { 'Idempotency-Key': operationIdempotencyKey('site-service-stop') } },
+    );
+    await waitForOperation(accepted.operationId, { timeoutMs: 16 * 60_000 });
     item.status = 'STOPPED';
     await fetchDetail(item.key);
     toast.success(`${item.catalog.name} остановлен`);
@@ -388,7 +411,12 @@ async function reconfigure(item: SvcItem) {
     if (hasMemoryControl(item.key)) {
       config.memoryMaxMb = memInputs[item.key] || MEM_DEFAULTS[item.key]?.def || 128;
     }
-    await api.patch(`/sites/${props.siteId}/services/${item.key}`, { config });
+    const accepted = await api.patch<AcceptedOperation>(
+      `/sites/${props.siteId}/services/${item.key}`,
+      { config },
+      { headers: { 'Idempotency-Key': operationIdempotencyKey('site-service-reconfigure') } },
+    );
+    await waitForOperation(accepted.operationId, { timeoutMs: 16 * 60_000 });
     toast.success('Настройки применены, демон перезапущен');
     await fetchDetail(item.key);
   } catch (err) {
@@ -405,13 +433,12 @@ async function openManticoreAdminer(item: SvcItem) {
   // подменим location, когда придёт ответ от API.
   const win = window.open('about:blank', '_blank');
   try {
-    const data = await api.post<{ url: string }>(
+    const delivery = await api.post<unknown>(
       `/sites/${props.siteId}/services/manticore/adminer-ticket`,
       {},
+      { headers: { 'Idempotency-Key': publicDeliveryIdempotencyKey('MANTICORE') } },
     );
-    if (!data?.url) throw new Error('SSO endpoint вернул пустой URL');
-    if (win) win.location.href = data.url;
-    else window.location.href = data.url;
+    await navigateAppHandoff(delivery, win, 'MANTICORE');
   } catch (err) {
     if (win) win.close();
     toast.error((err as Error).message || 'Не удалось открыть Adminer');

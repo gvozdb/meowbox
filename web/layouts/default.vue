@@ -91,7 +91,7 @@
           <Transition name="dropdown">
             <div v-if="serverMenuOpen" class="sidebar__server-menu" role="listbox">
               <button
-                v-for="s in serverStore.servers"
+                v-for="s in serverStore.serverOptions"
                 :key="s.id"
                 type="button"
                 class="sidebar__server-option"
@@ -203,6 +203,7 @@
     <!-- Main content -->
     <main class="main">
       <div class="main__content">
+        <RemoteContextNotice />
         <slot />
       </div>
     </main>
@@ -211,9 +212,11 @@
 
 <script setup lang="ts">
 import { PALETTE_SWATCHES, type PaletteId } from '~/composables/usePalette';
+import { serverSwitchUrl } from '~/utils/server-switch-navigation';
 
 const authStore = useAuthStore();
 const serverStore = useServerStore();
+const toast = useMbToast();
 const sidebarOpen = ref(false);
 const { connect: connectSocket, disconnect: disconnectSocket } = useSocket();
 const { isDark, toggle: themeToggle, init: themeInit } = useTheme();
@@ -224,14 +227,14 @@ const {
   loadAllFromApi: loadAllPalettesFromApi,
   DEFAULT_PALETTE,
 } = usePalette();
-const api = useApi();
+const masterApi = useMasterApi();
 
 // ── Кастомный селектор серверов (открывается по клику, дот = цвет палитры) ──
 const serverMenuOpen = ref(false);
 const serverDropdownRef = ref<HTMLElement | null>(null);
 
 const currentServerInfo = computed(() =>
-  serverStore.servers.find((s) => s.id === serverStore.currentServerId) ?? null,
+  serverStore.currentServer ?? null,
 );
 
 /** Hex цвета палитры сервера (или дефолт если кеш пустой). */
@@ -244,14 +247,21 @@ const currentServerSwatch = computed(() =>
   swatchForServer(serverStore.currentServerId || 'main'),
 );
 
-function selectServerFromMenu(id: string) {
+async function selectServerFromMenu(id: string) {
   serverMenuOpen.value = false;
   if (id === serverStore.currentServerId) return;
-  // Применяем cached палитру нового сервера ДО reload — иначе мигнёт
-  // текущая палитра пока скрипт не перечитает cache.
-  applyPaletteForServer(id, /* withTransition */ false);
-  serverStore.selectServer(id);
-  window.location.reload();
+  try {
+    await serverStore.selectServer(id);
+    applyPaletteForServer(id, /* withTransition */ false);
+    const target = serverSwitchUrl(window.location.pathname, window.location.search);
+    if (target === `${window.location.pathname}${window.location.search}`) {
+      window.location.reload();
+    } else {
+      window.location.assign(target);
+    }
+  } catch (error) {
+    toast.error((error as Error).message || 'Не удалось переключить сервер');
+  }
 }
 
 // Закрываем меню при клике мимо.
@@ -271,7 +281,7 @@ function onEsc(e: KeyboardEvent) {
  * текущего сервера. Молча игнорим ошибки сети — пользователь увидит cached.
  */
 async function syncPaletteFromApi() {
-  const map = await loadAllPalettesFromApi(api);
+  const map = await loadAllPalettesFromApi(masterApi);
   const sid = serverStore.currentServerId || 'main';
   const next = map[sid];
   if (next) {
@@ -290,7 +300,7 @@ let versionTimer: ReturnType<typeof setInterval> | null = null;
 
 async function loadVersion(refresh = false) {
   try {
-    versionInfo.value = await api.get<VersionInfo>(`/admin/update/version${refresh ? '?refresh=1' : ''}`);
+    versionInfo.value = await masterApi.get<VersionInfo>(`/admin/update/version${refresh ? '?refresh=1' : ''}`);
   } catch { /* silent */ }
 }
 

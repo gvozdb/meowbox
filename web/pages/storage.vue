@@ -169,7 +169,8 @@ interface ServerDisk {
   percent: number;
 }
 
-const api = useApi();
+const api = useRemoteApi();
+const { waitForOperation } = useOperation();
 const sites = ref<SiteStorageInfo[]>([]);
 const serverDisk = ref<ServerDisk>({ total: 0, used: 0, percent: 0 });
 const loading = ref(false);
@@ -279,10 +280,16 @@ async function loadDetails(siteId: string) {
   trendLoading.value = true;
 
   try {
-    const [files, trendData] = await Promise.all([
-      api.get<TopFile[]>(`/storage/${siteId}/top-files`),
+    const [accepted, trendData] = await Promise.all([
+      api.post<AcceptedOperation>(
+        `/storage/${siteId}/top-files/scan`,
+        undefined,
+        { headers: { 'Idempotency-Key': operationIdempotencyKey('storage-top-files') } },
+      ),
       api.get<DiskTrendPoint[]>(`/storage/${siteId}/trend?days=30`),
     ]);
+    const operation = await waitForOperation(accepted.operationId, { timeoutMs: 11 * 60_000 });
+    const files = Array.isArray(operation.result) ? operation.result as TopFile[] : [];
     topFiles.value = files;
     trend.value = trendData;
     detailsCache.set(siteId, { topFiles: files, trend: trendData });

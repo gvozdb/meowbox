@@ -8,8 +8,13 @@ import { Logger, Inject, forwardRef } from '@nestjs/common';
 import { Server, Socket } from 'socket.io';
 import { ConfigService } from '@nestjs/config';
 import { JwtService } from '@nestjs/jwt';
-import { timingSafeEqual, randomBytes } from 'crypto';
-import { io as ioClient, Socket as ClientSocket } from 'socket.io-client';
+import { timingSafeEqual, randomBytes, randomUUID } from 'crypto';
+import {
+  FederatedWsAckPayload,
+  FederatedWsEnvelope,
+  FederatedWsStatePayload,
+  validateFederatedWsEnvelope,
+} from '@meowbox/shared';
 import { AgentRelayService } from './agent-relay.service';
 import { DeployService } from '../deploy/deploy.service';
 import { BackupsService } from '../backups/backups.service';
@@ -22,19 +27,45 @@ import { MonitoringService } from '../monitoring/monitoring.service';
 import { LogsService } from '../logs/logs.service';
 import { AiService, AiEvent } from '../ai/ai.service';
 import { MigrationHostpanelService } from '../migration-hostpanel/migration-hostpanel.service';
-import { ProxyService } from '../proxy/proxy.service';
+import { FederatedSocketBridgeService } from './federated-socket-bridge.service';
+import { FederationWsChannelVerifierService } from '../federation/federation-ws-channel-verifier.service';
+import {
+  FederatedSocketPolicyAction,
+  FederatedSocketPolicyService,
+} from '../federation/federated-socket-policy';
+import { extractClientIp } from '../common/http/client-ip';
 
 interface AuthenticatedSocket extends Socket {
   data: {
-    type: 'agent' | 'client' | 'proxy-client';
+    type: 'agent' | 'client' | 'remote-client' | 'federated-client';
     userId?: string;
     role?: string;
-    /** При type='proxy-client' — upstream socket к выбранному slave-серверу. */
-    upstream?: ClientSocket;
-    /** При type='proxy-client' — id slave-сервера для аудита/логов. */
     proxyServerId?: string;
+    bootId?: string | null;
+    channelId?: string;
+    channelEpoch?: number;
+    federationKeyId?: string;
   };
 }
+
+type FederatedClientHandler = (...args: unknown[]) => unknown;
+
+interface FederatedTargetSession {
+  socket: AuthenticatedSocket;
+  channelId: string;
+  epoch: number;
+  role: 'ADMIN' | 'MANAGER';
+  allowedActionIds: Set<string>;
+  actionsById: Map<string, FederatedSocketPolicyAction>;
+  handlers: Map<string, FederatedClientHandler>;
+  rooms: Set<string>;
+  incomingSequence: number;
+  outgoingSequence: number;
+  expiryTimer: NodeJS.Timeout;
+  rateByAction: Map<string, { windowStartedAt: number; count: number }>;
+}
+
+const LOCAL_CLIENTS_ROOM = '__meowbox_local_clients';
 
 // CORS origin для WebSocket: те же правила, что и для HTTP (см. main.ts).
 // Агент подключается без browser-origin (там отдельная auth по AGENT_SECRET
@@ -87,6 +118,7 @@ export class AgentGateway implements OnGatewayConnection, OnGatewayDisconnect {
   private terminalSessionOwner = new Map<string, string>();
   /** Maps client socket ID → set of tail session IDs they own */
   private clientTailSessions = new Map<string, Set<string>>();
+  private federatedTargetSessions = new Map<string, FederatedTargetSession>();
 
   /** Limits to prevent resource exhaustion via PTY/tail. */
   private static readonly MAX_TERMINALS_PER_CLIENT = parseInt(
@@ -113,11 +145,23 @@ export class AgentGateway implements OnGatewayConnection, OnGatewayDisconnect {
     private readonly aiService: AiService,
     @Inject(forwardRef(() => MigrationHostpanelService))
     private readonly migrationHostpanelService: MigrationHostpanelService,
-    private readonly proxyService: ProxyService,
+    private readonly socketBridge: FederatedSocketBridgeService,
+    private readonly channelVerifier: FederationWsChannelVerifierService,
+    private readonly socketPolicy: FederatedSocketPolicyService,
   ) {}
 
   async handleConnection(client: AuthenticatedSocket) {
     const auth = client.handshake.auth;
+
+    if (auth.federationChannel) {
+      if (auth.secret || auth.proxySecret || auth.token) {
+        this.logger.warn('Ambiguous federation WebSocket authentication rejected');
+        client.disconnect(true);
+        return;
+      }
+      await this.startFederatedTargetMode(client, auth.federationChannel);
+      return;
+    }
 
     // --- Agent authentication (AGENT_SECRET) ---
     if (auth.secret) {
@@ -130,50 +174,23 @@ export class AgentGateway implements OnGatewayConnection, OnGatewayDisconnect {
         return;
       }
 
-      client.data = { type: 'agent' };
-      this.relay.setAgentSocket(client);
+      const bootId = typeof auth.bootId === 'string' &&
+        /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(auth.bootId)
+        ? auth.bootId
+        : null;
+      client.data = { type: 'agent', bootId };
+      this.relay.setAgentSocket(client, bootId);
       this.registerAgentListeners(client);
       this.logger.log(`Agent connected: ${client.id}`);
       this.reconcileOnConnect(client);
       return;
     }
 
-    // --- Master proxy authentication (PROXY_TOKEN) ---
-    // Когда мастер ретранслирует WS-соединение оператора на slave, он
-    // подключается с proxySecret = PROXY_TOKEN. На slave-стороне это
-    // эквивалент клиента с ролью ADMIN (как и HTTP-прокси через
-    // ProxyAuthGuard). originUserId — id оператора на мастере, нужен
-    // только для AI-сессий (per-user state) и для логов.
+    // Static-token WS never belongs to legacy-static-v0. Keep it fail-closed
+    // until the typed signed channel is negotiated by FederationSocketBridge.
     if (auth.proxySecret) {
-      const expected = this.config.get<string>('PROXY_TOKEN', '') || '';
-      if (!expected) {
-        this.logger.warn('Proxy WS auth failed: PROXY_TOKEN not configured');
-        client.disconnect(true);
-        return;
-      }
-      const provided = String(auth.proxySecret);
-      if (!this.constantTimeCompare(provided, expected)) {
-        this.logger.warn('Proxy WS auth failed: invalid PROXY_TOKEN');
-        client.disconnect(true);
-        return;
-      }
-      // originUserId — необязательное поле (мастер шлёт его для аудита/AI).
-      // Если пусто — подставляем синтетический id, чтобы AI-сессии не
-      // схлёстывались между разными мастерами.
-      const originUserId =
-        typeof auth.originUserId === 'string' && auth.originUserId.trim()
-          ? `proxy:${String(auth.originUserId).slice(0, 64)}`
-          : `proxy:anon`;
-      client.data = {
-        type: 'client',
-        userId: originUserId,
-        role: 'ADMIN',
-      };
-      client.join(`user:${originUserId}`);
-      this.registerClientListeners(client);
-      this.logger.log(
-        `Proxy client connected: ${client.id} (origin=${originUserId})`,
-      );
+      this.logger.warn('Legacy static-token WS rejected');
+      client.disconnect(true);
       return;
     }
 
@@ -219,6 +236,7 @@ export class AgentGateway implements OnGatewayConnection, OnGatewayDisconnect {
 
       // Join user-specific room for targeted events
       client.join(`user:${payload.sub}`);
+      client.join(LOCAL_CLIENTS_ROOM);
       this.registerClientListeners(client);
       this.logger.log(`Client connected: ${client.id} (user: ${payload.sub})`);
       return;
@@ -229,161 +247,402 @@ export class AgentGateway implements OnGatewayConnection, OnGatewayDisconnect {
     client.disconnect(true);
   }
 
-  /**
-   * Открывает upstream socket к slave и форвардит события в обе стороны.
-   * Прозрачно для UI: фронт думает, что говорит с локальным API; ack'и,
-   * rooms, broadcast'ы — всё ретранслируется как есть.
-   */
   private async startProxyMode(
     client: AuthenticatedSocket,
     serverId: string,
     operator: { sub: string; role: string },
   ): Promise<void> {
-    const server = this.proxyService.getServer(serverId);
-    if (!server) {
-      this.logger.warn(`Proxy WS: server "${serverId}" not found in config`);
-      client.emit('proxy:error', { code: 'SERVER_NOT_FOUND', message: `Сервер "${serverId}" не найден` });
-      client.disconnect(true);
-      return;
-    }
-
-    // Парсим URL slave — socket.io-client принимает базовый URL без /api.
-    const slaveUrl = server.url.replace(/\/+$/, '');
-
-    // Открываем upstream socket. proxySecret = PROXY_TOKEN slave'а
-    // (тот же, что и для HTTP); originUserId — id оператора на мастере.
-    const upstream = ioClient(slaveUrl, {
-      auth: {
-        proxySecret: server.token,
-        originUserId: operator.sub,
-      },
-      transports: ['websocket'],
-      reconnection: false, // upstream одноразовый — если падает, клиент пересоединится
-      timeout: 10_000,
-      rejectUnauthorized: !this.proxyService.allowsInsecureTlsForIp(server),
-    });
-
-    // Дожидаемся коннекта. Если не получилось — закрываем клиента.
-    try {
-      await new Promise<void>((resolve, reject) => {
-        const onConnect = () => {
-          upstream.off('connect_error', onErr);
-          resolve();
-        };
-        const onErr = (err: Error) => {
-          upstream.off('connect', onConnect);
-          reject(err);
-        };
-        upstream.once('connect', onConnect);
-        upstream.once('connect_error', onErr);
-        // Hard-timeout на handshake
-        setTimeout(() => reject(new Error('upstream connect timeout')), 12_000);
-      });
-    } catch (err) {
-      const msg = (err as Error).message;
-      this.logger.warn(`Proxy WS upstream "${server.name}" failed: ${msg}`);
-      client.emit('proxy:error', { code: 'UPSTREAM_UNREACHABLE', message: `Не удалось подключиться к "${server.name}": ${msg}` });
-      try { upstream.disconnect(); } catch { /* noop */ }
-      client.disconnect(true);
-      return;
-    }
-
     client.data = {
-      type: 'proxy-client',
+      type: 'remote-client',
       userId: operator.sub,
       role: operator.role,
-      upstream,
       proxyServerId: serverId,
     };
-
-    this.logger.log(
-      `Proxy WS connected: client=${client.id} → slave="${server.name}" (user=${operator.sub})`,
+    await this.socketBridge.attach(
+      client,
+      serverId,
+      { id: operator.sub, role: operator.role as 'ADMIN' | 'MANAGER' },
+      extractClientIp(client.handshake),
     );
+  }
 
-    // --- Forward client → upstream (с ack support) ---
-    // Любой эмит от браузера ретранслируется на slave. Если последний аргумент
-    // — функция, это ack-callback: socket.io-client поддерживает ack нативно
-    // через emit(event, ...args, cb) — так что просто пробрасываем.
-    client.onAny((event: string, ...args: unknown[]) => {
-      // Безопасность: фильтруем служебные события socket.io (с префиксом).
-      // Полезные user-events не должны начинаться с этого префикса.
-      if (event.startsWith('connect') || event.startsWith('disconnect')) return;
-      const lastArg = args[args.length - 1];
-      if (typeof lastArg === 'function') {
-        const cb = lastArg as (...a: unknown[]) => void;
-        const fwdArgs = args.slice(0, -1);
-        try {
-          upstream.emit(event, ...fwdArgs, (...ackArgs: unknown[]) => {
-            try { cb(...ackArgs); } catch { /* swallow ack handler errors */ }
-          });
-        } catch (err) {
-          this.logger.warn(`Proxy WS forward (ack) failed: ${(err as Error).message}`);
-        }
-      } else {
-        try {
-          upstream.emit(event, ...args);
-        } catch (err) {
-          this.logger.warn(`Proxy WS forward failed: ${(err as Error).message}`);
-        }
+  private async startFederatedTargetMode(
+    client: AuthenticatedSocket,
+    assertion: unknown,
+  ): Promise<void> {
+    try {
+      const verified = await this.channelVerifier.verify(
+        assertion as Parameters<FederationWsChannelVerifierService['verify']>[0],
+      );
+      if (verified.claims.role !== 'ADMIN' && verified.claims.role !== 'MANAGER') {
+        throw new Error('Federated WebSocket role is invalid');
       }
-    });
+      client.data = {
+        type: 'federated-client',
+        userId: verified.userId,
+        role: verified.claims.role,
+        channelId: verified.claims.channelId,
+        channelEpoch: verified.claims.epoch,
+        federationKeyId: verified.keyId,
+      };
+      const expiresInMs = Math.max(1, verified.claims.expiresAt * 1_000 - Date.now());
+      const expiryTimer = setTimeout(() => client.disconnect(true), expiresInMs);
+      expiryTimer.unref();
+      const session: FederatedTargetSession = {
+        socket: client,
+        channelId: verified.claims.channelId,
+        epoch: verified.claims.epoch,
+        role: verified.claims.role,
+        allowedActionIds: new Set(verified.claims.actionIds),
+        actionsById: new Map(verified.actions.map((action) => [action.actionId, action])),
+        handlers: new Map(),
+        rooms: new Set(),
+        incomingSequence: 0,
+        outgoingSequence: 0,
+        expiryTimer,
+        rateByAction: new Map(),
+      };
+      this.federatedTargetSessions.set(client.id, session);
+      this.registerClientListeners(client);
+      const federationSocket = client;
+      federationSocket.on('federation:event', (value: unknown) => {
+        void this.handleFederatedTargetEvent(session, value);
+      });
+      this.emitFederatedState(session, {
+        state: 'READY',
+        reasonCode: 'READY',
+        readyAt: new Date().toISOString(),
+        retryAfterMs: null,
+      });
+      this.logger.log(`Federated client connected: ${client.id}`);
+    } catch (error) {
+      this.logger.warn(`Federated client auth failed: ${(error as Error).name}`);
+      client.disconnect(true);
+    }
+  }
 
-    // --- Forward upstream → client ---
-    // Slave шлёт события (terminal:data, ai:*, logs:tail:data, broadcast'ы).
-    // Все они должны долететь до браузера как есть.
-    upstream.onAny((event: string, ...args: unknown[]) => {
-      try {
-        client.emit(event, ...args);
-      } catch (err) {
-        this.logger.warn(`Proxy WS reverse forward failed: ${(err as Error).message}`);
+  private async handleFederatedTargetEvent(
+    session: FederatedTargetSession,
+    value: unknown,
+  ): Promise<void> {
+    let envelope: FederatedWsEnvelope;
+    try {
+      envelope = validateFederatedWsEnvelope(value);
+    } catch {
+      this.closeFederatedProtocol(session, 'REMOTE_SCHEMA_MISMATCH');
+      return;
+    }
+    if (
+      envelope.channelId !== session.channelId ||
+      envelope.epoch !== session.epoch ||
+      envelope.sequence !== session.incomingSequence + 1 ||
+      envelope.kind !== 'EVENT'
+    ) {
+      this.closeFederatedProtocol(session, 'REMOTE_SEQUENCE_INVALID');
+      return;
+    }
+    session.incomingSequence = envelope.sequence;
+    const action = session.actionsById.get(envelope.actionId);
+    const handler = session.handlers.get(envelope.event);
+    if (
+      !action ||
+      !session.allowedActionIds.has(envelope.actionId) ||
+      action.direction !== 'browser_to_api' ||
+      action.event !== envelope.event ||
+      !handler
+    ) {
+      this.closeFederatedProtocol(session, 'REMOTE_ACTION_MISMATCH');
+      return;
+    }
+    try {
+      this.socketPolicy.validatePayload(action, envelope.payload);
+    } catch {
+      this.closeFederatedProtocol(session, 'REMOTE_SCHEMA_MISMATCH');
+      return;
+    }
+    const nowMs = Date.now();
+    const rate = session.rateByAction.get(action.actionId);
+    if (!rate || nowMs - rate.windowStartedAt >= 1_000) {
+      session.rateByAction.set(action.actionId, { windowStartedAt: nowMs, count: 1 });
+    } else if (rate.count >= 100) {
+      this.emitFederatedAck(session, envelope, {
+        acceptedSequence: envelope.sequence,
+        outcome: 'REJECTED',
+        code: 'REMOTE_RATE_LIMITED',
+        message: 'Remote WebSocket action rate limit exceeded',
+        result: null,
+      });
+      return;
+    } else {
+      rate.count += 1;
+    }
+
+    let responded = false;
+    const acknowledge = (result: unknown): void => {
+      if (responded) return;
+      responded = true;
+      this.emitFederatedAck(session, envelope, {
+        acceptedSequence: envelope.sequence,
+        outcome: result && typeof result === 'object' && 'error' in result
+          ? 'REJECTED'
+          : 'COMPLETED',
+        code: result && typeof result === 'object' && 'error' in result
+          ? 'REMOTE_ACTION_REJECTED'
+          : null,
+        message: result && typeof result === 'object' && 'error' in result
+          ? String((result as { error: unknown }).error).slice(0, 1_024)
+          : null,
+        result: result ?? null,
+      });
+    };
+    try {
+      await Promise.resolve(handler(envelope.payload, acknowledge));
+      if (!responded) acknowledge(null);
+    } catch {
+      if (responded) return;
+      responded = true;
+      this.emitFederatedAck(session, envelope, {
+        acceptedSequence: envelope.sequence,
+        outcome: 'REJECTED',
+        code: 'REMOTE_APPLICATION_ERROR',
+        message: 'Remote WebSocket action failed',
+        result: null,
+      });
+    }
+  }
+
+  private emitFederatedAck(
+    session: FederatedTargetSession,
+    request: FederatedWsEnvelope,
+    payload: FederatedWsAckPayload,
+  ): void {
+    this.emitFederatedEnvelope(session, {
+      actionId: request.actionId,
+      correlationId: request.correlationId,
+      event: request.event,
+      kind: payload.outcome === 'REJECTED' ? 'NACK' : 'ACK',
+      payload,
+    });
+  }
+
+  private emitFederatedState(
+    session: FederatedTargetSession,
+    payload: FederatedWsStatePayload,
+  ): void {
+    this.emitFederatedEnvelope(session, {
+      actionId: 'federation.ws-state',
+      correlationId: randomUUID(),
+      event: 'federation:state',
+      kind: 'STATE',
+      payload,
+    });
+  }
+
+  private emitFederatedEnvelope(
+    session: FederatedTargetSession,
+    message: Pick<FederatedWsEnvelope, 'actionId' | 'correlationId' | 'event' | 'kind' | 'payload'>,
+  ): void {
+    const envelope = validateFederatedWsEnvelope({
+      channelId: session.channelId,
+      epoch: session.epoch,
+      sequence: ++session.outgoingSequence,
+      ...message,
+    });
+    session.socket.emit('federation:message', envelope);
+  }
+
+  private closeFederatedProtocol(
+    session: FederatedTargetSession,
+    reasonCode: string,
+  ): void {
+    this.emitFederatedState(session, {
+      state: 'CLOSED',
+      reasonCode,
+      readyAt: null,
+      retryAfterMs: null,
+    });
+    session.socket.disconnect(true);
+  }
+
+  private removeFederatedTargetSession(clientId: string): void {
+    const session = this.federatedTargetSessions.get(clientId);
+    if (!session) return;
+    clearTimeout(session.expiryTimer);
+    this.federatedTargetSessions.delete(clientId);
+  }
+
+  private bindClientEvent<TArgs extends unknown[]>(
+    client: AuthenticatedSocket,
+    event: string,
+    handler: (...args: TArgs) => unknown,
+  ): void {
+    const wrapped: FederatedClientHandler = (...args: unknown[]) =>
+      handler(...args as TArgs);
+    if (client.data.type === 'federated-client') {
+      const session = this.federatedTargetSessions.get(client.id);
+      const action = this.socketPolicy.commandForEvent(event, client.data.role ?? '');
+      if (!session || !action || !session.allowedActionIds.has(action.actionId)) return;
+      session.handlers.set(event, wrapped);
+      return;
+    }
+    switch (event) {
+      case 'ai:message': client.on('ai:message', wrapped); return;
+      case 'ai:start': client.on('ai:start', wrapped); return;
+      case 'ai:stop': client.on('ai:stop', wrapped); return;
+      case 'logs:tail:start': client.on('logs:tail:start', wrapped); return;
+      case 'logs:tail:stop': client.on('logs:tail:stop', wrapped); return;
+      case 'migrate-hostpanel:subscribe': client.on('migrate-hostpanel:subscribe', wrapped); return;
+      case 'migrate-hostpanel:unsubscribe': client.on('migrate-hostpanel:unsubscribe', wrapped); return;
+      case 'php:ext-install:subscribe': client.on('php:ext-install:subscribe', wrapped); return;
+      case 'php:ext-install:unsubscribe': client.on('php:ext-install:unsubscribe', wrapped); return;
+      case 'php:install:subscribe': client.on('php:install:subscribe', wrapped); return;
+      case 'php:install:unsubscribe': client.on('php:install:unsubscribe', wrapped); return;
+      case 'terminal:close': client.on('terminal:close', wrapped); return;
+      case 'terminal:input': client.on('terminal:input', wrapped); return;
+      case 'terminal:open': client.on('terminal:open', wrapped); return;
+      case 'terminal:resize': client.on('terminal:resize', wrapped); return;
+      default: throw new Error(`Uncatalogued client command: ${event}`);
+    }
+  }
+
+  private joinClientRoom(client: AuthenticatedSocket, room: string): void {
+    const session = this.federatedTargetSessions.get(client.id);
+    if (client.data.type === 'federated-client' && session) {
+      session.rooms.add(room);
+      return;
+    }
+    void client.join(room);
+  }
+
+  private leaveClientRoom(client: AuthenticatedSocket, room: string): void {
+    const session = this.federatedTargetSessions.get(client.id);
+    if (client.data.type === 'federated-client' && session) {
+      session.rooms.delete(room);
+      return;
+    }
+    void client.leave(room);
+  }
+
+  private emitToClient(client: AuthenticatedSocket, event: string, payload: unknown): void {
+    const session = this.federatedTargetSessions.get(client.id);
+    if (client.data.type === 'federated-client' && session) {
+      this.emitFederatedNotification(session, event, payload);
+      return;
+    }
+    switch (event) {
+      case 'ai:error': client.emit('ai:error', payload); return;
+      case 'ai:result': client.emit('ai:result', payload); return;
+      case 'ai:system': client.emit('ai:system', payload); return;
+      case 'ai:text': client.emit('ai:text', payload); return;
+      case 'ai:thinking': client.emit('ai:thinking', payload); return;
+      case 'ai:tool_result': client.emit('ai:tool_result', payload); return;
+      case 'ai:tool_use_done': client.emit('ai:tool_use_done', payload); return;
+      case 'ai:tool_use_input': client.emit('ai:tool_use_input', payload); return;
+      case 'ai:tool_use_start': client.emit('ai:tool_use_start', payload); return;
+      default: throw new Error(`Uncatalogued client event: ${event}`);
+    }
+  }
+
+  private emitBrowserBroadcast(event: string, payload: unknown): void {
+    switch (event) {
+      case 'backup:progress': this.server.to(LOCAL_CLIENTS_ROOM).emit('backup:progress', payload); break;
+      case 'backup:restore:progress': this.server.to(LOCAL_CLIENTS_ROOM).emit('backup:restore:progress', payload); break;
+      case 'site:provision:done': this.server.to(LOCAL_CLIENTS_ROOM).emit('site:provision:done', payload); break;
+      case 'site:provision:log': this.server.to(LOCAL_CLIENTS_ROOM).emit('site:provision:log', payload); break;
+      case 'site:status': this.server.to(LOCAL_CLIENTS_ROOM).emit('site:status', payload); break;
+      case 'system:metrics': this.server.to(LOCAL_CLIENTS_ROOM).emit('system:metrics', payload); break;
+      default: throw new Error(`Uncatalogued broadcast event: ${event}`);
+    }
+    for (const session of this.federatedTargetSessions.values()) {
+      this.emitFederatedNotification(session, event, payload);
+    }
+  }
+
+  private emitBrowserRoom(
+    room: string,
+    event: string,
+    payload: unknown,
+    broadcastToFederated = false,
+  ): void {
+    switch (event) {
+      case 'logs:tail:data': this.server.to(room).emit('logs:tail:data', payload); break;
+      case 'php:ext-install:log': this.server.to(room).emit('php:ext-install:log', payload); break;
+      case 'php:install:log': this.server.to(room).emit('php:install:log', payload); break;
+      case 'site:deploy:log': this.server.to(room).emit('site:deploy:log', payload); break;
+      case 'terminal:data': this.server.to(room).emit('terminal:data', payload); break;
+      default: throw new Error(`Uncatalogued room event: ${event}`);
+    }
+    for (const session of this.federatedTargetSessions.values()) {
+      if (broadcastToFederated || session.rooms.has(room)) {
+        this.emitFederatedNotification(session, event, payload);
       }
-    });
+    }
+  }
 
-    // --- Lifecycle: если upstream отвалился — закрываем клиента ---
-    upstream.on('disconnect', (reason) => {
-      this.logger.log(`Proxy WS upstream disconnected (${reason}): client=${client.id}`);
-      client.emit('proxy:disconnected', { reason });
-      try { client.disconnect(true); } catch { /* noop */ }
+  private emitFederatedBroadcast(event: string, payload: unknown): void {
+    for (const session of this.federatedTargetSessions.values()) {
+      this.emitFederatedNotification(session, event, payload);
+    }
+  }
+
+  private emitFederatedNotification(
+    session: FederatedTargetSession,
+    event: string,
+    payload: unknown,
+  ): void {
+    const action = this.socketPolicy.notificationForEvent(event, session.role);
+    if (!action || !session.allowedActionIds.has(action.actionId)) return;
+    try {
+      this.socketPolicy.validatePayload(action, payload);
+    } catch {
+      this.closeFederatedProtocol(session, 'REMOTE_SCHEMA_MISMATCH');
+      return;
+    }
+    this.emitFederatedEnvelope(session, {
+      actionId: action.actionId,
+      correlationId: randomUUID(),
+      event,
+      kind: 'EVENT',
+      payload,
     });
   }
 
   handleDisconnect(client: AuthenticatedSocket) {
-    // Закрываем upstream при отключении proxy-клиента — без этого
-    // на slave останется висящий socket с открытым PTY/tail.
-    if (client.data?.type === 'proxy-client' && client.data.upstream) {
-      try {
-        client.data.upstream.disconnect();
-      } catch { /* noop */ }
-      this.logger.log(`Proxy WS client disconnected: ${client.id}`);
+    if (client.data?.type === 'remote-client') {
+      this.socketBridge.detach(client.id);
+      return;
+    }
+    if (client.data?.type === 'federated-client') {
+      this.cleanupClientResources(client);
+      this.removeFederatedTargetSession(client.id);
       return;
     }
 
     if (client.data?.type === 'agent') {
-      this.relay.setAgentSocket(null);
+      this.relay.clearAgentSocket(client);
       this.logger.log('Agent disconnected');
     } else if (client.data?.type === 'client') {
-      // Clean up any terminal sessions owned by this client
-      const sessions = this.clientTerminalSessions.get(client.id);
-      if (sessions) {
-        for (const sessionId of sessions) {
-          this.relay.emitToAgentAsync('terminal:close', { sessionId });
-          // terminalSessionOwner мог не очиститься через `terminal:close`-listener
-          // если клиент отвалился внезапно (kill -9 браузера, обрыв сети) →
-          // запись в Map жила до перезапуска API. Сносим явно при disconnect.
-          this.terminalSessionOwner.delete(sessionId);
-        }
-        this.clientTerminalSessions.delete(client.id);
-      }
-      // Clean up any tail sessions owned by this client
-      const tailSessions = this.clientTailSessions.get(client.id);
-      if (tailSessions && this.relay.isAgentConnected()) {
-        for (const tailId of tailSessions) {
-          this.relay.emitToAgentAsync('logs:tail:stop', { tailId });
-        }
-      }
-      this.clientTailSessions.delete(client.id);
+      this.cleanupClientResources(client);
       this.logger.log(`Client disconnected: ${client.id}`);
     }
+  }
+
+  private cleanupClientResources(client: AuthenticatedSocket): void {
+    const sessions = this.clientTerminalSessions.get(client.id);
+    if (sessions) {
+      for (const sessionId of sessions) {
+        this.relay.emitToAgentAsync('terminal:close', { sessionId });
+        this.terminalSessionOwner.delete(sessionId);
+      }
+      this.clientTerminalSessions.delete(client.id);
+    }
+    const tailSessions = this.clientTailSessions.get(client.id);
+    if (tailSessions && this.relay.isAgentConnected()) {
+      for (const tailId of tailSessions) {
+        this.relay.emitToAgentAsync('logs:tail:stop', { tailId });
+      }
+    }
+    this.clientTailSessions.delete(client.id);
   }
 
   /**
@@ -393,41 +652,42 @@ export class AgentGateway implements OnGatewayConnection, OnGatewayDisconnect {
     // Log tail: available to ADMIN and MANAGER
     if (client.data.role === 'ADMIN' || client.data.role === 'MANAGER') {
       this.registerLogTailListeners(client);
+      this.registerAiListeners(client);
     }
 
     // ─── Migration hostpanel: подписка на комнату миграции ───
     // Любой залогиненный пользователь, имеющий доступ к /admin/migrate-hostpanel
     // (= ADMIN), может подписаться. Логи и прогресс сами форвардятся в комнату.
     if (client.data.role === 'ADMIN') {
-      client.on('migrate-hostpanel:subscribe', (payload: { migrationId: string }) => {
+      this.bindClientEvent(client, 'migrate-hostpanel:subscribe', (payload: { migrationId: string }) => {
         if (!payload?.migrationId || typeof payload.migrationId !== 'string') return;
         if (!/^[a-f0-9-]{8,}$/i.test(payload.migrationId)) return;
-        client.join(`migrate-hostpanel:${payload.migrationId}`);
+        this.joinClientRoom(client, `migrate-hostpanel:${payload.migrationId}`);
       });
-      client.on('migrate-hostpanel:unsubscribe', (payload: { migrationId: string }) => {
+      this.bindClientEvent(client, 'migrate-hostpanel:unsubscribe', (payload: { migrationId: string }) => {
         if (!payload?.migrationId) return;
-        client.leave(`migrate-hostpanel:${payload.migrationId}`);
+        this.leaveClientRoom(client, `migrate-hostpanel:${payload.migrationId}`);
       });
 
       // ─── PHP install/extension live-log: подписка ───
       // Клиент шлёт subscribe → joinит комнату php:install:<ver> или
       // php:ext-install:<ver>:<name>, агент шлёт строки → форвардятся в комнату.
-      client.on('php:install:subscribe', (payload: { version: string }) => {
+      this.bindClientEvent(client, 'php:install:subscribe', (payload: { version: string }) => {
         if (!payload?.version || !/^\d+\.\d+$/.test(payload.version)) return;
-        client.join(`php:install:${payload.version}`);
+        this.joinClientRoom(client, `php:install:${payload.version}`);
       });
-      client.on('php:install:unsubscribe', (payload: { version: string }) => {
+      this.bindClientEvent(client, 'php:install:unsubscribe', (payload: { version: string }) => {
         if (!payload?.version) return;
-        client.leave(`php:install:${payload.version}`);
+        this.leaveClientRoom(client, `php:install:${payload.version}`);
       });
-      client.on('php:ext-install:subscribe', (payload: { version: string; name: string }) => {
+      this.bindClientEvent(client, 'php:ext-install:subscribe', (payload: { version: string; name: string }) => {
         if (!payload?.version || !/^\d+\.\d+$/.test(payload.version)) return;
         if (!payload.name || !/^[a-z][a-z0-9_]{0,63}$/.test(payload.name)) return;
-        client.join(`php:ext-install:${payload.version}:${payload.name}`);
+        this.joinClientRoom(client, `php:ext-install:${payload.version}:${payload.name}`);
       });
-      client.on('php:ext-install:unsubscribe', (payload: { version: string; name: string }) => {
+      this.bindClientEvent(client, 'php:ext-install:unsubscribe', (payload: { version: string; name: string }) => {
         if (!payload?.version || !payload.name) return;
-        client.leave(`php:ext-install:${payload.version}:${payload.name}`);
+        this.leaveClientRoom(client, `php:ext-install:${payload.version}:${payload.name}`);
       });
     }
 
@@ -435,7 +695,7 @@ export class AgentGateway implements OnGatewayConnection, OnGatewayDisconnect {
     if (client.data.role !== 'ADMIN') return;
 
     // --- Terminal: open ---
-    client.on('terminal:open', async (optionsOrCb: { user?: string } | ((p: Record<string, unknown>) => void), maybeCb?: (p: Record<string, unknown>) => void) => {
+    this.bindClientEvent(client, 'terminal:open', async (optionsOrCb: { user?: string } | ((p: Record<string, unknown>) => void), maybeCb?: (p: Record<string, unknown>) => void) => {
       const callback = (typeof optionsOrCb === 'function' ? optionsOrCb : maybeCb!) as (payload: { sessionId: string } | { error: string }) => void;
       const user = typeof optionsOrCb === 'object' ? optionsOrCb.user : undefined;
 
@@ -470,7 +730,7 @@ export class AgentGateway implements OnGatewayConnection, OnGatewayDisconnect {
         this.terminalSessionOwner.set(sessionId, client.id);
 
         // Join a room for this terminal session
-        client.join(`terminal:${sessionId}`);
+        this.joinClientRoom(client, `terminal:${sessionId}`);
 
         this.logger.log(`Terminal session opened: ${sessionId} for client ${client.id}`);
         callback({ sessionId });
@@ -484,7 +744,7 @@ export class AgentGateway implements OnGatewayConnection, OnGatewayDisconnect {
     // захлёбываться. 64 KiB более чем достаточно для любого разумного ввода;
     // реальный copy-paste больших файлов — через `files` API, не через PTY.
     const MAX_TERMINAL_INPUT_BYTES = 64 * 1024;
-    client.on('terminal:input', (payload: { sessionId: string; data: string }) => {
+    this.bindClientEvent(client, 'terminal:input', (payload: { sessionId: string; data: string }) => {
       // Verify ownership
       const sessions = this.clientTerminalSessions.get(client.id);
       if (!sessions?.has(payload.sessionId)) return;
@@ -504,7 +764,7 @@ export class AgentGateway implements OnGatewayConnection, OnGatewayDisconnect {
     });
 
     // --- Terminal: resize ---
-    client.on('terminal:resize', (payload: { sessionId: string; cols: number; rows: number }) => {
+    this.bindClientEvent(client, 'terminal:resize', (payload: { sessionId: string; cols: number; rows: number }) => {
       const sessions = this.clientTerminalSessions.get(client.id);
       if (!sessions?.has(payload.sessionId)) return;
 
@@ -514,7 +774,7 @@ export class AgentGateway implements OnGatewayConnection, OnGatewayDisconnect {
     });
 
     // --- Terminal: close ---
-    client.on('terminal:close', (payload: { sessionId: string }) => {
+    this.bindClientEvent(client, 'terminal:close', (payload: { sessionId: string }) => {
       const sessions = this.clientTerminalSessions.get(client.id);
       if (!sessions?.has(payload.sessionId)) return;
 
@@ -524,12 +784,10 @@ export class AgentGateway implements OnGatewayConnection, OnGatewayDisconnect {
 
       sessions.delete(payload.sessionId);
       this.terminalSessionOwner.delete(payload.sessionId);
-      client.leave(`terminal:${payload.sessionId}`);
+      this.leaveClientRoom(client, `terminal:${payload.sessionId}`);
       this.logger.log(`Terminal session closed: ${payload.sessionId}`);
     });
 
-    // --- AI Chat ---
-    this.registerAiListeners(client);
   }
 
   /**
@@ -537,7 +795,7 @@ export class AgentGateway implements OnGatewayConnection, OnGatewayDisconnect {
    */
   private registerLogTailListeners(client: AuthenticatedSocket) {
     // --- Log tail: start ---
-    client.on('logs:tail:start', async (
+    this.bindClientEvent(client, 'logs:tail:start', async (
       payload: { source: string; type: string },
       cb: (result: { tailId?: string; error?: string }) => void,
     ) => {
@@ -581,7 +839,7 @@ export class AgentGateway implements OnGatewayConnection, OnGatewayDisconnect {
           this.clientTailSessions.set(client.id, new Set());
         }
         this.clientTailSessions.get(client.id)!.add(tailId);
-        client.join(`logs:tail:${tailId}`);
+        this.joinClientRoom(client, `logs:tail:${tailId}`);
 
         this.logger.log(`Log tail started: ${tailId} for client ${client.id}`);
         cb({ tailId });
@@ -591,7 +849,7 @@ export class AgentGateway implements OnGatewayConnection, OnGatewayDisconnect {
     });
 
     // --- Log tail: stop ---
-    client.on('logs:tail:stop', (payload: { tailId: string }) => {
+    this.bindClientEvent(client, 'logs:tail:stop', (payload: { tailId: string }) => {
       const tails = this.clientTailSessions.get(client.id);
       if (!tails?.has(payload.tailId)) return;
 
@@ -600,7 +858,7 @@ export class AgentGateway implements OnGatewayConnection, OnGatewayDisconnect {
       }
 
       tails.delete(payload.tailId);
-      client.leave(`logs:tail:${payload.tailId}`);
+      this.leaveClientRoom(client, `logs:tail:${payload.tailId}`);
       this.logger.log(`Log tail stopped: ${payload.tailId}`);
     });
   }
@@ -615,7 +873,7 @@ export class AgentGateway implements OnGatewayConnection, OnGatewayDisconnect {
       (data: { version: string; line: string; stream?: 'stdout' | 'stderr' }) => {
         if (!data?.version || typeof data.line !== 'string') return;
         if (!/^\d+\.\d+$/.test(data.version)) return;
-        this.server.to(`php:install:${data.version}`).emit('php:install:log', {
+        this.emitBrowserRoom(`php:install:${data.version}`, 'php:install:log', {
           version: data.version,
           line: data.line,
           stream: data.stream || 'stdout',
@@ -629,7 +887,7 @@ export class AgentGateway implements OnGatewayConnection, OnGatewayDisconnect {
         if (!data?.version || !data?.name || typeof data.line !== 'string') return;
         if (!/^\d+\.\d+$/.test(data.version)) return;
         if (!/^[a-z][a-z0-9_]{0,63}$/.test(data.name)) return;
-        this.server.to(`php:ext-install:${data.version}:${data.name}`).emit('php:ext-install:log', {
+        this.emitBrowserRoom(`php:ext-install:${data.version}:${data.name}`, 'php:ext-install:log', {
           version: data.version,
           name: data.name,
           line: data.line,
@@ -645,12 +903,12 @@ export class AgentGateway implements OnGatewayConnection, OnGatewayDisconnect {
       async (data: { deployId: string; line: string }) => {
         await this.deployService.appendOutput(data.deployId, data.line + '\n');
         // Forward to subscribed clients
-        this.server.to(`deploy:${data.deployId}`).emit('site:deploy:log', {
+        this.emitBrowserRoom(`deploy:${data.deployId}`, 'site:deploy:log', {
           deployLogId: data.deployId,
           line: data.line,
           stream: 'stdout',
           timestamp: new Date().toISOString(),
-        });
+        }, true);
       },
     );
 
@@ -669,14 +927,14 @@ export class AgentGateway implements OnGatewayConnection, OnGatewayDisconnect {
           data.commitSha,
           data.commitMessage,
         );
-        this.server.to(`deploy:${data.deployId}`).emit('site:deploy:log', {
+        this.emitBrowserRoom(`deploy:${data.deployId}`, 'site:deploy:log', {
           deployLogId: data.deployId,
           line: data.success
             ? '✓ Deploy completed successfully'
             : '✗ Deploy failed',
           stream: data.success ? 'stdout' : 'stderr',
           timestamp: new Date().toISOString(),
-        });
+        }, true);
       },
     );
 
@@ -692,7 +950,7 @@ export class AgentGateway implements OnGatewayConnection, OnGatewayDisconnect {
           this.serverPathBackupService.updateProgress(data.backupId, data.progress).catch(() => {}),
           this.panelDataBackupService.updateProgress(data.backupId, data.progress).catch(() => {}),
         ]);
-        agent.broadcast.emit('backup:progress', {
+        this.emitBrowserBroadcast('backup:progress', {
           backupId: data.backupId,
           progress: data.progress,
           timestamp: new Date().toISOString(),
@@ -719,7 +977,7 @@ export class AgentGateway implements OnGatewayConnection, OnGatewayDisconnect {
           data.error,
           data.snapshotId,
         );
-        agent.broadcast.emit('backup:progress', {
+        this.emitBrowserBroadcast('backup:progress', {
           backupId: data.backupId,
           progress: data.success ? 100 : 0,
           status: data.success ? 'COMPLETED' : 'FAILED',
@@ -747,7 +1005,7 @@ export class AgentGateway implements OnGatewayConnection, OnGatewayDisconnect {
           data.error,
           data.snapshotId,
         );
-        agent.broadcast.emit('backup:progress', {
+        this.emitBrowserBroadcast('backup:progress', {
           backupId: data.backupId,
           progress: data.success ? 100 : 0,
           status: data.success ? 'COMPLETED' : 'FAILED',
@@ -775,7 +1033,7 @@ export class AgentGateway implements OnGatewayConnection, OnGatewayDisconnect {
           data.error,
           data.snapshotId,
         );
-        agent.broadcast.emit('backup:progress', {
+        this.emitBrowserBroadcast('backup:progress', {
           backupId: data.backupId,
           progress: data.success ? 100 : 0,
           status: data.success ? 'COMPLETED' : 'FAILED',
@@ -890,7 +1148,7 @@ export class AgentGateway implements OnGatewayConnection, OnGatewayDisconnect {
           data.restoreId,
           data.progress,
         );
-        agent.broadcast.emit('backup:restore:progress', {
+        this.emitBrowserBroadcast('backup:restore:progress', {
           backupId: data.backupId,
           restoreId: data.restoreId,
           progress: data.progress,
@@ -935,7 +1193,7 @@ export class AgentGateway implements OnGatewayConnection, OnGatewayDisconnect {
         error?: string;
       }) => {
         const result = await this.backupsService.completeRestore(data);
-        agent.broadcast.emit('backup:restore:progress', {
+        this.emitBrowserBroadcast('backup:restore:progress', {
           backupId: data.backupId,
           restoreId: data.restoreId,
           progress: result.success ? 100 : 0,
@@ -956,7 +1214,7 @@ export class AgentGateway implements OnGatewayConnection, OnGatewayDisconnect {
         // Помечаем строку как stderr -> 'warn', если прилетело из stderr-префикса.
         const level: 'info' | 'warn' =
           /^\[(composer|setup|install)!\] /.test(data.line) ? 'warn' : 'info';
-        this.server.emit('site:provision:log', {
+        this.emitBrowserBroadcast('site:provision:log', {
           siteId: data.siteId,
           level,
           line: data.line,
@@ -968,12 +1226,12 @@ export class AgentGateway implements OnGatewayConnection, OnGatewayDisconnect {
     // --- Terminal data streaming (PTY output) ---
     agent.on('terminal:data', (data: { sessionId: string; data: string }) => {
       // Route to the specific client that owns this session
-      this.server.to(`terminal:${data.sessionId}`).emit('terminal:data', data);
+      this.emitBrowserRoom(`terminal:${data.sessionId}`, 'terminal:data', data);
     });
 
     // --- Log tail data streaming ---
     agent.on('logs:tail:data', (data: { tailId: string; line: string }) => {
-      this.server.to(`logs:tail:${data.tailId}`).emit('logs:tail:data', data);
+      this.emitBrowserRoom(`logs:tail:${data.tailId}`, 'logs:tail:data', data);
     });
 
     // --- Reconciliation result ---
@@ -1012,7 +1270,7 @@ export class AgentGateway implements OnGatewayConnection, OnGatewayDisconnect {
     // --- System metrics streaming ---
     // Forward to browser clients + feed to monitoring service for persistence
     agent.on('system:metrics', (data: unknown) => {
-      agent.broadcast.emit('system:metrics', data);
+      this.emitBrowserBroadcast('system:metrics', data);
       this.monitoringService.updateLatest(data);
     });
   }
@@ -1025,7 +1283,7 @@ export class AgentGateway implements OnGatewayConnection, OnGatewayDisconnect {
     status: string,
     previousStatus: string,
   ) {
-    this.server.emit('site:status', {
+    this.emitBrowserBroadcast('site:status', {
       siteId,
       status,
       previousStatus,
@@ -1043,7 +1301,7 @@ export class AgentGateway implements OnGatewayConnection, OnGatewayDisconnect {
     level: 'info' | 'warn' | 'error',
     line: string,
   ) {
-    this.server.emit('site:provision:log', {
+    this.emitBrowserBroadcast('site:provision:log', {
       siteId,
       level,
       line,
@@ -1059,7 +1317,7 @@ export class AgentGateway implements OnGatewayConnection, OnGatewayDisconnect {
     status: 'RUNNING' | 'ERROR',
     error?: string,
   ) {
-    this.server.emit('site:provision:done', {
+    this.emitBrowserBroadcast('site:provision:done', {
       siteId,
       status,
       error,
@@ -1134,10 +1392,10 @@ export class AgentGateway implements OnGatewayConnection, OnGatewayDisconnect {
     const aiPromptMax = parseInt(process.env.AI_PROMPT_MAX_CHARS || '', 10) || 50_000;
 
     // Start new or resume existing session
-    client.on('ai:start', async (payload: { prompt: string; cwd?: string; sessionId?: string }) => {
+    this.bindClientEvent(client, 'ai:start', async (payload: { prompt: string; cwd?: string; sessionId?: string }) => {
       if (!payload.prompt?.trim()) return;
       if (payload.prompt.length > aiPromptMax) {
-        client.emit('ai:error', { type: 'error', message: `Промпт слишком длинный (>${aiPromptMax} символов)` });
+        this.emitToClient(client, 'ai:error', { type: 'error', message: `Промпт слишком длинный (>${aiPromptMax} символов)` });
         return;
       }
 
@@ -1146,20 +1404,20 @@ export class AgentGateway implements OnGatewayConnection, OnGatewayDisconnect {
           userId,
           payload.prompt,
           (event: AiEvent) => {
-            client.emit(`ai:${event.type}`, event);
+            this.emitToClient(client, `ai:${event.type}`, event);
           },
           { cwd: payload.cwd, resumeSessionId: payload.sessionId },
         );
       } catch (err) {
-        client.emit('ai:error', { type: 'error', message: (err as Error).message });
+        this.emitToClient(client, 'ai:error', { type: 'error', message: (err as Error).message });
       }
     });
 
     // Send message to existing session (resume with new prompt)
-    client.on('ai:message', async (payload: { sessionId: string; message: string }) => {
+    this.bindClientEvent(client, 'ai:message', async (payload: { sessionId: string; message: string }) => {
       if (!payload.message?.trim() || !payload.sessionId) return;
       if (payload.message.length > aiPromptMax) {
-        client.emit('ai:error', { type: 'error', message: `Сообщение слишком длинное (>${aiPromptMax} символов)` });
+        this.emitToClient(client, 'ai:error', { type: 'error', message: `Сообщение слишком длинное (>${aiPromptMax} символов)` });
         return;
       }
 
@@ -1168,17 +1426,17 @@ export class AgentGateway implements OnGatewayConnection, OnGatewayDisconnect {
           userId,
           payload.message,
           (event: AiEvent) => {
-            client.emit(`ai:${event.type}`, event);
+            this.emitToClient(client, `ai:${event.type}`, event);
           },
           { resumeSessionId: payload.sessionId },
         );
       } catch (err) {
-        client.emit('ai:error', { type: 'error', message: (err as Error).message });
+        this.emitToClient(client, 'ai:error', { type: 'error', message: (err as Error).message });
       }
     });
 
     // Stop active session
-    client.on('ai:stop', () => {
+    this.bindClientEvent(client, 'ai:stop', () => {
       this.aiService.stopForUser(userId);
     });
   }

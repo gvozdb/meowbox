@@ -27,6 +27,18 @@
 
       <!-- Form -->
       <form class="login-form" @submit.prevent="handleLogin">
+        <div
+          v-if="authStore.logoutRevocationUncertain"
+          class="login-form__warning"
+          role="status"
+        >
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M10.3 2.9 1.8 17a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 2.9a2 2 0 0 0-3.4 0Z" />
+            <path d="M12 9v4M12 17h.01" />
+          </svg>
+          <span>Локальная сессия очищена, но сервер не подтвердил отзыв токена. После входа завершите остальные сессии в настройках.</span>
+        </div>
+
         <div class="login-form__field">
           <label class="login-form__label" for="username">Имя пользователя</label>
           <div class="login-form__input-wrap" :class="{ 'login-form__input-wrap--focus': usernameFocused }">
@@ -127,7 +139,8 @@
 definePageMeta({ layout: 'auth' });
 
 const authStore = useAuthStore();
-const api = useApi();
+const api = useMasterApi();
+const serverStore = useServerStore();
 
 const form = reactive({ username: '', password: '' });
 const loading = ref(false);
@@ -137,6 +150,7 @@ const usernameFocused = ref(false);
 const passwordFocused = ref(false);
 
 onMounted(async () => {
+  serverStore.resetToMain();
   try {
     const status = await api.publicGet<{ needsSetup: boolean }>('/setup/status');
     if (status.needsSetup) {
@@ -322,6 +336,25 @@ async function handleLogin() {
 
 .login-form__toggle-pw:hover {
   color: var(--text-tertiary);
+}
+
+.login-form__warning {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.55rem;
+  padding: 0.7rem 0.85rem;
+  background: rgba(245, 158, 11, 0.09);
+  border: 1px solid rgba(245, 158, 11, 0.2);
+  border-radius: 12px;
+  color: #fbbf24;
+  font-size: 0.8rem;
+  line-height: 1.4;
+  animation: field-appear 0.4s cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+.login-form__warning svg {
+  flex: 0 0 auto;
+  margin-top: 0.05rem;
 }
 
 /* ---- Error ---- */

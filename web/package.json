@@ -7,6 +7,7 @@
     "dev": "nuxt dev",
     "build": "nuxt build",
     "test:contracts": "node --test tests/*.test.js",
+    "typecheck": "nuxi typecheck",
     "preview": "nuxt preview",
     "generate": "nuxt generate"
   },

@@ -1099,6 +1099,7 @@ interface Migration {
 const api = useApi();
 const toast = useMbToast();
 const { connect, getSocket } = useSocket();
+const { waitForOperation } = useOperation();
 
 const steps = ['Подключение', 'Выбор сайтов', 'План', 'Выполнение'];
 const step = ref(1);
@@ -1936,31 +1937,34 @@ async function doCancel() {
 async function doRetry(item: MigrationItem) {
   if (!discovery.value) return;
   try {
-    await api.post(
-      `/admin/migrate-hostpanel/${discovery.value.id}/items/${item.id}/retry`,
-      {},
-    );
-    item.status = 'RUNNING';
-    item.progressPercent = 0;
-    item.errorMsg = null;
-    item.currentStage = null;
-    item.log = '';
-    discovery.value.status = 'RUNNING';
-    delete forceRetryCheck.value[item.id]; // re-check после следующего fail'а
-    // Re-subscribe: сервер выходит из room после migration:complete, поэтому
-    // без re-subscribe новые WS-логи retry не приходят.
-    subscribeProgress();
-    pollDiscovery();
+    await startRetryItem(item);
     toast.success(`Повторяем ${item.plan.newName}`);
   } catch (e: unknown) {
     toast.error((e as Error).message || 'Не удалось повторить');
   }
 }
 
+async function startRetryItem(item: MigrationItem): Promise<void> {
+  if (!discovery.value) throw new Error('Миграция не выбрана');
+  await api.post(
+    `/admin/migrate-hostpanel/${discovery.value.id}/items/${item.id}/retry`,
+    {},
+  );
+  item.status = 'RUNNING';
+  item.progressPercent = 0;
+  item.errorMsg = null;
+  item.currentStage = null;
+  item.log = '';
+  discovery.value.status = 'RUNNING';
+  delete forceRetryCheck.value[item.id];
+  subscribeProgress();
+  pollDiscovery();
+}
+
 /**
  * Force-retry: API на сервере подтверждает что есть leak именно от этой
- * миграции (а не чужой работающий сайт), вызывает агента почистить
- * артефакты и потом стандартный retry. Для FAILED-айтемов с leak'нутыми
+ * миграции (а не чужой работающий сайт), durable-операцией чистит
+ * артефакты и только после подтверждения запускает стандартный retry. Для FAILED-айтемов с leak'нутыми
  * остатками (linux user, db, /var/www/<name>) — кнопка показывается
  * только если check-leak вернул canForceRetry=true.
  */
@@ -2006,21 +2010,17 @@ async function doForceRetry(item: MigrationItem) {
   )) return;
   forceRetrying.value[item.id] = true;
   try {
-    await api.post(
+    const accepted = await api.post<AcceptedOperation>(
       `/admin/migrate-hostpanel/${discovery.value.id}/items/${item.id}/force-retry`,
       {},
+      {
+        headers: {
+          'Idempotency-Key': operationIdempotencyKey('hostpanel-force-cleanup'),
+        },
+      },
     );
-    item.status = 'RUNNING';
-    item.progressPercent = 0;
-    item.errorMsg = null;
-    item.currentStage = null;
-    item.log = '';
-    discovery.value.status = 'RUNNING';
-    // Сбрасываем кэш — после успешного retry leak уже не должен быть
-    delete forceRetryCheck.value[item.id];
-    // Re-subscribe: те же причины, что и в doRetry.
-    subscribeProgress();
-    pollDiscovery();
+    await waitForOperation(accepted.operationId, { timeoutMs: 6 * 60_000 });
+    await startRetryItem(item);
     toast.success(`Очистка ОК, повторяем ${item.plan.newName}`);
   } catch (e: unknown) {
     toast.error((e as Error).message || 'Не удалось force-retry');
