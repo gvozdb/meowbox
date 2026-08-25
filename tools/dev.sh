@@ -21,6 +21,10 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PANEL_DIR="$(dirname "$SCRIPT_DIR")"
 cd "$PANEL_DIR"
 
+# Non-interactive runners may omit sbin, but system migrations must invoke
+# root-owned validation binaries such as nginx without relying on login-shell PATH.
+export PATH="/usr/local/sbin:/usr/sbin:/sbin:${PATH:-/usr/local/bin:/usr/bin:/bin}"
+
 # ----- CLI -----
 DO_PULL=true
 FORCE=false
