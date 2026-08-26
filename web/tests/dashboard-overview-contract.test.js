@@ -155,9 +155,10 @@ test('global text and action palettes meet WCAG AA contrast', () => {
     const lightPaletteBlock = cssBlock(globalCss, `html.theme-light.palette-${palette}`);
     assert.ok(contrastRatio(hexVariable(darkPaletteBlock, '--primary-text'), darkBackground) >= 4.5, `${palette} accent fails dark AA`);
     assert.ok(contrastRatio(hexVariable(lightPaletteBlock, '--primary-text'), lightBackground) >= 4.5, `${palette} accent fails light AA`);
+    const actionText = hexVariable(darkPaletteBlock, '--primary-action-text');
     for (const token of ['--primary-action', '--primary-action-hover']) {
       assert.ok(
-        contrastRatio(hexVariable(darkPaletteBlock, token), [255, 255, 255]) >= 4.5,
+        contrastRatio(hexVariable(darkPaletteBlock, token), actionText) >= 4.5,
         `${palette} ${token} fails AA`,
       );
     }
@@ -177,7 +178,9 @@ test('theme-aware semantic colors replace light-only foreground colors', () => {
   for (const file of webSourceFiles(root)) {
     assert.doesNotMatch(readFileSync(file, 'utf8'), forbiddenForeground, file);
   }
-  assert.match(globalCss, /--primary-action: #a16207/);
+  assert.match(globalCss, /--primary-action: #f59e0b/);
+  assert.match(globalCss, /--primary-action-hover: #fbbf24/);
+  assert.match(globalCss, /--primary-action-text: #111827/);
   assert.match(globalCss, /--danger-action: #b91c1c/);
   assert.match(globalCss, /--info-action: #1d4ed8/);
 });

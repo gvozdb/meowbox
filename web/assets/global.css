@@ -43,9 +43,9 @@
   --primary-dark: #d97706;
   --primary-text: #fbbf24;
   --primary-text-on: #0a0a0f;
-  --primary-action: #a16207;
-  --primary-action-hover: #854d0e;
-  --primary-action-text: #ffffff;
+  --primary-action: #f59e0b;
+  --primary-action-hover: #fbbf24;
+  --primary-action-text: #111827;
   --primary-rgb: 245, 158, 11;
   --primary-light-rgb: 251, 191, 36;
   --primary-dark-rgb: 217, 119, 6;
@@ -121,7 +121,7 @@ html.theme-light {
 
   /* Primary (amber) light — fallback, перекрывается классом palette-* */
   --primary-text: #b45309;
-  --primary-text-on: #ffffff;
+  --primary-text-on: #111827;
   --primary-dark-rgb: 180, 83, 9;
   --primary-bg: rgba(245, 158, 11, 0.06);
   --primary-bg-hover: rgba(245, 158, 11, 0.1);
@@ -162,9 +162,9 @@ html.palette-amber {
   --primary-dark: #d97706;
   --primary-text: #fbbf24;
   --primary-text-on: #0a0a0f;
-  --primary-action: #a16207;
-  --primary-action-hover: #854d0e;
-  --primary-action-text: #ffffff;
+  --primary-action: #f59e0b;
+  --primary-action-hover: #fbbf24;
+  --primary-action-text: #111827;
   --primary-rgb: 245, 158, 11;
   --primary-light-rgb: 251, 191, 36;
   --primary-dark-rgb: 217, 119, 6;
@@ -181,7 +181,7 @@ html.theme-light.palette-amber {
   --primary-light: #fbbf24;
   --primary-dark: #d97706;
   --primary-text: #b45309;
-  --primary-text-on: #ffffff;
+  --primary-text-on: #111827;
   --primary-rgb: 245, 158, 11;
   --primary-light-rgb: 251, 191, 36;
   --primary-dark-rgb: 180, 83, 9;
