@@ -427,7 +427,7 @@ onBeforeUnmount(() => {
   border-color: var(--primary-text);
   background: var(--primary-bg, rgba(99, 102, 241, 0.1));
 }
-.subtab__crown { color: #fbbf24; flex-shrink: 0; }
+.subtab__crown { color: var(--warning-text); flex-shrink: 0; }
 .subtab__dot {
   width: 7px;
   height: 7px;
@@ -477,9 +477,9 @@ onBeforeUnmount(() => {
 }
 .info-row__value--mono { font-family: 'JetBrains Mono', monospace; font-size: 0.74rem; }
 
-.ssl-active { color: #4ade80; }
+.ssl-active { color: var(--success-text); }
 .ssl-warning { color: var(--primary-text); }
-.ssl-error { color: #f87171; }
+.ssl-error { color: var(--danger-text); }
 
 .ssl-le__desc {
   font-size: 0.82rem;
@@ -491,7 +491,7 @@ onBeforeUnmount(() => {
 .ssl-le__actions .btn { display: inline-flex; align-items: center; gap: 0.35rem; }
 .ssl-le__progress { font-size: 0.78rem; color: var(--text-muted); }
 .ssl-le__elapsed { font-family: 'JetBrains Mono', monospace; font-size: 0.72rem; color: var(--text-faint); }
-.ssl-le__error { font-size: 0.78rem; color: #f87171; white-space: pre-wrap; }
+.ssl-le__error { font-size: 0.78rem; color: var(--danger-text); white-space: pre-wrap; }
 
 .ssl-actions {
   display: flex;
@@ -518,7 +518,7 @@ onBeforeUnmount(() => {
   height: 30px;
   border-radius: 8px;
   background: rgba(239, 68, 68, 0.15);
-  color: #f87171;
+  color: var(--danger-text);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -531,10 +531,10 @@ onBeforeUnmount(() => {
   color: var(--text-secondary);
   line-height: 1.5;
 }
-.domains-cert-alert__body strong { color: #fca5a5; font-size: 0.82rem; font-weight: 600; }
+.domains-cert-alert__body strong { color: var(--danger-text); font-size: 0.82rem; font-weight: 600; }
 .domains-cert-alert__body code {
   background: rgba(239, 68, 68, 0.12);
-  color: #fca5a5;
+  color: var(--danger-text);
   padding: 0.05em 0.35em;
   border-radius: 4px;
   font-size: 0.9em;
@@ -602,8 +602,8 @@ html.theme-light .domains-cert-alert__body code { background: rgba(239, 68, 68, 
 }
 .btn--sm { padding: 0.4rem 0.8rem; font-size: 0.75rem; border-radius: 8px; }
 .btn--primary {
-  background: linear-gradient(135deg, var(--primary-light), var(--primary-dark));
-  color: var(--primary-text-on);
+  background: linear-gradient(135deg, var(--primary-action), var(--primary-action-hover));
+  color: var(--primary-action-text);
 }
 .btn--primary:not(:disabled):hover {
   transform: translateY(-1px);
@@ -616,7 +616,7 @@ html.theme-light .domains-cert-alert__body code { background: rgba(239, 68, 68, 
   border: 1px solid var(--border-subtle);
 }
 .btn--secondary:not(:disabled):hover { border-color: var(--primary-border); color: var(--text-primary); }
-.btn--danger { background: rgba(239, 68, 68, 0.12); border: 1px solid rgba(239, 68, 68, 0.2); color: #f87171; }
+.btn--danger { background: rgba(239, 68, 68, 0.12); border: 1px solid rgba(239, 68, 68, 0.2); color: var(--danger-text); }
 .btn--danger:not(:disabled):hover { background: rgba(239, 68, 68, 0.18); }
 .btn--danger:disabled { opacity: 0.4; cursor: not-allowed; }
 

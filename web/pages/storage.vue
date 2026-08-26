@@ -401,7 +401,7 @@ onUnmounted(() => {
   align-items: center;
   justify-content: center;
   background: rgba(var(--primary-rgb), 0.1);
-  color: var(--primary-light);
+  color: var(--primary-text);
   flex-shrink: 0;
 }
 
@@ -444,11 +444,11 @@ onUnmounted(() => {
   font-family: 'JetBrains Mono', monospace;
   font-size: 1.25rem;
   font-weight: 700;
-  color: #4ade80;
+  color: var(--success-text);
 }
 
-.server-disk__pct--warn { color: var(--primary-light); }
-.server-disk__pct--crit { color: #f87171; }
+.server-disk__pct--warn { color: var(--primary-text); }
+.server-disk__pct--crit { color: var(--danger-text); }
 
 .server-disk__bar {
   height: 8px;

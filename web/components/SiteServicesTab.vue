@@ -562,13 +562,13 @@ function dotClass(s: string): string {
   align-items: center;
   justify-content: center;
   background: rgba(99, 102, 241, 0.12);
-  color: rgb(129, 140, 248);
+  color: var(--violet-text);
 }
-.ssvc__icon--search { background: rgba(var(--primary-rgb), 0.13); color: var(--primary-light); }
-.ssvc__icon--cache { background: rgba(16, 185, 129, 0.13); color: rgb(52, 211, 153); }
-.ssvc__icon--storage { background: rgba(14, 165, 233, 0.13); color: rgb(56, 189, 248); }
-.ssvc__icon--queue { background: rgba(168, 85, 247, 0.13); color: rgb(192, 132, 252); }
-.ssvc__icon--database { background: rgba(59, 130, 246, 0.13); color: rgb(96, 165, 250); }
+.ssvc__icon--search { background: rgba(var(--primary-rgb), 0.13); color: var(--primary-text); }
+.ssvc__icon--cache { background: rgba(16, 185, 129, 0.13); color: var(--success-text); }
+.ssvc__icon--storage { background: rgba(14, 165, 233, 0.13); color: var(--info-text); }
+.ssvc__icon--queue { background: rgba(168, 85, 247, 0.13); color: var(--violet-text); }
+.ssvc__icon--database { background: rgba(59, 130, 246, 0.13); color: var(--info-text); }
 
 .ssvc__title { font-weight: 600; font-size: 0.95rem; color: var(--text-primary); }
 .ssvc__desc { font-size: 0.78rem; color: var(--text-tertiary); margin-top: 2px; }
@@ -585,9 +585,9 @@ function dotClass(s: string): string {
   border-radius: 999px;
   white-space: nowrap;
 }
-.ssvc__pill--ok { background: rgba(16, 185, 129, 0.13); color: rgb(52, 211, 153); }
-.ssvc__pill--warn { background: rgba(var(--primary-rgb), 0.13); color: var(--primary-light); }
-.ssvc__pill--err { background: rgba(239, 68, 68, 0.13); color: rgb(248, 113, 113); }
+.ssvc__pill--ok { background: rgba(16, 185, 129, 0.13); color: var(--success-text); }
+.ssvc__pill--warn { background: rgba(var(--primary-rgb), 0.13); color: var(--primary-text); }
+.ssvc__pill--err { background: rgba(239, 68, 68, 0.13); color: var(--danger-text); }
 .ssvc__pill--idle { background: rgba(115, 115, 115, 0.16); color: var(--text-tertiary); }
 
 .status-dot {
@@ -667,7 +667,7 @@ function dotClass(s: string): string {
 
 .ssvc__warn {
   font-size: 0.82rem;
-  color: var(--primary-light);
+  color: var(--primary-text);
   background: rgba(var(--primary-rgb), 0.08);
   border: 1px solid rgba(var(--primary-rgb), 0.25);
   border-radius: 6px;
@@ -676,13 +676,13 @@ function dotClass(s: string): string {
 }
 
 .ssvc__link {
-  color: var(--primary-light);
+  color: var(--primary-text);
   text-decoration: underline;
 }
 
 .ssvc__error {
   font-size: 0.78rem;
-  color: rgb(248, 113, 113);
+  color: var(--danger-text);
   background: rgba(239, 68, 68, 0.08);
   border: 1px solid rgba(239, 68, 68, 0.25);
   padding: 0.4rem 0.6rem;
@@ -795,16 +795,16 @@ function dotClass(s: string): string {
   font-family: inherit; cursor: pointer; transition: all 0.2s; white-space: nowrap;
 }
 .btn--sm { padding: 0.45rem 0.85rem; font-size: 0.75rem; border-radius: 8px; }
-.btn--primary { background: linear-gradient(135deg, var(--primary-light), var(--primary-dark)); color: var(--primary-text-on); }
+.btn--primary { background: linear-gradient(135deg, var(--primary-action), var(--primary-action-hover)); color: var(--primary-action-text); }
 .btn--primary:not(:disabled):hover { transform: translateY(-1px); box-shadow: 0 4px 16px rgba(var(--primary-rgb), 0.2); }
 .btn--primary:disabled { opacity: 0.4; cursor: not-allowed; }
 .btn--ghost { background: var(--bg-input); border: 1px solid var(--border-strong); color: var(--text-tertiary); }
 .btn--ghost:hover:not(:disabled) { color: var(--text-secondary); border-color: var(--border-strong); }
 .btn--ghost:disabled { opacity: 0.4; cursor: not-allowed; }
-.btn--danger { background: rgba(239, 68, 68, 0.15); border: 1px solid rgba(239, 68, 68, 0.4); color: rgb(248, 113, 113); }
+.btn--danger { background: rgba(239, 68, 68, 0.15); border: 1px solid rgba(239, 68, 68, 0.4); color: var(--danger-text); }
 .btn--danger:hover:not(:disabled) { background: rgba(239, 68, 68, 0.25); }
 .btn--danger:disabled { opacity: 0.4; cursor: not-allowed; }
-.btn--blue { background: rgba(59, 130, 246, 0.12); border: 1px solid rgba(59, 130, 246, 0.35); color: rgb(96, 165, 250); }
-.btn--blue:hover:not(:disabled) { background: rgba(59, 130, 246, 0.22); border-color: rgba(59, 130, 246, 0.5); color: rgb(147, 197, 253); }
+.btn--blue { background: rgba(59, 130, 246, 0.12); border: 1px solid rgba(59, 130, 246, 0.35); color: var(--info-text); }
+.btn--blue:hover:not(:disabled) { background: rgba(59, 130, 246, 0.22); border-color: rgba(59, 130, 246, 0.5); color: var(--info-text); }
 .btn--blue:disabled { opacity: 0.4; cursor: not-allowed; }
 </style>

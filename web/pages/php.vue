@@ -526,9 +526,9 @@ onMounted(loadStatuses);
   font-size: 0.65rem; font-weight: 600; padding: 0.2rem 0.5rem; border-radius: 6px;
 }
 .version-badge__dot { width: 6px; height: 6px; border-radius: 50%; }
-.version-badge--ok { background: rgba(34, 197, 94, 0.1); color: #4ade80; }
+.version-badge--ok { background: rgba(34, 197, 94, 0.1); color: var(--success-text); }
 .version-badge--ok .version-badge__dot { background: #22c55e; box-shadow: 0 0 4px rgba(34, 197, 94, 0.5); }
-.version-badge--off { background: rgba(148, 163, 184, 0.1); color: #94a3b8; }
+.version-badge--off { background: rgba(148, 163, 184, 0.1); color: var(--text-muted); }
 .version-badge--off .version-badge__dot { background: #64748b; }
 
 .version-card__stats { display: flex; gap: 1.5rem; }
@@ -537,7 +537,7 @@ onMounted(loadStatuses);
 .stat__value { font-size: 0.82rem; font-weight: 500; color: var(--text-secondary); }
 .mono { font-family: 'JetBrains Mono', monospace; font-size: 0.75rem; }
 
-.spinner { width: 20px; height: 20px; border: 2px solid var(--spinner-track); border-top-color: var(--primary); border-radius: 50%; animation: spin 0.8s linear infinite; }
+.spinner { width: 20px; height: 20px; border: 2px solid var(--spinner-track); border-top-color: var(--primary-text); border-radius: 50%; animation: spin 0.8s linear infinite; }
 
 .btn {
   display: inline-flex; align-items: center; gap: 0.4rem; padding: 0.55rem 1rem;
@@ -582,12 +582,12 @@ onMounted(loadStatuses);
   background: rgba(239, 68, 68, 0.06);
   border: 1px solid rgba(239, 68, 68, 0.2);
   border-radius: 10px;
-  color: #fca5a5;
+  color: var(--danger-text);
   max-width: 720px;
 }
-.legacy-warning svg { flex-shrink: 0; color: #f87171; margin-top: 0.1rem; }
-.legacy-warning strong { display: block; color: #fda4a4; font-size: 0.85rem; margin-bottom: 0.2rem; font-weight: 600; }
-.legacy-warning p { margin: 0; font-size: 0.78rem; line-height: 1.5; color: rgba(252, 165, 165, 0.85); }
+.legacy-warning svg { flex-shrink: 0; color: var(--danger-text); margin-top: 0.1rem; }
+.legacy-warning strong { display: block; color: var(--danger-text); font-size: 0.85rem; margin-bottom: 0.2rem; font-weight: 600; }
+.legacy-warning p { margin: 0; font-size: 0.78rem; line-height: 1.5; color: var(--danger-text); }
 .form-select {
   flex: 1; max-width: 280px; padding: 0.45rem 0.75rem; border-radius: 8px;
   border: 1px solid var(--border-strong); background: var(--bg-input); color: var(--text-secondary);
@@ -597,23 +597,23 @@ onMounted(loadStatuses);
   background-repeat: no-repeat; background-position: right 0.6rem center;
   padding-right: 2rem;
 }
-.form-select:focus { outline: none; border-color: var(--primary); }
+.form-select:focus { outline: none; border-color: var(--primary-text); }
 .form-input {
   flex: 1; padding: 0.45rem 0.75rem; border-radius: 8px;
   border: 1px solid var(--border-strong); background: var(--bg-input); color: var(--text-secondary);
   font-size: 0.82rem; font-family: inherit;
 }
-.form-input:focus { outline: none; border-color: var(--primary); }
+.form-input:focus { outline: none; border-color: var(--primary-text); }
 .form-input::placeholder { color: var(--text-muted); }
 
 /* Primary and danger button styles */
 .btn--primary {
-  background: var(--primary); color: #fff; border: none;
+  background: var(--primary-action); color: var(--primary-action-text); border: none;
 }
-.btn--primary:hover:not(:disabled) { filter: brightness(1.1); }
+.btn--primary:hover:not(:disabled) { background: var(--primary-action-hover); }
 .btn--primary:disabled { opacity: 0.4; cursor: not-allowed; }
 .btn--danger {
-  background: rgba(239, 68, 68, 0.1); border: 1px solid rgba(239, 68, 68, 0.2); color: #f87171;
+  background: rgba(239, 68, 68, 0.1); border: 1px solid rgba(239, 68, 68, 0.2); color: var(--danger-text);
 }
 .btn--danger:hover:not(:disabled) { background: rgba(239, 68, 68, 0.18); }
 .btn--danger:disabled { opacity: 0.4; cursor: not-allowed; }
@@ -662,7 +662,7 @@ onMounted(loadStatuses);
   font-family: 'JetBrains Mono', monospace; font-size: 0.78rem; line-height: 1.6;
   resize: vertical; tab-size: 4;
 }
-.ini-editor:focus { outline: none; border-color: var(--primary); }
+.ini-editor:focus { outline: none; border-color: var(--primary-text); }
 
 /* Extensions */
 .ext-install-row { display: flex; gap: 0.5rem; margin-bottom: 0.85rem; }

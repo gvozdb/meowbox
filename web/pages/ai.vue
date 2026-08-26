@@ -768,7 +768,7 @@ onUnmounted(() => {
 }
 
 .ai-sidebar__new:hover {
-  color: var(--primary);
+  color: var(--primary-text);
   border-color: var(--primary-border);
   background: var(--primary-bg);
 }
@@ -846,7 +846,7 @@ onUnmounted(() => {
 }
 
 .ai-session__del:hover {
-  color: var(--danger);
+  color: var(--danger-text);
   background: var(--danger-bg);
 }
 
@@ -909,7 +909,7 @@ onUnmounted(() => {
   display: flex;
   align-items: center;
   justify-content: center;
-  color: var(--primary);
+  color: var(--primary-text);
   margin-bottom: 1rem;
 }
 
@@ -1088,17 +1088,17 @@ onUnmounted(() => {
 
 .ai-tool-badge[data-cat="read"] {
   background: rgba(59, 130, 246, 0.12);
-  color: #60a5fa;
+  color: var(--info-text);
 }
 
 .ai-tool-badge[data-cat="write"] {
   background: rgba(34, 197, 94, 0.12);
-  color: #4ade80;
+  color: var(--success-text);
 }
 
 .ai-tool-badge[data-cat="exec"] {
   background: rgba(168, 85, 247, 0.12);
-  color: #c084fc;
+  color: var(--violet-text);
 }
 
 .ai-tool-badge[data-cat="other"] {
@@ -1112,11 +1112,11 @@ onUnmounted(() => {
 }
 
 .ai-tool-status--ok {
-  color: var(--success);
+  color: var(--success-text);
 }
 
 .ai-tool-status--err {
-  color: var(--danger);
+  color: var(--danger-text);
 }
 
 .ai-tool-section {
@@ -1155,7 +1155,7 @@ onUnmounted(() => {
 
 .ai-tool-pre--err {
   border-color: var(--danger-border);
-  color: var(--danger-light);
+  color: var(--danger-text);
 }
 
 .ai-tool-expand {
@@ -1236,12 +1236,12 @@ onUnmounted(() => {
 }
 
 .ai-question__opt:hover:not(:disabled) {
-  border-color: var(--primary);
+  border-color: var(--primary-text);
   background: var(--bg-surface-hover);
 }
 
 .ai-question__opt--selected {
-  border-color: var(--primary);
+  border-color: var(--primary-text);
   background: var(--primary-bg);
   box-shadow: 0 0 0 1px var(--primary-border);
 }
@@ -1269,9 +1269,9 @@ onUnmounted(() => {
 }
 
 .ai-question__opt--selected .ai-question__opt-check {
-  border-color: var(--primary);
-  background: var(--primary);
-  color: #fff;
+  border-color: var(--primary-action);
+  background: var(--primary-action);
+  color: var(--primary-action-text);
 }
 
 .ai-question__opt-body {
@@ -1297,8 +1297,8 @@ onUnmounted(() => {
   padding: 0.5rem 1.2rem;
   border-radius: 8px;
   border: none;
-  background: var(--primary);
-  color: var(--primary-text-on);
+  background: var(--primary-action);
+  color: var(--primary-action-text);
   font-size: 0.8rem;
   font-weight: 600;
   font-family: inherit;
@@ -1308,7 +1308,7 @@ onUnmounted(() => {
 }
 
 .ai-question__submit:hover:not(:disabled) {
-  background: var(--primary-light);
+  background: var(--primary-action-hover);
   box-shadow: var(--shadow-button-hover);
 }
 
@@ -1323,7 +1323,7 @@ onUnmounted(() => {
   height: 12px;
   border-radius: 50%;
   border: 2px solid var(--spinner-track);
-  border-top-color: var(--primary);
+  border-top-color: var(--primary-text);
   animation: aispin 0.6s linear infinite;
 }
 
@@ -1472,13 +1472,13 @@ onUnmounted(() => {
 }
 
 .ai-input__btn--send {
-  background: var(--primary);
-  color: var(--primary-text-on);
+  background: var(--primary-action);
+  color: var(--primary-action-text);
   box-shadow: var(--shadow-button);
 }
 
 .ai-input__btn--send:hover:not(:disabled) {
-  background: var(--primary-light);
+  background: var(--primary-action-hover);
   box-shadow: var(--shadow-button-hover);
 }
 
@@ -1490,13 +1490,13 @@ onUnmounted(() => {
 
 .ai-input__btn--stop {
   background: var(--danger-bg);
-  color: var(--danger);
+  color: var(--danger-text);
   border: 1px solid var(--danger-border);
 }
 
 .ai-input__btn--stop:hover {
-  background: var(--danger);
-  color: #fff;
+  background: var(--danger-action);
+  color: var(--danger-action-text);
 }
 
 /* ---- Overlay (mobile) ---- */

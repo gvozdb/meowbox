@@ -587,13 +587,13 @@ onUnmounted(() => {
 .logs__btn--active {
   background: var(--success-bg);
   border-color: var(--success-border);
-  color: var(--success-light);
+  color: var(--success-text);
 }
 
 .logs__btn--active:hover:not(:disabled) {
   background: rgba(34, 197, 94, 0.12);
   border-color: rgba(34, 197, 94, 0.25);
-  color: var(--success-light);
+  color: var(--success-text);
 }
 
 /* Path */
@@ -623,7 +623,7 @@ onUnmounted(() => {
   font-size: 0.6rem;
   font-weight: 700;
   letter-spacing: 0.05em;
-  color: var(--success-light);
+  color: var(--success-text);
 }
 
 .logs__live-dot {
@@ -710,25 +710,25 @@ onUnmounted(() => {
   min-width: 3.2rem;
   text-align: right;
   padding-right: 0.85rem;
-  color: rgba(255, 255, 255, 0.1);
+  color: var(--text-muted);
   flex-shrink: 0;
   border-right: 1px solid rgba(255, 255, 255, 0.04);
   margin-right: 0.85rem;
 }
 
 :root.theme-light .logs__line-num {
-  color: rgba(0, 0, 0, 0.15);
+  color: var(--text-muted);
   border-right-color: rgba(0, 0, 0, 0.06);
 }
 
 .logs__line-text {
   white-space: pre;
-  color: rgba(255, 255, 255, 0.55);
+  color: var(--text-secondary);
   word-break: break-all;
 }
 
 :root.theme-light .logs__line-text {
-  color: rgba(0, 0, 0, 0.55);
+  color: var(--text-secondary);
 }
 
 /* Highlighted lines */
@@ -737,7 +737,7 @@ onUnmounted(() => {
 }
 
 .logs__line--error .logs__line-text {
-  color: #f87171;
+  color: var(--danger-text);
 }
 
 .logs__line--warn {
@@ -745,7 +745,7 @@ onUnmounted(() => {
 }
 
 .logs__line--warn .logs__line-text {
-  color: var(--primary-light);
+  color: var(--primary-text);
 }
 
 :root.theme-light .logs__line--error {
@@ -767,7 +767,7 @@ onUnmounted(() => {
 /* Search highlight */
 .logs__line-text :deep(.logs__highlight) {
   background: rgba(var(--primary-rgb), 0.25);
-  color: var(--primary-light);
+  color: var(--primary-text);
   border-radius: 2px;
   padding: 0 1px;
 }
@@ -794,7 +794,7 @@ onUnmounted(() => {
   width: 28px;
   height: 28px;
   border: 2px solid var(--spinner-track);
-  border-top-color: var(--primary);
+  border-top-color: var(--primary-text);
   border-radius: 50%;
   animation: spin 0.8s linear infinite;
 }

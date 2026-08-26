@@ -1,11 +1,12 @@
 <template>
   <main class="operations-dashboard">
     <header class="dashboard-heading">
-      <div>
-        <span class="ops-section-kicker">Operations control room</span>
+      <div class="dashboard-heading__copy">
+        <span class="ops-section-kicker">Операционный центр</span>
         <h1>Обзор системы</h1>
-        <p>{{ selectedServerName }} · единый операционный снимок</p>
+        <p><strong>{{ selectedServerName }}</strong><span aria-hidden="true">/</span> ключевые сигналы сервера в одном экране</p>
       </div>
+      <div class="dashboard-heading__freshness"><span aria-hidden="true" />Автообновление · 30 сек</div>
     </header>
 
     <p class="ops-sr-only" aria-live="polite" aria-atomic="true">{{ liveMessage }}</p>
@@ -81,39 +82,42 @@ const selectedServerName = computed(() => serverStore.currentServer?.name
 
 <style scoped>
 .operations-dashboard {
-  --text-tertiary: rgba(255, 255, 255, 0.58);
-  --text-muted: rgba(255, 255, 255, 0.5);
-  --dashboard-status-success: var(--success-light);
-  --dashboard-status-warning: var(--primary-light);
-  --dashboard-status-danger: var(--danger-light);
+  --dashboard-status-success: var(--success-text);
+  --dashboard-status-warning: var(--warning-text);
+  --dashboard-status-danger: var(--danger-text);
+  position: relative;
   display: grid;
   width: 100%;
-  max-width: 1400px;
-  gap: 1rem;
+  max-width: 1280px;
+  gap: 0.9rem;
   margin: 0 auto;
-  padding-bottom: 2rem;
+  padding-bottom: 2.5rem;
 }
 
-:global(html.theme-light) .operations-dashboard {
-  --text-tertiary: rgba(0, 0, 0, 0.62);
-  --text-muted: rgba(0, 0, 0, 0.56);
-  --dashboard-status-success: #15803d;
-  --dashboard-status-warning: #92400e;
-  --dashboard-status-danger: #b91c1c;
+.dashboard-heading {
+  display: flex;
+  min-height: 68px;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 0.25rem 0.2rem 0.35rem;
 }
-
-.dashboard-heading { display: flex; align-items: flex-end; justify-content: space-between; min-height: 48px; }
-.dashboard-heading h1 { margin: 0; color: var(--text-heading); font-size: 1.45rem; font-weight: 700; letter-spacing: -0.035em; }
-.dashboard-heading p { margin: 0.2rem 0 0; color: var(--text-muted); font-size: 0.72rem; }
+.dashboard-heading h1 { margin: 0; color: var(--text-heading); font-size: clamp(1.45rem, 2vw, 1.75rem); font-weight: 750; letter-spacing: -0.045em; }
+.dashboard-heading p { display: flex; align-items: center; gap: 0.45rem; margin: 0.28rem 0 0; color: var(--text-tertiary); font-size: 0.73rem; }
+.dashboard-heading p strong { color: var(--text-secondary); font-weight: 700; }
+.dashboard-heading p span { color: var(--text-faint); }
+.dashboard-heading__freshness { display: inline-flex; align-items: center; gap: 0.45rem; padding-bottom: 0.18rem; color: var(--text-muted); font: 650 0.62rem/1 'JetBrains Mono', monospace; }
+.dashboard-heading__freshness span { width: 7px; height: 7px; border-radius: 50%; background: var(--success); box-shadow: 0 0 0 4px var(--success-bg); }
 .compatibility-notice, .refresh-warning { display: flex; align-items: center; justify-content: space-between; gap: 1rem; padding: 0.75rem 0.9rem; border: 1px solid var(--primary-border); border-left: 3px solid var(--primary); border-radius: 9px; background: var(--primary-bg); }
 .compatibility-notice div { min-width: 0; }
 .compatibility-notice strong, .compatibility-notice span { display: block; }
 .compatibility-notice strong { color: var(--dashboard-status-warning); font-size: 0.76rem; }
 .compatibility-notice span, .refresh-warning span { margin-top: 0.12rem; color: var(--text-tertiary); font-size: 0.68rem; }
-.refresh-warning { border-color: var(--danger-border); border-left-color: var(--danger); background: var(--danger-bg); }
-.dashboard-grid { display: grid; gap: 1rem; align-items: start; }
-.dashboard-grid--workloads { grid-template-columns: minmax(0, 2fr) minmax(280px, 1fr); }
-.dashboard-grid--protection { grid-template-columns: minmax(0, 2fr) minmax(280px, 1fr); }
+.refresh-warning { border-color: var(--danger-border); border-left-color: var(--danger-text); background: var(--danger-bg); }
+.dashboard-grid { display: grid; gap: 0.9rem; align-items: stretch; }
+.dashboard-grid > :deep(.ops-panel) { height: 100%; }
+.dashboard-grid--workloads { grid-template-columns: minmax(0, 1.65fr) minmax(300px, 1fr); }
+.dashboard-grid--protection { grid-template-columns: minmax(0, 1.45fr) minmax(300px, 1fr); }
 .dashboard-grid--single { grid-template-columns: 1fr; }
 
 .dashboard-skeleton { display: grid; gap: 1rem; }
@@ -137,8 +141,11 @@ const selectedServerName = computed(() => serverStore.currentServer?.name
 
 @media (max-width: 620px) {
   .operations-dashboard { gap: 0.75rem; }
-  .dashboard-heading { min-height: 42px; }
+  .dashboard-heading { min-height: 58px; align-items: flex-start; }
   .dashboard-heading h1 { font-size: 1.25rem; }
+  .dashboard-heading p { display: block; line-height: 1.45; }
+  .dashboard-heading p span { display: none; }
+  .dashboard-heading__freshness { display: none; }
   .compatibility-notice, .refresh-warning { align-items: flex-start; }
   .compatibility-notice .ops-link { display: none; }
   .skeleton-grid { grid-template-columns: 1fr; }

@@ -254,7 +254,7 @@ async function handleLogin() {
 }
 
 .login-card__divider-icon {
-  color: rgba(var(--primary-rgb), 0.2);
+  color: var(--primary-text);
 }
 
 /* ---- Form ---- */
@@ -305,7 +305,7 @@ async function handleLogin() {
 }
 
 .login-form__input-wrap--focus .login-form__input-icon {
-  color: rgba(var(--primary-rgb), 0.6);
+  color: var(--primary-text);
 }
 
 .login-form__input {
@@ -346,7 +346,7 @@ async function handleLogin() {
   background: rgba(245, 158, 11, 0.09);
   border: 1px solid rgba(245, 158, 11, 0.2);
   border-radius: 12px;
-  color: #fbbf24;
+  color: var(--warning-text);
   font-size: 0.8rem;
   line-height: 1.4;
   animation: field-appear 0.4s cubic-bezier(0.16, 1, 0.3, 1) both;
@@ -366,7 +366,7 @@ async function handleLogin() {
   background: rgba(239, 68, 68, 0.08);
   border: 1px solid rgba(239, 68, 68, 0.15);
   border-radius: 12px;
-  color: #fca5a5;
+  color: var(--danger-text);
   font-size: 0.85rem;
   animation: field-appear 0.4s cubic-bezier(0.16, 1, 0.3, 1) both;
 }
@@ -383,7 +383,7 @@ async function handleLogin() {
   font-weight: 600;
   letter-spacing: 0.01em;
   cursor: pointer;
-  color: var(--primary-text-on);
+  color: var(--primary-action-text);
   background: linear-gradient(135deg, var(--primary-light) 0%, var(--primary) 50%, var(--primary-dark) 100%);
   box-shadow:
     0 2px 12px rgba(var(--primary-rgb), 0.2),

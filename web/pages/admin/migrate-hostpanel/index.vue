@@ -2146,12 +2146,12 @@ onUnmounted(() => {
   display: flex; align-items: center; justify-content: center;
   font-weight: 700; font-size: 0.8rem;
 }
-.stepper__item--active .stepper__num { background: var(--primary); color: #fff; border-color: var(--primary); }
+.stepper__item--active .stepper__num { background: var(--primary-action); color: var(--primary-action-text); border-color: var(--primary-action); }
 .stepper__item--done .stepper__num { background: rgba(34, 197, 94, 0.3); }
 .stepper__label { font-size: 0.85rem; font-weight: 500; }
 .stepper__item--clickable { cursor: pointer; }
-.stepper__item--clickable:hover .stepper__num { border-color: var(--primary); }
-.stepper__item--clickable:hover .stepper__label { color: var(--primary); }
+.stepper__item--clickable:hover .stepper__num { border-color: var(--primary-text); }
+.stepper__item--clickable:hover .stepper__label { color: var(--primary-text); }
 
 .card {
   background: var(--bg-surface); border: 1px solid var(--border);
@@ -2179,14 +2179,14 @@ onUnmounted(() => {
   border-radius: 8px; padding: 0.5rem 0.75rem; font-size: 0.85rem;
   color: var(--text-primary); font-family: inherit;
 }
-.form-input:focus { outline: none; border-color: var(--primary); }
+.form-input:focus { outline: none; border-color: var(--primary-text); }
 
 .btn { display: inline-flex; align-items: center; gap: 0.4rem; padding: 0.55rem 1.1rem; border-radius: 10px;
   border: none; font-size: 0.82rem; font-weight: 600; cursor: pointer; transition: all 0.18s ease; }
 .btn--sm { padding: 0.4rem 0.8rem; font-size: 0.75rem; border-radius: 8px; }
 .btn--primary {
-  background: linear-gradient(135deg, var(--primary-light), var(--primary-dark));
-  color: var(--primary-text-on);
+  background: linear-gradient(135deg, var(--primary-action), var(--primary-action-hover));
+  color: var(--primary-action-text);
   box-shadow: var(--shadow-button);
 }
 .btn--primary:hover:not(:disabled) { box-shadow: var(--shadow-button-hover); transform: translateY(-1px); }
@@ -2199,7 +2199,7 @@ onUnmounted(() => {
 .btn--ghost:hover:not(:disabled) { background: var(--bg-surface-hover); color: var(--text-heading); }
 
 .alert { padding: 0.65rem 0.85rem; border-radius: 10px; font-size: 0.82rem; margin-bottom: 0.75rem; }
-.alert--error { background: var(--danger-bg); border: 1px solid var(--danger-border); color: var(--danger-light); }
+.alert--error { background: var(--danger-bg); border: 1px solid var(--danger-border); color: var(--danger-text); }
 .alert--warning { background: var(--primary-bg); border: 1px solid var(--primary-border); color: var(--primary-text); }
 .alert__hint { width: 100%; font-size: 0.75rem; opacity: 0.75; margin-top: 0.4rem; }
 
@@ -2319,8 +2319,8 @@ onUnmounted(() => {
 
 .col code { font-family: 'JetBrains Mono', monospace; font-size: 0.78rem; }
 .col__sub { display: block; font-size: 0.7rem; color: var(--text-muted); margin-top: 0.1rem; }
-.col__err { display: block; font-size: 0.7rem; color: var(--danger-light); margin-top: 0.1rem; }
-.col__ok { display: inline-block; margin-left: 0.3rem; font-size: 0.85rem; color: var(--success-light); font-weight: 700; }
+.col__err { display: block; font-size: 0.7rem; color: var(--danger-text); margin-top: 0.1rem; }
+.col__ok { display: inline-block; margin-left: 0.3rem; font-size: 0.85rem; color: var(--success-text); font-weight: 700; }
 .col--check { display: flex; align-items: center; justify-content: center; }
 .col__suggest { display: block; margin-top: 0.25rem; }
 .col__suggest .btn { margin-right: 0.25rem; padding: 0.1rem 0.5rem; font-size: 0.7rem; }
@@ -2389,12 +2389,12 @@ onUnmounted(() => {
   border-radius: 6px; padding: 0.3rem 0.5rem; font-size: 0.78rem; font-family: inherit;
   color: var(--text-secondary);
 }
-.inline-input--invalid { border-color: var(--danger); box-shadow: 0 0 0 3px var(--danger-bg); }
-.inline-input--ok { border-color: var(--success); }
+.inline-input--invalid { border-color: var(--danger-text); box-shadow: 0 0 0 3px var(--danger-bg); }
+.inline-input--ok { border-color: var(--success-text); }
 
 .badge { display: inline-block; padding: 0.15rem 0.5rem; border-radius: 5px; font-size: 0.65rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.04em; }
-.badge--green { background: var(--success-bg); border: 1px solid var(--success-border); color: var(--success-light); }
-.badge--red { background: var(--danger-bg); border: 1px solid var(--danger-border); color: var(--danger-light); }
+.badge--green { background: var(--success-bg); border: 1px solid var(--success-border); color: var(--success-text); }
+.badge--red { background: var(--danger-bg); border: 1px solid var(--danger-border); color: var(--danger-text); }
 .badge--yellow { background: var(--primary-bg); border: 1px solid var(--primary-border); color: var(--primary-text); }
 
 /* ────── Кнопка-раскрывашка деталей сайта ────── */
@@ -2587,7 +2587,7 @@ onUnmounted(() => {
 }
 .form-textarea:focus {
   outline: none;
-  border-color: var(--primary);
+  border-color: var(--primary-text);
   box-shadow: var(--focus-ring);
 }
 .form-textarea--mono {
@@ -2609,7 +2609,7 @@ onUnmounted(() => {
   transition: border-color 0.15s ease;
 }
 .form-select:hover { border-color: var(--border-strong); }
-.form-select:focus { outline: none; border-color: var(--primary); }
+.form-select:focus { outline: none; border-color: var(--primary-text); }
 .form-select--sm { padding: 0.25rem 0.5rem; font-size: 0.74rem; border-radius: 6px; }
 
 /* ────── Чекбоксы (унифицированный стиль через accent-color) ────── */
@@ -2617,7 +2617,7 @@ onUnmounted(() => {
   width: 16px; height: 16px;
   margin: 0;
   cursor: pointer;
-  accent-color: var(--primary);
+  accent-color: var(--primary-text);
   flex-shrink: 0;
 }
 .mh-check:disabled { cursor: not-allowed; opacity: 0.45; }
@@ -2653,8 +2653,8 @@ onUnmounted(() => {
 .overall-progress__bar { flex: 1; height: 8px; background: var(--bg-input); border-radius: 4px; overflow: hidden; }
 .overall-progress__bar > span { display: block; height: 100%; background: linear-gradient(90deg, #34d399, #059669); transition: width 0.3s; }
 .overall-progress__label { font-weight: 600; font-size: 0.78rem; color: var(--text-secondary); min-width: 3rem; text-align: right; }
-.btn--danger { background: var(--danger-bg); border: 1px solid var(--danger-border); color: var(--danger-light); }
-.btn--danger:hover { background: var(--danger-bg); border-color: var(--danger); color: var(--danger); }
+.btn--danger { background: var(--danger-bg); border: 1px solid var(--danger-border); color: var(--danger-text); }
+.btn--danger:hover { background: var(--danger-bg); border-color: var(--danger-text); color: var(--danger-text); }
 
 /* btn--warning — амбер, в стиле alert--warning. Раньше класса не было,
    и кнопка «🧹 Очистить и повторить» рендерилась с белым фоном. */
@@ -2666,7 +2666,7 @@ onUnmounted(() => {
 }
 .btn--warning:hover:not(:disabled) {
   background: var(--primary-bg-hover);
-  border-color: var(--primary);
+  border-color: var(--primary-text);
 }
 .btn--warning:disabled { opacity: 0.5; cursor: not-allowed; }
 
@@ -2681,8 +2681,8 @@ onUnmounted(() => {
 .link:hover { filter: brightness(1.15); }
 .run-card__status { font-style: normal; font-size: 0.65rem; padding: 0.1rem 0.4rem; border-radius: 4px; background: var(--bg-input); color: var(--text-muted); margin-left: 0.4rem; }
 .run-card__http { font-style: normal; font-size: 0.65rem; padding: 0.1rem 0.4rem; border-radius: 4px; margin-left: 0.3rem; background: var(--bg-input); color: var(--text-muted); }
-.run-card__http--ok { background: var(--success-bg); color: var(--success-light); }
-.run-card__http--err { background: var(--danger-bg); color: var(--danger-light); }
+.run-card__http--ok { background: var(--success-bg); color: var(--success-text); }
+.run-card__http--err { background: var(--danger-bg); color: var(--danger-text); }
 .run-card__actions { display: flex; gap: 0.4rem; flex-wrap: wrap; margin-top: 0.6rem; padding-top: 0.6rem; border-top: 1px solid var(--border); }
 .run-card__actions a, .run-card__actions button { text-decoration: none; }
 .run-card { background: var(--bg-surface); border: 1px solid var(--border); border-radius: 10px; padding: 0.85rem; margin-bottom: 0.5rem; }
@@ -2693,7 +2693,7 @@ onUnmounted(() => {
 .run-card__name { font-weight: 600; }
 .run-card__domain { color: var(--text-muted); }
 .run-card__stage { font-family: 'JetBrains Mono', monospace; font-size: 0.72rem; color: var(--text-tertiary); }
-.run-card__pct { text-align: right; font-weight: 600; color: var(--primary); }
+.run-card__pct { text-align: right; font-weight: 600; color: var(--primary-text); }
 .run-card__bar { background: var(--bg-input); height: 4px; border-radius: 2px; overflow: hidden; margin-bottom: 0.4rem; position: relative; }
 .run-card__bar > span { display: block; height: 100%; background: linear-gradient(90deg, var(--primary-light), var(--primary-dark)); transition: width 0.3s; }
 /* spec §5.3 pulse: для не-rsync стейджей — индикативная анимация без точного процента */
@@ -2781,12 +2781,12 @@ onUnmounted(() => {
   color: var(--text-primary);
 }
 .saved-source:hover {
-  border-color: var(--primary);
+  border-color: var(--primary-text);
   background: var(--bg-surface-hover);
   transform: translateY(-1px);
 }
 .saved-source--active {
-  border-color: var(--primary);
+  border-color: var(--primary-text);
   background: var(--primary-bg);
   box-shadow: 0 0 0 2px var(--primary-border) inset;
 }
@@ -2844,7 +2844,7 @@ onUnmounted(() => {
 }
 .saved-source__delete:hover {
   background: var(--danger-bg);
-  color: var(--danger-light);
+  color: var(--danger-text);
 }
 
 /* ────── Form sections (SSH/MySQL grouping) ────── */

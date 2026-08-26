@@ -143,7 +143,7 @@ if (typeof window !== 'undefined') {
   transition: border-color 0.15s, box-shadow 0.15s;
 }
 .mb-confirm__input:focus {
-  border-color: var(--primary);
+  border-color: var(--primary-text);
   box-shadow: var(--focus-ring);
 }
 
@@ -173,16 +173,16 @@ if (typeof window !== 'undefined') {
 .mb-confirm__btn--ghost:hover { color: var(--text-primary); background: var(--bg-surface-hover); }
 
 .mb-confirm__btn--primary {
-  background: var(--primary);
-  color: var(--primary-text-on, #fff);
+  background: var(--primary-action);
+  color: var(--primary-action-text);
 }
-.mb-confirm__btn--primary:hover { filter: brightness(1.08); }
+.mb-confirm__btn--primary:hover { background: var(--primary-action-hover); }
 
 .mb-confirm__btn--danger {
-  background: var(--danger);
-  color: #fff;
+  background: var(--danger-action);
+  color: var(--danger-action-text);
 }
-.mb-confirm__btn--danger:hover { filter: brightness(1.08); }
+.mb-confirm__btn--danger:hover { background: var(--danger-action-hover); }
 
 .mb-confirm-enter-active, .mb-confirm-leave-active {
   transition: opacity 0.18s ease;

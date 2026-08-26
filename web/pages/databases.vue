@@ -746,9 +746,9 @@ onMounted(() => {
   letter-spacing: 0.03em;
 }
 
-.badge--mariadb { background: rgba(99, 102, 241, 0.1); color: #818cf8; }
-.badge--mysql { background: rgba(var(--primary-rgb), 0.1); color: var(--primary-light); }
-.badge--postgresql { background: rgba(59, 130, 246, 0.1); color: #60a5fa; }
+.badge--mariadb { background: rgba(99, 102, 241, 0.1); color: var(--violet-text); }
+.badge--mysql { background: rgba(var(--primary-rgb), 0.1); color: var(--primary-text); }
+.badge--postgresql { background: rgba(59, 130, 246, 0.1); color: var(--info-text); }
 
 .row-actions {
   display: flex;
@@ -766,14 +766,14 @@ onMounted(() => {
   transition: all 0.2s;
 }
 
-.row-action--amber { color: rgba(var(--primary-rgb), 0.4); }
+.row-action--amber { color: var(--primary-text); }
 .row-action--amber:hover { color: var(--primary-text); border-color: var(--primary-border); background: var(--primary-bg); }
-.row-action--red { color: rgba(239, 68, 68, 0.4); }
-.row-action--red:hover { color: #f87171; border-color: rgba(239, 68, 68, 0.2); background: rgba(239, 68, 68, 0.05); }
-.row-action--blue { color: rgba(59, 130, 246, 0.55); }
-.row-action--blue:hover:not(:disabled) { color: #60a5fa; border-color: rgba(59, 130, 246, 0.3); background: rgba(59, 130, 246, 0.08); }
-.row-action--green { color: rgba(34, 197, 94, 0.55); }
-.row-action--green:hover:not(:disabled) { color: #4ade80; border-color: rgba(34, 197, 94, 0.3); background: rgba(34, 197, 94, 0.08); }
+.row-action--red { color: var(--danger-text); }
+.row-action--red:hover { color: var(--danger-text); border-color: rgba(239, 68, 68, 0.2); background: rgba(239, 68, 68, 0.05); }
+.row-action--blue { color: var(--info-text); }
+.row-action--blue:hover:not(:disabled) { color: var(--info-text); border-color: rgba(59, 130, 246, 0.3); background: rgba(59, 130, 246, 0.08); }
+.row-action--green { color: var(--success-text); }
+.row-action--green:hover:not(:disabled) { color: var(--success-text); border-color: rgba(34, 197, 94, 0.3); background: rgba(34, 197, 94, 0.08); }
 .row-action:disabled { opacity: 0.5; cursor: wait; }
 
 .table-empty {
@@ -804,8 +804,8 @@ onMounted(() => {
 }
 
 .btn--primary {
-  background: linear-gradient(135deg, var(--primary-light), var(--primary-dark));
-  color: var(--primary-text-on);
+  background: linear-gradient(135deg, var(--primary-action), var(--primary-action-hover));
+  color: var(--primary-action-text);
 }
 
 .btn--primary:not(:disabled):hover { transform: translateY(-1px); box-shadow: 0 4px 16px rgba(var(--primary-rgb), 0.2); }
@@ -822,7 +822,7 @@ onMounted(() => {
 .btn--danger {
   background: rgba(239, 68, 68, 0.12);
   border: 1px solid rgba(239, 68, 68, 0.2);
-  color: #f87171;
+  color: var(--danger-text);
 }
 
 .btn--danger:not(:disabled):hover { background: rgba(239, 68, 68, 0.18); }
@@ -876,7 +876,7 @@ onMounted(() => {
 }
 
 .modal__error {
-  color: #f87171;
+  color: var(--danger-text);
   font-size: 0.78rem;
   margin-bottom: 0.75rem;
 }
@@ -993,7 +993,7 @@ select.form-input {
   width: 24px;
   height: 24px;
   border: 2px solid var(--spinner-track);
-  border-top-color: var(--primary);
+  border-top-color: var(--primary-text);
   border-radius: 50%;
   animation: spin 0.8s linear infinite;
 }
@@ -1002,7 +1002,7 @@ select.form-input {
   width: 14px;
   height: 14px;
   border: 2px solid var(--spinner-track);
-  border-top-color: var(--primary);
+  border-top-color: var(--primary-text);
   border-radius: 50%;
   animation: spin 0.6s linear infinite;
 }

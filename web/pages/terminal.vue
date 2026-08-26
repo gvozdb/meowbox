@@ -385,11 +385,11 @@ onUnmounted(() => {
 }
 
 .term-bar__status--connected .term-bar__status-dot { background: var(--success); }
-.term-bar__status--connected { color: var(--success); }
+.term-bar__status--connected { color: var(--success-text); }
 .term-bar__status--connecting .term-bar__status-dot { background: var(--primary); animation: dot-pulse 1s ease-in-out infinite; }
 .term-bar__status--connecting { color: var(--primary-text); }
 .term-bar__status--error .term-bar__status-dot { background: var(--danger); }
-.term-bar__status--error { color: var(--danger); }
+.term-bar__status--error { color: var(--danger-text); }
 
 .term-bar__btn {
   display: flex;
@@ -425,7 +425,7 @@ onUnmounted(() => {
 }
 .term-bar__btn--disconnect:hover {
   border-color: var(--danger-border);
-  color: var(--danger);
+  color: var(--danger-text);
   background: var(--danger-bg);
 }
 
@@ -472,7 +472,7 @@ onUnmounted(() => {
   width: 28px;
   height: 28px;
   border: 2px solid var(--spinner-track);
-  border-top-color: var(--primary);
+  border-top-color: var(--primary-text);
   border-radius: 50%;
   animation: spin 0.8s linear infinite;
 }
@@ -497,7 +497,7 @@ onUnmounted(() => {
 
 .term-overlay__icon--error {
   background: var(--danger-bg);
-  color: var(--danger);
+  color: var(--danger-text);
 }
 
 .term-overlay__heading {
@@ -522,8 +522,8 @@ onUnmounted(() => {
   padding: 0.55rem 1.25rem;
   border-radius: 8px;
   border: none;
-  background: var(--primary);
-  color: var(--primary-text-on);
+  background: var(--primary-action);
+  color: var(--primary-action-text);
   font-size: 0.8rem;
   font-weight: 600;
   font-family: inherit;

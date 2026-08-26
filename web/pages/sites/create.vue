@@ -710,7 +710,7 @@ const getCreatedPrimaryDomainId = computed(() => createdDomainId.value);
 .create-site__step-dot:disabled { cursor: default; }
 
 .create-site__step-dot--active {
-  border-color: var(--primary);
+  border-color: var(--primary-text);
   background: var(--primary-bg);
   color: var(--primary-text);
 }
@@ -718,7 +718,7 @@ const getCreatedPrimaryDomainId = computed(() => createdDomainId.value);
 .create-site__step-dot--done {
   border-color: rgba(34, 197, 94, 0.3);
   background: rgba(34, 197, 94, 0.1);
-  color: #4ade80;
+  color: var(--success-text);
 }
 
 .create-site__step-check { display: flex; }
@@ -823,7 +823,7 @@ const getCreatedPrimaryDomainId = computed(() => createdDomainId.value);
 }
 
 .create-site__domain-remove:hover {
-  color: var(--danger-light);
+  color: var(--danger-text);
   border-color: var(--danger-border);
 }
 
@@ -856,7 +856,7 @@ const getCreatedPrimaryDomainId = computed(() => createdDomainId.value);
 .module-card__checkbox {
   width: 18px;
   height: 18px;
-  accent-color: var(--primary);
+  accent-color: var(--primary-text);
   cursor: pointer;
 }
 
@@ -908,7 +908,7 @@ const getCreatedPrimaryDomainId = computed(() => createdDomainId.value);
   cursor: pointer;
 }
 
-.module-sub input { accent-color: var(--primary); }
+.module-sub input { accent-color: var(--primary-text); }
 
 .create-site__group-title {
   font-size: 0.8rem;
@@ -927,7 +927,7 @@ const getCreatedPrimaryDomainId = computed(() => createdDomainId.value);
 }
 
 .create-site__group-desc .link {
-  color: var(--primary);
+  color: var(--primary-text);
   text-decoration: none;
 }
 
@@ -962,7 +962,7 @@ const getCreatedPrimaryDomainId = computed(() => createdDomainId.value);
   color: var(--text-tertiary);
 }
 
-.form-required { color: var(--primary); }
+.form-required { color: var(--primary-text); }
 
 .form-input {
   background: var(--bg-input);
@@ -1085,7 +1085,7 @@ const getCreatedPrimaryDomainId = computed(() => createdDomainId.value);
 }
 
 .alias-remove:hover {
-  color: var(--danger-light);
+  color: var(--danger-text);
   background: var(--danger-bg);
   border-color: var(--danger-border);
 }
@@ -1136,7 +1136,7 @@ const getCreatedPrimaryDomainId = computed(() => createdDomainId.value);
 }
 
 .create-site__env-remove:hover {
-  color: var(--danger-light);
+  color: var(--danger-text);
   background: var(--danger-bg);
   border-color: var(--danger-border);
 }
@@ -1270,7 +1270,7 @@ const getCreatedPrimaryDomainId = computed(() => createdDomainId.value);
   border-radius: 10px;
   background: var(--danger-bg);
   border: 1px solid var(--danger-border);
-  color: var(--danger-light);
+  color: var(--danger-text);
   font-size: 0.82rem;
   margin-bottom: 1rem;
 }
@@ -1307,8 +1307,8 @@ const getCreatedPrimaryDomainId = computed(() => createdDomainId.value);
 }
 
 .create-site__btn--primary {
-  background: linear-gradient(135deg, var(--primary-light), var(--primary-dark));
-  color: var(--primary-text-on);
+  background: linear-gradient(135deg, var(--primary-action), var(--primary-action-hover));
+  color: var(--primary-action-text);
   box-shadow: var(--shadow-button);
 }
 
@@ -1332,7 +1332,7 @@ const getCreatedPrimaryDomainId = computed(() => createdDomainId.value);
   width: 14px;
   height: 14px;
   border: 2px solid var(--spinner-track);
-  border-top-color: var(--primary-text-on);
+  border-top-color: var(--primary-action-text);
   border-radius: 50%;
   animation: spin 0.6s linear infinite;
 }
@@ -1361,8 +1361,8 @@ const getCreatedPrimaryDomainId = computed(() => createdDomainId.value);
 }
 
 .provision-status--running { color: var(--primary-text); }
-.provision-status--success { color: #4ade80; }
-.provision-status--error { color: var(--danger-light); }
+.provision-status--success { color: var(--success-text); }
+.provision-status--error { color: var(--danger-text); }
 
 .provision-log {
   background: #0f0f13;
@@ -1388,8 +1388,8 @@ const getCreatedPrimaryDomainId = computed(() => createdDomainId.value);
   padding: 1px 0;
 }
 
-.provision-log__line--warn { color: var(--primary-light); }
-.provision-log__line--error { color: #f87171; }
+.provision-log__line--warn { color: var(--primary-text); }
+.provision-log__line--error { color: var(--danger-text); }
 
 @media (max-width: 768px) {
   .create-site { max-width: 100%; }

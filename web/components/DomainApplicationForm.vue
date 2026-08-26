@@ -451,7 +451,7 @@ function onPresetChange(): void {
   font-weight: 500;
   color: var(--text-tertiary);
 }
-.domain-app-form__label span { color: var(--primary); }
+.domain-app-form__label span { color: var(--primary-text); }
 .domain-app-form__input,
 .domain-app-form__select {
   width: 100%;
@@ -478,7 +478,7 @@ function onPresetChange(): void {
   font-size: 0.68rem;
   line-height: 1.45;
 }
-.domain-app-form__warning { color: var(--danger-light) !important; }
+.domain-app-form__warning { color: var(--danger-text) !important; }
 .domain-app-form__list-row {
   display: flex;
   align-items: center;
@@ -500,7 +500,7 @@ function onPresetChange(): void {
   flex: 0 0 36px;
   font-size: 1.15rem;
 }
-.domain-app-form__remove:hover { color: var(--danger-light); border-color: var(--danger-border); }
+.domain-app-form__remove:hover { color: var(--danger-text); border-color: var(--danger-border); }
 .domain-app-form__add {
   align-self: flex-start;
   border-style: dashed;
@@ -522,7 +522,7 @@ function onPresetChange(): void {
   cursor: pointer;
 }
 .domain-app-form__module--locked .domain-app-form__module-head { cursor: default; }
-.domain-app-form__module-head > input { width: 18px; height: 18px; accent-color: var(--primary); }
+.domain-app-form__module-head > input { width: 18px; height: 18px; accent-color: var(--primary-text); }
 .domain-app-form__module-head > span {
   display: flex;
   flex: 1;

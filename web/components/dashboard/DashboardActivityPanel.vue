@@ -27,15 +27,16 @@ function resultLabel(result: DashboardActivityItem['result']) {
 
 <style scoped>
 .section-actions { display: flex; align-items: center; gap: 0.7rem; }
-.activity-list { margin: 0; padding: 0; list-style: none; }
-.activity-list li { display: grid; grid-template-columns: 62px minmax(0, 1fr) auto; align-items: center; gap: 0.7rem; padding: 0.65rem 1rem; border-bottom: 1px solid var(--border); }
+.activity-panel { overflow: hidden; }
+.activity-list { margin: 0; padding: 0.28rem 0.75rem; list-style: none; }
+.activity-list li { display: grid; grid-template-columns: 66px minmax(0, 1fr) auto; align-items: center; gap: 0.72rem; min-height: 48px; padding: 0.45rem 0.35rem; border-bottom: 1px solid var(--border); }
 .activity-list li:last-child { border-bottom: 0; }
-.result { color: var(--text-muted); font: 650 0.58rem 'JetBrains Mono', monospace; text-transform: uppercase; }
+.result { justify-self: start; padding: 0.22rem 0.34rem; border: 1px solid currentColor; border-radius: 5px; color: var(--text-muted); font: 700 0.54rem 'JetBrains Mono', monospace; text-transform: uppercase; }
 .result--success { color: var(--dashboard-status-success); }
 .result--failed { color: var(--dashboard-status-danger); }
 .activity-copy { min-width: 0; }
 .activity-copy strong, .activity-copy small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.activity-copy strong { color: var(--text-secondary); font-size: 0.72rem; }
+.activity-copy strong { color: var(--text-primary); font-size: 0.72rem; }
 .activity-copy small { margin-top: 0.1rem; color: var(--text-muted); font-size: 0.62rem; }
 .activity-list time { color: var(--text-muted); font-size: 0.62rem; }
 

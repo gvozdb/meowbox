@@ -342,7 +342,7 @@ onMounted(() => {
 .updates-page__btn--upgrade {
   background: rgba(34, 197, 94, 0.06);
   border-color: rgba(34, 197, 94, 0.2);
-  color: #4ade80;
+  color: var(--success-text);
 }
 
 .updates-page__btn--upgrade:hover:not(:disabled) {
@@ -359,7 +359,7 @@ onMounted(() => {
   width: 14px;
   height: 14px;
   border: 2px solid var(--spinner-track);
-  border-top-color: var(--primary);
+  border-top-color: var(--primary-text);
   border-radius: 50%;
   animation: spin 0.6s linear infinite;
 }
@@ -442,32 +442,32 @@ onMounted(() => {
 
 .version-card__icon--nodejs {
   background: rgba(34, 197, 94, 0.08);
-  color: #4ade80;
+  color: var(--success-text);
 }
 
 .version-card__icon--nginx {
   background: rgba(34, 197, 94, 0.08);
-  color: #4ade80;
+  color: var(--success-text);
 }
 
 .version-card__icon--php {
   background: rgba(139, 92, 246, 0.08);
-  color: #a78bfa;
+  color: var(--violet-text);
 }
 
 .version-card__icon--mariadb {
   background: rgba(59, 130, 246, 0.08);
-  color: #60a5fa;
+  color: var(--info-text);
 }
 
 .version-card__icon--postgresql {
   background: rgba(59, 130, 246, 0.08);
-  color: #60a5fa;
+  color: var(--info-text);
 }
 
 .version-card__icon--redis {
   background: rgba(239, 68, 68, 0.08);
-  color: #f87171;
+  color: var(--danger-text);
 }
 
 .version-card__icon--pm2 {
@@ -530,7 +530,7 @@ onMounted(() => {
 }
 
 .updates-empty__text--ok {
-  color: #4ade80;
+  color: var(--success-text);
 }
 
 .updates-loading {
@@ -607,7 +607,7 @@ onMounted(() => {
 }
 
 .update-item__new {
-  color: #4ade80;
+  color: var(--success-text);
 }
 
 .update-item__versions svg {
@@ -619,7 +619,7 @@ onMounted(() => {
   border-radius: 7px;
   border: 1px solid rgba(139, 92, 246, 0.2);
   background: rgba(139, 92, 246, 0.06);
-  color: #a78bfa;
+  color: var(--violet-text);
   font-size: 0.72rem;
   font-weight: 600;
   font-family: inherit;

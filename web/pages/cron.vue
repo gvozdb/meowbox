@@ -300,14 +300,14 @@ onMounted(async () => {
   background: rgba(var(--primary-rgb), 0.08);
   border: 1px solid rgba(var(--primary-rgb), 0.2);
   border-radius: 10px;
-  font-size: 0.78rem; color: rgba(var(--primary-rgb), 0.9);
+  font-size: 0.78rem; color: var(--primary-text);
   margin-bottom: 1rem;
 }
 .cron__system-banner strong { color: var(--text-secondary); font-weight: 600; }
 .cron__system-banner svg { flex-shrink: 0; }
 .job-card__root-mark {
   display: inline-block; margin-right: 0.3rem;
-  color: var(--primary-light); font-size: 0.85rem; font-weight: 700;
+  color: var(--primary-text); font-size: 0.85rem; font-weight: 700;
 }
 .job-card__badge {
   display: inline-block;
@@ -316,7 +316,7 @@ onMounted(async () => {
   font-size: 0.6rem; font-weight: 600;
   border-radius: 4px;
   background: rgba(99, 102, 241, 0.12);
-  color: rgb(129, 140, 248);
+  color: var(--violet-text);
   text-transform: uppercase; letter-spacing: 0.04em;
   vertical-align: middle;
 }
@@ -355,7 +355,7 @@ onMounted(async () => {
 
 .job-card__schedule { text-align: right; flex-shrink: 0; display: flex; flex-direction: column; align-items: flex-end; gap: 0.1rem; }
 .job-card__schedule-label { font-size: 0.72rem; color: var(--text-tertiary); }
-.job-card__schedule-cron { font-size: 0.65rem; font-family: 'JetBrains Mono', monospace; color: rgba(var(--primary-rgb), 0.5); background: none; padding: 0; }
+.job-card__schedule-cron { font-size: 0.65rem; font-family: 'JetBrains Mono', monospace; color: var(--primary-text); background: none; padding: 0; }
 
 .job-card__actions { display: flex; gap: 0.3rem; flex-shrink: 0; margin-left: 0.5rem; }
 
@@ -372,8 +372,8 @@ onMounted(async () => {
   font-size: 0.65rem; font-weight: 600; font-family: 'JetBrains Mono', monospace;
   padding: 0.15rem 0.4rem; border-radius: 5px;
 }
-.job-card__log-exit--ok { background: rgba(34, 197, 94, 0.1); color: #4ade80; }
-.job-card__log-exit--fail { background: rgba(239, 68, 68, 0.1); color: #f87171; }
+.job-card__log-exit--ok { background: rgba(34, 197, 94, 0.1); color: var(--success-text); }
+.job-card__log-exit--fail { background: rgba(239, 68, 68, 0.1); color: var(--danger-text); }
 .job-card__log-output {
   background: var(--bg-input); border: 1px solid var(--border);
   border-radius: 8px; padding: 0.5rem 0.65rem; margin: 0;
@@ -388,7 +388,7 @@ onMounted(async () => {
   padding: 0.35rem; cursor: pointer; display: flex; color: var(--text-faint); transition: all 0.2s;
 }
 .row-action:hover { color: var(--text-tertiary); border-color: var(--border-strong); }
-.row-action--red:hover { color: #f87171; border-color: rgba(239, 68, 68, 0.2); background: rgba(239, 68, 68, 0.05); }
+.row-action--red:hover { color: var(--danger-text); border-color: rgba(239, 68, 68, 0.2); background: rgba(239, 68, 68, 0.05); }
 
 .empty-card {
   display: flex; flex-direction: column; align-items: center; padding: 2.5rem 1rem;
@@ -431,12 +431,12 @@ onMounted(async () => {
   font-family: inherit; cursor: pointer; transition: all 0.2s; white-space: nowrap;
 }
 .btn--sm { padding: 0.4rem 0.8rem; font-size: 0.75rem; border-radius: 8px; }
-.btn--primary { background: linear-gradient(135deg, var(--primary-light), var(--primary-dark)); color: var(--primary-text-on); }
+.btn--primary { background: linear-gradient(135deg, var(--primary-action), var(--primary-action-hover)); color: var(--primary-action-text); }
 .btn--primary:not(:disabled):hover { transform: translateY(-1px); box-shadow: 0 4px 16px rgba(var(--primary-rgb), 0.2); }
 .btn--primary:disabled { opacity: 0.4; cursor: not-allowed; }
 .btn--ghost { background: var(--bg-input); border: 1px solid var(--border-strong); color: var(--text-tertiary); }
 .btn--ghost:hover { color: var(--text-secondary); border-color: var(--border-strong); }
-.btn--danger { background: rgba(239, 68, 68, 0.12); border: 1px solid rgba(239, 68, 68, 0.2); color: #f87171; }
+.btn--danger { background: rgba(239, 68, 68, 0.12); border: 1px solid rgba(239, 68, 68, 0.2); color: var(--danger-text); }
 .btn--danger:not(:disabled):hover { background: rgba(239, 68, 68, 0.18); }
 .btn--danger:disabled { opacity: 0.4; cursor: not-allowed; }
 
@@ -451,7 +451,7 @@ onMounted(async () => {
 .modal__desc { font-size: 0.82rem; color: var(--text-tertiary); margin: 0 0 1.25rem; line-height: 1.5; }
 .modal__desc strong { color: var(--text-secondary); }
 .modal__fields { display: flex; flex-direction: column; gap: 0.85rem; margin-bottom: 1rem; }
-.modal__error { color: #f87171; font-size: 0.78rem; margin-bottom: 0.75rem; }
+.modal__error { color: var(--danger-text); font-size: 0.78rem; margin-bottom: 0.75rem; }
 .modal__actions { display: flex; gap: 0.5rem; justify-content: flex-end; }
 
 @keyframes modalIn { from { opacity: 0; transform: scale(0.96) translateY(8px); } to { opacity: 1; transform: scale(1) translateY(0); } }

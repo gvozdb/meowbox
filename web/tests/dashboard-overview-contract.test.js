@@ -32,12 +32,6 @@ function contrastRatio(foreground, background) {
     / (Math.min(foregroundLuminance, backgroundLuminance) + 0.05);
 }
 
-function blend(foreground, alpha, background) {
-  return foreground.map((channel, index) => Math.round(
-    (channel * alpha) + (background[index] * (1 - alpha)),
-  ));
-}
-
 function webSourceFiles(directory) {
   return readdirSync(directory, { withFileTypes: true }).flatMap((entry) => {
     if (entry.name === 'node_modules' || entry.name === '.nuxt' || entry.name === '.output' || entry.name === 'tests') {
@@ -45,8 +39,22 @@ function webSourceFiles(directory) {
     }
     const absolute = resolve(directory, entry.name);
     if (entry.isDirectory()) return webSourceFiles(absolute);
-    return /\.(?:ts|vue)$/.test(entry.name) ? [absolute] : [];
+    return /\.(?:ts|vue|css)$/.test(entry.name) ? [absolute] : [];
   });
+}
+
+function cssBlock(source, selector) {
+  const escaped = selector.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const match = source.match(new RegExp(`(?:^|\\n)${escaped}\\s*\\{([^}]*)\\}`));
+  assert.ok(match, `missing CSS block ${selector}`);
+  return match[1];
+}
+
+function hexVariable(block, name) {
+  const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const match = block.match(new RegExp(`${escaped}:\\s*(#[0-9a-f]{6})`, 'i'));
+  assert.ok(match, `missing hex variable ${name}`);
+  return [1, 3, 5].map((offset) => Number.parseInt(match[1].slice(offset, offset + 2), 16));
 }
 
 test('web keeps the CommonJS shared package type-only', () => {
@@ -125,36 +133,53 @@ test('dashboard states and progress remain accessible without color or motion', 
   assert.match(globalCss, /@media \(max-width: 620px\)[\s\S]*min-height: 44px/);
 });
 
-test('dashboard text palette meets WCAG AA contrast in dark and light themes', () => {
-  for (const declaration of [
-    '--text-tertiary: rgba(255, 255, 255, 0.58)',
-    '--text-muted: rgba(255, 255, 255, 0.5)',
-    '--text-tertiary: rgba(0, 0, 0, 0.62)',
-    '--text-muted: rgba(0, 0, 0, 0.56)',
-    '--dashboard-status-success: #15803d',
-    '--dashboard-status-warning: #92400e',
-    '--dashboard-status-danger: #b91c1c',
-  ]) {
-    assert.ok(page.includes(declaration), `missing accessible token ${declaration}`);
+test('global text and action palettes meet WCAG AA contrast', () => {
+  const rootBlock = cssBlock(globalCss, ':root');
+  const lightBlock = cssBlock(globalCss, 'html.theme-light');
+  const darkBackground = [10, 10, 15];
+  const lightBackground = [243, 244, 246];
+  const textTokens = [
+    '--text-primary', '--text-heading', '--text-secondary', '--text-tertiary',
+    '--text-muted', '--text-faint', '--text-placeholder', '--success-text',
+    '--danger-text', '--warning-text', '--info-text', '--violet-text',
+    '--orange-text', '--pink-text',
+  ];
+
+  for (const token of textTokens) {
+    assert.ok(contrastRatio(hexVariable(rootBlock, token), darkBackground) >= 4.5, `${token} fails dark AA`);
+    assert.ok(contrastRatio(hexVariable(lightBlock, token), lightBackground) >= 4.5, `${token} fails light AA`);
   }
 
-  const darkBackground = [10, 10, 15];
-  const lightBackground = [255, 255, 255];
-  const pairs = [
-    [blend([255, 255, 255], 0.58, darkBackground), darkBackground],
-    [blend([255, 255, 255], 0.5, darkBackground), darkBackground],
-    [blend([0, 0, 0], 0.62, lightBackground), lightBackground],
-    [blend([0, 0, 0], 0.56, lightBackground), lightBackground],
-    [[74, 222, 128], darkBackground],
-    [[251, 191, 36], darkBackground],
-    [[248, 113, 113], darkBackground],
-    [[21, 128, 61], lightBackground],
-    [[146, 64, 14], lightBackground],
-    [[185, 28, 28], lightBackground],
-  ];
-  for (const [foreground, background] of pairs) {
-    assert.ok(contrastRatio(foreground, background) >= 4.5);
+  for (const palette of ['amber', 'violet', 'emerald', 'sapphire', 'rose', 'teal', 'fuchsia']) {
+    const darkPaletteBlock = cssBlock(globalCss, `html.palette-${palette}`);
+    const lightPaletteBlock = cssBlock(globalCss, `html.theme-light.palette-${palette}`);
+    assert.ok(contrastRatio(hexVariable(darkPaletteBlock, '--primary-text'), darkBackground) >= 4.5, `${palette} accent fails dark AA`);
+    assert.ok(contrastRatio(hexVariable(lightPaletteBlock, '--primary-text'), lightBackground) >= 4.5, `${palette} accent fails light AA`);
+    for (const token of ['--primary-action', '--primary-action-hover']) {
+      assert.ok(
+        contrastRatio(hexVariable(darkPaletteBlock, token), [255, 255, 255]) >= 4.5,
+        `${palette} ${token} fails AA`,
+      );
+    }
   }
+  for (const token of ['--danger-action', '--danger-action-hover', '--info-action', '--info-action-hover']) {
+    assert.ok(contrastRatio(hexVariable(rootBlock, token), [255, 255, 255]) >= 4.5, `${token} fails AA`);
+  }
+
+  assert.doesNotMatch(page, /--text-(?:tertiary|muted):/);
+  assert.match(page, /--dashboard-status-success: var\(--success-text\)/);
+  assert.match(page, /Операционный центр/);
+  assert.doesNotMatch(page, /Operations control room|Problems Inbox/);
+});
+
+test('theme-aware semantic colors replace light-only foreground colors', () => {
+  const forbiddenForeground = /(?<![-\w])color\s*:\s*(?:var\(--(?:primary|primary-light|success|success-light|danger|danger-light)\)|#(?:4ade80|86efac|22c55e|f87171|fca5a5|fda4a4|ef4444|60a5fa|38bdf8|818cf8|a78bfa|fbbf24|fcd34d|fdba74)|rgb\((?:52,\s*211,\s*153|56,\s*189,\s*248|96,\s*165,\s*250|129,\s*140,\s*248|147,\s*197,\s*253|168,\s*85,\s*247|192,\s*132,\s*252|229,\s*115,\s*115|244,\s*114,\s*182|248,\s*113,\s*113|250,\s*204,\s*21|251,\s*146,\s*60)\)|rgba\(\s*(?:var\(--primary-rgb\)|34,\s*197,\s*94|59,\s*130,\s*246|129,\s*140,\s*248|139,\s*92,\s*246|168,\s*85,\s*247|239,\s*68,\s*68|252,\s*165,\s*165)\s*,)/i;
+  for (const file of webSourceFiles(root)) {
+    assert.doesNotMatch(readFileSync(file, 'utf8'), forbiddenForeground, file);
+  }
+  assert.match(globalCss, /--primary-action: #a16207/);
+  assert.match(globalCss, /--danger-action: #b91c1c/);
+  assert.match(globalCss, /--info-action: #1d4ed8/);
 });
 
 test('closed mobile navigation stays out of keyboard order', () => {

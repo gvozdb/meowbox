@@ -192,12 +192,12 @@ async function handleSetup() {
 
 .login-card__mascot { display: flex; justify-content: center; margin-bottom: 0.5rem; }
 .login-card__brand { text-align: center; margin-bottom: 1.5rem; }
-.login-card__title { font-size: 1.5rem; font-weight: 700; letter-spacing: -0.02em; background: linear-gradient(135deg, var(--primary-light), var(--primary-dark)); -webkit-background-clip: text; -webkit-text-fill-color: transparent; background-clip: text; margin: 0; }
+.login-card__title { margin: 0; color: var(--primary-text); font-size: 1.5rem; font-weight: 700; letter-spacing: -0.02em; }
 .login-card__subtitle { color: var(--text-muted); font-size: 0.8rem; letter-spacing: 0.08em; text-transform: uppercase; margin-top: 0.25rem; }
 
 .login-card__divider { display: flex; align-items: center; gap: 0.75rem; margin-bottom: 1.75rem; }
 .login-card__divider-line { flex: 1; height: 1px; background: linear-gradient(90deg, transparent, rgba(var(--primary-rgb), 0.15), transparent); }
-.login-card__divider-icon { color: rgba(var(--primary-rgb), 0.2); }
+.login-card__divider-icon { color: var(--primary-text); }
 
 .login-form { display: flex; flex-direction: column; gap: 1.25rem; }
 .login-form__field { animation: field-appear 0.6s cubic-bezier(0.16, 1, 0.3, 1) both; }
@@ -211,16 +211,16 @@ async function handleSetup() {
 .login-form__input-wrap--focus { border-color: rgba(var(--primary-rgb), 0.3); background: rgba(var(--primary-rgb), 0.03); box-shadow: var(--focus-ring); }
 
 .login-form__input-icon { color: var(--text-faint); flex-shrink: 0; transition: color 0.3s; }
-.login-form__input-wrap--focus .login-form__input-icon { color: rgba(var(--primary-rgb), 0.6); }
+.login-form__input-wrap--focus .login-form__input-icon { color: var(--primary-text); }
 
 .login-form__input { flex: 1; background: none; border: none; outline: none; color: var(--text-heading); font-family: 'DM Sans', sans-serif; font-size: 0.95rem; padding: 0.85rem 0; width: 100%; }
 .login-form__input::placeholder { color: var(--text-placeholder); }
 
-.login-form__error { display: flex; align-items: center; gap: 0.5rem; padding: 0.65rem 1rem; background: rgba(239, 68, 68, 0.08); border: 1px solid rgba(239, 68, 68, 0.15); border-radius: 12px; color: #fca5a5; font-size: 0.85rem; }
+.login-form__error { display: flex; align-items: center; gap: 0.5rem; padding: 0.65rem 1rem; background: rgba(239, 68, 68, 0.08); border: 1px solid rgba(239, 68, 68, 0.15); border-radius: 12px; color: var(--danger-text); font-size: 0.85rem; }
 
-.login-form__success { display: flex; align-items: center; gap: 0.5rem; padding: 0.65rem 1rem; background: rgba(34, 197, 94, 0.08); border: 1px solid rgba(34, 197, 94, 0.15); border-radius: 12px; color: #86efac; font-size: 0.85rem; }
+.login-form__success { display: flex; align-items: center; gap: 0.5rem; padding: 0.65rem 1rem; background: rgba(34, 197, 94, 0.08); border: 1px solid rgba(34, 197, 94, 0.15); border-radius: 12px; color: var(--success-text); font-size: 0.85rem; }
 
-.login-form__submit { width: 100%; padding: 0.9rem; border: none; border-radius: 14px; font-family: 'DM Sans', sans-serif; font-size: 0.95rem; font-weight: 600; cursor: pointer; color: var(--primary-text-on); background: linear-gradient(135deg, var(--primary-light) 0%, var(--primary) 50%, var(--primary-dark) 100%); box-shadow: 0 2px 12px rgba(var(--primary-rgb), 0.2); transition: all 0.3s cubic-bezier(0.16, 1, 0.3, 1); }
+.login-form__submit { width: 100%; padding: 0.9rem; border: none; border-radius: 14px; font-family: 'DM Sans', sans-serif; font-size: 0.95rem; font-weight: 600; cursor: pointer; color: var(--primary-action-text); background: linear-gradient(135deg, var(--primary-light) 0%, var(--primary) 50%, var(--primary-dark) 100%); box-shadow: 0 2px 12px rgba(var(--primary-rgb), 0.2); transition: all 0.3s cubic-bezier(0.16, 1, 0.3, 1); }
 .login-form__submit:hover:not(:disabled) { transform: translateY(-1px); box-shadow: 0 4px 20px rgba(var(--primary-rgb), 0.3); }
 .login-form__submit--loading { pointer-events: none; opacity: 0.7; }
 .login-form__spinner { display: inline-flex; animation: spin 1s linear infinite; }

@@ -416,7 +416,7 @@ onBeforeUnmount(() => stopPolling());
   justify-content: center;
   border-radius: 14px;
   background: rgba(var(--primary-rgb), 0.1);
-  color: var(--primary, var(--primary));
+  color: var(--primary-text);
   border: 1px solid rgba(var(--primary-rgb), 0.25);
 }
 .panel-updates__hero-text { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 0.4rem; }
@@ -529,7 +529,7 @@ onBeforeUnmount(() => stopPolling());
 .stage--done {
   border-color: rgba(34, 197, 94, 0.3);
   background: rgba(34, 197, 94, 0.05);
-  color: #4ade80;
+  color: var(--success-text);
 }
 .stage--current {
   border-color: rgba(var(--primary-rgb), 0.45);
@@ -539,7 +539,7 @@ onBeforeUnmount(() => stopPolling());
 .stage--failed {
   border-color: rgba(239, 68, 68, 0.4);
   background: rgba(239, 68, 68, 0.08);
-  color: #fca5a5;
+  color: var(--danger-text);
 }
 .stage__icon {
   display: inline-flex;
@@ -577,8 +577,8 @@ onBeforeUnmount(() => stopPolling());
   letter-spacing: 0.05em;
   color: var(--text-muted);
 }
-.history-row--succeeded { color: #4ade80; }
-.history-row--failed { color: #fca5a5; }
+.history-row--succeeded { color: var(--success-text); }
+.history-row--failed { color: var(--danger-text); }
 .history-row__ver {
   font-family: 'JetBrains Mono', monospace;
   font-size: 0.78rem;
@@ -600,7 +600,7 @@ onBeforeUnmount(() => stopPolling());
 .history-row__delete:hover:not(:disabled) {
   background: rgba(239, 68, 68, 0.08);
   border-color: rgba(239, 68, 68, 0.3);
-  color: #fca5a5;
+  color: var(--danger-text);
 }
 .history-row__delete:disabled {
   opacity: 0.5;
@@ -616,7 +616,7 @@ onBeforeUnmount(() => stopPolling());
 .alert--err {
   background: rgba(239, 68, 68, 0.08);
   border: 1px solid rgba(239, 68, 68, 0.3);
-  color: #fca5a5;
+  color: var(--danger-text);
 }
 .logs-block {
   margin-top: 0.75rem;
@@ -691,7 +691,7 @@ onBeforeUnmount(() => stopPolling());
 .btn--ok {
   background: rgba(34, 197, 94, 0.1);
   border-color: rgba(34, 197, 94, 0.3);
-  color: #4ade80;
+  color: var(--success-text);
 }
 .btn--ghost {
   border-color: var(--border-secondary);

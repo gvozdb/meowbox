@@ -199,8 +199,8 @@ onMounted(() => { refreshAll(); });
 }
 .btn:hover:not(:disabled) { border-color: var(--primary-border); color: var(--primary-text); background: var(--primary-bg); }
 .btn:disabled { opacity: 0.5; cursor: not-allowed; }
-.btn--primary { background: linear-gradient(135deg, var(--primary), var(--primary-dark)); color: #fff; border-color: transparent; }
-.btn--primary:hover:not(:disabled) { background: linear-gradient(135deg, var(--primary-dark), var(--primary)); color: #fff; }
+.btn--primary { background: linear-gradient(135deg, var(--primary-action), var(--primary-action-hover)); color: var(--primary-action-text); border-color: transparent; }
+.btn--primary:hover:not(:disabled) { background: linear-gradient(135deg, var(--primary-action-hover), var(--primary-action)); color: var(--primary-action-text); }
 .btn--small { padding: 0.25rem 0.6rem; font-size: 0.72rem; border-radius: 6px; }
 
 .spinning { display: inline-block; animation: spin 0.8s linear infinite; }
@@ -212,7 +212,7 @@ onMounted(() => { refreshAll(); });
   background: var(--bg-elevated); color: var(--text-secondary); font-size: 0.8rem;
   font-family: inherit; min-width: 200px;
 }
-.dns-input:focus { outline: none; border-color: var(--primary); }
+.dns-input:focus { outline: none; border-color: var(--primary-text); }
 
 .dns-empty { padding: 3rem; text-align: center; color: var(--text-faint); background: var(--bg-surface); border-radius: 14px; border: 1px solid var(--border); }
 .dns-empty p { margin: 0 0 1rem 0; }
@@ -250,12 +250,12 @@ onMounted(() => { refreshAll(); });
 .site-chip--more:hover { color: var(--text-muted); border-color: var(--border-secondary); background: transparent; }
 
 .dns-badge { display: inline-block; padding: 0.15rem 0.5rem; border-radius: 6px; font-size: 0.65rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em; }
-.dns-badge--cloudflare { background: rgba(244, 129, 32, 0.15); color: #f48120; }
-.dns-badge--yandex_cloud { background: rgba(255, 196, 0, 0.15); color: #ffc400; }
-.dns-badge--yandex_360 { background: rgba(255, 0, 0, 0.12); color: #ff3333; }
-.dns-badge--vk_cloud { background: rgba(0, 119, 255, 0.15); color: #0077ff; }
+.dns-badge--cloudflare { background: rgba(244, 129, 32, 0.15); color: var(--orange-text); }
+.dns-badge--yandex_cloud { background: rgba(255, 196, 0, 0.15); color: var(--warning-text); }
+.dns-badge--yandex_360 { background: rgba(255, 0, 0, 0.12); color: var(--danger-text); }
+.dns-badge--vk_cloud { background: rgba(0, 119, 255, 0.15); color: var(--info-text); }
 
 .dns-status { display: inline-block; padding: 0.1rem 0.45rem; border-radius: 4px; font-size: 0.65rem; text-transform: uppercase; }
-.dns-status--active { background: rgba(34, 197, 94, 0.12); color: #22c55e; }
-.dns-status--error { background: rgba(239, 68, 68, 0.12); color: #ef4444; }
+.dns-status--active { background: rgba(34, 197, 94, 0.12); color: var(--success-text); }
+.dns-status--error { background: rgba(239, 68, 68, 0.12); color: var(--danger-text); }
 </style>

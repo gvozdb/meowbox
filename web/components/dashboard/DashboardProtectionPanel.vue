@@ -50,16 +50,17 @@ const nearestExpiry = computed(() => props.protection.ssl.nearestExpiryDays === 
 </script>
 
 <style scoped>
-.protection-grid { display: grid; grid-template-columns: 1fr 1fr; }
-.protection-grid article { min-width: 0; padding: 1rem; }
+.protection-panel { overflow: hidden; }
+.protection-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 0.65rem; padding: 0.72rem; }
+.protection-grid article { min-width: 0; padding: 0.85rem; border: 1px solid var(--border); border-radius: 10px; background: var(--bg-body); }
 .protection-grid article + article { border-left: 1px solid var(--border); }
 .protection-title { display: flex; align-items: center; justify-content: space-between; }
-.protection-title h3 { margin: 0; color: var(--text-tertiary); font: 650 0.64rem 'JetBrains Mono', monospace; text-transform: uppercase; }
+.protection-title h3 { margin: 0; color: var(--text-tertiary); font: 700 0.61rem 'JetBrains Mono', monospace; letter-spacing: 0.045em; text-transform: uppercase; }
 .protection-title a { color: var(--primary-text); font-size: 0.67rem; }
-.protection-value { display: block; margin-top: 0.85rem; color: var(--text-heading); font-size: 1.25rem; }
+.protection-value { display: block; margin-top: 0.75rem; color: var(--text-heading); font-size: 1.35rem; letter-spacing: -0.04em; }
 .protection-label { color: var(--text-muted); font-size: 0.65rem; }
 .protection-grid dl { display: grid; gap: 0.45rem; margin: 0.8rem 0 0; }
-.protection-grid dl div { display: flex; justify-content: space-between; gap: 0.7rem; }
+.protection-grid dl div { display: flex; justify-content: space-between; gap: 0.7rem; padding-top: 0.38rem; border-top: 1px solid var(--border); }
 .protection-grid dt { color: var(--text-muted); font-size: 0.65rem; }
 .protection-grid dd { margin: 0; overflow: hidden; color: var(--text-tertiary); font: 0.63rem 'JetBrains Mono', monospace; text-align: right; text-overflow: ellipsis; white-space: nowrap; }
 .warning { color: var(--dashboard-status-warning) !important; }
@@ -70,6 +71,6 @@ const nearestExpiry = computed(() => props.protection.ssl.nearestExpiryDays === 
 
 @media (max-width: 620px) {
   .protection-grid { grid-template-columns: 1fr; }
-  .protection-grid article + article { border-top: 1px solid var(--border); border-left: 0; }
+  .protection-grid article + article { border-left: 1px solid var(--border); }
 }
 </style>

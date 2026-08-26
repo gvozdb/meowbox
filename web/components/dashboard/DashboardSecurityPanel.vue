@@ -1,7 +1,7 @@
 <template>
   <section class="ops-panel security-panel" aria-labelledby="security-title">
     <div class="ops-section-head">
-      <div><span class="ops-section-kicker">Admin scope</span><h2 id="security-title">Безопасность</h2></div>
+      <div><span class="ops-section-kicker">Контроль доступа</span><h2 id="security-title">Безопасность</h2></div>
       <DashboardSectionState :source="security.source" />
     </div>
     <div v-if="security.source.availability === 'UNAVAILABLE'" class="ops-empty">{{ security.source.message || 'Данные безопасности недоступны' }}</div>
@@ -23,11 +23,14 @@ defineProps<{ security: DashboardSecuritySection }>();
 </script>
 
 <style scoped>
-.security-list { display: grid; gap: 0; margin: 0; }
-.security-list div { display: flex; justify-content: space-between; gap: 0.8rem; padding: 0.7rem 1rem; border-bottom: 1px solid var(--border); }
+.security-panel { overflow: hidden; }
+.security-list { display: grid; gap: 0; margin: 0; padding: 0.42rem 0.72rem; }
+.security-list div { display: flex; min-height: 40px; align-items: center; justify-content: space-between; gap: 0.8rem; padding: 0.55rem 0.4rem; border-bottom: 1px solid var(--border); }
+.security-list div:last-child { border-bottom: 0; }
 .security-list dt { color: var(--text-muted); font-size: 0.67rem; }
 .security-list dd { margin: 0; color: var(--text-secondary); font: 650 0.67rem 'JetBrains Mono', monospace; text-align: right; }
 .security-list .danger { color: var(--dashboard-status-danger); }
-.security-footer { display: flex; gap: 0.8rem; padding: 0.75rem 1rem; }
-.security-footer a { color: var(--primary-text); font-size: 0.67rem; }
+.security-footer { display: flex; gap: 0.5rem; padding: 0.7rem; border-top: 1px solid var(--border); background: var(--bg-surface-hover); }
+.security-footer a { display: inline-flex; min-height: 30px; align-items: center; padding: 0.3rem 0.52rem; border: 1px solid var(--border); border-radius: 7px; color: var(--primary-text); font-size: 0.66rem; text-decoration: none; }
+.security-footer a:hover { border-color: var(--primary-border); background: var(--primary-bg); }
 </style>

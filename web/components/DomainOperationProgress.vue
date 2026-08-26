@@ -178,5 +178,5 @@ onBeforeUnmount(() => {
   color: var(--text-muted);
   font-size: 0.72rem;
 }
-.operation-progress .operation-progress__error { color: var(--danger-light); }
+.operation-progress .operation-progress__error { color: var(--danger-text); }
 </style>

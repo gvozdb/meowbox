@@ -400,7 +400,7 @@ onMounted(load);
   font-family: inherit; cursor: pointer; transition: all 0.2s; white-space: nowrap;
 }
 .btn--sm { padding: 0.4rem 0.8rem; font-size: 0.75rem; border-radius: 8px; }
-.btn--primary { background: linear-gradient(135deg, var(--primary-light), var(--primary-dark)); color: var(--primary-text-on); }
+.btn--primary { background: linear-gradient(135deg, var(--primary-action), var(--primary-action-hover)); color: var(--primary-action-text); }
 .btn--primary:not(:disabled):hover { transform: translateY(-1px); box-shadow: 0 4px 16px rgba(var(--primary-rgb), 0.2); }
 .btn--primary:disabled { opacity: 0.4; cursor: not-allowed; }
 .btn--ghost { background: var(--bg-input); border: 1px solid var(--border-strong); color: var(--text-tertiary); }
@@ -453,14 +453,14 @@ onMounted(load);
   color: var(--primary-text, var(--primary)); font-size: 0.72rem; font-weight: 500;
 }
 .cfg-badge--muted { background: var(--bg-input); color: var(--text-tertiary); }
-.cfg-badge--ok { background: var(--success-bg, rgba(34,197,94,0.12)); color: var(--success, #22c55e); }
+.cfg-badge--ok { background: var(--success-bg, rgba(34,197,94,0.12)); color: var(--success-text, #15803d); }
 .actions-cell { white-space: nowrap; display: flex; gap: 0.75rem; }
 .link-btn {
   background: none; border: none; color: var(--primary-text, var(--primary));
   cursor: pointer; padding: 0; font-size: 0.85rem;
 }
 .link-btn:hover { text-decoration: underline; }
-.link-btn--danger { color: var(--danger, #ef4444); }
+.link-btn--danger { color: var(--danger-text, #b91c1c); }
 
 .warning-box {
   background: var(--danger-bg, rgba(239,68,68,0.08));

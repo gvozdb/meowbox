@@ -231,7 +231,7 @@ onMounted(() => {
 
 .activity__filter:focus {
   outline: none;
-  border-color: var(--primary);
+  border-color: var(--primary-text);
 }
 
 .activity__refresh {
@@ -367,18 +367,18 @@ onMounted(() => {
   flex-shrink: 0;
 }
 
-.timeline__badge--login { background: rgba(34, 197, 94, 0.1); color: #4ade80; }
-.timeline__badge--logout { background: rgba(148, 163, 184, 0.1); color: #94a3b8; }
-.timeline__badge--create { background: rgba(99, 102, 241, 0.1); color: #818cf8; }
-.timeline__badge--update { background: rgba(var(--primary-rgb), 0.1); color: var(--primary-light); }
-.timeline__badge--delete { background: rgba(239, 68, 68, 0.1); color: #f87171; }
-.timeline__badge--deploy { background: rgba(0, 220, 130, 0.1); color: #00dc82; }
-.timeline__badge--backup { background: rgba(139, 92, 246, 0.1); color: #a78bfa; }
-.timeline__badge--restore { background: rgba(139, 92, 246, 0.1); color: #a78bfa; }
-.timeline__badge--ssl_issue { background: rgba(56, 189, 248, 0.1); color: #38bdf8; }
-.timeline__badge--service_start { background: rgba(34, 197, 94, 0.1); color: #4ade80; }
-.timeline__badge--service_stop { background: rgba(239, 68, 68, 0.1); color: #f87171; }
-.timeline__badge--service_restart { background: rgba(var(--primary-rgb), 0.1); color: var(--primary-light); }
+.timeline__badge--login { background: rgba(34, 197, 94, 0.1); color: var(--success-text); }
+.timeline__badge--logout { background: rgba(148, 163, 184, 0.1); color: var(--text-muted); }
+.timeline__badge--create { background: rgba(99, 102, 241, 0.1); color: var(--violet-text); }
+.timeline__badge--update { background: rgba(var(--primary-rgb), 0.1); color: var(--primary-text); }
+.timeline__badge--delete { background: rgba(239, 68, 68, 0.1); color: var(--danger-text); }
+.timeline__badge--deploy { background: rgba(0, 220, 130, 0.1); color: var(--success-text); }
+.timeline__badge--backup { background: rgba(139, 92, 246, 0.1); color: var(--violet-text); }
+.timeline__badge--restore { background: rgba(139, 92, 246, 0.1); color: var(--violet-text); }
+.timeline__badge--ssl_issue { background: rgba(56, 189, 248, 0.1); color: var(--info-text); }
+.timeline__badge--service_start { background: rgba(34, 197, 94, 0.1); color: var(--success-text); }
+.timeline__badge--service_stop { background: rgba(239, 68, 68, 0.1); color: var(--danger-text); }
+.timeline__badge--service_restart { background: rgba(var(--primary-rgb), 0.1); color: var(--primary-text); }
 
 .timeline__entity {
   font-size: 0.8rem;

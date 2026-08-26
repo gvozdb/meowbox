@@ -551,8 +551,8 @@ watch([() => props.active, () => props.domainId], ([active, domainId]) => {
   flex-shrink: 0;
 }
 
-.db-card__icon--mariadb { background: rgba(var(--primary-rgb), 0.12); color: var(--primary-light); }
-.db-card__icon--postgresql { background: rgba(59, 130, 246, 0.12); color: rgb(96, 165, 250); }
+.db-card__icon--mariadb { background: rgba(var(--primary-rgb), 0.12); color: var(--primary-text); }
+.db-card__icon--postgresql { background: rgba(59, 130, 246, 0.12); color: var(--info-text); }
 
 .db-card__info {
   display: flex;
@@ -608,8 +608,8 @@ watch([() => props.active, () => props.domainId], ([active, domainId]) => {
   white-space: nowrap;
 }
 .btn--primary {
-  background: linear-gradient(135deg, var(--primary-light), var(--primary-dark));
-  color: var(--primary-text-on);
+  background: linear-gradient(135deg, var(--primary-action), var(--primary-action-hover));
+  color: var(--primary-action-text);
 }
 .btn--primary:not(:disabled):hover {
   transform: translateY(-1px);
@@ -629,7 +629,7 @@ watch([() => props.active, () => props.domainId], ([active, domainId]) => {
 .btn--danger {
   background: rgba(239, 68, 68, 0.12);
   border: 1px solid rgba(239, 68, 68, 0.2);
-  color: #f87171;
+  color: var(--danger-text);
 }
 .btn--danger:not(:disabled):hover { background: rgba(239, 68, 68, 0.18); }
 .btn--danger:disabled { opacity: 0.4; cursor: not-allowed; }
@@ -688,7 +688,7 @@ watch([() => props.active, () => props.domainId], ([active, domainId]) => {
   border: 1px solid rgba(239, 68, 68, 0.2);
   border-radius: 8px;
   font-size: 0.78rem;
-  color: #f87171;
+  color: var(--danger-text);
 }
 .modal__actions {
   display: flex;
@@ -800,7 +800,7 @@ watch([() => props.active, () => props.domainId], ([active, domainId]) => {
 .password-display__toggle:hover { color: var(--text-heading); }
 
 .link {
-  color: var(--primary, var(--primary-light));
+  color: var(--primary-text);
   text-decoration: underline;
   text-underline-offset: 2px;
 }

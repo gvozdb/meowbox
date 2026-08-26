@@ -43,7 +43,7 @@ const label = computed(() => {
 /* Running — green */
 .status-badge--running {
   background: rgba(34, 197, 94, 0.1);
-  color: #4ade80;
+  color: var(--success-text);
 }
 .status-badge--running .status-badge__dot {
   background: #22c55e;
@@ -54,7 +54,7 @@ const label = computed(() => {
 /* Stopped — gray */
 .status-badge--stopped {
   background: rgba(148, 163, 184, 0.1);
-  color: #94a3b8;
+  color: var(--text-muted);
 }
 .status-badge--stopped .status-badge__dot {
   background: #64748b;
@@ -63,7 +63,7 @@ const label = computed(() => {
 /* Error — red */
 .status-badge--error {
   background: rgba(239, 68, 68, 0.1);
-  color: #f87171;
+  color: var(--danger-text);
 }
 .status-badge--error .status-badge__dot {
   background: #ef4444;
@@ -74,7 +74,7 @@ const label = computed(() => {
 /* Deploying — amber */
 .status-badge--deploying {
   background: rgba(var(--primary-rgb), 0.1);
-  color: var(--primary-light);
+  color: var(--primary-text);
 }
 .status-badge--deploying .status-badge__dot {
   background: var(--primary);

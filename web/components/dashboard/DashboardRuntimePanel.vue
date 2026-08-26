@@ -1,7 +1,7 @@
 <template>
   <section class="ops-panel runtime-panel" aria-labelledby="runtime-title">
     <div class="ops-section-head">
-      <div><span class="ops-section-kicker">Runtime</span><h2 id="runtime-title">Операции и сервисы</h2></div>
+      <div><span class="ops-section-kicker">Исполнение</span><h2 id="runtime-title">Операции и сервисы</h2></div>
       <DashboardSectionState :source="runtime.source" />
     </div>
     <div v-if="runtime.source.availability === 'UNAVAILABLE'" class="ops-empty">{{ runtime.source.message || 'Runtime недоступен' }}</div>
@@ -47,18 +47,20 @@ function serviceLabel(state: DashboardServiceItem['actualState']) {
 </script>
 
 <style scoped>
-.runtime-block { padding: 0.85rem 1rem; border-bottom: 1px solid var(--border); }
+.runtime-panel { overflow: hidden; }
+.runtime-block { padding: 0.78rem 0.9rem; border-bottom: 1px solid var(--border); }
 .runtime-block:last-child { border-bottom: 0; }
-.runtime-block h3 { margin: 0 0 0.6rem; color: var(--text-tertiary); font: 650 0.63rem 'JetBrains Mono', monospace; text-transform: uppercase; }
+.runtime-block h3 { margin: 0 0 0.55rem; color: var(--text-tertiary); font: 700 0.6rem 'JetBrains Mono', monospace; letter-spacing: 0.05em; text-transform: uppercase; }
 .runtime-block-title { display: flex; justify-content: space-between; }
 .runtime-block-title a { color: var(--primary-text); font-size: 0.67rem; }
 .runtime-block ul { margin: 0; padding: 0; list-style: none; }
-.runtime-block li { display: flex; align-items: center; gap: 0.5rem; min-height: 31px; color: var(--text-secondary); font-size: 0.72rem; }
+.runtime-block li { display: flex; align-items: center; gap: 0.55rem; min-height: 34px; padding: 0 0.25rem; border-radius: 7px; color: var(--text-primary); font-size: 0.72rem; }
+.runtime-block li:hover { background: var(--bg-surface-hover); }
 .runtime-block li > span:nth-child(1):not(.service-dot) { flex: 1; min-width: 0; }
 .runtime-block li strong { font-size: 0.69rem; }
 .runtime-block li small { display: block; margin-top: 0.1rem; color: var(--text-muted); font-size: 0.58rem; }
 .service-list li > span:nth-child(2) { flex: 1; }
-.service-list li > strong { color: var(--text-tertiary); font: 0.59rem 'JetBrains Mono', monospace; }
+.service-list li > strong { padding: 0.2rem 0.34rem; border: 1px solid var(--border); border-radius: 5px; color: var(--text-tertiary); font: 650 0.56rem 'JetBrains Mono', monospace; }
 .service-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--text-muted); }
 .service-dot--running { background: var(--success); }
 .service-dot--failed, .service-dot--missing { background: var(--danger); }

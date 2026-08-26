@@ -153,11 +153,11 @@ onMounted(load);
   color: var(--primary-text, var(--primary)); font-size: 0.72rem; font-weight: 500;
 }
 .cfg-badge--muted { background: var(--bg-input); color: var(--text-tertiary); }
-.cfg-badge--ok { background: var(--success-bg, rgba(34,197,94,0.12)); color: var(--success, #22c55e); }
-.cfg-badge--err { background: rgba(239,68,68,0.12); color: #f87171; }
+.cfg-badge--ok { background: var(--success-bg, rgba(34,197,94,0.12)); color: var(--success-text, #15803d); }
+.cfg-badge--err { background: rgba(239,68,68,0.12); color: var(--danger-text); }
 
 .check-err-cell {
-  max-width: 360px; font-size: 0.75rem; color: #f87171;
+  max-width: 360px; font-size: 0.75rem; color: var(--danger-text);
   white-space: pre-wrap; word-break: break-word;
 }
 </style>

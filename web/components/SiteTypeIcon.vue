@@ -45,6 +45,6 @@ const label = computed(() => {
 }
 
 .site-type-icon--modx-revo,
-.site-type-icon--modx-3 { background: rgba(34, 197, 94, 0.1); color: #4ade80; }
-.site-type-icon--custom { background: rgba(148, 163, 184, 0.1); color: #94a3b8; }
+.site-type-icon--modx-3 { background: rgba(34, 197, 94, 0.1); color: var(--success-text); }
+.site-type-icon--custom { background: rgba(148, 163, 184, 0.1); color: var(--text-muted); }
 </style>

@@ -79,32 +79,29 @@ const memoryPoints = computed(() => sparkPoints(props.resources.history.memory))
 </script>
 
 <style scoped>
-.resource-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); }
-.resource-cell { position: relative; min-height: 112px; padding: 0.9rem 1rem; overflow: hidden; border-right: 1px solid var(--border); }
-.resource-cell:last-child { border-right: 0; }
+.resource-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 0.65rem; padding: 0.75rem; }
+.resource-cell { position: relative; min-height: 122px; padding: 0.82rem 0.88rem; overflow: hidden; border: 1px solid var(--border); border-radius: 11px; background: var(--bg-body); }
 .resource-label { display: flex; align-items: baseline; justify-content: space-between; gap: 0.6rem; }
-.resource-label span { color: var(--text-tertiary); font: 650 0.64rem 'JetBrains Mono', monospace; text-transform: uppercase; }
-.resource-label strong { color: var(--text-heading); font-size: 0.84rem; font-weight: 650; }
-.meter { height: 4px; margin: 0.7rem 0 0.55rem; overflow: hidden; border-radius: 2px; background: var(--bar-bg); }
-.meter span { display: block; height: 100%; border-radius: inherit; background: var(--primary); }
-.resource-cell p { position: relative; z-index: 1; margin: 0.45rem 0 0; color: var(--text-muted); font-size: 0.66rem; }
+.resource-label span { color: var(--text-tertiary); font: 700 0.61rem 'JetBrains Mono', monospace; letter-spacing: 0.04em; text-transform: uppercase; }
+.resource-label strong { color: var(--text-heading); font-size: 1.05rem; font-weight: 750; letter-spacing: -0.035em; }
+.resource-label strong:not(.ops-mono) { color: var(--text-muted); font-size: 0.58rem; letter-spacing: 0; text-transform: uppercase; }
+.meter { height: 6px; margin: 0.72rem 0 0.58rem; overflow: hidden; border-radius: 999px; background: var(--bar-bg); }
+.meter span { display: block; height: 100%; border-radius: inherit; background: linear-gradient(90deg, var(--primary-action), var(--primary)); }
+.resource-cell p { position: relative; z-index: 1; margin: 0.45rem 0 0; color: var(--text-muted); font-size: 0.65rem; line-height: 1.4; }
 .resource-exception { color: var(--dashboard-status-warning) !important; }
-.spark { position: absolute; right: 0; bottom: 0; left: 0; width: 100%; height: 30px; opacity: 0.28; }
+.spark { position: absolute; right: 0; bottom: 0; left: 0; width: 100%; height: 34px; opacity: 0.34; }
 .spark polyline { fill: none; stroke: var(--primary); stroke-width: 1.5; vector-effect: non-scaling-stroke; }
-.resource-cell dl { display: grid; gap: 0.45rem; margin: 0.75rem 0 0; }
+.resource-cell dl { display: grid; gap: 0.48rem; margin: 0.78rem 0 0; }
 .resource-cell dl div { display: flex; justify-content: space-between; gap: 0.5rem; }
 .resource-cell dt { color: var(--text-muted); font-size: 0.67rem; }
 .resource-cell dd { margin: 0; color: var(--text-secondary); font-size: 0.68rem; }
 
 @media (max-width: 900px) {
   .resource-grid { grid-template-columns: repeat(2, 1fr); }
-  .resource-cell:nth-child(2) { border-right: 0; }
-  .resource-cell:nth-child(-n+2) { border-bottom: 1px solid var(--border); }
 }
 
 @media (max-width: 520px) {
   .resource-grid { grid-template-columns: 1fr; }
-  .resource-cell { min-height: 96px; border-right: 0; border-bottom: 1px solid var(--border); }
-  .resource-cell:last-child { border-bottom: 0; }
+  .resource-cell { min-height: 106px; }
 }
 </style>

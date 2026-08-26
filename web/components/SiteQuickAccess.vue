@@ -476,8 +476,8 @@ function formatDuration(ms: number): string {
   justify-content: center;
 }
 .qa-cmd__icon--sm { width: 22px; height: 22px; border-radius: 6px; }
-.qa-cmd__icon--npm { background: rgba(203, 56, 55, 0.14); color: rgb(229, 115, 115); }
-.qa-cmd__icon--make { background: rgba(var(--primary-rgb), 0.13); color: var(--primary-light); }
+.qa-cmd__icon--npm { background: rgba(203, 56, 55, 0.14); color: var(--danger-text); }
+.qa-cmd__icon--make { background: rgba(var(--primary-rgb), 0.13); color: var(--primary-text); }
 
 .qa-cmd__text { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
 .qa-cmd__label {
@@ -568,8 +568,8 @@ function formatDuration(ms: number): string {
   padding: 0.2rem 0.5rem;
   border-radius: 6px;
 }
-.qa-exit--ok { background: rgba(16, 185, 129, 0.14); color: rgb(52, 211, 153); }
-.qa-exit--err { background: rgba(239, 68, 68, 0.14); color: rgb(248, 113, 113); }
+.qa-exit--ok { background: rgba(16, 185, 129, 0.14); color: var(--success-text); }
+.qa-exit--err { background: rgba(239, 68, 68, 0.14); color: var(--danger-text); }
 
 /* ─── Конфиг-модалка ─── */
 .qa-config {
@@ -657,7 +657,7 @@ function formatDuration(ms: number): string {
   font-family: inherit; cursor: pointer; transition: all 0.2s; white-space: nowrap;
 }
 .btn--sm { padding: 0.4rem 0.8rem; font-size: 0.74rem; border-radius: 8px; }
-.btn--primary { background: linear-gradient(135deg, var(--primary-light), var(--primary-dark)); color: var(--primary-text-on); }
+.btn--primary { background: linear-gradient(135deg, var(--primary-action), var(--primary-action-hover)); color: var(--primary-action-text); }
 .btn--primary:not(:disabled):hover { transform: translateY(-1px); box-shadow: 0 4px 16px rgba(var(--primary-rgb), 0.2); }
 .btn--primary:disabled { opacity: 0.4; cursor: not-allowed; }
 .btn--ghost { background: var(--bg-input); border: 1px solid var(--border-strong); color: var(--text-tertiary); }

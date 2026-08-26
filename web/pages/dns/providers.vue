@@ -413,7 +413,7 @@ onUnmounted(() => {
 }
 .btn:hover:not(:disabled) { border-color: var(--primary-border); color: var(--primary-text); background: var(--primary-bg); }
 .btn:disabled { opacity: 0.5; cursor: not-allowed; }
-.btn--primary { background: linear-gradient(135deg, var(--primary), var(--primary-dark)); color: #fff; border-color: transparent; }
+.btn--primary { background: linear-gradient(135deg, var(--primary-action), var(--primary-action-hover)); color: var(--primary-action-text); border-color: transparent; }
 .btn--small { padding: 0.25rem 0.6rem; font-size: 0.72rem; border-radius: 6px; }
 
 .dns-empty { padding: 3rem; text-align: center; color: var(--text-faint); background: var(--bg-surface); border-radius: 14px; }
@@ -426,7 +426,7 @@ onUnmounted(() => {
 .provider-card__label { font-weight: 600; color: var(--text-heading); }
 .provider-card__actions { display: flex; gap: 0.3rem; }
 .provider-card__body { display: flex; flex-direction: column; gap: 0.3rem; }
-.provider-card__err { font-size: 0.72rem; color: #ef4444; padding: 0.3rem 0.5rem; background: rgba(239, 68, 68, 0.1); border-radius: 6px; }
+.provider-card__err { font-size: 0.72rem; color: var(--danger-text); padding: 0.3rem 0.5rem; background: rgba(239, 68, 68, 0.1); border-radius: 6px; }
 .provider-card__creds { display: flex; flex-wrap: wrap; gap: 0.3rem; margin-top: 0.4rem; }
 .cred-pill { font-family: 'JetBrains Mono', monospace; font-size: 0.65rem; color: var(--text-muted); padding: 0.1rem 0.4rem; background: var(--bg-elevated); border-radius: 4px; }
 
@@ -435,12 +435,12 @@ onUnmounted(() => {
 .kv__v { color: var(--text-secondary); font-family: 'JetBrains Mono', monospace; }
 
 .dns-badge { display: inline-block; padding: 0.15rem 0.5rem; border-radius: 6px; font-size: 0.65rem; font-weight: 600; text-transform: uppercase; }
-.dns-badge--cloudflare { background: rgba(244, 129, 32, 0.15); color: #f48120; }
-.dns-badge--yandex_cloud { background: rgba(255, 196, 0, 0.15); color: #ffc400; }
-.dns-badge--yandex_360 { background: rgba(255, 0, 0, 0.12); color: #ff3333; }
-.dns-badge--vk_cloud { background: rgba(0, 119, 255, 0.15); color: #0077ff; }
+.dns-badge--cloudflare { background: rgba(244, 129, 32, 0.15); color: var(--orange-text); }
+.dns-badge--yandex_cloud { background: rgba(255, 196, 0, 0.15); color: var(--warning-text); }
+.dns-badge--yandex_360 { background: rgba(255, 0, 0, 0.12); color: var(--danger-text); }
+.dns-badge--vk_cloud { background: rgba(0, 119, 255, 0.15); color: var(--info-text); }
 .dns-status { padding: 0.1rem 0.45rem; border-radius: 4px; font-size: 0.65rem; }
-.dns-status--unauthorized, .dns-status--error { background: rgba(239, 68, 68, 0.12); color: #ef4444; }
+.dns-status--unauthorized, .dns-status--error { background: rgba(239, 68, 68, 0.12); color: var(--danger-text); }
 
 /* Modal */
 .modal-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.5); display: flex; align-items: center; justify-content: center; z-index: 100; }
@@ -451,7 +451,7 @@ onUnmounted(() => {
 .field__label { font-size: 0.72rem; color: var(--text-muted); font-weight: 500; }
 .dns-input { padding: 0.45rem 0.7rem; border-radius: 8px; border: 1px solid var(--border-secondary); background: var(--bg-elevated); color: var(--text-secondary); font-size: 0.8rem; font-family: inherit; }
 .dns-input--textarea { font-family: 'JetBrains Mono', monospace; font-size: 0.7rem; resize: vertical; min-height: 100px; }
-.dns-input:focus { outline: none; border-color: var(--primary); }
+.dns-input:focus { outline: none; border-color: var(--primary-text); }
 .form__actions { display: flex; gap: 0.5rem; justify-content: flex-end; margin-top: 0.5rem; }
 
 .dns-help {
@@ -473,7 +473,7 @@ onUnmounted(() => {
 .dns-help__sublist { margin: 0.25rem 0 0; padding-left: 1.1rem; list-style: disc; display: flex; flex-direction: column; gap: 0.15rem; }
 .dns-help__sublist li { color: var(--text-tertiary); font-size: 0.72rem; }
 .dns-help__list code { font-family: 'JetBrains Mono', monospace; font-size: 0.7rem; padding: 0.05rem 0.3rem; background: var(--bg-surface); border: 1px solid var(--border-secondary); border-radius: 4px; color: var(--text-secondary); }
-.dns-help__list a { color: var(--primary); text-decoration: none; }
+.dns-help__list a { color: var(--primary-text); text-decoration: none; }
 .dns-help__list a:hover { text-decoration: underline; }
 .dns-help__note { margin-top: 0.5rem; font-size: 0.7rem; color: var(--text-muted); font-style: italic; }
 </style>

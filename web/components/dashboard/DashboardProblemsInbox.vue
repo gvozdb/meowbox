@@ -2,12 +2,13 @@
   <section class="problems ops-panel" :class="{ 'problems--compact': problems.total === 0 }" aria-labelledby="problems-title">
     <div class="ops-section-head problems-head">
       <div>
-        <span class="ops-section-kicker">Требует реакции</span>
-        <h2 id="problems-title">Problems Inbox</h2>
+        <span class="ops-section-kicker">Приоритетная очередь</span>
+        <h2 id="problems-title">Требуют внимания</h2>
+        <p>Критичные события и отклонения на выбранном сервере</p>
       </div>
       <div class="problem-counters" aria-label="Сводка проблем">
-        <span class="counter counter--critical">{{ problems.critical }} крит.</span>
-        <span class="counter counter--warning">{{ problems.warning }} вним.</span>
+        <span class="counter counter--critical">{{ problems.critical }} критичных</span>
+        <span class="counter counter--warning">{{ problems.warning }} предупреждений</span>
         <span v-if="problems.info" class="counter">{{ problems.info }} инфо</span>
       </div>
     </div>
@@ -104,13 +105,14 @@ function trapDialogFocus(event: KeyboardEvent) {
 
 <style scoped>
 .problems { overflow: hidden; border-color: var(--border-strong); }
-.problems-head { border-bottom-color: var(--border-secondary); }
+.problems-head { align-items: center; border-bottom-color: var(--border-secondary); }
+.problems-head p { margin: 0.22rem 0 0; color: var(--text-muted); font-size: 0.67rem; }
 .problem-counters { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 0.35rem; }
-.counter { padding: 0.25rem 0.45rem; border: 1px solid var(--border-secondary); border-radius: 5px; color: var(--text-tertiary); font: 650 0.61rem 'JetBrains Mono', monospace; }
+.counter { padding: 0.28rem 0.48rem; border: 1px solid var(--border-secondary); border-radius: 999px; color: var(--text-tertiary); font: 700 0.58rem 'JetBrains Mono', monospace; }
 .counter--critical { border-color: var(--danger-border); background: var(--danger-bg); color: var(--dashboard-status-danger); }
 .counter--warning { border-color: var(--primary-border); background: var(--primary-bg); color: var(--dashboard-status-warning); }
 .problem-list { margin: 0; padding: 0; list-style: none; }
-.problems-more { display: flex; align-items: center; gap: 0.8rem; padding: 0.75rem 1rem; border-top: 1px solid var(--border); }
+.problems-more { display: flex; align-items: center; gap: 0.8rem; padding: 0.65rem 1rem; border-top: 1px solid var(--border); background: var(--bg-surface-hover); }
 .problems-more span { color: var(--text-muted); font-size: 0.65rem; }
 .problems-clear { display: flex; align-items: center; gap: 0.8rem; padding: 0.8rem 1.1rem; color: var(--dashboard-status-success); }
 .problems-clear--unknown { color: var(--dashboard-status-warning); }
@@ -126,6 +128,8 @@ function trapDialogFocus(event: KeyboardEvent) {
 
 @media (max-width: 620px) {
   .ops-section-head { align-items: center; }
+  .problems-head p { display: none; }
+  .counter { padding-inline: 0.4rem; }
   .problem-counters .counter:not(.counter--critical):not(.counter--warning) { display: none; }
   .problems-dialog { width: calc(100vw - 1rem); max-height: calc(100vh - 1rem); }
 }

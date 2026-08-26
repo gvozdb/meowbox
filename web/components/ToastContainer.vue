@@ -121,7 +121,7 @@ const { toasts, dismiss } = useMbToast();
 }
 .mb-toast--success .mb-toast__icon {
   background: var(--success-bg);
-  color: var(--success-light);
+  color: var(--success-text);
 }
 
 .mb-toast--error {
@@ -129,7 +129,7 @@ const { toasts, dismiss } = useMbToast();
 }
 .mb-toast--error .mb-toast__icon {
   background: var(--danger-bg);
-  color: var(--danger-light);
+  color: var(--danger-text);
 }
 
 .mb-toast--warning {
@@ -137,7 +137,7 @@ const { toasts, dismiss } = useMbToast();
 }
 .mb-toast--warning .mb-toast__icon {
   background: var(--primary-bg);
-  color: var(--primary-light);
+  color: var(--primary-text);
 }
 
 .mb-toast--info {

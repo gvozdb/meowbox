@@ -80,7 +80,7 @@
         <div class="chart-card">
           <div class="chart-card__header">
             <span class="chart-card__title">CPU Usage</span>
-            <span class="chart-card__value" style="color: #818cf8">{{ lastHistoryPoint?.cpu?.toFixed(1) ?? '—' }}%</span>
+            <span class="chart-card__value" style="color: var(--violet-text)">{{ lastHistoryPoint?.cpu?.toFixed(1) ?? '—' }}%</span>
           </div>
           <svg class="chart-svg" :viewBox="`0 0 ${chartW} ${chartH}`" preserveAspectRatio="none">
             <defs><linearGradient :id="'grad-cpu'" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="#818cf8" stop-opacity="0.25" /><stop offset="100%" stop-color="#818cf8" stop-opacity="0" /></linearGradient></defs>
@@ -93,7 +93,7 @@
         <div class="chart-card">
           <div class="chart-card__header">
             <span class="chart-card__title">Memory Usage</span>
-            <span class="chart-card__value" style="color: #f472b6">{{ lastHistoryPoint?.mem?.toFixed(1) ?? '—' }}%</span>
+            <span class="chart-card__value" style="color: var(--pink-text)">{{ lastHistoryPoint?.mem?.toFixed(1) ?? '—' }}%</span>
           </div>
           <svg class="chart-svg" :viewBox="`0 0 ${chartW} ${chartH}`" preserveAspectRatio="none">
             <defs><linearGradient :id="'grad-mem'" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="#f472b6" stop-opacity="0.25" /><stop offset="100%" stop-color="#f472b6" stop-opacity="0" /></linearGradient></defs>
@@ -106,7 +106,7 @@
         <div class="chart-card">
           <div class="chart-card__header">
             <span class="chart-card__title">Network In</span>
-            <span class="chart-card__value" style="color: #22d3ee">{{ formatBps(lastHistoryPoint?.netRx) }}</span>
+            <span class="chart-card__value" style="color: var(--info-text)">{{ formatBps(lastHistoryPoint?.netRx) }}</span>
           </div>
           <svg class="chart-svg" :viewBox="`0 0 ${chartW} ${chartH}`" preserveAspectRatio="none">
             <defs><linearGradient :id="'grad-rx'" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="#22d3ee" stop-opacity="0.25" /><stop offset="100%" stop-color="#22d3ee" stop-opacity="0" /></linearGradient></defs>
@@ -119,7 +119,7 @@
         <div class="chart-card">
           <div class="chart-card__header">
             <span class="chart-card__title">Network Out</span>
-            <span class="chart-card__value" style="color: var(--primary-light)">{{ formatBps(lastHistoryPoint?.netTx) }}</span>
+            <span class="chart-card__value" style="color: var(--primary-text)">{{ formatBps(lastHistoryPoint?.netTx) }}</span>
           </div>
           <svg class="chart-svg" :viewBox="`0 0 ${chartW} ${chartH}`" preserveAspectRatio="none">
             <defs><linearGradient :id="'grad-tx'" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="var(--primary-light)" stop-opacity="0.25" /><stop offset="100%" stop-color="var(--primary-light)" stop-opacity="0" /></linearGradient></defs>
@@ -502,7 +502,7 @@ onUnmounted(() => {
 }
 .charts-loading__spinner {
   width: 24px; height: 24px; border: 2px solid var(--spinner-track);
-  border-top-color: var(--primary); border-radius: 50%;
+  border-top-color: var(--primary-text); border-radius: 50%;
   animation: chart-spin 0.8s linear infinite;
 }
 @keyframes chart-spin { to { transform: rotate(360deg); } }

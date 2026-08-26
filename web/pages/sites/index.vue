@@ -204,8 +204,8 @@ onMounted(async () => {
   font-size: 0.85rem;
   font-weight: 600;
   text-decoration: none;
-  color: var(--primary-text-on);
-  background: linear-gradient(135deg, var(--primary-light), var(--primary-dark));
+  color: var(--primary-action-text);
+  background: linear-gradient(135deg, var(--primary-action), var(--primary-action-hover));
   box-shadow: 0 2px 8px rgba(var(--primary-rgb), 0.2);
   transition: all 0.2s;
 }

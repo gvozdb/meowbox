@@ -329,9 +329,9 @@ onUnmounted(() => {
   color: var(--text-primary);
 }
 
-.health-card__metric-value--ok { color: #4ade80; }
-.health-card__metric-value--warn { color: var(--primary-light); }
-.health-card__metric-value--crit { color: #f87171; }
+.health-card__metric-value--ok { color: var(--success-text); }
+.health-card__metric-value--warn { color: var(--primary-text); }
+.health-card__metric-value--crit { color: var(--danger-text); }
 .health-card__metric-value--code { font-size: 0.85rem; }
 
 .health-card__metric-label {

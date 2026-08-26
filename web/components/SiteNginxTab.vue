@@ -697,12 +697,12 @@ onMounted(() => loadAll());
 .site-nginx__banner--ok {
   background: rgba(34, 197, 94, 0.1);
   border: 1px solid rgba(34, 197, 94, 0.35);
-  color: #4ade80;
+  color: var(--success-text);
 }
 .site-nginx__banner--err {
   background: rgba(239, 68, 68, 0.1);
   border: 1px solid rgba(239, 68, 68, 0.35);
-  color: #fca5a5;
+  color: var(--danger-text);
 }
 .site-nginx__banner--err .site-nginx__banner-text {
   white-space: pre-wrap;

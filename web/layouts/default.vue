@@ -387,10 +387,7 @@ onUnmounted(() => {
 .mobile-header__name {
   font-size: 0.95rem;
   font-weight: 700;
-  background: linear-gradient(135deg, var(--primary-light), var(--primary-dark));
-  -webkit-background-clip: text;
-  -webkit-text-fill-color: transparent;
-  background-clip: text;
+  color: var(--primary-text);
 }
 
 .mobile-header__theme {
@@ -454,10 +451,7 @@ onUnmounted(() => {
   font-size: 1.1rem;
   font-weight: 700;
   letter-spacing: -0.01em;
-  background: linear-gradient(135deg, var(--primary-light), var(--primary-dark));
-  -webkit-background-clip: text;
-  -webkit-text-fill-color: transparent;
-  background-clip: text;
+  color: var(--primary-text);
 }
 
 .sidebar__brand-version {
@@ -471,7 +465,7 @@ onUnmounted(() => {
   align-items: center;
   gap: 0.3rem;
   text-decoration: none;
-  color: var(--primary, var(--primary));
+  color: var(--primary-text);
   font-weight: 600;
   cursor: pointer;
 }
@@ -487,7 +481,7 @@ onUnmounted(() => {
 }
 .sidebar__update-arrow {
   font-size: 0.6rem;
-  color: var(--primary, var(--primary));
+  color: var(--primary-text);
   opacity: 0.85;
 }
 @keyframes sidebar-pulse {
@@ -534,7 +528,7 @@ onUnmounted(() => {
   border-color: var(--border);
 }
 .sidebar__server--open .sidebar__server-trigger {
-  border-color: var(--primary);
+  border-color: var(--primary-text);
   box-shadow: var(--focus-ring);
 }
 /* Статичный (один сервер) — без интеракции */
@@ -561,14 +555,14 @@ onUnmounted(() => {
   transition: border-color 0.15s, color 0.15s, background 0.15s;
 }
 .sidebar__server-manage:hover {
-  border-color: var(--primary);
-  color: var(--primary);
+  border-color: var(--primary-text);
+  color: var(--primary-text);
   background: var(--primary-bg, var(--bg-elevated));
 }
 .sidebar__server-manage.router-link-active,
 .sidebar__server-manage.router-link-exact-active {
-  border-color: var(--primary);
-  color: var(--primary);
+  border-color: var(--primary-text);
+  color: var(--primary-text);
   background: var(--primary-bg, var(--bg-elevated));
 }
 
@@ -657,7 +651,7 @@ onUnmounted(() => {
 
 .sidebar__server-check {
   flex-shrink: 0;
-  color: var(--primary);
+  color: var(--primary-text);
 }
 
 /* Dropdown transition */
@@ -745,7 +739,7 @@ onUnmounted(() => {
   justify-content: center;
   font-size: 0.75rem;
   font-weight: 600;
-  color: var(--primary);
+  color: var(--primary-text);
 }
 
 .sidebar__user-meta {
@@ -779,7 +773,7 @@ onUnmounted(() => {
 }
 
 .sidebar__logout:hover {
-  color: var(--danger);
+  color: var(--danger-text);
   background: var(--danger-bg);
 }
 

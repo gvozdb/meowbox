@@ -227,8 +227,8 @@ function pluralize(n: number): string {
 }
 .btn:hover:not(:disabled) { border-color: var(--primary-border); color: var(--primary-text); background: var(--primary-bg); }
 .btn:disabled { opacity: 0.5; cursor: not-allowed; }
-.btn--primary { background: linear-gradient(135deg, var(--primary), var(--primary-dark)); color: #fff; border-color: transparent; }
-.btn--primary:hover:not(:disabled) { background: linear-gradient(135deg, var(--primary-dark), var(--primary)); color: #fff; }
+.btn--primary { background: linear-gradient(135deg, var(--primary-action), var(--primary-action-hover)); color: var(--primary-action-text); border-color: transparent; }
+.btn--primary:hover:not(:disabled) { background: linear-gradient(135deg, var(--primary-action-hover), var(--primary-action)); color: var(--primary-action-text); }
 .btn--small { padding: 0.25rem 0.6rem; font-size: 0.72rem; border-radius: 6px; }
 
 .site-dns__zones-hint { font-size: 0.72rem; color: var(--text-muted); font-style: italic; }
@@ -316,10 +316,10 @@ function pluralize(n: number): string {
   font-weight: 700;
   margin-right: .35rem;
 }
-.site-dns__provider-badge[data-type="CLOUDFLARE"] { background: rgba(244, 129, 32, 0.15); color: #f48120; }
+.site-dns__provider-badge[data-type="CLOUDFLARE"] { background: rgba(244, 129, 32, 0.15); color: var(--orange-text); }
 .site-dns__provider-badge[data-type="YANDEX_CLOUD"] { background: rgba(255, 196, 0, 0.18); color: #b8860b; }
 .site-dns__provider-badge[data-type="YANDEX_360"] { background: rgba(255, 0, 0, 0.12); color: #c92020; }
-.site-dns__provider-badge[data-type="VK_CLOUD"] { background: rgba(0, 119, 255, 0.15); color: #0077ff; }
+.site-dns__provider-badge[data-type="VK_CLOUD"] { background: rgba(0, 119, 255, 0.15); color: var(--info-text); }
 
 .site-dns__provider-name-small { font-size: 11px; color: var(--text-muted, #6b7280); }
 .site-dns__provider-name { font-size: 12px; }

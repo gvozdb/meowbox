@@ -231,7 +231,7 @@ onMounted(load);
   width: 14px;
   height: 14px;
   border: 2px solid var(--spinner-track);
-  border-top-color: var(--primary);
+  border-top-color: var(--primary-text);
   border-radius: 50%;
   animation: spin 0.6s linear infinite;
 }
@@ -344,21 +344,21 @@ onMounted(load);
 .proc-card__btn--start, .proc-card__btn--restart {
   background: rgba(34, 197, 94, 0.06);
   border-color: rgba(34, 197, 94, 0.2);
-  color: #4ade80;
+  color: var(--success-text);
 }
 .proc-card__btn--start:hover, .proc-card__btn--restart:hover { background: rgba(34, 197, 94, 0.12); }
 
 .proc-card__btn--reload {
   background: rgba(59, 130, 246, 0.06);
   border-color: rgba(59, 130, 246, 0.2);
-  color: #60a5fa;
+  color: var(--info-text);
 }
 .proc-card__btn--reload:hover { background: rgba(59, 130, 246, 0.12); }
 
 .proc-card__btn--stop {
   background: rgba(239, 68, 68, 0.06);
   border-color: rgba(239, 68, 68, 0.2);
-  color: #f87171;
+  color: var(--danger-text);
 }
 .proc-card__btn--stop:hover { background: rgba(239, 68, 68, 0.12); }
 

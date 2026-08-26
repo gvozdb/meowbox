@@ -2525,7 +2525,7 @@ onUnmounted(() => accessCutoverController?.abort());
 
 .settings__tab--active {
   color: var(--primary-text);
-  border-bottom-color: var(--primary);
+  border-bottom-color: var(--primary-text);
 }
 
 /* Cards */
@@ -2625,8 +2625,8 @@ onUnmounted(() => accessCutoverController?.abort());
   font-family: inherit;
   cursor: pointer;
   transition: all 0.2s;
-  background: linear-gradient(135deg, var(--primary-light), var(--primary-dark));
-  color: var(--primary-text-on);
+  background: linear-gradient(135deg, var(--primary-action), var(--primary-action-hover));
+  color: var(--primary-action-text);
 }
 
 .settings-card__btn:disabled {
@@ -2640,7 +2640,7 @@ onUnmounted(() => accessCutoverController?.abort());
 
 .settings-card__btn--danger {
   background: var(--danger-bg);
-  color: var(--danger-light);
+  color: var(--danger-text);
   border: 1px solid var(--danger-border);
 }
 
@@ -2649,7 +2649,7 @@ onUnmounted(() => accessCutoverController?.abort());
 }
 
 .settings-card__error {
-  color: var(--danger-light);
+  color: var(--danger-text);
   font-size: 0.78rem;
   margin-bottom: 0.75rem;
 }
@@ -2664,7 +2664,7 @@ onUnmounted(() => accessCutoverController?.abort());
   user-select: none;
 }
 
-.inline-check input { accent-color: var(--primary); }
+.inline-check input { accent-color: var(--primary-text); }
 
 .settings-actions {
   display: flex;
@@ -2747,13 +2747,13 @@ onUnmounted(() => accessCutoverController?.abort());
   letter-spacing: 0.02em;
 }
 
-.audit-item__action--login { background: rgba(34, 197, 94, 0.1); color: #4ade80; }
-.audit-item__action--logout { background: rgba(148, 163, 184, 0.1); color: #94a3b8; }
-.audit-item__action--create { background: rgba(99, 102, 241, 0.1); color: #818cf8; }
-.audit-item__action--update { background: rgba(var(--primary-rgb), 0.1); color: var(--primary-light); }
-.audit-item__action--delete { background: rgba(239, 68, 68, 0.1); color: #f87171; }
-.audit-item__action--deploy { background: rgba(0, 220, 130, 0.1); color: #00dc82; }
-.audit-item__action--backup { background: rgba(139, 92, 246, 0.1); color: #a78bfa; }
+.audit-item__action--login { background: rgba(34, 197, 94, 0.1); color: var(--success-text); }
+.audit-item__action--logout { background: rgba(148, 163, 184, 0.1); color: var(--text-muted); }
+.audit-item__action--create { background: rgba(99, 102, 241, 0.1); color: var(--violet-text); }
+.audit-item__action--update { background: rgba(var(--primary-rgb), 0.1); color: var(--primary-text); }
+.audit-item__action--delete { background: rgba(239, 68, 68, 0.1); color: var(--danger-text); }
+.audit-item__action--deploy { background: rgba(0, 220, 130, 0.1); color: var(--success-text); }
+.audit-item__action--backup { background: rgba(139, 92, 246, 0.1); color: var(--violet-text); }
 
 .audit-item__info {
   display: flex;
@@ -2889,8 +2889,8 @@ onUnmounted(() => accessCutoverController?.abort());
   border-radius: 4px;
   font-size: 0.6rem;
   font-weight: 600;
-  background: var(--primary);
-  color: var(--primary-text-on);
+  background: var(--primary-action);
+  color: var(--primary-action-text);
   margin-left: 0.25rem;
   vertical-align: middle;
 }
@@ -2901,7 +2901,7 @@ onUnmounted(() => accessCutoverController?.abort());
   border-radius: 8px;
   border: 1px solid var(--danger-border);
   background: var(--danger-bg);
-  color: var(--danger-light);
+  color: var(--danger-text);
   font-size: 0.72rem;
   font-weight: 500;
   font-family: inherit;
@@ -2940,7 +2940,7 @@ onUnmounted(() => accessCutoverController?.abort());
 
 .notif-badge--off {
   background: var(--danger-bg);
-  color: var(--danger-light);
+  color: var(--danger-text);
 }
 
 .notif-events {
@@ -2959,7 +2959,7 @@ onUnmounted(() => accessCutoverController?.abort());
 }
 
 .notif-event-check input[type="checkbox"] {
-  accent-color: var(--primary);
+  accent-color: var(--primary-text);
 }
 
 /* Modal */
@@ -3075,7 +3075,7 @@ onUnmounted(() => accessCutoverController?.abort());
   color: var(--text-tertiary);
 }
 .ip-allow__client--in .ip-allow__status {
-  color: #4ade80;
+  color: var(--success-text);
 }
 .ip-allow__list {
   display: flex;
@@ -3153,7 +3153,7 @@ onUnmounted(() => accessCutoverController?.abort());
   cursor: not-allowed;
 }
 .palette-card--active {
-  border-color: var(--primary);
+  border-color: var(--primary-text);
   background: var(--primary-bg);
   box-shadow: var(--focus-ring);
 }
@@ -3218,8 +3218,8 @@ onUnmounted(() => accessCutoverController?.abort());
   width: 22px;
   height: 22px;
   border-radius: 50%;
-  background: var(--primary);
-  color: var(--primary-text-on);
+  background: var(--primary-action);
+  color: var(--primary-action-text);
 }
 
 .palette-card__title {
@@ -3302,7 +3302,7 @@ onUnmounted(() => accessCutoverController?.abort());
   font-size: 0.78rem;
 }
 .access-cutover-card__reason {
-  color: #fca5a5;
+  color: var(--danger-text);
   font-family: 'JetBrains Mono', monospace;
   font-size: 0.72rem;
 }
@@ -3342,10 +3342,10 @@ onUnmounted(() => accessCutoverController?.abort());
   letter-spacing: 0.02em;
   text-transform: uppercase;
 }
-.access-pill--ok    { background: rgba(34, 197, 94, 0.12);  color: #4ade80; }
-.access-pill--off   { background: rgba(148, 163, 184, 0.12); color: #94a3b8; }
-.access-pill--warn  { background: rgba(234, 179, 8, 0.14);  color: #facc15; }
-.access-pill--danger{ background: rgba(239, 68, 68, 0.14);  color: #fca5a5; }
+.access-pill--ok    { background: rgba(34, 197, 94, 0.12);  color: var(--success-text); }
+.access-pill--off   { background: rgba(148, 163, 184, 0.12); color: var(--text-muted); }
+.access-pill--warn  { background: rgba(234, 179, 8, 0.14);  color: var(--warning-text); }
+.access-pill--danger{ background: rgba(239, 68, 68, 0.14);  color: var(--danger-text); }
 
 .access-input-row {
   display: flex;
@@ -3370,17 +3370,17 @@ onUnmounted(() => accessCutoverController?.abort());
 .access-dns-row--ok {
   background: rgba(34, 197, 94, 0.08);
   border: 1px solid rgba(34, 197, 94, 0.2);
-  color: #86efac;
+  color: var(--success-text);
 }
 .access-dns-row--off {
   background: rgba(239, 68, 68, 0.06);
   border: 1px solid rgba(239, 68, 68, 0.2);
-  color: #fca5a5;
+  color: var(--danger-text);
 }
 .access-dns-row--pending {
   background: rgba(234, 179, 8, 0.07);
   border: 1px solid rgba(234, 179, 8, 0.2);
-  color: #fde68a;
+  color: var(--warning-text);
 }
 
 .access-cert-option {
@@ -3412,17 +3412,17 @@ onUnmounted(() => accessCutoverController?.abort());
   border-radius: 8px;
   background: rgba(239, 68, 68, 0.06);
   border: 1px solid rgba(239, 68, 68, 0.2);
-  color: #fca5a5;
+  color: var(--danger-text);
   font-size: 0.78rem;
 }
-.access-error strong { display: block; margin-bottom: 0.3rem; color: #fda4a4; font-weight: 600; }
+.access-error strong { display: block; margin-bottom: 0.3rem; color: var(--danger-text); font-weight: 600; }
 .access-error pre {
   margin: 0;
   font-family: 'JetBrains Mono', monospace;
   font-size: 0.72rem;
   white-space: pre-wrap;
   word-break: break-word;
-  color: rgba(252, 165, 165, 0.85);
+  color: var(--danger-text);
 }
 
 @media (max-width: 640px) {

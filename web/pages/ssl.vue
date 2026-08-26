@@ -315,10 +315,10 @@ onMounted(() => {
   justify-content: center;
 }
 
-.summary-card__icon--ok { background: rgba(34, 197, 94, 0.1); color: #4ade80; }
-.summary-card__icon--warn { background: rgba(var(--primary-rgb), 0.1); color: var(--primary-light); }
-.summary-card__icon--crit { background: rgba(239, 68, 68, 0.1); color: #f87171; }
-.summary-card__icon--pending { background: rgba(99, 102, 241, 0.1); color: #818cf8; }
+.summary-card__icon--ok { background: rgba(34, 197, 94, 0.1); color: var(--success-text); }
+.summary-card__icon--warn { background: rgba(var(--primary-rgb), 0.1); color: var(--primary-text); }
+.summary-card__icon--crit { background: rgba(239, 68, 68, 0.1); color: var(--danger-text); }
+.summary-card__icon--pending { background: rgba(99, 102, 241, 0.1); color: var(--violet-text); }
 
 .summary-card__value {
   font-size: 1.5rem;
@@ -434,9 +434,9 @@ onMounted(() => {
   text-align: right;
 }
 
-.ssl-row__days--ok { color: #4ade80; }
-.ssl-row__days--warn { color: var(--primary-light); }
-.ssl-row__days--crit { color: #f87171; }
+.ssl-row__days--ok { color: var(--success-text); }
+.ssl-row__days--warn { color: var(--primary-text); }
+.ssl-row__days--crit { color: var(--danger-text); }
 
 .ssl-row__date {
   font-family: 'JetBrains Mono', monospace;
@@ -462,11 +462,11 @@ onMounted(() => {
   letter-spacing: 0.02em;
 }
 
-.status-badge--active { background: rgba(34, 197, 94, 0.1); color: #4ade80; }
-.status-badge--expiring_soon { background: rgba(var(--primary-rgb), 0.1); color: var(--primary-light); }
-.status-badge--expired { background: rgba(239, 68, 68, 0.1); color: #f87171; }
-.status-badge--pending { background: rgba(99, 102, 241, 0.1); color: #818cf8; }
-.status-badge--none { background: rgba(148, 163, 184, 0.1); color: #94a3b8; }
+.status-badge--active { background: rgba(34, 197, 94, 0.1); color: var(--success-text); }
+.status-badge--expiring_soon { background: rgba(var(--primary-rgb), 0.1); color: var(--primary-text); }
+.status-badge--expired { background: rgba(239, 68, 68, 0.1); color: var(--danger-text); }
+.status-badge--pending { background: rgba(99, 102, 241, 0.1); color: var(--violet-text); }
+.status-badge--none { background: rgba(148, 163, 184, 0.1); color: var(--text-muted); }
 
 /* Missing aliases banner */
 .ssl-missing {
@@ -490,7 +490,7 @@ onMounted(() => {
   height: 30px;
   border-radius: 8px;
   background: rgba(239, 68, 68, 0.15);
-  color: #f87171;
+  color: var(--danger-text);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -498,7 +498,7 @@ onMounted(() => {
 .ssl-missing__title {
   font-size: 0.85rem;
   font-weight: 700;
-  color: #fca5a5;
+  color: var(--danger-text);
 }
 .ssl-missing__subtitle {
   font-size: 0.72rem;
@@ -546,14 +546,14 @@ onMounted(() => {
   font-family: 'JetBrains Mono', monospace;
   font-size: 0.7rem;
   background: rgba(239, 68, 68, 0.12);
-  color: #fca5a5;
+  color: var(--danger-text);
   padding: 0.1em 0.45em;
   border-radius: 5px;
   word-break: break-all;
 }
 .ssl-missing__domain--main {
   background: rgba(251, 146, 60, 0.15);
-  color: #fdba74;
+  color: var(--warning-text);
 }
 .ssl-missing__arrow { color: var(--text-faint); flex-shrink: 0; }
 
