@@ -66,8 +66,19 @@ export default migration;
 Ручной запуск:
 ```bash
 make migrate-system          # apply pending
-node migrations/runner.js status   # список pending/applied
+node migrations/dist/runner.js status   # список pending/applied
 ```
+
+После устранения причины зафиксированного сбоя конкретную идемпотентную
+миграцию можно повторить явно:
+
+```bash
+node migrations/dist/runner.js retry <migration-id>
+```
+
+Runner требует ту же checksum, сохранённую ошибку, отсутствие более поздней
+истории и успешно применённые предыдущие миграции. Запись нельзя удалять
+вручную: повторный запуск обновляет существующую строку итоговым результатом.
 
 ## Правила
 

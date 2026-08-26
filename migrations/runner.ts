@@ -5,6 +5,7 @@
  *   node migrations/dist/runner.js up           # apply all pending
  *   node migrations/dist/runner.js status       # list applied/pending
  *   node migrations/dist/runner.js down <id>    # rollback одной миграции (если есть down())
+ *   node migrations/dist/runner.js retry <id>   # explicit retry of exact failed artifact
  *   node migrations/dist/runner.js up --dry-run # симуляция без записи изменений
  *
  * Применяется автоматически в make update после prisma migrate deploy.
@@ -21,6 +22,7 @@ import { atomicWriteManagedFile } from './release/atomic-file';
 import { applySystemMigrationWithCompatibility } from './system-apply-compat';
 import { planLegacySystemMigration } from './system-plan-compat';
 import { assessSystemMigrationHistory } from './system-history';
+import { assertFailedSystemMigrationRetry } from './system-retry';
 import type {
   MigrationContext,
   MigrationPlan,
@@ -189,6 +191,11 @@ async function main() {
       const id = argv[1];
       if (!id) throw new Error('Usage: runner.js down <migration-id>');
       await runner.down(id);
+    } else if (cmd === 'retry') {
+      const id = argv[1];
+      if (!id) throw new Error('Usage: runner.js retry <migration-id>');
+      if (dryRun) throw new Error('retry does not accept --dry-run');
+      await runner.retryFailed(id);
     } else if (cmd === FRESH_INSTALL_BASELINE_COMMAND) {
       if (!argv.includes('--fresh-install')) {
         throw new Error(
@@ -202,7 +209,7 @@ async function main() {
     } else {
       console.error(`Unknown command: ${cmd}`);
       console.error(
-        `Usage: runner.js [up|status|down <id>|${FRESH_INSTALL_BASELINE_COMMAND} --fresh-install] ` +
+        `Usage: runner.js [up|status|down <id>|retry <id>|${FRESH_INSTALL_BASELINE_COMMAND} --fresh-install] ` +
           '[--dry-run] [--verbose]',
       );
       process.exit(2);
@@ -336,6 +343,33 @@ class MigrationsRunner {
     await target.module.down(ctx);
     await this.prisma.systemMigration.delete({ where: { id } });
     console.log(`[migrate] OK: ${id} rolled back`);
+  }
+
+  async retryFailed(id: string): Promise<void> {
+    const all = await this.discoverMigrations();
+    const target = all.find((migration) => migration.id === id);
+    if (!target) throw new Error(`Миграция не найдена: ${id}`);
+
+    const applied = await this.getApplied();
+    assertFailedSystemMigrationRetry(id, target.checksum, applied);
+
+    const withoutTarget = applied.filter((record) => record.id !== id);
+    assessSystemMigrationHistory(all, withoutTarget);
+    const successfulIds = new Set(
+      withoutTarget.filter((record) => record.ok).map((record) => record.id),
+    );
+    const earlierPending = all.find(
+      (migration) => migration.id.localeCompare(id) < 0 && !successfulIds.has(migration.id),
+    );
+    if (earlierPending) {
+      throw new Error(
+        `Cannot retry ${id} before earlier migration succeeds: ${earlierPending.id}`,
+      );
+    }
+
+    console.log(`[migrate] Explicit retry: ${id}`);
+    await this.applyOne(target);
+    console.log(`[migrate] OK: retry succeeded for ${id}`);
   }
 
   /**
