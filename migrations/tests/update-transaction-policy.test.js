@@ -15,6 +15,7 @@ const releaseWorkflow = path.join(root, '.github', 'workflows', 'release.yml');
 const apiPackage = path.join(root, 'api', 'package.json');
 const panelUpdateService = path.join(root, 'api', 'src', 'panel-update', 'panel-update.service.ts');
 const prismaBridge = path.join(root, 'api', 'scripts', 'prisma-legacy-bridge.cjs');
+const migrationRunner = path.join(root, 'migrations', 'runner.ts');
 
 function action(armed, committed, journalState) {
   return execFileSync(
@@ -92,6 +93,7 @@ test('updater wires tested policy across ordered transaction phases', () => {
 
 test('dry-run isolates candidate hooks from a concurrently writable live SQLite database', () => {
   const source = fs.readFileSync(updater, 'utf8');
+  const runnerSource = fs.readFileSync(migrationRunner, 'utf8');
   const start = source.indexOf('run_dry_run()');
   const end = source.indexOf('\napply_database()', start);
   assert.notEqual(start, -1);
@@ -114,8 +116,18 @@ test('dry-run isolates candidate hooks from a concurrently writable live SQLite 
     dryRun,
     /run_hook "\$QUIESCE_HOOK" check[^\n]+--database "\$clone_db"/,
   );
+  assert.match(
+    dryRun,
+    /MEOWBOX_STATE_DIR="\$STATE_DIR"[^\n]+\\\n\s+MEOWBOX_RUNTIME_VALIDATED=1 DATABASE_URL="file:\$clone_db"[^\n]+up --dry-run/,
+  );
+  assert.doesNotMatch(dryRun, /MEOWBOX_STATE_DIR="\$DRY_DIR\/state"/);
   assert.match(dryRun, /dry-run planning mutated the isolated SQLite clone/);
   assert.doesNotMatch(dryRun, /dry-run changed live SQLite/);
+
+  assert.match(runnerSource, /const readOnly = this\.opts\.dryRun/);
+  assert.match(runnerSource, /File write is forbidden in a read-only migration plan/);
+  assert.match(runnerSource, /External command is forbidden in a read-only migration plan/);
+  assert.match(runnerSource, /Checkpoint write is forbidden in a read-only migration plan/);
 });
 
 test('release preflight recovers stopped PM2 processes before health verification', () => {

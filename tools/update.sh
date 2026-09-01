@@ -939,7 +939,10 @@ run_dry_run() {
   # The maintenance integration owns the authoritative active-operation check.
   # Absence is a blocker rather than a best-effort warning.
   run_hook "$QUIESCE_HOOK" check --transaction "$TRANSACTION_ID" --candidate "$CANDIDATE_DIR" --database "$clone_db"
-  MEOWBOX_STATE_DIR="$DRY_DIR/state" MEOWBOX_RUNTIME_MANIFEST="$RUNTIME_MANIFEST" MEOWBOX_RUNTIME_STAGE="$RUNTIME_STAGE" \
+  # System migration plans must inspect the persistent runtime they will
+  # actually update. The runner's dry-run context blocks DB, command, file,
+  # and checkpoint writes; only SQLite is redirected to the isolated clone.
+  MEOWBOX_STATE_DIR="$STATE_DIR" MEOWBOX_RUNTIME_MANIFEST="$RUNTIME_MANIFEST" MEOWBOX_RUNTIME_STAGE="$RUNTIME_STAGE" \
     MEOWBOX_RUNTIME_VALIDATED=1 DATABASE_URL="file:$clone_db" node "$CANDIDATE_DIR/migrations/dist/runner.js" up --dry-run
   clone_plan_after="$(sqlite_hash_inputs "$clone_db")"
   local config_after
