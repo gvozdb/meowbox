@@ -745,18 +745,24 @@ model CronJob {
 }
 
 model NotificationSetting {
-  id        String   @id @default(uuid())
-  userId    String   @map("user_id")
-  channel   String // NotificationChannel
-  events    String   @default("[]") // JSON string[]
-  enabled   Boolean  @default(true)
-  config    String   @default("{}") // JSON object
-  createdAt DateTime @default(now()) @map("created_at")
-  updatedAt DateTime @updatedAt @map("updated_at")
+  id                        String    @id @default(uuid())
+  userId                    String    @map("user_id")
+  channel                   String // NotificationChannel
+  events                    String    @default("[]") // JSON string[]
+  enabled                   Boolean   @default(true)
+  config                    String    @default("{}") // JSON object
+  commandBotTokenHash       String?   @unique @map("command_bot_token_hash")
+  telegramNextUpdateId      String?   @map("telegram_next_update_id")
+  telegramCommandsEnabledAt DateTime? @map("telegram_commands_enabled_at")
+  telegramLeaseOwner        String?   @map("telegram_lease_owner")
+  telegramLeaseExpiresAt    DateTime? @map("telegram_lease_expires_at")
+  createdAt                 DateTime  @default(now()) @map("created_at")
+  updatedAt                 DateTime  @updatedAt @map("updated_at")
 
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@unique([userId, channel])
+  @@index([telegramLeaseExpiresAt])
   @@map("notification_settings")
 }
 

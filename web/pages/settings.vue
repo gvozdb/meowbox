@@ -439,6 +439,7 @@
               </div>
               <div class="session-item__meta">
                 {{ ns.events.map(e => eventLabel(e)).join(', ') }}
+                <span v-if="ns.channel === 'TELEGRAM' && ns.config.commandsEnabled"> · Команды: ON</span>
               </div>
             </div>
             <div class="notif-actions">
@@ -476,12 +477,26 @@
           <template v-if="notifForm.channel === 'TELEGRAM'">
             <div class="form-group">
               <label class="form-label">Bot Token</label>
-              <input v-model="(notifForm.config as Record<string, string>).botToken" type="text" class="form-input" placeholder="123456:ABC-DEF..." />
+              <input v-model="(notifForm.config as Record<string, string>).botToken" type="password" autocomplete="new-password" class="form-input" placeholder="123456:ABC-DEF..." />
+              <p v-if="(notifForm.config as Record<string, boolean>).hasBotToken" class="form-hint">Token сохранён. Оставьте поле пустым, чтобы не менять его.</p>
             </div>
             <div class="form-group">
               <label class="form-label">Chat ID</label>
               <input v-model="(notifForm.config as Record<string, string>).chatId" type="text" class="form-input" placeholder="-1001234567890 или -1001234567890:3 (топик)" />
               <p class="form-hint">Личка/группа/канал: <code>123456</code>, <code>-1001234567890</code>, <code>@channel</code>. Для топика в форум-группе: <code>-1001234567890:3</code> или <code>-1001234567890/3</code>.</p>
+            </div>
+            <div class="form-group">
+              <label class="notif-event-check">
+                <input v-model="(notifForm.config as Record<string, boolean>).commandsEnabled" type="checkbox" />
+                Информационные команды
+              </label>
+              <p class="form-hint">Только чтение: статус, проблемы, ресурсы, сайты, сервисы, бэкапы и SSL. Для команд нужен числовой Chat ID.</p>
+              <p class="form-hint">Bot Token не должен одновременно использовать webhook или <code>getUpdates</code> в другом приложении.</p>
+            </div>
+            <div v-if="(notifForm.config as Record<string, boolean>).commandsEnabled" class="form-group">
+              <label class="form-label">Разрешённый Telegram User ID</label>
+              <input v-model="(notifForm.config as Record<string, string>).commandUserId" type="text" inputmode="numeric" class="form-input" placeholder="123456789" />
+              <p class="form-hint">Сначала сохраните с пустым полем и отправьте боту <code>/whoami</code>. Вставьте полученный User ID сюда и сохраните ещё раз.</p>
             </div>
           </template>
           <template v-else-if="notifForm.channel === 'EMAIL'">
@@ -1561,7 +1576,7 @@ const notifForm = reactive({
   channel: 'TELEGRAM',
   events: [] as string[],
   enabled: true,
-  config: {} as Record<string, unknown>,
+  config: { commandsEnabled: false, commandUserId: '' } as Record<string, unknown>,
 });
 
 function resetNotifForm() {
@@ -1569,7 +1584,7 @@ function resetNotifForm() {
   notifForm.channel = 'TELEGRAM';
   notifForm.events = [];
   notifForm.enabled = true;
-  notifForm.config = {};
+  notifForm.config = { commandsEnabled: false, commandUserId: '' };
 }
 
 async function loadNotifications() {

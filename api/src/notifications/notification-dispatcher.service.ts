@@ -4,6 +4,12 @@ import { ConfigService } from '@nestjs/config';
 import { jsonArrayContains } from '../common/sqlite-mappers';
 import { parseJsonObject } from '../common/json-array';
 import { assertPublicHttpUrl } from '../common/validators/safe-url';
+import {
+  parseTelegramDestination,
+  readTelegramConfig,
+  type TelegramConfig,
+} from './telegram-config';
+import { TelegramClientService } from './telegram-client.service';
 
 interface NotificationPayload {
   event: string;
@@ -11,11 +17,6 @@ interface NotificationPayload {
   message: string;
   siteName?: string;
   timestamp?: Date;
-}
-
-interface TelegramConfig {
-  botToken: string;
-  chatId: string;
 }
 
 interface EmailConfig {
@@ -39,6 +40,7 @@ export class NotificationDispatcherService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly config: ConfigService,
+    private readonly telegram: TelegramClientService,
   ) {}
 
   /**
@@ -103,10 +105,12 @@ export class NotificationDispatcherService {
   // =========================================================================
 
   private async sendTelegram(
-    cfg: TelegramConfig,
+    rawConfig: TelegramConfig | Record<string, unknown>,
     payload: NotificationPayload,
   ): Promise<void> {
-    if (!cfg.botToken || !cfg.chatId) {
+    const cfg = readTelegramConfig(rawConfig);
+    const destination = cfg ? parseTelegramDestination(cfg.chatId) : null;
+    if (!cfg || !destination) {
       throw new Error('Telegram botToken and chatId are required');
     }
 
@@ -126,58 +130,19 @@ export class NotificationDispatcherService {
     //   "-1003803183992:3"      → чат -1003803183992, топик 3
     //   "-1003803183992/3"      → то же самое
     //   "@channelname"          → канал по username
-    const { chatId, messageThreadId } = this.parseTelegramChatId(cfg.chatId);
-
-    const url = `https://api.telegram.org/bot${cfg.botToken}/sendMessage`;
-    const body: Record<string, unknown> = {
-      chat_id: chatId,
+    await this.telegram.sendMessage(cfg.botToken, {
+      chatId: destination.chatId,
+      messageThreadId: destination.messageThreadId,
       text,
-      parse_mode: 'MarkdownV2',
-      disable_web_page_preview: true,
-    };
-    if (messageThreadId !== undefined) {
-      body.message_thread_id = messageThreadId;
-    }
-
-    const response = await fetch(url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
+      parseMode: 'MarkdownV2',
     });
 
-    if (!response.ok) {
-      const apiBody = await response.text();
-      throw new Error(`Telegram API error ${response.status}: ${apiBody}`);
-    }
-
     this.logger.debug(
-      `Telegram notification sent to ${chatId}` +
-        (messageThreadId !== undefined ? ` (topic ${messageThreadId})` : ''),
+      `Telegram notification sent to ${destination.chatId}` +
+        (destination.messageThreadId !== undefined
+          ? ` (topic ${destination.messageThreadId})`
+          : ''),
     );
-  }
-
-  /**
-   * Парсит Telegram chatId с опциональным указанием топика.
-   * Допустимые форматы:
-   *   "133652371"                 → личка
-   *   "-1003803183992"            → группа/канал
-   *   "-1003803183992:3"          → топик 3 в группе
-   *   "-1003803183992/3"          → то же
-   *   "@channel"                  → username канала
-   */
-  private parseTelegramChatId(raw: string): {
-    chatId: string;
-    messageThreadId?: number;
-  } {
-    const trimmed = String(raw).trim();
-    const m = trimmed.match(/^(-?\d+|@[A-Za-z0-9_]+)[:/](\d+)$/);
-    if (m) {
-      const threadId = Number(m[2]);
-      if (Number.isFinite(threadId) && threadId > 0) {
-        return { chatId: m[1], messageThreadId: threadId };
-      }
-    }
-    return { chatId: trimmed };
   }
 
   // =========================================================================

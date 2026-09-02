@@ -2,18 +2,11 @@ import { Module } from '@nestjs/common';
 import { DashboardController } from './dashboard.controller';
 import { DashboardService } from './dashboard.service';
 import { AuthModule } from '../auth/auth.module';
-import { DashboardOverviewService } from './dashboard-overview.service';
-import { DashboardQueryService } from './dashboard-query.service';
-import { DashboardDiagnosticsService } from './dashboard-diagnostics.service';
+import { DashboardOverviewModule } from './dashboard-overview.module';
 
 @Module({
-  imports: [AuthModule],
+  imports: [AuthModule, DashboardOverviewModule],
   controllers: [DashboardController],
-  providers: [
-    DashboardService,
-    DashboardOverviewService,
-    DashboardQueryService,
-    DashboardDiagnosticsService,
-  ],
+  providers: [DashboardService],
 })
 export class DashboardModule {}
