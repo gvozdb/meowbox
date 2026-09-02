@@ -306,6 +306,7 @@ import {
   type SelectOption,
   type SiteTypePreset,
 } from '~/utils/domain-application';
+import { createBrowserUuid } from '~/utils/idempotency-key';
 
 interface SiteAlias {
   domain: string;
@@ -457,10 +458,7 @@ function isModxPreset(preset: SiteTypePreset): boolean {
 }
 
 function idempotencyKey(prefix: string): string {
-  const suffix =
-    globalThis.crypto?.randomUUID?.() ||
-    `${Date.now()}-${Math.random().toString(36).slice(2, 12)}`;
-  return `${prefix}:${suffix}`;
+  return `${prefix}:${createBrowserUuid()}`;
 }
 
 async function loadFormOptions(): Promise<void> {

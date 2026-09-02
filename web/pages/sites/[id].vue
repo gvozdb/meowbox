@@ -2606,6 +2606,7 @@ php_value[max_execution_time] = 300"
 
 <script setup lang="ts">
 import { copyToClipboard } from '~/utils/clipboard';
+import { createBrowserUuid } from '~/utils/idempotency-key';
 import {
   navigateAppHandoff,
   navigateDownloadDelivery,
@@ -3218,10 +3219,7 @@ async function submitSshPasswordChange() {
 }
 
 function domainMutationKey(action: string): string {
-  const suffix =
-    globalThis.crypto?.randomUUID?.() ||
-    `${Date.now()}-${Math.random().toString(36).slice(2, 12)}`;
-  return `domain-${action}:${suffix}`;
+  return `domain-${action}:${createBrowserUuid()}`;
 }
 
 // ─── MODX admin password change ───
@@ -3950,7 +3948,7 @@ async function triggerDeploy() {
       },
       {
         headers: {
-          'Idempotency-Key': `domain-deploy-${crypto.randomUUID()}`,
+          'Idempotency-Key': operationIdempotencyKey('domain-deploy'),
         },
       },
     );
@@ -4052,7 +4050,7 @@ async function rollbackDeploy(dl: { id: string; commitSha: string | null }) {
       undefined,
       {
         headers: {
-          'Idempotency-Key': `domain-rollback-${crypto.randomUUID()}`,
+          'Idempotency-Key': operationIdempotencyKey('domain-rollback'),
         },
       },
     );
@@ -4905,10 +4903,7 @@ async function loadSnapshotsInPicker() {
 }
 
 function backupRestoreIdempotencyKey(prefix: string): string {
-  const suffix =
-    globalThis.crypto?.randomUUID?.() ||
-    `${Date.now()}-${Math.random().toString(36).slice(2, 12)}`;
-  return `${prefix}:${suffix}`;
+  return `${prefix}:${createBrowserUuid()}`;
 }
 
 async function runResticQuery<T>(

@@ -238,6 +238,7 @@ location /api/ {
 
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from 'vue';
+import { createBrowserUuid } from '~/utils/idempotency-key';
 
 interface ResolvedNginxSettings {
   clientMaxBodySize: string;
@@ -354,10 +355,7 @@ function nginxBase(): string {
 }
 
 function nginxMutationKey(action: string): string {
-  const suffix =
-    globalThis.crypto?.randomUUID?.() ||
-    `${Date.now()}-${Math.random().toString(36).slice(2, 12)}`;
-  return `domain-nginx-${action}:${suffix}`;
+  return `domain-nginx-${action}:${createBrowserUuid()}`;
 }
 
 async function loadAll() {

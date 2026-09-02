@@ -7,6 +7,7 @@ import {
   type SelectedTargetSnapshot,
 } from '~/utils/selected-target-context';
 import { evaluateRemoteCapability } from '~/utils/remote-capability';
+import { createIdempotencyKey } from '~/utils/idempotency-key';
 import { resolveRemoteHttpAction } from '~/utils/remote-action-resolver';
 
 export interface ApiCallOptions {
@@ -153,9 +154,7 @@ function hasHeader(headers: Record<string, string>, expected: string): boolean {
 }
 
 function newIdempotencyKey(): string {
-  const uuid = globalThis.crypto?.randomUUID?.();
-  if (!uuid) throw new Error('Secure idempotency key generation is unavailable');
-  return `web-${uuid}`;
+  return createIdempotencyKey('web');
 }
 
 function attachRemoteMutationIdempotency(

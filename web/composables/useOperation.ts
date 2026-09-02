@@ -1,3 +1,5 @@
+import { createIdempotencyKey } from '~/utils/idempotency-key';
+
 export const OPERATION_TERMINAL_STATES = [
   'CANCELLED',
   'SUCCEEDED',
@@ -44,7 +46,7 @@ export class OperationFailedError extends Error {
 }
 
 export function operationIdempotencyKey(prefix: string): string {
-  return `${prefix}-${crypto.randomUUID()}`;
+  return createIdempotencyKey(prefix);
 }
 
 const operationWatchControllers = new Set<AbortController>();

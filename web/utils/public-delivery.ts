@@ -5,6 +5,7 @@ import type {
   PublicDeliveryPurpose,
   TransferSessionDelivery,
 } from '@meowbox/shared';
+import { createIdempotencyKey } from './idempotency-key';
 
 const DIRECT_PROBE_TIMEOUT_MS = 5_000;
 export type VpnSubscriptionDelivery = PublicEndpointDelivery;
@@ -162,7 +163,7 @@ export function publicDeliveryIdempotencyKey(
     'ADMINER' | 'MANTICORE' | 'MODX_LOGIN' | 'DOWNLOAD'
   >,
 ): string {
-  return `public-delivery-${purpose.toLowerCase()}-${crypto.randomUUID()}`;
+  return createIdempotencyKey(`public-delivery-${purpose.toLowerCase()}`);
 }
 
 function validateTransferSessionDelivery(

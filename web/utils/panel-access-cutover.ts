@@ -1,3 +1,5 @@
+import { createIdempotencyKey } from './idempotency-key';
+
 export const PANEL_ACCESS_CUTOVER_STATES = [
   'PREPARED',
   'STAGED',
@@ -68,7 +70,7 @@ export function validatePanelAccessCutoverView(
 }
 
 export function panelAccessCutoverIdempotencyKey(stage: 'start' | 'confirm' | 'rollback'): string {
-  return `panel-access-${stage}-${crypto.randomUUID()}`;
+  return createIdempotencyKey(`panel-access-${stage}`);
 }
 
 export async function probePanelAccessCandidate(
