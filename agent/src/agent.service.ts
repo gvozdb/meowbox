@@ -978,7 +978,7 @@ export class AgentService {
       } catch (err) {
         cb({ success: false, error: (err as Error).message });
       }
-    });
+    }, 360_000);
 
     this.safeOn(s, 'panel-access:gen-selfsigned', async (_params: unknown, cb: Callback) => {
       try {

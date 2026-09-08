@@ -22,7 +22,7 @@ curl -fsSL https://raw.githubusercontent.com/gvozdb/meowbox/main/bootstrap.sh \
 - **API** — NestJS + Prisma + **SQLite** (один файл, без PostgreSQL/Redis)
 - **Web** — Nuxt 3 + Pinia
 - **Agent** — Node.js + Socket.io (выполняет команды на хосте)
-- **Proxy** — nginx (один порт наружу, по умолчанию `11862`)
+- **Proxy** — nginx (`443` для привязанного домена; recovery IP-порт по умолчанию `11862`)
 - **Process manager** — PM2
 
 API слушает только loopback. Всё, что наружу — идёт через nginx с TLS и rate-limit-зонами per-site.

@@ -46,6 +46,17 @@ export class IssueLeDto {
   /** Email регистрации в LE (обязателен — без него LE будет ругаться). */
   @IsEmail({}, { message: 'email обязателен и должен быть валидным' })
   email!: string;
+
+  /**
+   * Новый домен можно передать вместе с выпуском сертификата. Это позволяет
+   * подготовить ACME и переключить nginx одним cutover, не снимая текущий TLS.
+   */
+  @IsOptional()
+  @IsString()
+  @Matches(/^([a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)+[a-zA-Z]{2,}$/, {
+    message: 'domain должен быть валидным DNS-именем (например panel.example.com)',
+  })
+  domain?: string;
 }
 
 export class GenerateSelfSignedDto {

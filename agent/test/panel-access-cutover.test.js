@@ -35,15 +35,33 @@ test('T-PA-001 candidate listener coexists without replacing primary upstreams',
   });
   assert.match(candidate, /federation-cutover: 11111111-2222-4333-8444-555555555555/);
   assert.match(candidate, /server_name new\.target\.test/);
+  assert.match(candidate, /listen 443 ssl/);
+  assert.doesNotMatch(candidate, /listen 11862/);
   assert.match(candidate, /proxy_pass http:\/\/meowbox_api/);
   assert.match(candidate, /location \/socket\.io\//);
   assert.doesNotMatch(candidate, /upstream meowbox_api/);
   assert.doesNotMatch(candidate, /default_server/);
 
-  const primary = manager.buildPanelNginxConf(settings, env);
+  const primary = manager.buildPanelNginxConf({ ...settings, denyIpAccess: false }, env);
   assert.match(primary, /upstream meowbox_api/);
-  assert.match(primary, /default_server/);
+  assert.doesNotMatch(primary, /default_server/);
+  assert.match(primary, /listen 443 ssl/);
+  assert.match(primary, /listen 11862 ssl/);
   assert.match(primary, /ssl_certificate \/fixture\/new\/fullchain\.pem/);
+});
+
+test('T-PA-002 denyIpAccess keeps domain on 443 and closes the recovery port', () => {
+  const manager = new PanelAccessManager();
+  const config = manager.buildPanelNginxConf({ ...settings, denyIpAccess: true }, env);
+  const primaryHeader = config.slice(
+    config.lastIndexOf('\nserver {', config.indexOf('    # Security headers')),
+    config.indexOf('    # Security headers'),
+  );
+  assert.match(primaryHeader, /listen 443 ssl/);
+  assert.doesNotMatch(primaryHeader, /11862/);
+  assert.match(config, /listen 11862 ssl default_server/);
+  assert.match(config, /return 444/);
+  assert.doesNotMatch(config, /https:\/\/\$host:11862/);
 });
 
 test('T-PA-003 cutover writes durable journals and validates Nginx before reload', () => {
@@ -55,6 +73,9 @@ test('T-PA-003 cutover writes durable journals and validates Nginx before reload
   assert.match(body, /writeFederationEndpoints\(envBefore, nextEndpoints\)/);
   assert.match(body, /state: 'FINALIZED'/);
   assert.match(body, /state: 'ROLLED_BACK'/);
+  assert.match(body, /PANEL_ACME_PATH/);
+  assert.match(body, /buildAcmeChallengeConf\('local-issuance', params\.domain\)/);
+  assert.match(body, /removeManagedNginxConfig\(PANEL_ACME_PATH, PANEL_ACME_ENABLED, true\)/);
   assert.match(agentSource(), /panel-access:cutover-status/);
   assert.doesNotMatch(body, /rejectUnauthorized\s*:\s*false/);
 });

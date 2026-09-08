@@ -40,3 +40,14 @@ test('T-PA-003 unsafe remote certificate shortcuts stay disabled', () => {
   assert.match(page, /Idempotency-Key/);
   assert.doesNotMatch(page, /window\.location\.protocol\/\/\$\{window\.location\.host\}/);
 });
+
+test('T-PA-004 local domain replacement keeps current TLS until LE succeeds', () => {
+  const page = read('pages/settings.vue');
+  const save = page.slice(page.indexOf('async function saveAccessDomain()'), page.indexOf('async function unbindAccessDomain()'));
+  assert.ok(save.indexOf('isLocalDomainDraftWithTls.value') < save.indexOf("'/panel-access/domain'"));
+  assert.match(save, /isLocalDomainDraftWithTls\.value[\s\S]*?return;/);
+  assert.match(page, /\{ email, domain: requestedDomain \}/);
+  assert.match(page, /url\.port = ''/);
+  assert.match(page, /navigateToPanelDomain\(res\.settings\.domain/);
+  assert.doesNotMatch(page, /https:\/\/\$host:\$\{PANEL_PORT\}/);
+});

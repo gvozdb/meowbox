@@ -72,7 +72,7 @@ export class PanelAccessController {
   // ── Cert: Let's Encrypt ────────────────────────────────────────────────────
   @Post('cert/le')
   async issueLe(@Body() body: IssueLeDto) {
-    const data = await this.service.issueLeCert(body.email);
+    const data = await this.service.issueLeCert(body.email, body.domain);
     return { success: true, data };
   }
 

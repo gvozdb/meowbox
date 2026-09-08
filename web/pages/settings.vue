@@ -758,7 +758,7 @@
           <div class="access-status">
             <div class="access-status__row">
               <span class="access-status__label">URL</span>
-              <span class="access-status__value mono">{{ currentPanelUrl }}</span>
+              <a class="access-status__value mono" :href="currentPanelUrl">{{ currentPanelUrl }}</a>
             </div>
             <div class="access-status__row">
               <span class="access-status__label">Протокол</span>
@@ -817,7 +817,7 @@
               <div class="access-input-row">
                 <input v-model="accessForm.domain" class="form-input mono" placeholder="panel.example.com" :disabled="accessSaving || accessIssueLeRunning || accessCutoverPending" />
                 <button class="settings-card__btn settings-card__btn--sm" :disabled="accessSaving || accessIssueLeRunning || accessCutoverPending" @click="saveAccessDomain">
-                  {{ accessSaving ? '...' : (isFederatedRemotePanelAccess ? 'Подготовить' : 'Сохранить') }}
+                  {{ accessSaving ? '...' : ((isFederatedRemotePanelAccess || isLocalDomainDraftWithTls) ? 'Подготовить' : 'Сохранить') }}
                 </button>
                 <button v-if="accessForm.domain && !isRemotePanelAccess" class="settings-card__btn settings-card__btn--sm settings-card__btn--danger" :disabled="accessSaving" @click="unbindAccessDomain">
                   Отвязать
@@ -826,7 +826,7 @@
               <span class="form-hint">
                 {{ isFederatedRemotePanelAccess
                   ? 'Домен не меняется до полного cutover. Удаление TLS и IP-only режим для federation target запрещены.'
-                  : 'Смена домена при наличии текущего сертификата автоматически снесёт cert — его нужно выпустить заново.' }}
+                  : 'При активном TLS новый домен переключится только после успешного выпуска сертификата.' }}
               </span>
             </div>
 
@@ -870,7 +870,7 @@
                 class="settings-card__btn"
                 :disabled="accessIssueLeRunning || !accessLeReady"
                 @click="issueAccessLe"
-                :title="!accessLeReady ? (isFederatedRemotePanelAccess ? 'Укажи новый домен и проверь capability target' : 'Сначала сохрани домен и проверь DNS') : ''"
+                :title="!accessLeReady ? (isFederatedRemotePanelAccess ? 'Укажи новый домен и проверь capability target' : 'Укажи домен и корректный email') : ''"
               >
                 {{ accessIssueButtonLabel }}
               </button>
@@ -2021,6 +2021,7 @@ interface AccessLive {
   dnsResolved: string | null;
   serverIp: string | null;
   dnsMatchesServer: boolean | null;
+  panelPort: number | null;
   agentOnline: boolean;
 }
 
@@ -2056,10 +2057,12 @@ const accessLive = reactive<AccessLive>({
   dnsResolved: null,
   serverIp: null,
   dnsMatchesServer: null,
+  panelPort: null,
   agentOnline: false,
 });
 const accessOriginalDomain = ref<string | null>(null);
 const accessDefaultEmail = ref<string | null>(null);
+const PANEL_DOMAIN_RE = /^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,}$/;
 const isRemotePanelAccess = computed(() => !serverStore.isLocal);
 const isFederatedRemotePanelAccess = computed(() =>
   isRemotePanelAccess.value && serverStore.currentServer?.federation === true,
@@ -2100,6 +2103,13 @@ const isRemoteDomainDraft = computed(() =>
   accessForm.domain !== accessOriginalDomain.value,
 );
 
+const isLocalDomainDraftWithTls = computed(() =>
+  !isRemotePanelAccess.value &&
+  accessForm.certMode !== 'NONE' &&
+  !!accessForm.domain &&
+  accessForm.domain !== accessOriginalDomain.value,
+);
+
 const selectedPanelOrigin = computed(() => {
   if (typeof window === 'undefined') return '';
   if (!isRemotePanelAccess.value) return window.location.origin;
@@ -2110,6 +2120,7 @@ const selectedPanelOrigin = computed(() => {
 });
 
 const panelPort = computed(() => {
+  if (accessLive.panelPort) return String(accessLive.panelPort);
   try {
     const url = new URL(selectedPanelOrigin.value);
     return url.port || (url.protocol === 'https:' ? '443' : '80');
@@ -2118,10 +2129,38 @@ const panelPort = computed(() => {
   }
 });
 
-const currentPanelUrl = computed(() => selectedPanelOrigin.value);
+function panelDomainOrigin(domain: string): string {
+  if (typeof window === 'undefined' || !domain) return '';
+  const url = new URL(window.location.origin);
+  url.protocol = 'https:';
+  url.hostname = domain;
+  url.port = '';
+  return url.origin;
+}
+
+function navigateToPanelDomain(domain: string) {
+  if (typeof window === 'undefined') return;
+  const origin = panelDomainOrigin(domain);
+  if (!origin || origin === window.location.origin) return;
+  const target = new URL(window.location.href);
+  const canonical = new URL(origin);
+  target.protocol = canonical.protocol;
+  target.hostname = canonical.hostname;
+  target.port = canonical.port;
+  window.location.assign(target.toString());
+}
+
+const currentPanelUrl = computed(() => {
+  if (
+    !isRemotePanelAccess.value &&
+    accessOriginalDomain.value &&
+    accessForm.certMode === 'LE'
+  ) return panelDomainOrigin(accessOriginalDomain.value);
+  return selectedPanelOrigin.value;
+});
 
 const accessProtocolHttps = computed(() => {
-  try { return new URL(selectedPanelOrigin.value).protocol === 'https:'; }
+  try { return new URL(currentPanelUrl.value).protocol === 'https:'; }
   catch { return false; }
 });
 
@@ -2135,13 +2174,13 @@ const certExpiryClass = computed(() => {
   return 'access-pill--ok';
 });
 
-// LE можно запускать только когда: домен сохранён (originalDomain совпадает с
-// формой), email валиден, и DNS либо совпадает либо ещё не проверен.
+// Новый локальный домен передаётся вместе с LE-запросом и до успеха остаётся draft.
 const accessLeReady = computed(() => {
-  if (!accessForm.domain) return false;
+  const domain = (accessForm.domain || '').trim().toLowerCase();
+  if (!PANEL_DOMAIN_RE.test(domain)) return false;
   if (isFederatedRemotePanelAccess.value) {
     if (!remoteCutoverSupported.value || !isRemoteDomainDraft.value) return false;
-  } else if (accessForm.domain !== accessOriginalDomain.value) return false;
+  }
   const email = (accessForm.leEmailDraft || '').trim();
   if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return false;
   return true;
@@ -2194,7 +2233,7 @@ async function saveAccessDomain() {
   const domain = (accessForm.domain || '').trim().toLowerCase() || null;
   if (
     domain &&
-    !/^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,}$/.test(domain)
+    !PANEL_DOMAIN_RE.test(domain)
   ) {
     showStatus('Домен невалиден', true);
     return;
@@ -2206,6 +2245,11 @@ async function saveAccessDomain() {
         ? 'Это уже активный target endpoint'
         : 'Candidate подготовлен в форме. Запусти проверку и переключение endpoint.',
     );
+    return;
+  }
+  if (domain && isLocalDomainDraftWithTls.value) {
+    accessForm.domain = domain;
+    showStatus('Домен подготовлен. Выпусти сертификат — переключение произойдёт без отключения текущего HTTPS.');
     return;
   }
   accessSaving.value = true;
@@ -2228,7 +2272,7 @@ async function unbindAccessDomain() {
     showStatus('Удалённый federation endpoint нельзя отвязать без recovery cutover', true);
     return;
   }
-  if (!confirm('Отвязать домен? Если есть сертификат — он будет снесён.')) return;
+  if (!confirm('Отвязать домен? Панель сохранит HTTPS на recovery-порту через self-signed сертификат.')) return;
   accessForm.domain = '';
   await saveAccessDomain();
 }
@@ -2236,22 +2280,29 @@ async function unbindAccessDomain() {
 async function issueAccessLe() {
   if (!accessLeReady.value) return;
   const email = (accessForm.leEmailDraft || '').trim();
+  const requestedDomain = (accessForm.domain || '').trim().toLowerCase();
   accessIssueLeRunning.value = true;
   try {
     if (isFederatedRemotePanelAccess.value) {
       await runRemotePanelAccessCutover(email);
       return;
     }
-    const res = await api.post<{ settings: AccessSettings; live: AccessLive }>('/panel-access/cert/le', { email });
+    const res = await api.post<{ settings: AccessSettings; live: AccessLive }>(
+      '/panel-access/cert/le',
+      { email, domain: requestedDomain },
+    );
     Object.assign(accessForm, res.settings);
     Object.assign(accessLive, res.live);
     accessForm.domain = res.settings.domain || '';
+    accessOriginalDomain.value = res.settings.domain;
     showStatus('Let\'s Encrypt сертификат выпущен');
+    navigateToPanelDomain(res.settings.domain || '');
   } catch (err) {
     // Ошибка детальная — показываем как есть.
     showStatus('Не удалось выпустить cert: ' + ((err as Error).message || ''), true);
     // Перечитаем настройки чтобы подтянуть leLastError.
     await loadPanelAccess();
+    if (!isRemotePanelAccess.value && requestedDomain) accessForm.domain = requestedDomain;
   } finally {
     accessIssueLeRunning.value = false;
   }
@@ -2312,6 +2363,9 @@ async function saveAccessBehavior() {
     Object.assign(accessForm, res.settings);
     Object.assign(accessLive, res.live);
     showStatus('Настройки доступа применены');
+    if (!isRemotePanelAccess.value && res.settings.denyIpAccess && res.settings.domain) {
+      navigateToPanelDomain(res.settings.domain);
+    }
   } catch (err) {
     showStatus('Не применить: ' + ((err as Error).message || ''), true);
     // Откатываем чекбоксы к серверной правде.

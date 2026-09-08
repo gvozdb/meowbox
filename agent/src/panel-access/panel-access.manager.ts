@@ -24,6 +24,8 @@ const PANEL_NGINX_ENABLED = '/etc/nginx/sites-enabled/meowbox-panel';
 const PANEL_NGINX_BAK = '/etc/nginx/sites-available/meowbox-panel.bak';
 const PANEL_CANDIDATE_PATH = '/etc/nginx/sites-available/meowbox-panel-candidate';
 const PANEL_CANDIDATE_ENABLED = '/etc/nginx/sites-enabled/meowbox-panel-candidate';
+const PANEL_ACME_PATH = '/etc/nginx/sites-available/meowbox-panel-acme';
+const PANEL_ACME_ENABLED = '/etc/nginx/sites-enabled/meowbox-panel-acme';
 const SELFSIGNED_DIR = '/etc/ssl/meowbox/panel';
 const CUTOVER_STATE_DIR = '/opt/meowbox/state/data/panel-access-cutovers';
 const CUTOVER_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
@@ -99,6 +101,7 @@ export class PanelAccessManager {
     dnsResolved: string | null;
     serverIp: string | null;
     dnsMatchesServer: boolean | null;
+    panelPort: number | null;
     error?: string;
   }> {
     const out = {
@@ -108,6 +111,7 @@ export class PanelAccessManager {
       dnsResolved: null as string | null,
       serverIp: null as string | null,
       dnsMatchesServer: null as boolean | null,
+      panelPort: null as number | null,
     };
 
     if (params.certPath) {
@@ -121,6 +125,11 @@ export class PanelAccessManager {
     }
 
     out.serverIp = await this.detectPublicIp();
+    try {
+      out.panelPort = this.panelPort((await this.readPanelEnv()).PANEL_PORT);
+    } catch {
+      out.panelPort = null;
+    }
 
     if (params.domain) {
       try {
@@ -149,26 +158,54 @@ export class PanelAccessManager {
     expiresAt?: string;
     error?: string;
   }> {
-    if (!/^([a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)+[a-zA-Z]{2,}$/.test(params.domain)) {
-      return { success: false, error: 'Invalid domain' };
-    }
-    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(params.email)) {
-      return { success: false, error: 'Invalid email' };
-    }
+    const validationError = this.validateLeParams(params);
+    if (validationError) return { success: false, error: validationError };
 
-    // 1) webroot должен существовать и быть доступным nginx'у.
     try {
       await fs.mkdir(ACME_WEBROOT, { recursive: true, mode: 0o755 });
     } catch (e) {
       return { success: false, error: `Не удалось создать ACME webroot: ${(e as Error).message}` };
     }
 
-    // 2) Перед запуском certbot убеждаемся, что nginx сейчас отдаёт ACME-challenge
-    //    с :80 для нашего домена. Если конфиг ещё не подключён — certbot упадёт
-    //    с unauthorized. Поэтому API ДОЛЖЕН вызвать render-nginx раньше с
-    //    valid http server. (см. PanelAccessService.issueLeCert)
+    // Новый ACME vhost живёт отдельно: основной panel config и текущий TLS
+    // остаются нетронутыми до успешного выпуска сертификата.
+    let challengeInstalled = false;
+    let result: Awaited<ReturnType<PanelAccessManager['runCertbot']>>;
+    try {
+      await this.applyManagedNginxConfig(
+        PANEL_ACME_PATH,
+        PANEL_ACME_ENABLED,
+        this.buildAcmeChallengeConf('local-issuance', params.domain),
+      );
+      challengeInstalled = true;
+      result = await this.runCertbot(params);
+    } catch (error) {
+      result = { success: false, error: (error as Error).message };
+    }
 
-    // 3) Запускаем certbot.
+    if (challengeInstalled) {
+      try {
+        await this.removeManagedNginxConfig(PANEL_ACME_PATH, PANEL_ACME_ENABLED, true);
+      } catch (error) {
+        return {
+          success: false,
+          error: `Не удалось убрать временный ACME-конфиг: ${(error as Error).message}`,
+        };
+      }
+    }
+    return result;
+  }
+
+  private async runCertbot(params: { domain: string; email: string }): Promise<{
+    success: boolean;
+    certPath?: string;
+    keyPath?: string;
+    expiresAt?: string;
+    error?: string;
+  }> {
+    const validationError = this.validateLeParams(params);
+    if (validationError) return { success: false, error: validationError };
+
     const args = [
       'certonly',
       '--webroot',
@@ -353,7 +390,7 @@ export class PanelAccessManager {
     } catch { /* первого файла может не быть */ }
 
     try {
-      await fs.writeFile(PANEL_NGINX_PATH, config, 'utf-8');
+      await this.writeAtomicFile(PANEL_NGINX_PATH, config, 0o644);
 
       // Убеждаемся, что symlink есть.
       try {
@@ -375,6 +412,9 @@ export class PanelAccessManager {
       // reload
       const r = await this.executor.execute('systemctl', ['reload', 'nginx'], { allowFailure: true });
       if (r.exitCode !== 0) {
+        if (hadBackup) {
+          await fs.copyFile(PANEL_NGINX_BAK, PANEL_NGINX_PATH).catch(() => {});
+        }
         return { success: false, error: `nginx reload failed: ${r.stderr}` };
       }
       return { success: true };
@@ -411,7 +451,8 @@ export class PanelAccessManager {
       this.buildCandidateAcmeConf(input.cutoverId, input.domain),
     );
 
-    const issued = await this.issueLeCert({ domain: input.domain, email: input.email });
+    await fs.mkdir(ACME_WEBROOT, { recursive: true, mode: 0o755 });
+    const issued = await this.runCertbot({ domain: input.domain, email: input.email });
     if (!issued.success || !issued.certPath || !issued.keyPath) {
       await this.removeCandidateConfig();
       throw new Error(issued.error || 'Panel Access certificate issuance failed');
@@ -421,8 +462,7 @@ export class PanelAccessManager {
     const certificate = new X509Certificate(certPem);
     const spki = certificate.publicKey.export({ type: 'spki', format: 'der' });
     const spkiSha256 = `sha256/${createHash('sha256').update(spki).digest('base64')}`;
-    const panelPort = this.panelPort(env.PANEL_PORT);
-    const candidateOrigin = `https://${input.domain}${panelPort === 443 ? '' : `:${panelPort}`}`;
+    const candidateOrigin = `https://${input.domain}`;
     const issuedAt = new Date().toISOString();
     const candidateSettings: PanelAccessCutoverStageResult['candidateSettings'] = {
       domain: input.domain,
@@ -613,6 +653,7 @@ export class PanelAccessManager {
     } = {},
   ): string {
     const { PANEL_PORT, API_PORT, WEB_PORT, ADMINER_DIR, TRANSFER_RATE_LIMIT } = env;
+    const panelPort = this.panelPort(PANEL_PORT);
     const serverNamePanel = s.domain || '_';
     const includeUpstreams = options.includeUpstreams !== false;
     const candidateOnly = options.candidateOnly === true;
@@ -651,7 +692,7 @@ server {
 ${
   s.httpsRedirect && s.certMode !== 'NONE'
     ? `    location / {
-        return 301 https://$host:${PANEL_PORT}$request_uri;
+        return 301 https://$host$request_uri;
     }
 `
     : `    location / {
@@ -663,17 +704,26 @@ ${
       conf += acmeBlock;
     }
 
-    // ------- Основной server на PANEL_PORT
+    // ------- Основной server: domain на стандартном :443, recovery на PANEL_PORT
     //
-    // Если denyIpAccess — server_name <domain>, без default_server.
-    //   Плюс отдельный default-server на этом же порту, который 444 отдаёт.
-    // Иначе — server_name <domain> _; default_server (как раньше).
+    // Candidate слушает только :443 и не пересекается с активным recovery-портом.
+    // Если denyIpAccess — основной server не слушает PANEL_PORT, а отдельный
+    // default-server на нём возвращает 444.
     const isHttps = s.certMode !== 'NONE';
     // HTTP/2 не включаем — не у всех сборок nginx есть ngx_http_v2_module,
     // а для админ-панели http/1.1 более чем достаточно.
-    const listenLine = isHttps
-      ? `    listen ${PANEL_PORT} ssl;\n    listen [::]:${PANEL_PORT} ssl;`
-      : `    listen ${PANEL_PORT};\n    listen [::]:${PANEL_PORT};`;
+    const listenLines: string[] = [];
+    if (isHttps && s.domain) {
+      listenLines.push('    listen 443 ssl;', '    listen [::]:443 ssl;');
+    }
+    const exposePanelPort = !candidateOnly && !(s.denyIpAccess && s.domain);
+    if (exposePanelPort && (!isHttps || !s.domain || panelPort !== 443)) {
+      listenLines.push(
+        isHttps ? `    listen ${panelPort} ssl;` : `    listen ${panelPort};`,
+        isHttps ? `    listen [::]:${panelPort} ssl;` : `    listen [::]:${panelPort};`,
+      );
+    }
+    const listenLine = listenLines.join('\n');
 
     let serverNames: string;
     let defaultServerBlock = '';
@@ -687,11 +737,11 @@ ${
       // — браузер на IP получит ssl-handshake → cert не валиден на IP →
       // соединение разорвано (для атакующего бесшумно).
       defaultServerBlock = `
-# Default server — IP:PORT доступ запрещён (server_name только domain).
+# Recovery port disabled — IP:PORT доступ запрещён.
 server {
 ${isHttps
-  ? `    listen ${PANEL_PORT} ssl default_server;\n    listen [::]:${PANEL_PORT} ssl default_server;\n    ssl_certificate ${s.certPath};\n    ssl_certificate_key ${s.keyPath};`
-  : `    listen ${PANEL_PORT} default_server;\n    listen [::]:${PANEL_PORT} default_server;`
+  ? `    listen ${panelPort} ssl default_server;\n    listen [::]:${panelPort} ssl default_server;\n    ssl_certificate ${s.certPath};\n    ssl_certificate_key ${s.keyPath};`
+  : `    listen ${panelPort} default_server;\n    listen [::]:${panelPort} default_server;`
 }
     server_name _;
     return 444;
@@ -801,6 +851,19 @@ ${isHttps ? '    add_header Strict-Transport-Security "max-age=31536000; include
         add_header Referrer-Policy "no-referrer" always;
         access_log off;
         error_log /dev/null crit;
+    }
+
+    # Certificate issuance can legitimately outlive the generic API timeout.
+    # The current TLS listener remains active for the whole request.
+    location = /api/panel-access/cert/le {
+        proxy_pass http://meowbox_api;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_read_timeout 360s;
+        proxy_send_timeout 360s;
     }
 
     # API proxy
@@ -980,8 +1043,12 @@ ${defaultServerBlock}`;
   }
 
   private buildCandidateAcmeConf(cutoverId: string, domain: string): string {
+    return this.buildAcmeChallengeConf(`federation-cutover: ${cutoverId}`, domain);
+  }
+
+  private buildAcmeChallengeConf(marker: string, domain: string): string {
     return `# Generated by meowbox panel-access manager. DO NOT EDIT MANUALLY.
-# federation-cutover: ${cutoverId}
+# ${marker}
 server {
     listen 80;
     listen [::]:80;
@@ -1002,40 +1069,69 @@ server {
     if (!content.includes(`# federation-cutover: ${cutoverId}`)) {
       throw new Error('Candidate Nginx configuration is not cutover-bound');
     }
-    const previous = await fs.readFile(PANEL_CANDIDATE_PATH, 'utf8').catch(() => null);
-    await this.writeAtomicFile(PANEL_CANDIDATE_PATH, content, 0o644);
+    await this.applyManagedNginxConfig(PANEL_CANDIDATE_PATH, PANEL_CANDIDATE_ENABLED, content);
+  }
+
+  private async removeCandidateFilesOnly(): Promise<void> {
+    await this.removeManagedNginxConfig(PANEL_CANDIDATE_PATH, PANEL_CANDIDATE_ENABLED, false);
+  }
+
+  private async applyManagedNginxConfig(
+    configPath: string,
+    enabledPath: string,
+    content: string,
+  ): Promise<void> {
+    const previous = await fs.readFile(configPath, 'utf8').catch(() => null);
+    await this.writeAtomicFile(configPath, content, 0o644);
+    let createdLink = false;
     try {
-      const stat = await fs.lstat(PANEL_CANDIDATE_ENABLED).catch(() => null);
+      const stat = await fs.lstat(enabledPath).catch(() => null);
       if (stat) {
-        if (!stat.isSymbolicLink() || await fs.readlink(PANEL_CANDIDATE_ENABLED) !== PANEL_CANDIDATE_PATH) {
-          throw new Error('Panel candidate Nginx link is not managed by Meowbox');
+        if (!stat.isSymbolicLink() || await fs.readlink(enabledPath) !== configPath) {
+          throw new Error('Managed Panel Access Nginx link has an unexpected target');
         }
       } else {
-        await fs.symlink(PANEL_CANDIDATE_PATH, PANEL_CANDIDATE_ENABLED);
+        await fs.symlink(configPath, enabledPath);
+        createdLink = true;
       }
       await this.assertNginxAndReload();
     } catch (error) {
-      if (previous === null) await fs.rm(PANEL_CANDIDATE_PATH, { force: true });
-      else await this.writeAtomicFile(PANEL_CANDIDATE_PATH, previous, 0o644);
+      if (createdLink) await fs.rm(enabledPath, { force: true }).catch(() => undefined);
+      if (previous === null) await fs.rm(configPath, { force: true });
+      else await this.writeAtomicFile(configPath, previous, 0o644);
       await this.assertNginxAndReload().catch(() => undefined);
       throw error;
     }
   }
 
-  private async removeCandidateFilesOnly(): Promise<void> {
-    const stat = await fs.lstat(PANEL_CANDIDATE_ENABLED).catch(() => null);
+  private async removeManagedNginxConfig(
+    configPath: string,
+    enabledPath: string,
+    reload: boolean,
+  ): Promise<void> {
+    const stat = await fs.lstat(enabledPath).catch(() => null);
     if (stat) {
-      if (!stat.isSymbolicLink() || await fs.readlink(PANEL_CANDIDATE_ENABLED) !== PANEL_CANDIDATE_PATH) {
-        throw new Error('Panel candidate Nginx link is not managed by Meowbox');
+      if (!stat.isSymbolicLink() || await fs.readlink(enabledPath) !== configPath) {
+        throw new Error('Managed Panel Access Nginx link has an unexpected target');
       }
-      await fs.rm(PANEL_CANDIDATE_ENABLED, { force: true });
+      await fs.rm(enabledPath, { force: true });
     }
-    await fs.rm(PANEL_CANDIDATE_PATH, { force: true });
+    await fs.rm(configPath, { force: true });
+    if (reload) await this.assertNginxAndReload();
   }
 
   private async removeCandidateConfig(): Promise<void> {
-    await this.removeCandidateFilesOnly();
-    await this.assertNginxAndReload();
+    await this.removeManagedNginxConfig(PANEL_CANDIDATE_PATH, PANEL_CANDIDATE_ENABLED, true);
+  }
+
+  private validateLeParams(params: { domain: string; email: string }): string | null {
+    if (!/^([a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)+[a-zA-Z]{2,}$/.test(params.domain)) {
+      return 'Invalid domain';
+    }
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(params.email)) {
+      return 'Invalid email';
+    }
+    return null;
   }
 
   private async assertNginxAndReload(): Promise<void> {

@@ -31,6 +31,8 @@ export interface PanelAccessStatus {
     serverIp: string | null;
     /** Совпадает ли DNS A-record с публичным IP сервера. */
     dnsMatchesServer: boolean | null;
+    /** Recovery-порт для прямого IP-доступа. */
+    panelPort: number | null;
     /** Подключён ли агент. Если false — live-блок не наполняется. */
     agentOnline: boolean;
   };
@@ -60,6 +62,7 @@ export class PanelAccessService {
       dnsResolved: null,
       serverIp: null,
       dnsMatchesServer: null,
+      panelPort: null,
       agentOnline: this.agentRelay.isAgentConnected(),
     };
 
@@ -71,6 +74,7 @@ export class PanelAccessService {
           dnsResolved: string | null;
           serverIp: string | null;
           dnsMatchesServer: boolean | null;
+          panelPort: number | null;
         }>('panel-access:status', { domain: s.domain, certPath: s.certPath }, 10_000);
         const data = (ack as unknown) as Partial<typeof live> & { success?: boolean };
         if (data.success !== false) {
@@ -79,6 +83,7 @@ export class PanelAccessService {
           live.dnsResolved = data.dnsResolved ?? null;
           live.serverIp = data.serverIp ?? null;
           live.dnsMatchesServer = data.dnsMatchesServer ?? null;
+          live.panelPort = data.panelPort ?? null;
         }
       } catch (e) {
         this.logger.warn(`panel-access:status failed: ${(e as Error).message}`);
@@ -100,42 +105,41 @@ export class PanelAccessService {
       throw new BadRequestException('domain не валиден');
     }
 
-    // Если домен изменился и текущий cert привязан к старому домену —
-    // удаляем cert (нечего хранить серт от старого имени). Это исключает
-    // ситуацию «домен сменили, на nginx остался старый LE серт».
-    let next: PanelAccessSettings = { ...current, domain: normalized };
-    if (normalized !== current.domain && current.certMode !== 'NONE') {
-      this.logger.warn(
-        `Domain changed (${current.domain} → ${normalized}). Сбрасываю текущий cert: certMode=NONE`,
+    if (normalized === current.domain) {
+      return this.getStatus();
+    }
+
+    // Новый домен при активном TLS переключается только вместе с успешным LE.
+    // Иначе текущий HTTPS listener исчезает между PUT /domain и POST /cert/le.
+    if (normalized && current.certMode !== 'NONE') {
+      throw new BadRequestException(
+        'При активном HTTPS новый домен применяется вместе с выпуском Let\'s Encrypt сертификата',
       );
-      // Сносим cert на диске через агент (если он есть).
-      if (this.agentRelay.isAgentConnected() && current.certPath) {
-        try {
-          await this.agentRelay.emitToAgent('panel-access:remove-cert', {
-            domain: current.domain,
-            certPath: current.certPath,
-            keyPath: current.keyPath,
-            mode: current.certMode,
-          }, 30_000);
-        } catch (e) {
-          this.logger.warn(`panel-access:remove-cert failed: ${(e as Error).message}`);
-        }
-      }
+    }
+
+    let next: PanelAccessSettings = {
+      ...current,
+      domain: normalized,
+      httpsRedirect: normalized ? current.httpsRedirect : false,
+      denyIpAccess: normalized ? current.denyIpAccess : false,
+      leLastError: null,
+    };
+
+    // Отвязка LE-домена не должна переводить открытый HTTPS-сеанс в HTTP.
+    // Сначала готовим self-signed замену, затем атомарно меняем nginx state.
+    if (!normalized && current.certMode === 'LE') {
+      const selfSigned = await this.generateSelfSigned();
       next = {
         ...next,
-        certMode: 'NONE',
-        httpsRedirect: false,
-        denyIpAccess: false,
-        certIssuedAt: null,
-        certExpiresAt: null,
-        certPath: null,
-        keyPath: null,
-        leLastError: null,
+        certMode: 'SELFSIGNED',
+        certPath: selfSigned.certPath,
+        keyPath: selfSigned.keyPath,
+        certIssuedAt: new Date().toISOString(),
+        certExpiresAt: selfSigned.expiresAt,
       };
     }
 
-    await this.settings.set(PANEL_DOMAIN_KEY, next);
-    await this.applyNginx(next);
+    await this.applyAndStore(current, next);
     return this.getStatus();
   }
 
@@ -170,8 +174,7 @@ export class PanelAccessService {
       throw new BadRequestException('httpsRedirect требует выпущенного сертификата');
     }
 
-    await this.settings.set(PANEL_DOMAIN_KEY, next);
-    await this.applyNginx(next);
+    await this.applyAndStore(current, next);
     return this.getStatus();
   }
 
@@ -179,10 +182,14 @@ export class PanelAccessService {
   // Cert: Let's Encrypt
   // ---------------------------------------------------------------------------
 
-  async issueLeCert(email: string): Promise<PanelAccessStatus> {
+  async issueLeCert(email: string, domain?: string): Promise<PanelAccessStatus> {
     const current = await this.settings.getPanelAccess();
-    if (!current.domain) {
+    const requestedDomain = (domain ?? current.domain ?? '').trim().toLowerCase();
+    if (!requestedDomain) {
       throw new BadRequestException('Сначала привяжите домен — LE выпускается только на DNS-имя');
+    }
+    if (!this.isValidDomain(requestedDomain)) {
+      throw new BadRequestException('domain не валиден');
     }
     if (!this.agentRelay.isAgentConnected()) {
       throw new BadRequestException('Агент офлайн — не могу выпустить cert');
@@ -191,18 +198,13 @@ export class PanelAccessService {
       throw new BadRequestException('email не валиден');
     }
 
-    // Перед выпуском LE нужно убедиться, что nginx слушает :80 для
-    // ACME challenge на webroot. applyNginx() с certMode=NONE и httpsRedirect=false
-    // приведёт конфиг в state, где ACME пройдёт.
-    await this.applyNginx({ ...current });
-
     try {
       const ack = await this.agentRelay.emitToAgent<{
         certPath?: string;
         keyPath?: string;
         expiresAt?: string;
         error?: string;
-      }>('panel-access:issue-le', { domain: current.domain, email }, 180_000);
+      }>('panel-access:issue-le', { domain: requestedDomain, email }, 330_000);
 
       const data = (ack as unknown) as {
         success?: boolean;
@@ -212,39 +214,29 @@ export class PanelAccessService {
         error?: string;
       };
 
-      if (data.success !== true) {
+      if (data.success !== true || !data.certPath || !data.keyPath) {
         const err = data.error || 'certbot не вернул success';
-        const updated: PanelAccessSettings = {
-          ...current,
-          leEmail: email,
-          leLastError: err,
-        };
-        await this.settings.set(PANEL_DOMAIN_KEY, updated);
+        await this.rememberLeFailure(current, email, err);
         throw new BadRequestException(err);
       }
 
       const updated: PanelAccessSettings = {
         ...current,
+        domain: requestedDomain,
         certMode: 'LE',
-        certPath: data.certPath || null,
-        keyPath: data.keyPath || null,
+        certPath: data.certPath,
+        keyPath: data.keyPath,
         certIssuedAt: new Date().toISOString(),
         certExpiresAt: data.expiresAt || null,
         leEmail: email,
         leLastError: null,
       };
-      await this.settings.set(PANEL_DOMAIN_KEY, updated);
-      await this.applyNginx(updated);
+      await this.applyAndStore(current, updated);
       return this.getStatus();
     } catch (err) {
       if (err instanceof BadRequestException) throw err;
       const msg = (err as Error).message;
-      const updated: PanelAccessSettings = {
-        ...current,
-        leEmail: email,
-        leLastError: msg,
-      };
-      await this.settings.set(PANEL_DOMAIN_KEY, updated);
+      await this.rememberLeFailure(current, email, msg);
       throw new BadRequestException(msg);
     }
   }
@@ -260,42 +252,19 @@ export class PanelAccessService {
         'Self-signed предназначен только для доступа по IP. Для домена используйте Let\'s Encrypt.',
       );
     }
-    if (!this.agentRelay.isAgentConnected()) {
-      throw new BadRequestException('Агент офлайн — не могу сгенерировать cert');
-    }
-
     try {
-      const ack = await this.agentRelay.emitToAgent<{
-        certPath?: string;
-        keyPath?: string;
-        expiresAt?: string;
-        cn?: string;
-        error?: string;
-      }>('panel-access:gen-selfsigned', { domain: null }, 60_000);
-
-      const data = (ack as unknown) as {
-        success?: boolean;
-        certPath?: string;
-        keyPath?: string;
-        expiresAt?: string;
-        error?: string;
-      };
-
-      if (data.success !== true) {
-        throw new BadRequestException(data.error || 'не удалось сгенерировать self-signed cert');
-      }
+      const selfSigned = await this.generateSelfSigned();
 
       const updated: PanelAccessSettings = {
         ...current,
         certMode: 'SELFSIGNED',
-        certPath: data.certPath || null,
-        keyPath: data.keyPath || null,
+        certPath: selfSigned.certPath,
+        keyPath: selfSigned.keyPath,
         certIssuedAt: new Date().toISOString(),
-        certExpiresAt: data.expiresAt || null,
+        certExpiresAt: selfSigned.expiresAt,
         leLastError: null,
       };
-      await this.settings.set(PANEL_DOMAIN_KEY, updated);
-      await this.applyNginx(updated);
+      await this.applyAndStore(current, updated);
       return this.getStatus();
     } catch (err) {
       if (err instanceof BadRequestException) throw err;
@@ -390,6 +359,73 @@ export class PanelAccessService {
     } catch (e) {
       this.logger.error(`panel-access:render-nginx failed: ${(e as Error).message}`);
       throw new BadRequestException(`Не удалось применить конфиг nginx: ${(e as Error).message}`);
+    }
+  }
+
+  private async generateSelfSigned(): Promise<{
+    certPath: string;
+    keyPath: string;
+    expiresAt: string | null;
+  }> {
+    if (!this.agentRelay.isAgentConnected()) {
+      throw new BadRequestException('Агент офлайн — не могу сгенерировать self-signed cert');
+    }
+    const ack = await this.agentRelay.emitToAgent<{
+      success?: boolean;
+      certPath?: string;
+      keyPath?: string;
+      expiresAt?: string;
+      error?: string;
+    }>('panel-access:gen-selfsigned', { domain: null }, 60_000);
+    const data = (ack as unknown) as {
+      success?: boolean;
+      certPath?: string;
+      keyPath?: string;
+      expiresAt?: string;
+      error?: string;
+    };
+    if (data.success !== true || !data.certPath || !data.keyPath) {
+      throw new BadRequestException(data.error || 'не удалось подготовить self-signed cert');
+    }
+    return {
+      certPath: data.certPath,
+      keyPath: data.keyPath,
+      expiresAt: data.expiresAt || null,
+    };
+  }
+
+  private async applyAndStore(
+    previous: PanelAccessSettings,
+    next: PanelAccessSettings,
+  ): Promise<void> {
+    await this.applyNginx(next);
+    try {
+      await this.settings.set(PANEL_DOMAIN_KEY, next);
+    } catch (error) {
+      try {
+        await this.applyNginx(previous);
+      } catch (rollbackError) {
+        this.logger.error(
+          `Не удалось откатить nginx после ошибки сохранения Panel Access: ${(rollbackError as Error).message}`,
+        );
+      }
+      throw error;
+    }
+  }
+
+  private async rememberLeFailure(
+    current: PanelAccessSettings,
+    email: string,
+    error: string,
+  ): Promise<void> {
+    try {
+      await this.settings.set(PANEL_DOMAIN_KEY, {
+        ...current,
+        leEmail: email,
+        leLastError: error,
+      });
+    } catch (persistError) {
+      this.logger.warn(`Не удалось сохранить ошибку certbot: ${(persistError as Error).message}`);
     }
   }
 
