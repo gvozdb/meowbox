@@ -252,7 +252,7 @@
         <div class="stat-card stat-card--wide">
           <span class="stat-card__label">Выбрано</span>
           <span class="stat-card__value">
-            <strong>{{ selectedItems.size }}</strong>
+            <strong>{{ selectedCurrentItemIds.length }}</strong>
             <span class="stat-card__sep">из {{ selectableItemIds.length }} доступных</span>
           </span>
         </div>
@@ -289,10 +289,10 @@
             <input
               type="checkbox"
               class="mh-check"
-              :checked="selectableItemIds.length > 0 && selectableItemIds.every((id) => selectedItems.has(id))"
+              :checked="selectableItemIds.length > 0 && selectableItemIds.every((id) => selectedCurrentItemIds.includes(id))"
               :indeterminate.prop="
-                selectableItemIds.some((id) => selectedItems.has(id))
-                  && !selectableItemIds.every((id) => selectedItems.has(id))
+                selectableItemIds.some((id) => selectedCurrentItemIds.includes(id))
+                  && !selectableItemIds.every((id) => selectedCurrentItemIds.includes(id))
               "
               :disabled="selectableItemIds.length === 0"
               title="Выбрать/снять все"
@@ -312,7 +312,7 @@
           class="sites-table__row sites-table__row--shortlist"
           :class="{
             'sites-table__row--blocked': item.plan.blockedReason,
-            'sites-table__row--off': !selectedItems.has(item.id),
+            'sites-table__row--off': !selectedCurrentItemIds.includes(item.id),
           }"
           @click.self="!item.plan.blockedReason && toggleSelected(item.id)"
         >
@@ -320,7 +320,7 @@
             <input
               type="checkbox"
               class="mh-check"
-              :checked="selectedItems.has(item.id)"
+              :checked="selectedCurrentItemIds.includes(item.id)"
               :disabled="!!item.plan.blockedReason"
               @change="toggleSelected(item.id)"
             />
@@ -380,10 +380,10 @@
         <button class="btn btn--ghost" @click="step = 1" :disabled="discovery.status === 'PROBING'">← Назад</button>
         <button
           class="btn btn--primary"
-          :disabled="selectedItems.size === 0 || probing"
+          :disabled="selectedCurrentItemIds.length === 0 || probing"
           @click="startProbe"
         >
-          <span v-if="!probing">Собрать план для {{ selectedItems.size }} сайтов →</span>
+          <span v-if="!probing">Собрать план для {{ selectedCurrentItemIds.length }} сайтов →</span>
           <span v-else><span class="spinner spinner--sm" /> Собираю план...</span>
         </button>
       </div>
@@ -460,10 +460,10 @@
             <input
               type="checkbox"
               class="mh-check"
-              :checked="selectableItemIds.length > 0 && selectableItemIds.every((id) => selectedItems.has(id))"
+              :checked="selectableItemIds.length > 0 && selectableItemIds.every((id) => selectedCurrentItemIds.includes(id))"
               :indeterminate.prop="
-                selectableItemIds.some((id) => selectedItems.has(id))
-                  && !selectableItemIds.every((id) => selectedItems.has(id))
+                selectableItemIds.some((id) => selectedCurrentItemIds.includes(id))
+                  && !selectableItemIds.every((id) => selectedCurrentItemIds.includes(id))
               "
               :disabled="selectableItemIds.length === 0"
               title="Выбрать/снять все"
@@ -489,7 +489,7 @@
               <input
                 type="checkbox"
                 class="mh-check"
-                :checked="selectedItems.has(item.id)"
+                :checked="selectedCurrentItemIds.includes(item.id)"
                 :disabled="!!item.plan.blockedReason"
                 @change="toggleSelected(item.id)"
               />
@@ -859,7 +859,7 @@
       <div class="card__actions card__actions--space">
         <button class="btn btn--ghost" @click="step = 2">← К выбору сайтов</button>
         <button class="btn btn--primary" :disabled="!canStart" @click="startMigration">
-          Запустить миграцию ({{ selectedItems.size }} сайтов) →
+          Запустить миграцию ({{ selectedCurrentItemIds.length }} сайтов) →
         </button>
       </div>
     </div>
@@ -1021,6 +1021,14 @@
 </template>
 
 <script setup lang="ts">
+import {
+  createCurrentSelection,
+  getCurrentSelectionIds,
+  getDefaultSelectedHostpanelItemIds,
+  getSelectableHostpanelItemIds,
+  toggleCurrentSelection,
+} from '~/utils/hostpanel-selection';
+
 definePageMeta({ middleware: 'auth' });
 
 interface PlanItem {
@@ -1056,6 +1064,7 @@ interface PlanItem {
   dbBytes: number;
   warnings: string[];
   blockedReason?: string;
+  defaultSelected?: boolean;
 }
 
 interface MigrationItem {
@@ -1128,6 +1137,17 @@ const discoverProgress = reactive<{ step: number; total: number }>({ step: 0, to
 const discoverLogEl = ref<HTMLDivElement | null>(null);
 const expandedItem = ref<string>('');
 const selectedItems = ref<Set<string>>(new Set());
+const selectableItemIds = computed<string[]>(() =>
+  getSelectableHostpanelItemIds(discovery.value?.items || []),
+);
+const selectedCurrentItemIds = computed<string[]>(() =>
+  getCurrentSelectionIds(selectableItemIds.value, selectedItems.value),
+);
+
+function replaceSelectedItems(ids: Iterable<string>) {
+  selectedItems.value = createCurrentSelection(selectableItemIds.value, ids);
+}
+
 const aliasDraft = reactive<Record<string, string>>({});
 const rsyncExcludesText = reactive<Record<string, string>>({});
 const dbExcludesText = reactive<Record<string, string>>({});
@@ -1390,11 +1410,11 @@ const canDiscover = computed(() => {
   );
 });
 const canStart = computed(() => {
-  if (selectedItems.value.size === 0) return false;
+  if (selectedCurrentItemIds.value.length === 0) return false;
   // spec §12.2: «Кнопка "Запустить миграцию →" блокируется, пока есть CONFLICT»
   // + любые BLOCKED items (forced PHP перезапишет blockedReason). Валидация
   // имени/домена тоже блокирует (red-state inline-input).
-  for (const id of selectedItems.value) {
+  for (const id of selectedCurrentItemIds.value) {
     const item = discovery.value?.items.find((i) => i.id === id);
     if (!item) continue;
     if (item.status === 'CONFLICT' || item.plan.blockedReason) return false;
@@ -1517,6 +1537,7 @@ function formatDate(iso: string) {
 
 async function startDiscovery() {
   error.value = '';
+  replaceSelectedItems([]);
   discoverLog.value = [];
   discoverProgress.step = 0;
   discoverProgress.total = 0;
@@ -1545,26 +1566,21 @@ async function startDiscovery() {
       if (m.status === 'SHORTLIST_READY') {
         // По дефолту — выбираем те, у кого defaultSelected=true (выставляет
         // агент: всё кроме Adminer/host/pma). BLOCKED — никогда.
-        for (const it of m.items) {
-          if (it.plan.blockedReason) continue;
-          if ((it.plan as any).defaultSelected !== false) {
-            selectedItems.value.add(it.id);
-          }
-        }
+        replaceSelectedItems(getDefaultSelectedHostpanelItemIds(m.items));
         step.value = 2;
         break;
       } else if (m.status === 'READY') {
         // Backward-compat: если backend по какой-то причине вернул сразу READY
         // (legacy flow без shortlist), работаем как раньше — сразу Step 3.
-        for (const it of m.items) {
-          if (it.plan.blockedReason) continue;
+        replaceSelectedItems(m.items.filter((it) => {
+          if (it.plan.blockedReason) return false;
           const isAdminer =
             it.plan.sourceCms === null &&
             (it.plan.sourceUser === 'host' ||
               it.plan.newDomain.startsWith('db.') ||
               it.plan.sourceUser === 'pma');
-          if (!isAdminer) selectedItems.value.add(it.id);
-        }
+          return !isAdminer;
+        }).map((it) => it.id));
         for (const it of m.items) {
           rsyncExcludesText[it.id] = it.plan.rsyncExtraExcludes.join('\n');
           dbExcludesText[it.id] = it.plan.dbExcludeDataTables.join('\n');
@@ -1591,7 +1607,7 @@ const probing = ref(false);
  */
 async function startProbe() {
   if (!discovery.value) return;
-  if (selectedItems.value.size === 0) return;
+  if (selectedCurrentItemIds.value.length === 0) return;
   const migrationId = discovery.value.id;
   probing.value = true;
   // Чистим лог и подписываемся заново — теперь будут события phase=plan
@@ -1601,7 +1617,7 @@ async function startProbe() {
   subscribeDiscoverLog(migrationId);
   try {
     await api.post(`/admin/migrate-hostpanel/${migrationId}/probe`, {
-      itemIds: Array.from(selectedItems.value),
+      itemIds: selectedCurrentItemIds.value,
     });
     // Poll
     while (true) {
@@ -1643,30 +1659,16 @@ function toggleExpand(id: string) {
 }
 
 function toggleSelected(id: string) {
-  if (selectedItems.value.has(id)) selectedItems.value.delete(id);
-  else selectedItems.value.add(id);
+  selectedItems.value = toggleCurrentSelection(
+    selectableItemIds.value,
+    selectedItems.value,
+    id,
+  );
 }
-
-/**
- * IDs всех «выбираемых» сайтов — без BLOCKED. На них работает галка
- * «Выбрать все»: если все selectable выбраны → checked, частично → indeterminate,
- * ничего → unchecked.
- */
-const selectableItemIds = computed<string[]>(() =>
-  (discovery.value?.items || [])
-    // BLOCKED — нельзя; SKIPPED — оператор уже отверг на shortlist'е,
-    // на step 3 их вообще не показываем (см. planItems)
-    .filter((it) => !it.plan.blockedReason && it.status !== 'SKIPPED')
-    .map((it) => it.id),
-);
 
 function toggleSelectAll(e: Event) {
   const target = e.target as HTMLInputElement;
-  if (target.checked) {
-    for (const id of selectableItemIds.value) selectedItems.value.add(id);
-  } else {
-    for (const id of selectableItemIds.value) selectedItems.value.delete(id);
-  }
+  replaceSelectedItems(target.checked ? selectableItemIds.value : []);
 }
 
 /**
@@ -1759,15 +1761,15 @@ function applyNameSuggest(item: MigrationItem, suggested: string) {
 }
 
 async function startMigration() {
-  if (!discovery.value) return;
+  if (!discovery.value || !canStart.value) return;
   try {
     await api.post(`/admin/migrate-hostpanel/${discovery.value.id}/start`, {
-      itemIds: Array.from(selectedItems.value),
+      itemIds: selectedCurrentItemIds.value,
     });
     // Счётчик «Готово: X/Y» — Y это число реально запускаемых сайтов,
     // а не всех найденных на источнике. Бэкенд выставит totalSites при start,
     // здесь — оптимистично, чтобы не было мигания до первого поллинга.
-    discovery.value.totalSites = selectedItems.value.size;
+    discovery.value.totalSites = selectedCurrentItemIds.value.length;
     step.value = 4;
     subscribeProgress();
     pollDiscovery();
@@ -2048,7 +2050,7 @@ async function forcePhp(item: MigrationItem) {
   );
   await savePlan(item);
   // По умолчанию выбираем сайт после force
-  selectedItems.value.add(item.id);
+  replaceSelectedItems([...selectedCurrentItemIds.value, item.id]);
   toast.success(`Force PHP ${defaultForcedPhp.value} применён к ${item.plan.newName}`);
 }
 
@@ -2061,6 +2063,7 @@ async function doSkip(item: MigrationItem) {
       {},
     );
     item.status = 'SKIPPED';
+    replaceSelectedItems(selectedItems.value);
   } catch (e: unknown) {
     toast.error((e as Error).message || 'Не удалось пропустить');
   }
@@ -2078,20 +2081,28 @@ async function loadMigration(id: string) {
   try {
     const m = await api.get<Migration>(`/admin/migrate-hostpanel/${id}`);
     discovery.value = m;
+    replaceSelectedItems([]);
     if (m.status === 'DISCOVERING') {
       step.value = 1; // ждём shortlist
-    } else if (m.status === 'SHORTLIST_READY' || m.status === 'PROBING') {
+    } else if (m.status === 'SHORTLIST_READY') {
       // Восстанавливаем галочки (если это reload страницы)
-      for (const it of m.items) {
-        if (it.status === 'PLANNED' && (it.plan as any).defaultSelected !== false) {
-          selectedItems.value.add(it.id);
-        }
-      }
+      replaceSelectedItems(getDefaultSelectedHostpanelItemIds(
+        m.items.filter((it) => it.status === 'PLANNED'),
+      ));
+      step.value = 2;
+    } else if (m.status === 'PROBING') {
+      // После старта probe бэкенд уже пометил невыбранные items как SKIPPED.
+      // Это точнее defaultSelected: оператор мог изменить дефолтный выбор.
+      replaceSelectedItems(
+        m.items.filter((it) => it.status !== 'SKIPPED').map((it) => it.id),
+      );
       step.value = 2;
     } else if (m.status === 'READY' || m.status === 'PARTIAL') {
       // Все non-SKIPPED items — выбраны
+      replaceSelectedItems(
+        m.items.filter((it) => it.status === 'PLANNED').map((it) => it.id),
+      );
       for (const it of m.items) {
-        if (it.status === 'PLANNED') selectedItems.value.add(it.id);
         rsyncExcludesText[it.id] = (it.plan.rsyncExtraExcludes || []).join('\n');
         dbExcludesText[it.id] = (it.plan.dbExcludeDataTables || []).join('\n');
       }
@@ -2099,6 +2110,9 @@ async function loadMigration(id: string) {
       await loadSlavePhpVersions();
       await autoPickPhpForAllItems();
     } else {
+      replaceSelectedItems(
+        m.items.filter((it) => it.status !== 'SKIPPED').map((it) => it.id),
+      );
       step.value = 4; // RUNNING/DONE/FAILED/CANCELLED
       // Если уже есть FAILED-item'ы — сразу спросим про leak'и для force-retry
       if (m.items.some((it) => it.status === 'FAILED')) {
@@ -2112,7 +2126,7 @@ async function loadMigration(id: string) {
 function reset() {
   step.value = 1;
   discovery.value = null;
-  selectedItems.value.clear();
+  replaceSelectedItems([]);
   expandedItem.value = '';
   src.host = '';
   src.sshPassword = '';
