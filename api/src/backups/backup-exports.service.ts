@@ -712,15 +712,19 @@ export class BackupExportsService implements OnModuleInit, OnModuleDestroy {
   private validatedResticOutput(child: ChildProcess): Readable {
     if (!child.stdout) throw new Error('Restic output pipe is unavailable');
     const output = new PassThrough();
+    const destroyOutput = (error: Error): void => {
+      if (!output.destroyed) output.destroy(error);
+    };
     child.stdout.pipe(output, { end: false });
-    child.stdout.once('error', (error) => output.destroy(error));
-    child.once('error', (error) => output.destroy(error));
+    child.stdout.once('error', destroyOutput);
+    child.once('error', destroyOutput);
     child.once('close', (code, signal) => {
+      if (output.destroyed) return;
       if (code === 0) {
         output.end();
         return;
       }
-      output.destroy(new Error(
+      destroyOutput(new Error(
         signal
           ? `Restic export process terminated by ${signal}`
           : `Restic export process exited with code ${code ?? 'unknown'}`,

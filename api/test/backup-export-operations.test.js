@@ -5,9 +5,11 @@ require('reflect-metadata');
 const assert = require('node:assert/strict');
 const { execFileSync } = require('node:child_process');
 const crypto = require('node:crypto');
+const { EventEmitter } = require('node:events');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
+const { PassThrough } = require('node:stream');
 const test = require('node:test');
 const { PrismaClient } = require('@prisma/client');
 const masterKey = require('../src/common/crypto/master-key');
@@ -228,4 +230,17 @@ test('T-OPS-005 staged export deletion cancels source and leaves no orphan artif
   assert.equal(await prisma.transferArtifact.count({
     where: { resourceId: accepted.export.id, state: 'READY' },
   }), 0);
+});
+
+test('T-OPS-005 ignores a late Restic failure after downstream cancellation', async () => {
+  const child = new EventEmitter();
+  child.stdout = new PassThrough();
+  const output = BackupExportsService.prototype.validatedResticOutput(child);
+
+  output.destroy();
+  await new Promise((resolve) => output.once('close', resolve));
+  child.emit('close', null, 'SIGTERM');
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.equal(output.errored, null);
 });
