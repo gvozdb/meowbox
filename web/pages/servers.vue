@@ -102,6 +102,7 @@
             <div class="server-card__status" :class="canSelectServer(server) ? 'server-card__status--online' : 'server-card__status--offline'" />
             <span class="server-card__name">{{ server.name }}</span>
             <span v-if="server.federation" class="server-card__update-badge">federation</span>
+            <span v-else class="server-card__update-badge">legacy</span>
             <span v-if="server.hasUpdate" class="server-card__update-badge" :title="`Доступна ${server.latestVersion}`">
               <span class="server-card__update-dot" />
               update
@@ -130,6 +131,21 @@
               <span class="server-card__label">URL</span>
               <span class="server-card__value server-card__value--mono">{{ server.url }}</span>
             </div>
+            <div v-if="!server.federation" class="server-card__row">
+              <span class="server-card__label">TLS</span>
+              <span class="server-card__value">
+                {{ server.tlsSpkiSha256 ? 'Self-signed закреплён' : 'Автопроверка' }}
+              </span>
+              <button
+                v-if="needsTlsRefresh(server)"
+                type="button"
+                class="server-card__tls-refresh"
+                :disabled="tlsRefreshId === server.id"
+                @click="refreshTlsTrust(server)"
+              >
+                {{ tlsRefreshId === server.id ? 'Проверка…' : 'Перепривязать' }}
+              </button>
+            </div>
             <div v-if="server.version" class="server-card__row">
               <span class="server-card__label">Версия</span>
               <span class="server-card__value server-card__value--mono">
@@ -145,7 +161,9 @@
             </div>
             <div v-if="!server.online && server.lastError" class="server-card__row">
               <span class="server-card__label">Ошибка</span>
-              <span class="server-card__value server-card__value--error" :title="server.lastError">{{ truncate(server.lastError, 40) }}</span>
+              <span class="server-card__value server-card__value--error" :title="serverErrorLabel(server.lastError)">
+                {{ truncate(serverErrorLabel(server.lastError), 40) }}
+              </span>
             </div>
             <div class="server-card__row">
               <span class="server-card__label">Гамма</span>
@@ -235,9 +253,12 @@
                   v-model="serverForm.url"
                   class="modal__input modal__input--mono"
                   type="url"
-                  placeholder="http://10.0.0.5:3000"
+                  placeholder="https://203.0.113.10:18443"
                   required
                 />
+                <span class="modal__hint">
+                  Self-signed сертификат определяется и закрепляется автоматически.
+                </span>
               </div>
               <div class="modal__field">
                 <label class="modal__label">Токен</label>
@@ -526,6 +547,7 @@ interface ServerInfo {
   name: string;
   url: string;
   token: string;
+  tlsSpkiSha256?: string;
   online: boolean;
   version?: string;
   latestVersion?: string | null;
@@ -572,6 +594,23 @@ function serverStatusLabel(server: ServerInfo): string {
   return 'Онлайн';
 }
 
+function serverErrorLabel(code: string): string {
+  const labels: Record<string, string> = {
+    LEGACY_TLS_PIN_REQUIRED: 'Не удалось автоматически закрепить TLS',
+    LEGACY_TLS_PIN_MISMATCH: 'Сохранённый TLS-сертификат не совпадает',
+    LEGACY_TLS_HOSTNAME_MISMATCH: 'TLS-сертификат не соответствует хосту',
+    LEGACY_TLS_CERT_INVALID: 'TLS-сертификат недействителен',
+    LEGACY_UPSTREAM_UNREACHABLE: 'Сервер недоступен',
+  };
+  return labels[code] || code;
+}
+
+function needsTlsRefresh(server: ServerInfo): boolean {
+  return ['LEGACY_TLS_PIN_MISMATCH', 'LEGACY_TLS_CERT_INVALID'].includes(
+    server.lastError || '',
+  );
+}
+
 function canFleetUpdate(server: ServerInfo): boolean {
   return server.online && (!server.federation || server.fleetUpdateReady === true);
 }
@@ -594,6 +633,7 @@ const {
 } = usePalette();
 
 const refreshing = ref(false);
+const tlsRefreshId = ref<string | null>(null);
 
 // ── Палитра per-server ─────────────────────────────────────────────────────
 // reactive map: { serverId → palette id (или null если ещё не загрузили) }
@@ -873,7 +913,11 @@ async function submitServer() {
   serverFormError.value = '';
   try {
     if (editingServer.value) {
-      const data: Record<string, string> = {};
+      const data: {
+        name?: string;
+        url?: string;
+        token?: string;
+      } = {};
       if (serverForm.name !== editingServer.value.name) data.name = serverForm.name;
       if (serverForm.url !== editingServer.value.url) data.url = serverForm.url;
       if (serverForm.token) data.token = serverForm.token;
@@ -892,6 +936,19 @@ async function submitServer() {
     serverFormError.value = (err as Error).message || 'Ошибка сохранения сервера';
   } finally {
     serverFormLoading.value = false;
+  }
+}
+
+async function refreshTlsTrust(server: ServerInfo) {
+  if (tlsRefreshId.value) return;
+  tlsRefreshId.value = server.id;
+  try {
+    await serverStore.updateServer(server.id, { refreshTlsTrust: true });
+    showStatus(`TLS-доверие для «${server.name}» обновлено`);
+  } catch (error) {
+    showStatus((error as Error).message || 'Не удалось обновить TLS-доверие', true);
+  } finally {
+    tlsRefreshId.value = null;
   }
 }
 
@@ -1381,6 +1438,22 @@ watch(
 .server-card__value--offline {
   color: var(--danger-text);
   font-weight: 500;
+}
+
+.server-card__tls-refresh {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--primary-text);
+  cursor: pointer;
+  font: inherit;
+  font-size: 0.7rem;
+  font-weight: 600;
+}
+
+.server-card__tls-refresh:disabled {
+  cursor: wait;
+  opacity: 0.55;
 }
 
 .server-card__palette {

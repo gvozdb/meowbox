@@ -64,14 +64,22 @@ export class RegistryImportService {
               reasonCode: 'LEGACY_UPGRADE_REQUIRED',
               legacyEnabled: true,
               legacyUrl: record.url,
-              legacyTokenEnc: encryptLegacyToken(record.id, record.token),
+              legacyTokenEnc: encryptLegacyToken(
+                record.id,
+                record.token,
+                record.tlsCaCertificatePem,
+              ),
             },
             update: {
               displayName: record.name,
               registryGeneration: generation,
               legacyEnabled: true,
               legacyUrl: record.url,
-              legacyTokenEnc: encryptLegacyToken(record.id, record.token),
+              legacyTokenEnc: encryptLegacyToken(
+                record.id,
+                record.token,
+                record.tlsCaCertificatePem,
+              ),
             },
           });
         }

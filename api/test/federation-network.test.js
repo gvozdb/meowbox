@@ -1,6 +1,11 @@
 'use strict';
 
 const assert = require('node:assert/strict');
+const { execFileSync } = require('node:child_process');
+const { X509Certificate } = require('node:crypto');
+const fs = require('node:fs');
+const os = require('node:os');
+const path = require('node:path');
 const test = require('node:test');
 const {
   FederationEndpointError,
@@ -12,8 +17,16 @@ const {
   isPublicFederationAddress,
 } = require('../src/federation/federation-network-policy');
 const {
+  caFromPinnedSelfSignedCertificate,
   createValidatedTlsDispatcher,
+  inspectLegacySelfSignedCertificate,
+  spkiSha256FromCertificate,
+  validateLegacySelfSignedCertificate,
 } = require('../src/federation/pinned-dispatcher');
+const {
+  legacyTlsTrustFromPeerCertificate,
+} = require('../src/proxy/legacy-tls-trust');
+const { ProxyService } = require('../src/proxy/proxy.service');
 const { createPinnedSocketAgent } = require('../src/federation/federation-socket-dialer');
 
 test('public federation address policy rejects private and special ranges', () => {
@@ -126,6 +139,77 @@ test('legacy upgrade rail uses exact HTTPS origin with normal TLS validation', a
   );
   assert.doesNotMatch(source, /rejectUnauthorized\s*:\s*false/);
   assert.doesNotMatch(source, /allowsInsecureTlsForIp/);
+  assert.match(source, /createPinnedFederationDispatcher/);
+
+  const trustSource = fs.readFileSync(
+    path.join(__dirname, '../src/proxy/legacy-tls-trust.ts'),
+    'utf8',
+  );
+  assert.equal((trustSource.match(/rejectUnauthorized\s*:\s*false/g) || []).length, 1);
+  assert.doesNotMatch(trustSource, /X-Proxy-Token|PROXY_TOKEN|\.write\s*\(/);
+});
+
+test('legacy self-signed certificate becomes a CA only after hostname and SPKI verification', (t) => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'meowbox-legacy-tls-'));
+  const keyPath = path.join(directory, 'key.pem');
+  const certPath = path.join(directory, 'cert.pem');
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  execFileSync('openssl', [
+    'req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-days', '1',
+    '-subj', '/CN=panel.example.test',
+    '-addext', 'subjectAltName=DNS:panel.example.test',
+    '-keyout', keyPath,
+    '-out', certPath,
+  ], { stdio: 'ignore' });
+
+  const certificate = new X509Certificate(fs.readFileSync(certPath));
+  const peer = certificate.toLegacyObject();
+  const pin = spkiSha256FromCertificate(certificate.raw);
+  assert.equal(
+    legacyTlsTrustFromPeerCertificate('https://panel.example.test', peer).spkiSha256,
+    pin,
+  );
+  const ca = caFromPinnedSelfSignedCertificate('panel.example.test', pin, peer);
+  assert.match(ca, /BEGIN CERTIFICATE/);
+  assert.deepEqual(
+    validateLegacySelfSignedCertificate('https://panel.example.test', ca).spkiSha256,
+    pin,
+  );
+  assert.equal(
+    inspectLegacySelfSignedCertificate('https://panel.example.test', ca).spkiSha256,
+    pin,
+  );
+  assert.throws(
+    () => validateLegacySelfSignedCertificate(
+      'https://panel.example.test',
+      ca,
+      new Date('2100-01-01T00:00:00.000Z'),
+    ),
+    /validity period/,
+  );
+  assert.throws(
+    () => caFromPinnedSelfSignedCertificate(
+      'panel.example.test',
+      `sha256/${Buffer.alloc(32, 9).toString('base64')}`,
+      peer,
+    ),
+    /SPKI pin mismatch/,
+  );
+  assert.throws(
+    () => caFromPinnedSelfSignedCertificate('other.example.test', pin, peer),
+    /does not match certificate/,
+  );
+
+  const projection = new ProxyService({}, {}).publicServerConfig({
+    id: 'legacy-tls',
+    name: 'Legacy TLS',
+    url: 'https://panel.example.test',
+    token: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+    tlsCaCertificatePem: ca,
+  });
+  assert.equal(projection.token, '***');
+  assert.equal(projection.tlsSpkiSha256, pin);
+  assert.equal('tlsCaCertificatePem' in projection, false);
 });
 
 test('T-DIAL-002 Socket.IO uses the same all-answer public policy and pinned lookup', async () => {

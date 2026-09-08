@@ -481,6 +481,18 @@ export function useDashboardOverview() {
   let token = 0;
   let timer: ReturnType<typeof setInterval> | null = null;
 
+  function selectedTransportError(serverKey: string): string | null {
+    const code = serverStore.serverOptions.find((item) => item.id === serverKey)?.lastError;
+    const messages: Record<string, string> = {
+      LEGACY_TLS_PIN_REQUIRED: 'Не удалось автоматически закрепить self-signed TLS выбранного сервера',
+      LEGACY_TLS_PIN_MISMATCH: 'Сохранённый TLS-сертификат не совпадает с сертификатом выбранного сервера',
+      LEGACY_TLS_HOSTNAME_MISMATCH: 'TLS-сертификат не соответствует адресу выбранного сервера',
+      LEGACY_TLS_CERT_INVALID: 'TLS-сертификат выбранного сервера недействителен',
+      LEGACY_UPSTREAM_UNREACHABLE: 'Выбранный сервер недоступен',
+    };
+    return code ? messages[code] ?? null : null;
+  }
+
   function decorate(value: DashboardOverview, serverKey: string): DashboardOverview {
     const selected = serverStore.serverOptions.find((item) => item.id === serverKey);
     return {
@@ -613,7 +625,7 @@ export function useDashboardOverview() {
         ? 'Нет доступа к обзору выбранного сервера'
         : status === 401
           ? 'Требуется повторная авторизация'
-          : 'Обзор выбранного сервера недоступен';
+          : selectedTransportError(serverKey) || 'Обзор выбранного сервера недоступен';
       if (manual) liveMessage.value = error.value;
     } finally {
       if (request?.token === currentToken) request = null;

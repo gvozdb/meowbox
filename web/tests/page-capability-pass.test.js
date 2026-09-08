@@ -97,6 +97,7 @@ test('RPP-640 unknown and partial target actions fail closed with an operator-vi
 
   assert.match(layout, /<RemoteContextNotice\s*\/>/);
   assert.match(notice, /remoteContextNotice\(serverStore\.remoteContext\)/);
+  assert.match(notice, /!serverStore\.currentServer\?\.federation/);
   assert.match(notice, /notice\.code/);
   assert.match(notice, /notice\.message/);
   assert.match(api, /resolveRemoteHttpAction\(method, endpoint\)/);
@@ -113,4 +114,14 @@ test('RPP-640 unknown and partial target actions fail closed with an operator-vi
     new Set(catalogue.actions.map((action) => `${action.method} ${action.routeTemplate}`)).size,
     catalogue.actions.length,
   );
+});
+
+test('legacy self-signed TLS is automatic and never asks the operator for PEM', () => {
+  const page = fs.readFileSync(path.join(webRoot, 'pages/servers.vue'), 'utf8');
+  const store = fs.readFileSync(path.join(webRoot, 'stores/server.ts'), 'utf8');
+
+  assert.match(page, /определяется и закрепляется автоматически/);
+  assert.match(page, /refreshTlsTrust:\s*true/);
+  assert.doesNotMatch(page, /tlsCaCertificatePem|BEGIN CERTIFICATE|fullchain\.pem/);
+  assert.doesNotMatch(store, /tlsCaCertificatePem/);
 });

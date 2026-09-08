@@ -12,7 +12,7 @@ import { PrismaService } from '../common/prisma.service';
 import { assertPublicHttpUrl } from '../common/validators/safe-url';
 import { LegacyRegistryFileService } from './legacy-registry-file.service';
 import {
-  decryptLegacyToken,
+  decryptLegacyCredentials,
   encryptLegacyToken,
   legacyRegistryDigest,
   LegacyServerRecord,
@@ -267,11 +267,15 @@ function rowsToLegacyRecords(rows: ReadonlyArray<{
       if (!row.legacyUrl || !row.legacyTokenEnc) {
         throw new Error(`Legacy projection is incomplete for server ${row.id}`);
       }
+      const credentials = decryptLegacyCredentials(row.id, row.legacyTokenEnc);
       return validateLegacyServerRecord({
         id: row.id,
         name: row.displayName,
         url: row.legacyUrl,
-        token: decryptLegacyToken(row.id, row.legacyTokenEnc),
+        token: credentials.token,
+        ...(credentials.tlsCaCertificatePem === undefined
+          ? {}
+          : { tlsCaCertificatePem: credentials.tlsCaCertificatePem }),
       });
     });
 }
@@ -806,7 +810,11 @@ export class RemoteRegistryService {
           reasonCode: 'LEGACY_UPGRADE_REQUIRED',
           legacyEnabled: true,
           legacyUrl: record.url,
-          legacyTokenEnc: encryptLegacyToken(record.id, record.token),
+          legacyTokenEnc: encryptLegacyToken(
+            record.id,
+            record.token,
+            record.tlsCaCertificatePem,
+          ),
         },
       });
       return {
@@ -814,16 +822,23 @@ export class RemoteRegistryService {
         name: created.displayName,
         url: record.url,
         token: record.token,
+        ...(record.tlsCaCertificatePem === undefined
+          ? {}
+          : { tlsCaCertificatePem: record.tlsCaCertificatePem }),
       };
     });
   }
 
   async updateLegacyServer(
     id: string,
-    patch: Partial<Omit<LegacyServerRecord, 'id'>>,
+    patch: Omit<Partial<Omit<LegacyServerRecord, 'id'>>, 'tlsCaCertificatePem'> & {
+      tlsCaCertificatePem?: string | null;
+    },
   ): Promise<LegacyServerRecord> {
     const current = await this.findLegacyServerOrThrow(id);
-    const next = validateLegacyServerRecord({ ...current, ...patch, id });
+    const candidate: Record<string, unknown> = { ...current, ...patch, id };
+    if (patch.tlsCaCertificatePem === null) delete candidate.tlsCaCertificatePem;
+    const next = validateLegacyServerRecord(candidate);
     if (patch.url !== undefined) {
       await assertPublicHttpUrl(next.url, { protocols: ['http:', 'https:'] });
     }
@@ -833,9 +848,11 @@ export class RemoteRegistryService {
         data: {
           displayName: next.name,
           legacyUrl: normalizeLegacyServerUrl(next.url),
-          legacyTokenEnc: patch.token === undefined
-            ? undefined
-            : encryptLegacyToken(id, next.token),
+          legacyTokenEnc: encryptLegacyToken(
+            id,
+            next.token,
+            next.tlsCaCertificatePem,
+          ),
           registryGeneration: generation,
         },
       });

@@ -24,7 +24,7 @@ import { Roles } from '../common/decorators/roles.decorator';
 import { CurrentUser } from '../common/decorators/current-user.decorator';
 import { isLegacyStaticV0Action } from '../common/guards/proxy-auth.guard';
 import { dashboardOverviewMetricSamples } from '../common/dashboard-observability';
-import { ProxyService } from './proxy.service';
+import { LegacyProxyTransportError, ProxyService } from './proxy.service';
 import { ProxyAuditService } from './proxy-audit.service';
 import {
   FederationDispatchError,
@@ -91,7 +91,7 @@ export class ProxyController {
     const ping = await this.proxyService.pingServer(server);
     return {
       success: true,
-      data: { ...server, token: '***', ...ping },
+      data: { ...this.proxyService.publicServerConfig(server), ...ping },
     };
   }
 
@@ -101,8 +101,19 @@ export class ProxyController {
     @Param('id') id: string,
     @Body() body: UpdateServerDto,
   ) {
-    const server = await this.proxyService.updateServer(id, body);
-    return { success: true, data: { ...server, token: '***' } };
+    const { refreshTlsTrust, ...patch } = body;
+    let server = this.proxyService.getServer(id);
+    if (!server) throw new NotFoundException(`Server "${id}" not found`);
+    if (Object.keys(patch).length > 0) {
+      server = await this.proxyService.updateServer(id, patch);
+    }
+    if (refreshTlsTrust) {
+      server = await this.proxyService.refreshLegacyTlsTrust(id);
+    }
+    return {
+      success: true,
+      data: this.proxyService.publicServerConfig(server),
+    };
   }
 
   /** Delete a server */
@@ -242,7 +253,7 @@ export class ProxyController {
         success: false,
         error: {
           code: 'LEGACY_UPGRADE_REQUIRED',
-          message: 'This target must be upgraded before the action is available',
+          message: 'This legacy server must be enrolled into federation before the action is available',
         },
       });
       return;
@@ -284,6 +295,9 @@ export class ProxyController {
       );
     } catch (err) {
       const msg = (err as Error).message;
+      const code = err instanceof LegacyProxyTransportError
+        ? err.code
+        : 'PROXY_UPSTREAM_FAILED';
       this.logger.error(`Proxy to ${server.name} failed: ${msg}`);
       if (targetPath === '/dashboard/overview') {
         this.logger.log(JSON.stringify({
@@ -314,7 +328,7 @@ export class ProxyController {
       }
       res.status(502).json({
         success: false,
-        error: { code: 'PROXY_UPSTREAM_FAILED', message: `Failed to reach server "${server.name}": ${msg}` },
+        error: { code, message: `Failed to reach server "${server.name}": ${msg}` },
       });
       return;
     }

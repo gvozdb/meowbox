@@ -37,7 +37,7 @@ const REASON_MESSAGES: Readonly<Record<FederationReasonCode, string>> = {
   POLICY_BLOCKED: 'Действие запрещено topology policy.',
   ENDPOINT_CUTOVER: 'Endpoint target переключается.',
   REGISTRY_FROZEN: 'Изменения registry заморожены.',
-  LEGACY_UPGRADE_REQUIRED: 'Target нужно обновить до federation protocol 1.',
+  LEGACY_UPGRADE_REQUIRED: 'Target нужно подключить через federation protocol 1.',
   UNKNOWN: 'Состояние target ещё не определено.',
 };
 

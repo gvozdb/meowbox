@@ -69,6 +69,7 @@ test('overview fails closed and enters legacy mode only on 404', () => {
   assert.match(composable, /statusOf\(overviewError\) !== 404/);
   assert.doesNotMatch(composable, /\[401,\s*403,\s*404/);
   assert.match(composable, /\[401, 403\]\.includes\(statusOf\(result\.reason\)/);
+  assert.match(composable, /LEGACY_TLS_PIN_REQUIRED/);
 });
 
 test('polling is selected-server safe, non-overlapping, cancellable and visibility-aware', () => {

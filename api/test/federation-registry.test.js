@@ -10,7 +10,10 @@ const test = require('node:test');
 const { PrismaClient } = require('@prisma/client');
 const masterKey = require('../src/common/crypto/master-key');
 const { LegacyRegistryFileService } = require('../src/federation/legacy-registry-file.service');
-const { parseLegacyRegistry } = require('../src/federation/legacy-registry');
+const {
+  decryptLegacyCredentials,
+  parseLegacyRegistry,
+} = require('../src/federation/legacy-registry');
 const { PanelIdentityService } = require('../src/federation/panel-identity.service');
 const { RegistryImportService } = require('../src/federation/registry-import.service');
 const { RemoteRegistryService } = require('../src/federation/remote-registry.service');
@@ -97,6 +100,19 @@ test('T-REG-001 import preserves IDs, encrypts tokens, and remains JSON-authorit
   assert.equal(await prisma.registryProjectionJournal.count(), 1);
 });
 
+test('legacy credential v1 remains readable after optional TLS pin support', async (t) => {
+  await fixture(t);
+  const encoded = masterKey.encryptWithDomain('federation', {
+    version: 1,
+    kind: 'legacy-proxy-token',
+    serverId: 'legacy-a',
+    token: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+  });
+  assert.deepEqual(decryptLegacyCredentials('legacy-a', encoded), {
+    token: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+  });
+});
+
 test('T-REG-002 cutover commits mode-0600 projection and DB mutations project atomically', async (t) => {
   const { actualFile, importer, prisma, registry } = await fixture(t);
   const imported = await importer.importAuthoritativeJson();
@@ -113,6 +129,33 @@ test('T-REG-002 cutover commits mode-0600 projection and DB mutations project at
   const projected = parseLegacyRegistry(await actualFile.read());
   assert.equal(projected.find(({ id }) => id === 'legacy-a').name, 'Legacy A renamed');
   assert.equal((await prisma.registryProjectionJournal.findFirst({ orderBy: { registryGeneration: 'desc' } })).state, 'COMMITTED');
+});
+
+test('legacy self-signed CA survives DB authority projection', async (t) => {
+  const { actualFile, importer, registry } = await fixture(t);
+  const certificateRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'meowbox-legacy-registry-tls-'));
+  t.after(() => fs.rmSync(certificateRoot, { recursive: true, force: true }));
+  const certificatePath = path.join(certificateRoot, 'cert.pem');
+  execFileSync('openssl', [
+    'req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-days', '1',
+    '-subj', '/CN=b.fixture.test',
+    '-addext', 'subjectAltName=DNS:b.fixture.test',
+    '-keyout', path.join(certificateRoot, 'key.pem'),
+    '-out', certificatePath,
+  ], { stdio: 'ignore' });
+  const certificatePem = fs.readFileSync(certificatePath, 'utf8');
+
+  const imported = await importer.importAuthoritativeJson();
+  await importer.cutoverToDb(imported.sourceDigest);
+  const updated = await registry.updateLegacyServer('legacy-b', {
+    tlsCaCertificatePem: certificatePem,
+  });
+  assert.match(updated.tlsCaCertificatePem, /BEGIN CERTIFICATE/);
+  const projected = parseLegacyRegistry(await actualFile.read());
+  assert.equal(
+    projected.find(({ id }) => id === 'legacy-b').tlsCaCertificatePem,
+    updated.tlsCaCertificatePem,
+  );
 });
 
 test('T-REG-003 projection failure freezes mutation until explicit repair', async (t) => {

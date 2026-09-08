@@ -1,5 +1,10 @@
 import { createHash, timingSafeEqual, X509Certificate } from 'node:crypto';
-import { checkServerIdentity, PeerCertificate, SecureContextOptions } from 'node:tls';
+import { isIP } from 'node:net';
+import {
+  checkServerIdentity,
+  PeerCertificate,
+  SecureContextOptions,
+} from 'node:tls';
 import {
   Agent,
   buildConnector,
@@ -33,6 +38,7 @@ function createValidatedConnector(
   expectedPin: Buffer | null,
 ): buildConnector.connector {
   const expectedPort = String(origin.port);
+  const servername = isIP(origin.hostname) === 0 ? origin.hostname : undefined;
 
   return (connectOptions, callback) => {
     const requestedHostname = connectOptions.hostname.replace(/^\[|\]$/g, '');
@@ -51,7 +57,7 @@ function createValidatedConnector(
         const connector = buildConnector({
           ca: options.ca,
           rejectUnauthorized: true,
-          servername: origin.hostname,
+          servername,
           timeout: options.connectTimeoutMs ?? 5_000,
           checkServerIdentity: (hostname, certificate) => {
             const hostnameError = checkServerIdentity(hostname, certificate);
@@ -73,7 +79,7 @@ function createValidatedConnector(
           {
             ...connectOptions,
             hostname: resolved.selectedAddress,
-            servername: origin.hostname,
+            servername,
           },
           callback,
         );
@@ -82,6 +88,77 @@ function createValidatedConnector(
         callback(error instanceof Error ? error : new Error('Validated DNS resolution failed'), null);
       });
   };
+}
+
+export function caFromPinnedSelfSignedCertificate(
+  hostname: string,
+  expectedPin: string,
+  certificate: PeerCertificate,
+  now = new Date(),
+): string {
+  const pinError = verifyPinnedCertificate(hostname, expectedPin, certificate);
+  if (pinError) throw pinError;
+  if (!certificate.raw) throw new Error('Peer certificate is unavailable');
+
+  const parsed = new X509Certificate(certificate.raw);
+  const validFrom = Date.parse(parsed.validFrom);
+  const validTo = Date.parse(parsed.validTo);
+  if (
+    !Number.isFinite(validFrom) ||
+    !Number.isFinite(validTo) ||
+    now.getTime() < validFrom ||
+    now.getTime() > validTo
+  ) {
+    throw new Error('Peer certificate is outside its validity period');
+  }
+  if (parsed.subject !== parsed.issuer || !parsed.verify(parsed.publicKey)) {
+    throw new Error('Pinned legacy certificate must be self-signed');
+  }
+  return parsed.toString();
+}
+
+export function inspectLegacySelfSignedCertificate(
+  inputOrigin: string,
+  certificatePem: string,
+): Readonly<{ caCertificatePem: string; spkiSha256: string }> {
+  const origin = parseFederationOrigin(inputOrigin);
+  const trimmed = certificatePem.trim();
+  if (
+    Buffer.byteLength(trimmed, 'utf8') > 16 * 1024 ||
+    (trimmed.match(/-----BEGIN CERTIFICATE-----/g) ?? []).length !== 1 ||
+    (trimmed.match(/-----END CERTIFICATE-----/g) ?? []).length !== 1 ||
+    !/^-----BEGIN CERTIFICATE-----[\s\S]+-----END CERTIFICATE-----$/.test(trimmed)
+  ) throw new Error('Legacy TLS certificate PEM is invalid');
+
+  const parsed = new X509Certificate(trimmed);
+  const spkiSha256 = spkiSha256FromCertificate(parsed.raw);
+  const pinError = verifyPinnedCertificate(origin.hostname, spkiSha256, parsed.toLegacyObject());
+  if (pinError) throw pinError;
+  if (parsed.subject !== parsed.issuer || !parsed.verify(parsed.publicKey)) {
+    throw new Error('Pinned legacy certificate must be self-signed');
+  }
+  const caCertificatePem = parsed.toString();
+  return { caCertificatePem, spkiSha256 };
+}
+
+export function validateLegacySelfSignedCertificate(
+  inputOrigin: string,
+  certificatePem: string,
+  now = new Date(),
+): Readonly<{ caCertificatePem: string; spkiSha256: string }> {
+  const inspected = inspectLegacySelfSignedCertificate(inputOrigin, certificatePem);
+  const parsed = new X509Certificate(inspected.caCertificatePem);
+  const validFrom = Date.parse(parsed.validFrom);
+  const validTo = Date.parse(parsed.validTo);
+  if (
+    !Number.isFinite(validFrom) ||
+    !Number.isFinite(validTo) ||
+    now.getTime() < validFrom ||
+    now.getTime() > validTo
+  ) {
+    throw new Error('Peer certificate is outside its validity period');
+  }
+  return inspected;
 }
 
 function decodeSpkiPin(pin: string): Buffer {

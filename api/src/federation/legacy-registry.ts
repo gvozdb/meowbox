@@ -1,18 +1,33 @@
 import { createHash } from 'node:crypto';
 import { decryptWithDomain, encryptWithDomain } from '../common/crypto/master-key';
+import { inspectLegacySelfSignedCertificate } from './pinned-dispatcher';
 
 export interface LegacyServerRecord {
   id: string;
   name: string;
   url: string;
   token: string;
+  tlsCaCertificatePem?: string;
 }
 
-interface EncryptedLegacyToken {
+interface EncryptedLegacyTokenV1 {
   version: 1;
   kind: 'legacy-proxy-token';
   serverId: string;
   token: string;
+}
+
+interface EncryptedLegacyTokenV2 {
+  version: 2;
+  kind: 'legacy-proxy-token';
+  serverId: string;
+  token: string;
+  tlsCaCertificatePem?: string;
+}
+
+export interface LegacyServerCredentials {
+  token: string;
+  tlsCaCertificatePem?: string;
 }
 
 const ID = /^[A-Za-z0-9_-]{1,64}$/;
@@ -49,15 +64,34 @@ export function normalizeLegacyServerUrl(input: string): string {
 export function validateLegacyServerRecord(value: unknown): LegacyServerRecord {
   if (!isRecord(value)) throw new Error('Legacy server record is invalid');
   const keys = Object.keys(value).sort();
-  if (keys.join(',') !== 'id,name,token,url') throw new Error('Legacy server record fields are invalid');
+  const expected = value.tlsCaCertificatePem === undefined
+    ? 'id,name,token,url'
+    : 'id,name,tlsCaCertificatePem,token,url';
+  if (keys.join(',') !== expected) throw new Error('Legacy server record fields are invalid');
   if (typeof value.id !== 'string' || !ID.test(value.id)) throw new Error('Legacy server ID is invalid');
   if (typeof value.name !== 'string' || !NAME.test(value.name)) throw new Error('Legacy server name is invalid');
   if (typeof value.token !== 'string' || !TOKEN.test(value.token)) throw new Error('Legacy server token is invalid');
+  const url = normalizeLegacyServerUrl(value.url as string);
+  let tlsCaCertificatePem: string | undefined;
+  if (value.tlsCaCertificatePem !== undefined) {
+    if (typeof value.tlsCaCertificatePem !== 'string') {
+      throw new Error('Legacy server TLS certificate is invalid');
+    }
+    try {
+      tlsCaCertificatePem = inspectLegacySelfSignedCertificate(
+        url,
+        value.tlsCaCertificatePem,
+      ).caCertificatePem;
+    } catch {
+      throw new Error('Legacy server TLS certificate is invalid');
+    }
+  }
   return {
     id: value.id,
     name: value.name,
-    url: normalizeLegacyServerUrl(value.url as string),
+    url,
     token: value.token,
+    ...(tlsCaCertificatePem === undefined ? {} : { tlsCaCertificatePem }),
   };
 }
 
@@ -93,25 +127,59 @@ export function renderLegacyRegistry(records: readonly LegacyServerRecord[]): st
   return `${JSON.stringify(sorted, null, 2)}\n`;
 }
 
-export function encryptLegacyToken(serverId: string, token: string): string {
+export function encryptLegacyToken(
+  serverId: string,
+  token: string,
+  tlsCaCertificatePem?: string,
+): string {
   if (!ID.test(serverId) || !TOKEN.test(token)) throw new Error('Legacy token binding is invalid');
-  const payload: EncryptedLegacyToken = {
-    version: 1,
+  if (tlsCaCertificatePem !== undefined) {
+    const trimmed = tlsCaCertificatePem.trim();
+    if (
+      Buffer.byteLength(trimmed, 'utf8') > 16 * 1024 ||
+      !/^-----BEGIN CERTIFICATE-----[\s\S]+-----END CERTIFICATE-----$/.test(trimmed)
+    ) throw new Error('Legacy TLS certificate binding is invalid');
+    tlsCaCertificatePem = trimmed;
+  }
+  const payload: EncryptedLegacyTokenV2 = {
+    version: 2,
     kind: 'legacy-proxy-token',
     serverId,
     token,
+    ...(tlsCaCertificatePem === undefined ? {} : { tlsCaCertificatePem }),
   };
   return encryptWithDomain('federation', payload);
 }
 
-export function decryptLegacyToken(serverId: string, encoded: string): string {
-  const payload = decryptWithDomain<EncryptedLegacyToken>('federation', encoded);
+export function decryptLegacyCredentials(
+  serverId: string,
+  encoded: string,
+): LegacyServerCredentials {
+  const payload = decryptWithDomain<EncryptedLegacyTokenV1 | EncryptedLegacyTokenV2>(
+    'federation',
+    encoded,
+  );
   if (
-    payload.version !== 1 ||
+    ![1, 2].includes(payload.version) ||
     payload.kind !== 'legacy-proxy-token' ||
     payload.serverId !== serverId ||
-    !TOKEN.test(payload.token)
+    !TOKEN.test(payload.token) ||
+    (payload.version === 2 &&
+      payload.tlsCaCertificatePem !== undefined &&
+      (typeof payload.tlsCaCertificatePem !== 'string' ||
+        Buffer.byteLength(payload.tlsCaCertificatePem, 'utf8') > 16 * 1024 ||
+        !/^-----BEGIN CERTIFICATE-----[\s\S]+-----END CERTIFICATE-----$/.test(
+          payload.tlsCaCertificatePem,
+        )))
   ) throw new Error('Legacy token binding is invalid');
-  return payload.token;
+  return {
+    token: payload.token,
+    ...(payload.version === 2 && payload.tlsCaCertificatePem !== undefined
+      ? { tlsCaCertificatePem: payload.tlsCaCertificatePem }
+      : {}),
+  };
 }
 
+export function decryptLegacyToken(serverId: string, encoded: string): string {
+  return decryptLegacyCredentials(serverId, encoded).token;
+}

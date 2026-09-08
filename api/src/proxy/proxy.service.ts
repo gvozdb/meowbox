@@ -7,29 +7,43 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { randomUUID } from 'crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { readFile, writeFile, rename, mkdir, chmod } from 'fs/promises';
 import { existsSync } from 'fs';
 import { join } from 'path';
 import { type Dispatcher } from 'undici';
+import {
+  LegacyServerRecord,
+  parseLegacyRegistry,
+  renderLegacyRegistry,
+  validateLegacyServerRecord,
+} from '../federation/legacy-registry';
 import { RemoteRegistryService } from '../federation/remote-registry.service';
 import {
+  createPinnedFederationDispatcher,
   createValidatedTlsDispatcher,
+  inspectLegacySelfSignedCertificate,
   PinnedFederationDispatcher,
+  validateLegacySelfSignedCertificate,
 } from '../federation/pinned-dispatcher';
 import {
   parseFederationOrigin,
   resolveFederationOrigin,
 } from '../federation/endpoint-normalizer';
+import { discoverLegacySelfSignedCertificate } from './legacy-tls-trust';
 
-export interface ServerConfig {
+export interface ServerConfig extends LegacyServerRecord {}
+
+type ServerConfigUpdate = Omit<Partial<Omit<ServerConfig, 'id'>>, 'tlsCaCertificatePem'> & {
+  tlsCaCertificatePem?: string | null;
+};
+
+export interface ServerInfo {
   id: string;
   name: string;
-  url: string; // e.g. "http://10.0.0.5:3000"
-  token: string; // proxy auth token
-}
-
-export interface ServerInfo extends ServerConfig {
+  url: string;
+  token: string;
+  tlsSpkiSha256?: string;
   online: boolean;
   /** Текущая версия панели на удалённом сервере (например `v0.3.0`). */
   version?: string;
@@ -63,11 +77,99 @@ const LEGACY_BROWSER_HEADERS = new Set([
   'if-unmodified-since',
 ]);
 
+export type LegacyProxyTransportErrorCode =
+  | 'LEGACY_TLS_PIN_REQUIRED'
+  | 'LEGACY_TLS_PIN_MISMATCH'
+  | 'LEGACY_TLS_HOSTNAME_MISMATCH'
+  | 'LEGACY_TLS_CERT_INVALID'
+  | 'LEGACY_UPSTREAM_UNREACHABLE';
+
+export class LegacyProxyTransportError extends Error {
+  constructor(
+    readonly code: LegacyProxyTransportErrorCode,
+    message: string,
+    cause?: unknown,
+  ) {
+    super(message);
+    this.name = 'LegacyProxyTransportError';
+    if (cause !== undefined) {
+      (this as Error & { cause?: unknown }).cause = cause;
+    }
+  }
+}
+
+function errorChain(error: unknown): Array<{ code?: unknown; message?: unknown }> {
+  const chain: Array<{ code?: unknown; message?: unknown }> = [];
+  let current = error;
+  for (let depth = 0; depth < 5; depth += 1) {
+    if (!current || typeof current !== 'object') break;
+    const item = current as { code?: unknown; message?: unknown; cause?: unknown };
+    chain.push(item);
+    current = item.cause;
+  }
+  return chain;
+}
+
+export function normalizeLegacyProxyTransportError(
+  error: unknown,
+  hasPinnedTrust = false,
+): LegacyProxyTransportError {
+  if (error instanceof LegacyProxyTransportError) return error;
+  const chain = errorChain(error);
+  const codes = new Set(chain.map(({ code }) => code).filter((code): code is string => typeof code === 'string'));
+  const messages = chain.map(({ message }) => typeof message === 'string' ? message : '').join('\n');
+
+  if (codes.has('DEPTH_ZERO_SELF_SIGNED_CERT') || codes.has('SELF_SIGNED_CERT_IN_CHAIN') ||
+      codes.has('UNABLE_TO_VERIFY_LEAF_SIGNATURE') || codes.has('UNABLE_TO_GET_ISSUER_CERT_LOCALLY') ||
+      codes.has('CERT_UNTRUSTED')) {
+    if (hasPinnedTrust) {
+      return new LegacyProxyTransportError(
+        'LEGACY_TLS_PIN_MISMATCH',
+        'Configured TLS certificate does not match the server certificate',
+        error,
+      );
+    }
+    return new LegacyProxyTransportError(
+      'LEGACY_TLS_PIN_REQUIRED',
+      'Self-signed TLS certificate requires automatic trust bootstrap',
+      error,
+    );
+  }
+  if (/SPKI pin mismatch/i.test(messages)) {
+    return new LegacyProxyTransportError(
+      'LEGACY_TLS_PIN_MISMATCH',
+      'Configured TLS certificate does not match the server certificate',
+      error,
+    );
+  }
+  if (codes.has('ERR_TLS_CERT_ALTNAME_INVALID') || /hostname\/IP does not match/i.test(messages)) {
+    return new LegacyProxyTransportError(
+      'LEGACY_TLS_HOSTNAME_MISMATCH',
+      'TLS certificate does not match the configured server host',
+      error,
+    );
+  }
+  if (codes.has('CERT_HAS_EXPIRED') || codes.has('CERT_NOT_YET_VALID') ||
+      /validity period/i.test(messages) || /must be self-signed/i.test(messages)) {
+    return new LegacyProxyTransportError(
+      'LEGACY_TLS_CERT_INVALID',
+      'Pinned TLS certificate is invalid or expired',
+      error,
+    );
+  }
+  return new LegacyProxyTransportError(
+    'LEGACY_UPSTREAM_UNREACHABLE',
+    'Legacy server is unreachable',
+    error,
+  );
+}
+
 @Injectable()
 export class ProxyService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger('ProxyService');
   private servers: ServerConfig[] = [];
   private readonly legacyDispatchers = new Map<string, PinnedFederationDispatcher>();
+  private readonly legacyTrustBootstraps = new Map<string, Promise<ServerConfig>>();
 
   constructor(
     private readonly config: ConfigService,
@@ -103,7 +205,7 @@ export class ProxyService implements OnModuleInit, OnModuleDestroy {
     if (existsSync(SERVERS_FILE)) {
       try {
         const raw = await readFile(SERVERS_FILE, 'utf-8');
-        this.servers = JSON.parse(raw);
+        this.servers = parseLegacyRegistry(raw);
         this.logger.log(
           `Loaded ${this.servers.length} server(s) from ${SERVERS_FILE}`,
         );
@@ -117,7 +219,7 @@ export class ProxyService implements OnModuleInit, OnModuleDestroy {
     const envRaw = this.config.get<string>('SERVERS', '');
     if (envRaw) {
       try {
-        this.servers = JSON.parse(envRaw);
+        this.servers = parseLegacyRegistry(envRaw);
         this.logger.log(
           `Migrated ${this.servers.length} server(s) from SERVERS env to JSON`,
         );
@@ -139,7 +241,7 @@ export class ProxyService implements OnModuleInit, OnModuleDestroy {
     // PROXY_TOKEN'ы всех slave-серверов в plaintext. Любой локальный юзер не
     // должен мочь их прочитать.
     const tmp = SERVERS_FILE + '.tmp';
-    await writeFile(tmp, JSON.stringify(this.servers, null, 2), 'utf-8');
+    await writeFile(tmp, renderLegacyRegistry(this.servers), 'utf-8');
     await chmod(tmp, 0o600);
     await rename(tmp, SERVERS_FILE);
   }
@@ -152,25 +254,106 @@ export class ProxyService implements OnModuleInit, OnModuleDestroy {
     return this.servers.find((s) => s.id === id);
   }
 
-  private getFetchDispatcher(server: ServerConfig): Dispatcher {
-    const origin = parseFederationOrigin(server.url).origin;
-    const existing = this.legacyDispatchers.get(origin);
-    if (existing) return existing.dispatcher;
-    const created = createValidatedTlsDispatcher(origin, { connectTimeoutMs: 5_000 });
-    this.legacyDispatchers.set(origin, created);
-    return created.dispatcher;
+  publicServerConfig(server: ServerConfig): Omit<ServerInfo, 'online'> {
+    const publicServer = {
+      id: server.id,
+      name: server.name,
+      url: server.url,
+      token: '***',
+    };
+    if (!server.tlsCaCertificatePem) return publicServer;
+    const trust = inspectLegacySelfSignedCertificate(server.url, server.tlsCaCertificatePem);
+    return { ...publicServer, tlsSpkiSha256: trust.spkiSha256 };
   }
 
-  private async validateLegacyOrigin(input: string): Promise<string> {
-    const origin = parseFederationOrigin(input);
-    await resolveFederationOrigin(origin);
-    return origin.origin;
+  private getFetchDispatcher(server: ServerConfig): Dispatcher {
+    try {
+      const origin = parseFederationOrigin(server.url).origin;
+      const trust = server.tlsCaCertificatePem
+        ? validateLegacySelfSignedCertificate(origin, server.tlsCaCertificatePem)
+        : null;
+      const certificateDigest = trust
+        ? createHash('sha256').update(trust.caCertificatePem).digest('base64url')
+        : '';
+      const key = `${origin}\0${trust?.spkiSha256 ?? ''}\0${certificateDigest}`;
+      const existing = this.legacyDispatchers.get(key);
+      if (existing) return existing.dispatcher;
+      const created = trust
+        ? createPinnedFederationDispatcher(origin, {
+          spkiSha256: trust.spkiSha256,
+          ca: trust.caCertificatePem,
+          connectTimeoutMs: 5_000,
+        })
+        : createValidatedTlsDispatcher(origin, { connectTimeoutMs: 5_000 });
+      this.legacyDispatchers.set(key, created);
+      return created.dispatcher;
+    } catch (error) {
+      throw normalizeLegacyProxyTransportError(error, !!server.tlsCaCertificatePem);
+    }
+  }
+
+  private async validateLegacyOrigin(
+    input: string,
+    tlsCaCertificatePem?: string,
+  ): Promise<string> {
+    try {
+      const origin = parseFederationOrigin(input);
+      await resolveFederationOrigin(origin);
+      if (tlsCaCertificatePem) {
+        validateLegacySelfSignedCertificate(origin.origin, tlsCaCertificatePem);
+      }
+      return origin.origin;
+    } catch (error) {
+      const normalized = normalizeLegacyProxyTransportError(error);
+      throw new BadRequestException(normalized.message, { cause: error });
+    }
   }
 
   private async clearLegacyDispatchers(): Promise<void> {
     const dispatchers = [...this.legacyDispatchers.values()];
     this.legacyDispatchers.clear();
     await Promise.allSettled(dispatchers.map(({ close }) => close()));
+  }
+
+  private async bindLegacySelfSignedTrust(
+    server: ServerConfig,
+    replaceExisting = false,
+  ): Promise<ServerConfig> {
+    const inProgress = this.legacyTrustBootstraps.get(server.id);
+    if (inProgress) return inProgress;
+
+    const bootstrap = (async () => {
+      const current = this.getServer(server.id);
+      if (!current) throw new NotFoundException(`Server "${server.id}" not found`);
+      if (current.tlsCaCertificatePem && !replaceExisting) return current;
+
+      const expectedOrigin = parseFederationOrigin(current.url).origin;
+      const trust = await discoverLegacySelfSignedCertificate(expectedOrigin);
+      const latest = this.getServer(server.id);
+      if (!latest) throw new NotFoundException(`Server "${server.id}" not found`);
+      if (parseFederationOrigin(latest.url).origin !== expectedOrigin) {
+        throw new LegacyProxyTransportError(
+          'LEGACY_TLS_PIN_MISMATCH',
+          'Legacy server URL changed during TLS trust bootstrap',
+        );
+      }
+      if (latest.tlsCaCertificatePem && !replaceExisting) return latest;
+
+      const updated = await this.updateServer(server.id, {
+        tlsCaCertificatePem: trust.caCertificatePem,
+      });
+      this.logger.log(`Pinned self-signed TLS certificate for "${updated.name}" (${updated.id})`);
+      return updated;
+    })();
+
+    this.legacyTrustBootstraps.set(server.id, bootstrap);
+    try {
+      return await bootstrap;
+    } finally {
+      if (this.legacyTrustBootstraps.get(server.id) === bootstrap) {
+        this.legacyTrustBootstraps.delete(server.id);
+      }
+    }
   }
 
   private assertNoLegacyRedirect(response: Response): void {
@@ -180,6 +363,41 @@ export class ProxyService implements OnModuleInit, OnModuleDestroy {
     }
   }
 
+  private async fetchLegacy(
+    server: ServerConfig,
+    url: string,
+    options: RequestInit,
+  ): Promise<Response> {
+    try {
+      return await fetch(url, options);
+    } catch (error) {
+      const normalized = normalizeLegacyProxyTransportError(
+        error,
+        !!server.tlsCaCertificatePem,
+      );
+      if (
+        normalized.code !== 'LEGACY_TLS_PIN_REQUIRED' ||
+        server.tlsCaCertificatePem
+      ) throw normalized;
+
+      try {
+        const trusted = await this.bindLegacySelfSignedTrust(server);
+        const retryOptions = { ...options };
+        (retryOptions as RequestInit & { dispatcher: Dispatcher }).dispatcher =
+          this.getFetchDispatcher(trusted);
+        return await fetch(url, retryOptions);
+      } catch (retryError) {
+        throw normalizeLegacyProxyTransportError(retryError, true);
+      }
+    }
+  }
+
+  async refreshLegacyTlsTrust(id: string): Promise<ServerConfig> {
+    const server = this.getServer(id);
+    if (!server) throw new NotFoundException(`Server "${id}" not found`);
+    return this.bindLegacySelfSignedTrust(server, true);
+  }
+
   async addServer(
     data: Omit<ServerConfig, 'id'> & { id?: string },
   ): Promise<ServerConfig> {
@@ -187,25 +405,25 @@ export class ProxyService implements OnModuleInit, OnModuleDestroy {
       throw new BadRequestException(`Server "${data.name}" already exists`);
     }
 
-    const normalizedOrigin = await this.validateLegacyOrigin(data.url);
-
-    if (await this.remoteRegistry.authority() !== 'JSON') {
-      const created = await this.remoteRegistry.addLegacyServer({
-        id: data.id,
-        name: data.name,
-        url: normalizedOrigin,
-        token: data.token,
-      });
-      this.servers = await this.remoteRegistry.getLegacyServersFromDb();
-      return created;
-    }
-
-    const server: ServerConfig = {
+    const normalizedOrigin = await this.validateLegacyOrigin(
+      data.url,
+      data.tlsCaCertificatePem,
+    );
+    const server = validateLegacyServerRecord({
       id: data.id || randomUUID().slice(0, 8),
       name: data.name,
       url: normalizedOrigin,
       token: data.token,
-    };
+      ...(data.tlsCaCertificatePem === undefined
+        ? {}
+        : { tlsCaCertificatePem: data.tlsCaCertificatePem }),
+    });
+
+    if (await this.remoteRegistry.authority() !== 'JSON') {
+      const created = await this.remoteRegistry.addLegacyServer(server);
+      this.servers = await this.remoteRegistry.getLegacyServersFromDb();
+      return created;
+    }
 
     this.servers.push(server);
     await this.saveServers();
@@ -215,22 +433,40 @@ export class ProxyService implements OnModuleInit, OnModuleDestroy {
 
   async updateServer(
     id: string,
-    data: Partial<Omit<ServerConfig, 'id'>>,
+    data: ServerConfigUpdate,
   ): Promise<ServerConfig> {
     const idx = this.servers.findIndex((s) => s.id === id);
     if (idx === -1) {
       throw new NotFoundException(`Server "${id}" not found`);
     }
 
-    if (data.url !== undefined) {
-      data.url = await this.validateLegacyOrigin(data.url);
+    const current = this.servers[idx];
+    const normalizedUrl = data.url === undefined
+      ? current.url
+      : await this.validateLegacyOrigin(data.url);
+    const candidate: Record<string, unknown> = {
+      ...current,
+      ...data,
+      id,
+      url: normalizedUrl,
+    };
+    if (normalizedUrl !== current.url) delete candidate.tlsCaCertificatePem;
+    if (data.tlsCaCertificatePem === null) delete candidate.tlsCaCertificatePem;
+    const next = validateLegacyServerRecord(candidate);
+    if (data.tlsCaCertificatePem !== undefined) {
+      next.url = await this.validateLegacyOrigin(next.url, next.tlsCaCertificatePem);
     }
 
     if (await this.remoteRegistry.authority() !== 'JSON') {
       const updated = await this.remoteRegistry.updateLegacyServer(id, {
         ...(data.name === undefined ? {} : { name: data.name }),
-        ...(data.url === undefined ? {} : { url: data.url }),
+        ...(data.url === undefined ? {} : { url: next.url }),
         ...(data.token === undefined ? {} : { token: data.token }),
+        ...(normalizedUrl !== current.url
+          ? { tlsCaCertificatePem: null }
+          : data.tlsCaCertificatePem === undefined
+            ? {}
+            : { tlsCaCertificatePem: data.tlsCaCertificatePem }),
       });
       this.servers = await this.remoteRegistry.getLegacyServersFromDb();
       this.statusCache.delete(id);
@@ -238,17 +474,14 @@ export class ProxyService implements OnModuleInit, OnModuleDestroy {
       return updated;
     }
 
-    if (data.name !== undefined) this.servers[idx].name = data.name;
-    if (data.url !== undefined)
-      this.servers[idx].url = data.url;
-    if (data.token !== undefined) this.servers[idx].token = data.token;
+    this.servers[idx] = next;
 
     await this.saveServers();
     // URL/токен поменялись — статус мог стать невалидным. Инвалидируем кеш.
     this.statusCache.delete(id);
     await this.clearLegacyDispatchers();
-    this.logger.log(`Updated server "${this.servers[idx].name}" (${id})`);
-    return this.servers[idx];
+    this.logger.log(`Updated server "${next.name}" (${id})`);
+    return next;
   }
 
   async removeServer(id: string): Promise<void> {
@@ -308,13 +541,14 @@ export class ProxyService implements OnModuleInit, OnModuleDestroy {
       signal: AbortSignal.timeout(timeoutMs),
       redirect: 'manual',
     };
-    (fetchOptions as RequestInit & { dispatcher: Dispatcher }).dispatcher = this.getFetchDispatcher(server);
+    (fetchOptions as RequestInit & { dispatcher: Dispatcher }).dispatcher =
+      this.getFetchDispatcher(server);
 
     if (body && method !== 'GET' && method !== 'HEAD') {
       fetchOptions.body = JSON.stringify(body);
     }
 
-    const response = await fetch(url, fetchOptions);
+    const response = await this.fetchLegacy(server, url, fetchOptions);
     this.assertNoLegacyRedirect(response);
     const data = await response.json().catch(() => null);
 
@@ -373,7 +607,8 @@ export class ProxyService implements OnModuleInit, OnModuleDestroy {
       // duplex: 'half' нужен для streaming body, но мы передаём целиком Buffer
       // (контроллер уже собрал raw body), так что это не критично.
     };
-    (fetchOptions as RequestInit & { dispatcher: Dispatcher }).dispatcher = this.getFetchDispatcher(server);
+    (fetchOptions as RequestInit & { dispatcher: Dispatcher }).dispatcher =
+      this.getFetchDispatcher(server);
 
     if (body && body.length > 0 && method !== 'GET' && method !== 'HEAD') {
       // node-fetch принимает Buffer — но lib.dom типы fetch BodyInit не
@@ -382,7 +617,7 @@ export class ProxyService implements OnModuleInit, OnModuleDestroy {
       (fetchOptions as any).body = body;
     }
 
-    const response = await fetch(url, fetchOptions);
+    const response = await this.fetchLegacy(server, url, fetchOptions);
     this.assertNoLegacyRedirect(response);
     return response;
   }
@@ -421,7 +656,8 @@ export class ProxyService implements OnModuleInit, OnModuleDestroy {
       }
       return { online: false, lastError: `HTTP ${status}` };
     } catch (err) {
-      return { online: false, lastError: (err as Error).message };
+      const error = normalizeLegacyProxyTransportError(err);
+      return { online: false, lastError: error.code };
     }
   }
 
@@ -449,7 +685,7 @@ export class ProxyService implements OnModuleInit, OnModuleDestroy {
           lastCheckedAt: new Date().toISOString(),
         };
         this.statusCache.set(s.id, status);
-        return { ...s, ...status, token: '***' } as ServerInfo;
+        return { ...this.publicServerConfig(s), ...status } as ServerInfo;
       }),
     );
 
@@ -461,7 +697,10 @@ export class ProxyService implements OnModuleInit, OnModuleDestroy {
         lastCheckedAt: new Date().toISOString(),
       };
       this.statusCache.set(this.servers[i].id, fallback);
-      return { ...this.servers[i], ...fallback, token: '***' } as ServerInfo;
+      return {
+        ...this.publicServerConfig(this.servers[i]),
+        ...fallback,
+      } as ServerInfo;
     });
     return [...legacy, ...await this.federatedServerInfo()];
   }
@@ -492,7 +731,7 @@ export class ProxyService implements OnModuleInit, OnModuleDestroy {
 
     const legacy = this.servers.map((s) => {
       const status = this.statusCache.get(s.id) ?? { online: false };
-      return { ...s, ...status, token: '***' } as ServerInfo;
+      return { ...this.publicServerConfig(s), ...status } as ServerInfo;
     });
     return [...legacy, ...await this.federatedServerInfo()];
   }

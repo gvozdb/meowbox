@@ -23,7 +23,9 @@ const serverStore = useServerStore();
 const toast = useMbToast();
 const refreshing = ref(false);
 const notice = computed(() =>
-  serverStore.isLocal ? null : remoteContextNotice(serverStore.remoteContext),
+  serverStore.isLocal || !serverStore.currentServer?.federation
+    ? null
+    : remoteContextNotice(serverStore.remoteContext),
 );
 
 async function refresh() {

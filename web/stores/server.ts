@@ -11,6 +11,7 @@ interface ServerInfo {
   name: string;
   url: string;
   token: string;
+  tlsSpkiSha256?: string;
   online: boolean;
   version?: string;
   /** Latest release tag, как видит сам удалённый сервер. */
@@ -301,14 +302,23 @@ export const useServerStore = defineStore('server', {
       if (refreshContext) await this.refreshCurrentRemoteContext();
     },
 
-    async addServer(data: { name: string; url: string; token: string }) {
+    async addServer(data: {
+      name: string;
+      url: string;
+      token: string;
+    }) {
       const api = useMasterApi();
       const server = await api.post<ServerInfo>('/servers', data);
       await this.loadServers();
       return server;
     },
 
-    async updateServer(id: string, data: { name?: string; url?: string; token?: string }) {
+    async updateServer(id: string, data: {
+      name?: string;
+      url?: string;
+      token?: string;
+      refreshTlsTrust?: boolean;
+    }) {
       const api = useMasterApi();
       const server = await api.put<ServerInfo>(`/servers/${id}`, data);
       await this.loadServers();

@@ -7,6 +7,7 @@ import {
   Matches,
   IsUrl,
   IsArray,
+  IsBoolean,
   ArrayMinSize,
   ArrayMaxSize,
 } from 'class-validator';
@@ -44,6 +45,7 @@ export class AddServerDto {
     message: 'Token contains unsupported characters',
   })
   token!: string;
+
 }
 
 export class UpdateServerDto {
@@ -68,6 +70,11 @@ export class UpdateServerDto {
     message: 'Token contains unsupported characters',
   })
   token?: string;
+
+  @IsOptional()
+  @IsBoolean()
+  refreshTlsTrust?: boolean;
+
 }
 
 /**
