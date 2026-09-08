@@ -11,7 +11,10 @@ import * as path from 'node:path';
 import { DOMAIN_REGEX } from '@meowbox/shared';
 import { SslStatus } from '../common/enums';
 import { PrismaService } from '../common/prisma.service';
-import { AgentRelayService } from '../gateway/agent-relay.service';
+import {
+  AgentJobTerminalError,
+  AgentRelayService,
+} from '../gateway/agent-relay.service';
 import { NotificationDispatcherService } from '../notifications/notification-dispatcher.service';
 import { parseStringArray, parseSiteAliases } from '../common/json-array';
 import { SiteDomainsService } from '../sites/site-domains.service';
@@ -21,7 +24,10 @@ import {
   OperationsWorkerService,
   type OperationExecutionContext,
 } from '../operations/operations-worker.service';
-import { OperationNeedsAttentionError } from '../operations/operation-errors';
+import {
+  OperationFailedError,
+  OperationNeedsAttentionError,
+} from '../operations/operation-errors';
 
 /**
  * Inspection остаётся bounded read. Выпуск и отзыв выполняются через durable
@@ -354,17 +360,28 @@ export class SslService implements OnModuleInit, OnModuleDestroy {
 
     await context.throwIfCancellationRequested();
     await context.heartbeat('certbot', 10);
-    const rawResult = await this.agentRelay.runAgentJob(
-      {
-        operationId: context.operationId,
-        actionId: SSL_AGENT_ACTIONS[SSL_OPERATION_ACTIONS.ISSUE],
-        step: 'certbot',
-        payload: { domain: domains[0], domains },
-        deadlineAt: context.deadlineAt,
-        cancelSafe: false,
-      },
-      () => context.isCancellationRequested(),
-    );
+    let rawResult: unknown;
+    try {
+      rawResult = await this.agentRelay.runAgentJob(
+        {
+          operationId: context.operationId,
+          actionId: SSL_AGENT_ACTIONS[SSL_OPERATION_ACTIONS.ISSUE],
+          step: 'certbot',
+          payload: { domain: domains[0], domains },
+          deadlineAt: context.deadlineAt,
+          cancelSafe: false,
+        },
+        () => context.isCancellationRequested(),
+      );
+    } catch (error) {
+      if (
+        error instanceof AgentJobTerminalError &&
+        !(await context.isCancellationRequested())
+      ) {
+        throw new OperationFailedError(error.message);
+      }
+      throw error;
+    }
     const result = validateIssueAgentResult(rawResult, domains);
 
     await context.heartbeat('persist', 85);

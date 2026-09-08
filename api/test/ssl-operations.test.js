@@ -18,6 +18,7 @@ const { OperationsService } = require('../src/operations/operations.service');
 const {
   OperationsWorkerService,
 } = require('../src/operations/operations-worker.service');
+const { AgentJobTerminalError } = require('../src/gateway/agent-relay.service');
 const { SslService } = require('../src/ssl/ssl.service');
 
 async function fixture(t, runAgentJob) {
@@ -146,6 +147,49 @@ test('T-OPS-004 SSL issuance is idempotent and persists only a validated AgentJo
   assert.equal(cert.keyPath, `/etc/letsencrypt/live/${domain.domain}/privkey.pem`);
   assert.equal(cert.expiresAt.toISOString(), expiresAt);
   assert.deepEqual(nginxCalls, [site.id]);
+});
+
+test('terminal certbot failure releases SSL locks and permits a new issuance attempt', async (t) => {
+  const expiresAt = new Date(Date.now() + 80 * 24 * 60 * 60_000).toISOString();
+  let attempt = 0;
+  const data = await fixture(t, async (input) => {
+    attempt++;
+    if (attempt === 1) {
+      throw new AgentJobTerminalError('DNS validation failed');
+    }
+    return {
+      certPath: `/etc/letsencrypt/live/${input.payload.domain}/fullchain.pem`,
+      keyPath: `/etc/letsencrypt/live/${input.payload.domain}/privkey.pem`,
+      expiresAt,
+      domains: input.payload.domains,
+    };
+  });
+  const { prisma, user, site, domain, worker, ssl } = data;
+  const actor = { userId: user.id, role: 'ADMIN' };
+  const failed = await ssl.enqueueIssuance(
+    site.id,
+    domain.id,
+    actor,
+    `ssl-terminal-failure-${crypto.randomUUID()}`,
+  );
+
+  await worker.pollOnce();
+  const failedOperation = await waitForStatus(prisma, failed.operationId, 'FAILED');
+  assert.equal(failedOperation.errorMessage, 'DNS validation failed');
+  assert.equal(
+    await prisma.operationLock.count({ where: { operationId: failed.operationId } }),
+    0,
+  );
+
+  const retry = await ssl.enqueueIssuance(
+    site.id,
+    domain.id,
+    actor,
+    `ssl-terminal-retry-${crypto.randomUUID()}`,
+  );
+  assert.notEqual(retry.operationId, failed.operationId);
+  await worker.pollOnce();
+  await waitForStatus(prisma, retry.operationId, 'SUCCEEDED');
 });
 
 test('T-OPS-006 mismatched SSL metadata fails closed without activating certificate', async (t) => {
