@@ -71,7 +71,7 @@ function fixture() {
   const identity = {
     getLocalIdentity: async () => ({ installationId: TARGET_ID }),
   };
-  const origins = { browserPublicOrigin: () => 'https://target.example:11862' };
+  const origins = { browserPublicOrigin: async () => 'https://target.example:11862' };
   return new DomainApplicationsService(
     prisma,
     {},

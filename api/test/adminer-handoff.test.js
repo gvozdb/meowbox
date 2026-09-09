@@ -47,7 +47,7 @@ function fixture() {
       findUnique: async () => null,
     },
   };
-  const origins = { browserPublicOrigin: () => 'https://target.example' };
+  const origins = { browserPublicOrigin: async () => 'https://target.example' };
   const identity = {
     getLocalIdentity: async () => ({
       installationId: TARGET_ID,

@@ -652,7 +652,7 @@ export class FederatedVpnSubscriptionService {
       rangeSupported: false,
       resumeSupported: false,
       fallbackReason: null,
-      url: `${this.origins.browserPublicOrigin()}/api/public/v1/vpn/subscriptions/${token}`,
+      url: `${await this.origins.browserPublicOrigin()}/api/public/v1/vpn/subscriptions/${token}`,
       reusable: true,
     }) as PublicEndpointDelivery;
   }

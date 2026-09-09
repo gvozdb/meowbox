@@ -113,7 +113,7 @@ async function fixture(t, { slow = false } = {}) {
     prisma,
     config,
     identity,
-    { directTransferOrigin: () => 'https://target.example.test' },
+    { directTransferOrigin: async () => 'https://target.example.test' },
   );
   const artifacts = new TransferArtifactService(prisma, config, identity, sessions);
   const operations = new OperationsService(prisma);

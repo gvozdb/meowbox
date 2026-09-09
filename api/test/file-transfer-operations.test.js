@@ -113,7 +113,7 @@ async function fixture(t) {
     prisma,
     config,
     identity,
-    { directTransferOrigin: () => 'https://transfer.target.test' },
+    { directTransferOrigin: async () => 'https://transfer.target.test' },
   );
   const artifacts = new TransferArtifactService(prisma, config, identity, transfers);
   await artifacts.onModuleInit();

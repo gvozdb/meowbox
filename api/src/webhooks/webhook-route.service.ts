@@ -226,7 +226,7 @@ export class WebhookRouteService {
     return route;
   }
 
-  private delivery(route: WebhookRoute): PublicEndpointDelivery {
+  private async delivery(route: WebhookRoute): Promise<PublicEndpointDelivery> {
     const token = deriveWebhookRouteToken(route.id, route.tokenVersion);
     if (webhookRouteTokenHash(token) !== route.tokenHash) {
       throw new Error('Webhook route token binding mismatch');
@@ -249,7 +249,7 @@ export class WebhookRouteService {
       resumeSupported: false,
       fallbackReason: null,
       reusable: true,
-      url: `${this.origins.browserPublicOrigin()}/api/public/v1/webhooks/${token}`,
+      url: `${await this.origins.browserPublicOrigin()}/api/public/v1/webhooks/${token}`,
     }) as PublicEndpointDelivery;
   }
 }

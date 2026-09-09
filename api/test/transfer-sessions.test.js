@@ -89,7 +89,7 @@ async function fixture(t) {
   const identity = {
     getLocalIdentity: async () => ({ installationId: TARGET_ID, installationRole: 'TARGET' }),
   };
-  const origins = { directTransferOrigin: () => 'https://transfer.target.test' };
+  const origins = { directTransferOrigin: async () => 'https://transfer.target.test' };
   const service = new TransferSessionService(prisma, config, identity, origins);
   const artifacts = new TransferArtifactService(prisma, config, identity, service);
   await artifacts.onModuleInit();

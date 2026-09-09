@@ -1562,7 +1562,7 @@ export class DomainApplicationsService implements OnModuleInit, OnModuleDestroy 
     }
 
     const local = await this.identity.getLocalIdentity();
-    const publicOrigin = this.publicOrigins.browserPublicOrigin();
+    const publicOrigin = await this.publicOrigins.browserPublicOrigin();
     const raced = this.loginHandoffReceipts.get(receiptKey);
     if (raced) {
       if (raced.siteId !== siteId || raced.domainId !== domainId) {

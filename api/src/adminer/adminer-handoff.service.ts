@@ -183,7 +183,7 @@ export class AdminerHandoffService implements OnModuleInit, OnModuleDestroy {
     }
     assertCredentials(input.credentials);
     const identity = await this.panelIdentity.getLocalIdentity();
-    const publicOrigin = this.origins.browserPublicOrigin();
+    const publicOrigin = await this.origins.browserPublicOrigin();
     const id = randomUUID();
     const secret = randomBytes(32).toString('base64url');
     const now = Date.now();

@@ -92,7 +92,7 @@ async function fixture(t, overrides = {}) {
       },
     }),
   };
-  const origins = { browserPublicOrigin: () => 'https://master.example.test' };
+  const origins = { browserPublicOrigin: async () => 'https://master.example.test' };
   const routes = new WebhookRouteService(prisma, identity, contexts, origins);
   const spool = new WebhookSpoolService(config);
   await spool.onModuleInit();

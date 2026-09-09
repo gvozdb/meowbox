@@ -84,7 +84,7 @@ async function fixture(t) {
     identityService,
     dispatcher,
     fragments,
-    { browserPublicOrigin: () => 'https://master.fixture.test' },
+    { browserPublicOrigin: async () => 'https://master.fixture.test' },
   );
   return { prisma, identity, actorUserId, sources, fragments, subscriptions };
 }

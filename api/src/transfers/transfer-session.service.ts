@@ -221,6 +221,7 @@ export class TransferSessionService implements OnModuleInit, OnModuleDestroy {
 
   async issueGeneratedStream(input: IssueGeneratedStreamInput): Promise<TransferSessionDelivery> {
     this.validateIssue(input);
+    const publicOrigin = await this.origins.directTransferOrigin();
     const localIdentity = await this.identity.getLocalIdentity();
     const now = new Date();
     const expiresAt = new Date(Math.min(
@@ -272,7 +273,7 @@ export class TransferSessionService implements OnModuleInit, OnModuleDestroy {
       rangeSupported: false,
       resumeSupported: false,
       fallbackReason: null,
-      url: `${this.origins.directTransferOrigin()}/api/public/v1/transfers/${id}/download?secret=${secret}`,
+      url: `${publicOrigin}/api/public/v1/transfers/${id}/download?secret=${secret}`,
       reusable: false,
       transferMode: 'GENERATED_STREAM',
       contentLength: null,
@@ -288,6 +289,7 @@ export class TransferSessionService implements OnModuleInit, OnModuleDestroy {
     if (!TRANSFER_UUID.test(input.artifactId) || !this.stagedHandler) {
       throw new Error('Staged transfer session request is invalid');
     }
+    const publicOrigin = await this.origins.directTransferOrigin();
     const artifact = await this.prisma.transferArtifact.findUnique({ where: { id: input.artifactId } });
     if (!artifact) throw new NotFoundException('Transfer artifact not found');
     if (artifact.state !== 'READY' || !artifact.readyAt || artifact.deletedAt) {
@@ -348,7 +350,7 @@ export class TransferSessionService implements OnModuleInit, OnModuleDestroy {
       rangeSupported: true,
       resumeSupported: true,
       fallbackReason: null,
-      url: `${this.origins.directTransferOrigin()}/api/public/v1/transfers/${id}/download?secret=${secret}`,
+      url: `${publicOrigin}/api/public/v1/transfers/${id}/download?secret=${secret}`,
       reusable: true,
       transferMode: 'STAGED_ARTIFACT',
       contentLength: Number(artifact.sizeBytes),
@@ -371,6 +373,7 @@ export class TransferSessionService implements OnModuleInit, OnModuleDestroy {
     ) throw new Error('Staged upload session request is invalid');
     const handler = this.stagedHandler;
     if (!handler) throw new NotFoundException('Staged transfer handler is unavailable');
+    const publicOrigin = await this.origins.directTransferOrigin();
 
     const localIdentity = await this.identity.getLocalIdentity();
     const now = new Date();
@@ -394,7 +397,7 @@ export class TransferSessionService implements OnModuleInit, OnModuleDestroy {
       where: { id: material.sessionId },
     });
     if (existing) {
-      return this.replayStagedUpload(existing, material.secret, material.artifactId, input);
+      return this.replayStagedUpload(existing, material.secret, material.artifactId, input, publicOrigin);
     }
 
     await handler.prepareUploadAdmission(input.contentLength);
@@ -439,7 +442,9 @@ export class TransferSessionService implements OnModuleInit, OnModuleDestroy {
         const raced = await this.prisma.transferSession.findUnique({
           where: { id: material.sessionId },
         });
-        if (raced) return this.replayStagedUpload(raced, material.secret, material.artifactId, input);
+        if (raced) {
+          return this.replayStagedUpload(raced, material.secret, material.artifactId, input, publicOrigin);
+        }
       }
       throw error;
     }
@@ -451,7 +456,7 @@ export class TransferSessionService implements OnModuleInit, OnModuleDestroy {
       resourceId: input.resourceId,
       contentLength: BigInt(input.contentLength),
       expiresAt,
-    }, material.secret);
+    }, material.secret, publicOrigin);
   }
 
   async upload(
@@ -681,6 +686,7 @@ export class TransferSessionService implements OnModuleInit, OnModuleDestroy {
     secret: string,
     artifactId: string,
     input: IssueStagedUploadInput,
+    publicOrigin: string,
   ): TransferSessionDelivery {
     if (
       session.purpose !== 'UPLOAD' ||
@@ -699,7 +705,7 @@ export class TransferSessionService implements OnModuleInit, OnModuleDestroy {
       session.expiresAt.getTime() <= Date.now() ||
       session.failureCode || session.completedAt || session.consumedAt
     ) throw new GoneException('Idempotent upload session is no longer writable');
-    return this.buildUploadDelivery(session, secret);
+    return this.buildUploadDelivery(session, secret, publicOrigin);
   }
 
   private buildUploadDelivery(
@@ -708,6 +714,7 @@ export class TransferSessionService implements OnModuleInit, OnModuleDestroy {
       'id' | 'targetInstallationId' | 'sourceKind' | 'resourceId' | 'contentLength' | 'expiresAt'
     >,
     secret: string,
+    publicOrigin: string,
   ): TransferSessionDelivery {
     if (session.contentLength === null || session.contentLength > BigInt(Number.MAX_SAFE_INTEGER)) {
       throw new ConflictException('Upload session length is invalid');
@@ -726,7 +733,7 @@ export class TransferSessionService implements OnModuleInit, OnModuleDestroy {
       rangeSupported: false,
       resumeSupported: false,
       fallbackReason: null,
-      url: `${this.origins.directTransferOrigin()}/api/public/v1/transfers/${session.id}/upload?secret=${secret}`,
+      url: `${publicOrigin}/api/public/v1/transfers/${session.id}/upload?secret=${secret}`,
       reusable: false,
       transferMode: 'STAGED_ARTIFACT',
       contentLength: Number(session.contentLength),
