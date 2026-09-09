@@ -3,7 +3,8 @@
 
 declare(strict_types=1);
 
-const MEOWBOX_COOKIE_NAME = '__Secure-meowbox_adminer_session';
+const MEOWBOX_SECURE_COOKIE_NAME = '__Secure-meowbox_adminer_session';
+const MEOWBOX_HTTP_COOKIE_NAME = 'meowbox_adminer_session';
 const MEOWBOX_COOKIE_PATH = '/adminer';
 const MEOWBOX_COOKIE_MAX_BYTES = 3800;
 const MEOWBOX_SESSION_MAX_MS = 900000;
@@ -139,12 +140,12 @@ function meowbox_validate_session(array $payload, string $target): void {
     if ($hasPort === $hasSocket) throw new RuntimeException('Session endpoint is invalid');
 }
 
-function meowbox_clear_session_cookie(): void {
-    setcookie(MEOWBOX_COOKIE_NAME, '', [
+function meowbox_clear_session_cookie(string $cookieName): void {
+    setcookie($cookieName, '', [
         'expires' => time() - 3600,
         'path' => MEOWBOX_COOKIE_PATH,
         'domain' => '',
-        'secure' => true,
+        'secure' => $cookieName === MEOWBOX_SECURE_COOKIE_NAME,
         'httponly' => true,
         'samesite' => 'Lax',
     ]);
@@ -152,13 +153,15 @@ function meowbox_clear_session_cookie(): void {
 
 /** No renewal: absolute expiry from the Node-issued v2 payload is binding. */
 function meowbox_read_session(): ?array {
-    $token = $_COOKIE[MEOWBOX_COOKIE_NAME] ?? null;
-    if (!is_string($token) || $token === '') return null;
-    try {
-        return meowbox_decrypt_session($token);
-    } catch (Throwable $error) {
-        meowbox_diag_log('session rejected: ' . get_class($error));
-        meowbox_clear_session_cookie();
-        return null;
+    foreach ([MEOWBOX_SECURE_COOKIE_NAME, MEOWBOX_HTTP_COOKIE_NAME] as $cookieName) {
+        $token = $_COOKIE[$cookieName] ?? null;
+        if (!is_string($token) || $token === '') continue;
+        try {
+            return meowbox_decrypt_session($token);
+        } catch (Throwable $error) {
+            meowbox_diag_log('session rejected: ' . get_class($error));
+            meowbox_clear_session_cookie($cookieName);
+        }
     }
+    return null;
 }

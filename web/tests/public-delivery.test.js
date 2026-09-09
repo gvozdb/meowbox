@@ -8,7 +8,7 @@ const test = require('node:test');
 const root = path.resolve(__dirname, '..');
 const read = (file) => fs.readFileSync(path.join(root, file), 'utf8');
 
-test('T-ADM-001 browser validates typed handoff and keeps local launches on the current HTTPS origin', () => {
+test('T-ADM-001 browser validates typed handoff and keeps local HTTP or HTTPS launches on the current origin', () => {
   const helper = read('utils/public-delivery.ts');
   assert.match(helper, /validateAppHandoffDelivery\(rawDelivery\)/);
   assert.match(helper, /value\.kind !== 'AppHandoff'/);
@@ -19,7 +19,8 @@ test('T-ADM-001 browser validates typed handoff and keeps local launches on the 
   assert.match(helper, /referrerPolicy: 'no-referrer'/);
   assert.match(helper, /TARGET_BROWSER_UNREACHABLE/);
   assert.match(helper, /localPanelOrigin !== window\.location\.origin/);
-  assert.match(helper, /local\.protocol !== 'https:'/);
+  assert.equal(helper.includes("!['http:', 'https:'].includes(local.protocol)"), true);
+  assert.doesNotMatch(helper, /Adminer доступен только через HTTPS/);
   assert.match(helper, /new URL\(`\$\{url\.pathname\}\$\{url\.hash\}`/);
 });
 

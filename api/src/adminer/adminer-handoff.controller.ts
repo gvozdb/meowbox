@@ -6,10 +6,11 @@ import {
   Param,
   ParseUUIDPipe,
   Post,
+  Req,
   Res,
 } from '@nestjs/common';
 import { Throttle } from '@nestjs/throttler';
-import type { Response } from 'express';
+import type { Request, Response } from 'express';
 import { Public } from '../common/decorators/public.decorator';
 import { ConsumeAdminerHandoffDto } from './adminer-handoff.dto';
 import { AdminerHandoffService } from './adminer-handoff.service';
@@ -33,9 +34,10 @@ export class AdminerHandoffController {
   async consume(
     @Param('id', ParseUUIDPipe) id: string,
     @Body() dto: ConsumeAdminerHandoffDto,
+    @Req() request: Request,
     @Res({ passthrough: true }) response: Response,
   ) {
-    const consumed = await this.handoffs.consume(id, dto.secret);
+    const consumed = await this.handoffs.consume(id, dto.secret, request.secure);
     this.setPublicHeaders(response);
     response.setHeader('Set-Cookie', consumed.cookieHeader);
     return { success: true, data: { expiresAt: consumed.expiresAt } };

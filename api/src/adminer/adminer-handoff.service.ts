@@ -21,7 +21,8 @@ import { PublicDeliveryOriginService } from '../public-delivery/public-delivery-
 
 const HANDOFF_TTL_MS = 60_000;
 const SESSION_TTL_SECONDS = 900;
-const COOKIE_NAME = '__Secure-meowbox_adminer_session';
+const SECURE_COOKIE_NAME = '__Secure-meowbox_adminer_session';
+const HTTP_COOKIE_NAME = 'meowbox_adminer_session';
 const COOKIE_MAX_BYTES = 3_800;
 const HANDOFF_RETENTION_MS = 24 * 60 * 60 * 1000;
 const HANDOFF_CLEANUP_INTERVAL_MS = 10 * 60 * 1000;
@@ -246,7 +247,11 @@ export class AdminerHandoffService implements OnModuleInit, OnModuleDestroy {
     };
   }
 
-  async consume(id: string, secret: string): Promise<ConsumedAdminerHandoff> {
+  async consume(
+    id: string,
+    secret: string,
+    secureTransport: boolean,
+  ): Promise<ConsumedAdminerHandoff> {
     const now = Date.now();
     const secretHash = sha256(secret);
     const handoff = await this.prisma.adminerHandoff.findUnique({ where: { id } });
@@ -305,17 +310,19 @@ export class AdminerHandoffService implements OnModuleInit, OnModuleDestroy {
     };
     const cookieValue = encryptAdminerSessionCookie(session, handoff.targetInstallationId);
     const cookieHeader = [
-      `${COOKIE_NAME}=${cookieValue}`,
+      `${secureTransport ? SECURE_COOKIE_NAME : HTTP_COOKIE_NAME}=${cookieValue}`,
       `Max-Age=${SESSION_TTL_SECONDS}`,
       'Path=/adminer',
       'HttpOnly',
-      'Secure',
+      ...(secureTransport ? ['Secure'] : []),
       'SameSite=Lax',
     ].join('; ');
     if (Buffer.byteLength(cookieHeader, 'utf8') > COOKIE_MAX_BYTES) {
       throw new ServiceUnavailableException('Adminer session cookie exceeds safe size');
     }
-    this.logger.log(`public.adminer_handoff outcome=consumed purpose=${handoff.purpose}`);
+    this.logger.log(
+      `public.adminer_handoff outcome=consumed purpose=${handoff.purpose} transport=${secureTransport ? 'https' : 'http'}`,
+    );
     return { cookieHeader, expiresAt: expiresAt.toISOString() };
   }
 

@@ -424,8 +424,8 @@ function resolveAppHandoffUrl(url: URL, localPanelOrigin: string | null): URL {
   try { local = new URL(localPanelOrigin); } catch {
     throw new Error('Текущий адрес панели некорректен');
   }
-  if (local.protocol !== 'https:' || local.origin !== localPanelOrigin) {
-    throw new Error('Adminer доступен только через HTTPS-адрес панели');
+  if (!['http:', 'https:'].includes(local.protocol) || local.origin !== localPanelOrigin) {
+    throw new Error('Текущий адрес панели некорректен');
   }
   return new URL(`${url.pathname}${url.hash}`, `${local.origin}/`);
 }
@@ -454,7 +454,7 @@ export async function navigateAppHandoff(
   } else {
     window.location.assign(url.href);
   }
-  return url.href === delivery.url ? delivery : { ...delivery, url: url.href };
+  return delivery;
 }
 
 export async function navigateModxHandoff(

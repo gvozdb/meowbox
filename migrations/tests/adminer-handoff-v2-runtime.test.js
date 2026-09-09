@@ -75,6 +75,7 @@ test('SYS-02 installer, Panel Access, PHP source, and Prisma migration carry v2 
     assert.doesNotMatch(template, /index\|sso\|adminer/);
   }
   assert.match(phpSession, /__Secure-meowbox_adminer_session/);
+  assert.match(phpSession, /meowbox_adminer_session/);
   assert.match(phpSession, /MEOWBOX-ADMINER-SESSION-V2/);
   assert.match(legacy, /http_response_code\(410\)/);
   assert.match(sql, /CREATE TABLE "adminer_handoffs"/);
