@@ -69,4 +69,11 @@ test('PHP transfer preflight rejects runtime, path and config conflicts', () => 
       ]),
     /cannot override listen/,
   );
+  assert.throws(
+    () =>
+      buildPhpPoolPreflightPlan([
+        pool({ customConfig: 'php_admin_value[upload_tmp_dir] = /var/www/legacy/tmp' }),
+      ]),
+    /cannot override php_admin_value\[upload_tmp_dir\]/,
+  );
 });

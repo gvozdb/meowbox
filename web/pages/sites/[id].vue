@@ -3356,13 +3356,14 @@ async function openAdminer(dbId: string) {
   openingAdminer.value = dbId;
   // Open blank tab synchronously, чтобы popup-blocker не зарезал.
   const win = window.open('about:blank', '_blank');
+  const localPanelOrigin = serverStore.isLocal ? window.location.origin : null;
   try {
     const delivery = await api.post<unknown>(
       `${selectedDomainApi.value}/databases/${dbId}/adminer-ticket`,
       {},
       { headers: { 'Idempotency-Key': publicDeliveryIdempotencyKey('ADMINER') } },
     );
-    await navigateAppHandoff(delivery, win, 'ADMINER');
+    await navigateAppHandoff(delivery, win, 'ADMINER', localPanelOrigin);
   } catch (e) {
     if (win) win.close();
     useMbToast().error((e as Error)?.message || 'Не удалось открыть Adminer');

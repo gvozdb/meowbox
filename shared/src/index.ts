@@ -23,6 +23,11 @@ export {
 export type { SupportedPhpVersion } from './constants';
 
 export {
+  isMeowboxManagedPhpFpmDirective,
+  sanitizeMigratedPhpFpmCustomConfig,
+} from './php-fpm';
+
+export {
   redactSensitiveText,
   safeErrorMessage,
 } from './safe-error-message';

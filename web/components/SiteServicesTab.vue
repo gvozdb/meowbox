@@ -242,6 +242,7 @@ interface SvcDetail {
 }
 
 const api = useRemoteApi();
+const serverStore = useServerStore();
 const { waitForOperation } = useOperation();
 const toast = useMbToast();
 
@@ -432,13 +433,14 @@ async function openManticoreAdminer(item: SvcItem) {
   // Открываем blank-таб синхронно, чтобы popup-blocker не зарезал — потом
   // подменим location, когда придёт ответ от API.
   const win = window.open('about:blank', '_blank');
+  const localPanelOrigin = serverStore.isLocal ? window.location.origin : null;
   try {
     const delivery = await api.post<unknown>(
       `/sites/${props.siteId}/services/manticore/adminer-ticket`,
       {},
       { headers: { 'Idempotency-Key': publicDeliveryIdempotencyKey('MANTICORE') } },
     );
-    await navigateAppHandoff(delivery, win, 'MANTICORE');
+    await navigateAppHandoff(delivery, win, 'MANTICORE', localPanelOrigin);
   } catch (err) {
     if (win) win.close();
     toast.error((err as Error).message || 'Не удалось открыть Adminer');

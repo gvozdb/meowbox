@@ -29,7 +29,10 @@ import { parseHostpanelNginx } from './parsers/nginx.parser';
 import { parseCrontab } from './parsers/crontab.parser';
 import { validateSqlIdentifier } from './sql-safety';
 import { SUPPORTED_PHP_VERSIONS } from '../../config';
-import { hostpanelPresetFromSource } from '@meowbox/shared';
+import {
+  hostpanelPresetFromSource,
+  sanitizeMigratedPhpFpmCustomConfig,
+} from '@meowbox/shared';
 
 interface HostpanelSiteRow {
   id: number;
@@ -917,7 +920,7 @@ function parsePhpFpmPool(raw: string, defaults: PlanItem['phpFpm']): PlanItem['p
     uploadMaxFilesize: uploadMax,
     postMaxSize: postMax,
     memoryLimit: memLimit,
-    custom: customLines.join('\n'),
+    custom: sanitizeMigratedPhpFpmCustomConfig(customLines.join('\n')),
   };
 }
 

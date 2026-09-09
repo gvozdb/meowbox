@@ -30,6 +30,7 @@ import { stringifySiteAliases, stringifyStringArray } from '../common/json-array
 import {
   isModxPreset,
   normalizeHostpanelPreset,
+  sanitizeMigratedPhpFpmCustomConfig,
 } from '@meowbox/shared';
 import {
   createHostnameClaims,
@@ -2168,7 +2169,7 @@ export class MigrationHostpanelService implements OnModuleInit, OnModuleDestroy 
   }
 }
 
-function normalizeHostpanelPlan(plan: PlanItem): PlanItem {
+export function normalizeHostpanelPlan(plan: PlanItem): PlanItem {
   return {
     ...plan,
     preset: normalizeHostpanelPreset(
@@ -2176,5 +2177,9 @@ function normalizeHostpanelPlan(plan: PlanItem): PlanItem {
       plan.sourceCms,
       plan.sourceCmsVersion,
     ),
+    phpFpm: {
+      ...plan.phpFpm,
+      custom: sanitizeMigratedPhpFpmCustomConfig(plan.phpFpm?.custom),
+    },
   };
 }

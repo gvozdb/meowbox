@@ -1,3 +1,5 @@
+import { isMeowboxManagedPhpFpmDirective } from '@meowbox/shared';
+
 const MAX_CUSTOM_POOL_CONFIG_BYTES = 64 * 1024;
 
 const FORBIDDEN_POOL_DIRECTIVES = new Set([
@@ -6,14 +8,6 @@ const FORBIDDEN_POOL_DIRECTIVES = new Set([
   'listen',
   'socket',
   'chdir',
-]);
-
-const OWNED_PHP_VALUES = new Set([
-  'error_log',
-  'sys_temp_dir',
-  'upload_tmp_dir',
-  'session.save_path',
-  'open_basedir',
 ]);
 
 function directiveKey(line: string): string | null {
@@ -28,8 +22,7 @@ function isForbiddenDirective(key: string): boolean {
   if (FORBIDDEN_POOL_DIRECTIVES.has(key)) return true;
   if (key.startsWith('listen.') || key.startsWith('socket.')) return true;
 
-  const valueMatch = key.match(/^php_(?:admin_)?(?:value|flag)\[([^\]]+)\]$/);
-  return valueMatch ? OWNED_PHP_VALUES.has(valueMatch[1].trim().toLowerCase()) : false;
+  return isMeowboxManagedPhpFpmDirective(key);
 }
 
 /**

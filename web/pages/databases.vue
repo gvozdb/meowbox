@@ -242,6 +242,7 @@ interface SiteItem {
 }
 
 const api = useRemoteApi();
+const serverStore = useServerStore();
 const { waitForOperation } = useOperation();
 const { waitForSensitiveResult } = useSensitiveOperationResult();
 const { exportDatabase, importDatabase } = useDatabaseTransfer();
@@ -504,11 +505,12 @@ async function openAdminer(db: DbItem) {
   // Открываем вкладку СРАЗУ — иначе popup-blocker зарежет, если ждать ответ API.
   // Window.open в обработчике клика разрешён, потом подменим location.
   const win = window.open('about:blank', '_blank');
+  const localPanelOrigin = serverStore.isLocal ? window.location.origin : null;
   try {
     const delivery = await api.post<unknown>(`${databaseApi(db)}/adminer-ticket`, {}, {
       headers: { 'Idempotency-Key': publicDeliveryIdempotencyKey('ADMINER') },
     });
-    await navigateAppHandoff(delivery, win, 'ADMINER');
+    await navigateAppHandoff(delivery, win, 'ADMINER', localPanelOrigin);
   } catch (err) {
     if (win) win.close();
     const msg = (err as Error).message || 'Не удалось открыть Adminer';

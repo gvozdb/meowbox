@@ -14,7 +14,10 @@ const masterKey = require('../src/common/crypto/master-key');
 const { OperationAdmissionService } = require('../src/operations/operation-admission.service');
 const { OperationsService } = require('../src/operations/operations.service');
 const { OperationsWorkerService } = require('../src/operations/operations-worker.service');
-const { MigrationHostpanelService } = require('../src/migration-hostpanel/migration-hostpanel.service');
+const {
+  MigrationHostpanelService,
+  normalizeHostpanelPlan,
+} = require('../src/migration-hostpanel/migration-hostpanel.service');
 
 function plan(name) {
   return {
@@ -52,6 +55,25 @@ function plan(name) {
     warnings: [],
   };
 }
+
+test('legacy hostPanel plans drop target-owned PHP-FPM paths before retry', () => {
+  const normalized = normalizeHostpanelPlan({
+    ...plan('hp_legacy_retry'),
+    phpFpm: {
+      ...plan('hp_legacy_retry').phpFpm,
+      custom: [
+        'php_admin_value[upload_tmp_dir] = /var/www/old/tmp',
+        'php_admin_value[session.save_path] = /var/www/old/sessions',
+        'php_admin_value[disable_functions] = exec,passthru',
+      ].join('\n'),
+    },
+  });
+
+  assert.equal(
+    normalized.phpFpm.custom,
+    'php_admin_value[disable_functions] = exec,passthru',
+  );
+});
 
 async function fixture(t) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'meowbox-rpp-hostpanel-cleanup-'));

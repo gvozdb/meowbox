@@ -188,6 +188,7 @@ const emit = defineEmits<{
 }>();
 
 const api = useRemoteApi();
+const serverStore = useServerStore();
 const { waitForOperation } = useOperation();
 const { waitForSensitiveResult } = useSensitiveOperationResult();
 const { exportDatabase, importDatabase } = useDatabaseTransfer();
@@ -354,11 +355,12 @@ async function openAdminer(db: DbItem) {
   busy[db.id] = 'adminer';
   // window.open в синхронном click-handler — иначе popup-blocker зарежет.
   const win = window.open('about:blank', '_blank');
+  const localPanelOrigin = serverStore.isLocal ? window.location.origin : null;
   try {
     const delivery = await api.post<unknown>(`${databasesApi.value}/${db.id}/adminer-ticket`, {}, {
       headers: { 'Idempotency-Key': publicDeliveryIdempotencyKey('ADMINER') },
     });
-    await navigateAppHandoff(delivery, win, 'ADMINER');
+    await navigateAppHandoff(delivery, win, 'ADMINER', localPanelOrigin);
   } catch (err) {
     if (win) win.close();
     toast.error((err as Error).message || 'Не удалось открыть Adminer');

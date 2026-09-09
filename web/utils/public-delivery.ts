@@ -415,10 +415,26 @@ async function probeModxOrigin(origin: string): Promise<void> {
   }
 }
 
+function resolveAppHandoffUrl(url: URL, localPanelOrigin: string | null): URL {
+  if (!localPanelOrigin) return url;
+  if (localPanelOrigin !== window.location.origin) {
+    throw new Error('Контекст выбранного сервера изменился');
+  }
+  let local: URL;
+  try { local = new URL(localPanelOrigin); } catch {
+    throw new Error('Текущий адрес панели некорректен');
+  }
+  if (local.protocol !== 'https:' || local.origin !== localPanelOrigin) {
+    throw new Error('Adminer доступен только через HTTPS-адрес панели');
+  }
+  return new URL(`${url.pathname}${url.hash}`, `${local.origin}/`);
+}
+
 export async function navigateAppHandoff(
   rawDelivery: unknown,
   popup: Window | null,
   expectedPurpose: Extract<PublicDeliveryPurpose, 'ADMINER' | 'MANTICORE'>,
+  localPanelOrigin: string | null = null,
 ): Promise<AppHandoffDelivery> {
   const delivery = validateAppHandoffDelivery(rawDelivery);
   if (delivery.purpose !== expectedPurpose) {
@@ -430,15 +446,15 @@ export async function navigateAppHandoff(
   if (new Date(delivery.expiresAt!).getTime() <= Date.now()) {
     throw new Error('Одноразовый handoff уже истёк');
   }
-  const url = new URL(delivery.url);
+  const url = resolveAppHandoffUrl(new URL(delivery.url), localPanelOrigin);
   await probeAdminerOrigin(url.origin);
   if (popup && !popup.closed) {
     try { popup.opener = null; } catch { /* browser-controlled */ }
-    popup.location.replace(delivery.url);
+    popup.location.replace(url.href);
   } else {
-    window.location.assign(delivery.url);
+    window.location.assign(url.href);
   }
-  return delivery;
+  return url.href === delivery.url ? delivery : { ...delivery, url: url.href };
 }
 
 export async function navigateModxHandoff(

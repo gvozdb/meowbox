@@ -8,7 +8,7 @@ const test = require('node:test');
 const root = path.resolve(__dirname, '..');
 const read = (file) => fs.readFileSync(path.join(root, file), 'utf8');
 
-test('T-ADM-001 browser validates typed direct handoff and probes target reachability', () => {
+test('T-ADM-001 browser validates typed handoff and keeps local launches on the current HTTPS origin', () => {
   const helper = read('utils/public-delivery.ts');
   assert.match(helper, /validateAppHandoffDelivery\(rawDelivery\)/);
   assert.match(helper, /value\.kind !== 'AppHandoff'/);
@@ -18,7 +18,9 @@ test('T-ADM-001 browser validates typed direct handoff and probes target reachab
   assert.match(helper, /mode: 'no-cors'/);
   assert.match(helper, /referrerPolicy: 'no-referrer'/);
   assert.match(helper, /TARGET_BROWSER_UNREACHABLE/);
-  assert.doesNotMatch(helper, /window\.location\.origin/);
+  assert.match(helper, /localPanelOrigin !== window\.location\.origin/);
+  assert.match(helper, /local\.protocol !== 'https:'/);
+  assert.match(helper, /new URL\(`\$\{url\.pathname\}\$\{url\.hash\}`/);
 });
 
 test('T-ADM-005 all four Adminer/Manticore callers use one typed helper and idempotency', () => {
@@ -32,7 +34,8 @@ test('T-ADM-005 all four Adminer/Manticore callers use one typed helper and idem
     const source = read(file);
     assert.match(source, /navigateAppHandoff/);
     assert.match(source, new RegExp(`publicDeliveryIdempotencyKey\\('${purpose}'\\)`));
-    assert.match(source, new RegExp(`navigateAppHandoff\\(delivery, win, '${purpose}'\\)`));
+    assert.match(source, /const localPanelOrigin = serverStore\.isLocal \? window\.location\.origin : null/);
+    assert.match(source, new RegExp(`navigateAppHandoff\\(delivery, win, '${purpose}', localPanelOrigin\\)`));
     assert.doesNotMatch(source, /adminer\/sso\.php/);
   }
 });
@@ -53,6 +56,10 @@ test('T-MODX-001 MODX login navigates a typed target-origin handoff without mast
 
 test('T-XFER-001 browser validates generated versus staged delivery and probes direct target', () => {
   const helper = read('utils/public-delivery.ts');
+  const downloadHelper = helper.slice(
+    helper.indexOf('export async function navigateDownloadDelivery'),
+    helper.indexOf('async function probeAdminerOrigin'),
+  );
   assert.match(helper, /validateTransferSessionDelivery/);
   assert.match(helper, /value\.transferMode === 'GENERATED_STREAM'/);
   assert.match(helper, /Сервер ложно объявил live stream возобновляемым/);
@@ -60,7 +67,7 @@ test('T-XFER-001 browser validates generated versus staged delivery and probes d
   assert.match(helper, /method: 'HEAD'/);
   assert.match(helper, /mode: 'no-cors'/);
   assert.match(helper, /TARGET_BROWSER_UNREACHABLE/);
-  assert.doesNotMatch(helper, /window\.location\.origin/);
+  assert.doesNotMatch(downloadHelper, /window\.location\.origin/);
 });
 
 test('T-XFER-004 backup exports use typed native delivery without relay Blob fallback', () => {
