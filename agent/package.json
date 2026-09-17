@@ -18,6 +18,7 @@
     "test:minio-executor": "TS_NODE_TRANSPILE_ONLY=1 node --test -r ts-node/register -r ../tools/register-shared-source.js test/minio-executor.test.js",
     "test:restore-validation": "TS_NODE_TRANSPILE_ONLY=1 node --test -r ts-node/register -r ../tools/register-shared-source.js test/restore-validation.test.js",
     "test:application-root-preflight": "TS_NODE_TRANSPILE_ONLY=1 node --test -r ts-node/register -r ../tools/register-shared-source.js test/application-root-preflight.test.js",
+    "test:hostpanel-migration-verify": "TS_NODE_TRANSPILE_ONLY=1 node --test -r ts-node/register -r ../tools/register-shared-source.js test/hostpanel-migration-verify.test.js",
     "test:installer-fail-closed": "TS_NODE_TRANSPILE_ONLY=1 node --test -r ts-node/register -r ../tools/register-shared-source.js test/site-installer-fail-closed.test.js",
     "test:xray-port-reservation": "TS_NODE_TRANSPILE_ONLY=1 node --test -r ts-node/register -r ../tools/register-shared-source.js test/xray-port-reservation.test.js",
     "test:dashboard-diagnostics": "TS_NODE_TRANSPILE_ONLY=1 node --test -r ts-node/register -r ../tools/register-shared-source.js test/dashboard-diagnostics.test.js",

@@ -16,7 +16,8 @@
  *   9. import-cron       — bulk-create cron'ов для нового user'а
  *  10. enable-services   — Manticore (если plan.manticore.enable === true)
  *  11. copy-ssl          — scp архив LE + патч renewal/*.conf + симлинки
- *  12. verify            — curl --resolve <domain>:443:<slave_ip> → HTTP-код
+ *  12. verify            — curl --resolve <domain>:<port>:<slave_ip> → HTTP-код
+ *                          (80 без перенесённого SSL, 443 с ним)
  *  13. mark-running      — Site.status = RUNNING; вызывающий сохраняет в БД
  *
  * На любом сбое — текущий item помечается FAILED, выполняется per-item rollback
@@ -1192,6 +1193,23 @@ async function copySslStageImpl(
   return { notBefore, notAfter };
 }
 
+export function buildVerifyCurlArgs(args: {
+  domain: string;
+  slaveIp: string;
+  sslTransferred: boolean;
+}): string[] {
+  const port = args.sslTransferred ? 443 : 80;
+  const scheme = args.sslTransferred ? 'https' : 'http';
+
+  return [
+    '-sk', '-o', '/dev/null',
+    '-w', '%{http_code}',
+    '--resolve', `${args.domain}:${port}:${args.slaveIp}`,
+    '-I', `${scheme}://${args.domain}/`,
+    '--max-time', '15',
+  ];
+}
+
 async function verifyStage(ctx: RunCtx): Promise<string | null> {
   // Простой curl с --resolve в обход DNS
   const slaveIp = await detectSlaveIp(ctx);
@@ -1199,14 +1217,11 @@ async function verifyStage(ctx: RunCtx): Promise<string | null> {
     log(ctx, `  не удалось определить IP slave — пропускаю verify`);
     return null;
   }
-  const r = await ctx.exec.execute('curl', [
-    '-sk', '-o', '/dev/null',
-    '-w', '%{http_code}',
-    '--resolve', `${ctx.plan.newDomain}:443:${slaveIp}`,
-    '--resolve', `${ctx.plan.newDomain}:80:${slaveIp}`,
-    '-I', `https://${ctx.plan.newDomain}/`,
-    '--max-time', '15',
-  ]);
+  const r = await ctx.exec.execute('curl', buildVerifyCurlArgs({
+    domain: ctx.plan.newDomain,
+    slaveIp,
+    sslTransferred: ctx.plan.ssl?.transfer === true,
+  }));
   const code = r.stdout?.trim() || null;
   log(ctx, `  HTTP ${code || '???'} via slave-IP ${slaveIp}`);
   return code;
