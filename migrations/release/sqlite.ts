@@ -6,9 +6,26 @@ import { asJsonValue } from './stable';
 import type { JsonObject, JsonValue } from './types';
 import { safeErrorMessage } from './redaction';
 
-export interface SqliteOptions {
-  readonly readOnly?: boolean;
+/**
+ * The sqlite3 process watchdog remains the final availability bound. SQLite's
+ * own busy handler is intentionally shorter so a lock diagnostic is returned
+ * before the process has to be terminated.
+ */
+export const DEFAULT_SQLITE_PROCESS_TIMEOUT_MS = 30_000;
+export const DEFAULT_SQLITE_BUSY_TIMEOUT_MS = 25_000;
+
+const SQLITE_PROCESS_TIMEOUT_GRACE_MS = 1_000;
+const MAX_SQLITE_PROCESS_TIMEOUT_MS = 120_000;
+
+export interface SqliteExecutionOptions {
+  /** Maximum lifetime for the sqlite3 child process. */
   readonly timeoutMs?: number;
+  /** Maximum time SQLite retries a transient busy/locked database. */
+  readonly busyTimeoutMs?: number;
+}
+
+export interface SqliteOptions extends SqliteExecutionOptions {
+  readonly readOnly?: boolean;
 }
 
 export class SqliteError extends Error {
@@ -48,25 +65,52 @@ export async function assertWritableDatabase(dbPath: string): Promise<void> {
   await access(dbPath, constants.W_OK);
 }
 
+interface ResolvedSqliteExecutionOptions {
+  readonly timeoutMs: number;
+  readonly busyTimeoutMs: number;
+}
+
+function resolveSqliteExecutionOptions(options: SqliteExecutionOptions): ResolvedSqliteExecutionOptions {
+  const timeoutMs = options.timeoutMs ?? DEFAULT_SQLITE_PROCESS_TIMEOUT_MS;
+  if (!Number.isSafeInteger(timeoutMs) || timeoutMs <= SQLITE_PROCESS_TIMEOUT_GRACE_MS || timeoutMs > MAX_SQLITE_PROCESS_TIMEOUT_MS) {
+    throw new SqliteError(
+      `sqlite3 timeoutMs must be a safe integer between ${SQLITE_PROCESS_TIMEOUT_GRACE_MS + 1} and ${MAX_SQLITE_PROCESS_TIMEOUT_MS}`,
+    );
+  }
+
+  const maximumBusyTimeoutMs = timeoutMs - SQLITE_PROCESS_TIMEOUT_GRACE_MS;
+  const busyTimeoutMs = options.busyTimeoutMs ?? Math.min(DEFAULT_SQLITE_BUSY_TIMEOUT_MS, maximumBusyTimeoutMs);
+  if (!Number.isSafeInteger(busyTimeoutMs) || busyTimeoutMs < 1 || busyTimeoutMs > maximumBusyTimeoutMs) {
+    throw new SqliteError(
+      `sqlite3 busyTimeoutMs must be a safe integer between 1 and ${maximumBusyTimeoutMs}`,
+    );
+  }
+  return { timeoutMs, busyTimeoutMs };
+}
+
 /**
- * Runs sqlite3 with stdin SQL, never via a shell. `-readonly` prevents SQLite
- * from creating journal files or accepting accidental write statements.
+ * Runs sqlite3 with stdin SQL, never via a shell. The CLI busy handler retries
+ * transient SQLITE_BUSY/SQLITE_LOCKED results for a bounded interval. `-readonly`
+ * prevents SQLite from creating journal files or accepting accidental writes.
  */
 export async function runSqlite(dbPath: string, sql: string, options: SqliteOptions = {}): Promise<string> {
   const readOnly = options.readOnly ?? true;
+  const execution = resolveSqliteExecutionOptions(options);
   if (readOnly) await assertReadableDatabase(dbPath);
-  const args = ['-bail'];
+  // `busyTimeoutMs` is a validated integer and spawn receives an argv array,
+  // so neither the database path nor SQLite configuration is shell input.
+  const args = ['-bail', '-cmd', `.timeout ${execution.busyTimeoutMs}`];
   if (readOnly) args.push('-readonly');
-  args.push(dbPath);
+  args.push('--', dbPath);
 
   return new Promise<string>((resolve, reject) => {
-    const child = spawn('sqlite3', args, { stdio: ['pipe', 'pipe', 'pipe'] });
+    const child = spawn('sqlite3', args, { shell: false, stdio: ['pipe', 'pipe', 'pipe'] });
     let stdout = '';
     let stderr = '';
     let settled = false;
     const timer = setTimeout(() => {
       child.kill('SIGTERM');
-    }, options.timeoutMs ?? 30_000);
+    }, execution.timeoutMs);
 
     const finish = (callback: () => void): void => {
       if (settled) return;
@@ -91,13 +135,22 @@ export async function runSqlite(dbPath: string, sql: string, options: SqliteOpti
   });
 }
 
-export async function runSqliteScript(dbPath: string, sql: string, timeoutMs?: number): Promise<void> {
+export async function runSqliteScript(
+  dbPath: string,
+  sql: string,
+  options: SqliteExecutionOptions | number = {},
+): Promise<void> {
   await assertWritableDatabase(dbPath);
-  await runSqlite(dbPath, sql, { readOnly: false, timeoutMs });
+  const executionOptions = typeof options === 'number' ? { timeoutMs: options } : options;
+  await runSqlite(dbPath, sql, { ...executionOptions, readOnly: false });
 }
 
-export async function querySqliteJson(dbPath: string, sql: string): Promise<readonly JsonObject[]> {
-  const output = await runSqlite(dbPath, `.mode json\n${sql}`, { readOnly: true });
+export async function querySqliteJson(
+  dbPath: string,
+  sql: string,
+  options: SqliteExecutionOptions = {},
+): Promise<readonly JsonObject[]> {
+  const output = await runSqlite(dbPath, `.mode json\n${sql}`, { ...options, readOnly: true });
   const trimmed = output.trim();
   if (trimmed === '') return [];
   let decoded: unknown;

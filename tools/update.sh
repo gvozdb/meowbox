@@ -657,6 +657,26 @@ release_cli() {
   node "$CANDIDATE_DIR/migrations/dist/release-cli.js" "$@"
 }
 
+# JSON-mode release-cli output is retained as a transaction artifact. Catch a
+# non-zero invariant result here so the web updater also receives one concise,
+# redacted [update] error line before the normal EXIT rollback handler runs.
+run_release_invariants() {
+  local stage_name="$1"
+  local database="$2"
+  local baseline_counts="$3"
+  local report="$4"
+  local status summary
+  if release_cli invariants --db "$database" --phase final --baseline-counts "$baseline_counts" --json > "$report"; then
+    return 0
+  else
+    status=$?
+  fi
+  summary="$(mb_release_cli_invariants_failure_summary "$report" "$stage_name")" || \
+    summary="release-cli invariants $stage_name failed (exit $status; redacted report unavailable)"
+  [[ -n "$summary" ]] || summary="release-cli invariants $stage_name failed (exit $status; redacted report unavailable)"
+  die "$summary"
+}
+
 prisma_deploy() {
   local database="$1"
   (cd "$CANDIDATE_DIR/api" && DATABASE_URL="file:$database" npx prisma migrate deploy --schema prisma/schema.prisma)
@@ -927,7 +947,7 @@ run_dry_run() {
   printf '%s\n' "$mapping_required" | mb_atomic_write_stdin "$TX_DIR/dry-run-mapping-required"
   release_cli baseline --db "$clone_db" --api-dir "$CANDIDATE_DIR/api" --contract "$CANDIDATE_DIR/migrations/release/supported-baselines.json" --apply --write-mode clone --json > "$baseline_applied_report"
   prisma_deploy "$clone_db"
-  release_cli invariants --db "$clone_db" --phase final --baseline-counts "$baseline_counts" --json > "$invariant_report"
+  run_release_invariants dry-run "$clone_db" "$baseline_counts" "$invariant_report"
   local clone_plan_before clone_plan_after
   clone_plan_before="$(sqlite_hash_inputs "$clone_db")"
   prepare_runtime "$clone_db" dry-run
@@ -1011,7 +1031,7 @@ apply_database() {
     die "mapper evidence changed managed runtime input; rollback is required"
   release_cli baseline --db "$DB_FILE" --api-dir "$CANDIDATE_DIR/api" --contract "$CANDIDATE_DIR/migrations/release/supported-baselines.json" --apply --write-mode live --json > "$TX_DIR/live-baseline.json"
   prisma_deploy "$DB_FILE"
-  release_cli invariants --db "$DB_FILE" --phase final --baseline-counts "$live_counts" --json > "$TX_DIR/live-invariants.json"
+  run_release_invariants live "$DB_FILE" "$live_counts" "$TX_DIR/live-invariants.json"
   journal_update database "SQLite baseline/map/migrate/invariants completed"
 }
 
@@ -1083,7 +1103,7 @@ verify_release() {
   MEOWBOX_DATABASE_FILE="$DB_FILE" MEOWBOX_RELEASE_HEALTH_HOOKS_REQUIRED=1 \
     bash "$SCRIPT_DIR/healthcheck.sh" --strict --manifest "$RUNTIME_MANIFEST" \
       --probe-baseline "$HTTP_PROBE_BASELINE" --release-dir "$CANDIDATE_DIR" --expected-version "$TARGET"
-  release_cli invariants --db "$DB_FILE" --phase final --baseline-counts "$TX_DIR/live-baseline-counts.json" --json > "$TX_DIR/final-invariants.json"
+  run_release_invariants final "$DB_FILE" "$TX_DIR/live-baseline-counts.json" "$TX_DIR/final-invariants.json"
   journal_update verify "final health and invariants passed"
 }
 

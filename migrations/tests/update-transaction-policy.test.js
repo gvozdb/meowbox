@@ -3,11 +3,13 @@
 const assert = require('node:assert/strict');
 const { execFileSync } = require('node:child_process');
 const fs = require('node:fs');
+const os = require('node:os');
 const path = require('node:path');
 const test = require('node:test');
 
 const root = path.resolve(__dirname, '..', '..');
 const policy = path.join(root, 'tools', 'release-transaction-policy.sh');
+const releaseLib = path.join(root, 'tools', 'release-lib.sh');
 const updater = path.join(root, 'tools', 'update.sh');
 const bootstrapUpdater = path.join(root, 'tools', 'bootstrap-release-update.sh');
 const releaseRecovery = path.join(root, 'tools', 'recover-missing-release.sh');
@@ -28,6 +30,21 @@ function action(armed, committed, journalState) {
       String(armed),
       String(committed),
       journalState,
+    ],
+    { encoding: 'utf8' },
+  ).trim();
+}
+
+function invariantFailureSummary(report, stage) {
+  return execFileSync(
+    'bash',
+    [
+      '-c',
+      'source "$1"; mb_release_cli_invariants_failure_summary "$2" "$3"',
+      'release-cli-summary-test',
+      releaseLib,
+      report,
+      stage,
     ],
     { encoding: 'utf8' },
   ).trim();
@@ -56,6 +73,68 @@ test('durable commit always selects forward repair, including hard-kill gap', ()
     assert.equal(action(true, false, 'committed'), 'forward-repair', phase);
     assert.equal(action(true, true, 'committed'), 'forward-repair', phase);
   }
+});
+
+test('release-cli invariant failure summaries are concise and redact report data', () => {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'meowbox-release-cli-summary-test-'));
+  const report = path.join(temp, 'invariants.json');
+  try {
+    fs.writeFileSync(report, JSON.stringify({
+      ok: false,
+      kind: 'release-cli-error',
+      error: {
+        message: 'sqlite3 failed (exit 1): database is locked (5); Authorization: Bearer should-not-appear api_key=should-not-appear https://alice:secret@example.test/db',
+      },
+    }));
+    const errorSummary = invariantFailureSummary(report, 'final');
+    assert.equal(errorSummary, 'release-cli invariants final failed: SQLite database is locked');
+    assert.doesNotMatch(errorSummary, /should-not-appear|alice:secret|Authorization|api_key/);
+
+    fs.writeFileSync(report, JSON.stringify({
+      ok: false,
+      kind: 'invariants',
+      report: {
+        ok: false,
+        blockers: [
+          { code: 'ROW_COUNT_CHANGED', message: 'token=should-not-appear', details: { secret: 'should-not-appear' } },
+          { code: 'SQLITE_INTEGRITY_CHECK_FAILED', message: 'details must stay out of the log' },
+          { code: 'ROW_COUNT_CHANGED', message: 'duplicate code' },
+        ],
+      },
+    }));
+    assert.equal(
+      invariantFailureSummary(report, 'live'),
+      'release-cli invariants live blocked: 3 blocker(s): ROW_COUNT_CHANGED, SQLITE_INTEGRITY_CHECK_FAILED',
+    );
+
+    fs.writeFileSync(report, '{not-json');
+    assert.equal(
+      invariantFailureSummary(report, 'dry-run'),
+      'release-cli invariants dry-run failed; redacted report unavailable',
+    );
+  } finally {
+    fs.rmSync(temp, { recursive: true, force: true });
+  }
+});
+
+test('updater reports redirected invariant failures before normal rollback handling', () => {
+  const source = fs.readFileSync(updater, 'utf8');
+  execFileSync('bash', ['-n', updater]);
+
+  assert.match(source, /mb_release_cli_invariants_failure_summary "\$report" "\$stage_name"/);
+  assert.match(source, /die "\$summary"/);
+  assert.match(
+    source,
+    /run_release_invariants dry-run "\$clone_db" "\$baseline_counts" "\$invariant_report"/,
+  );
+  assert.match(
+    source,
+    /run_release_invariants live "\$DB_FILE" "\$live_counts" "\$TX_DIR\/live-invariants\.json"/,
+  );
+  assert.match(
+    source,
+    /run_release_invariants final "\$DB_FILE" "\$TX_DIR\/live-baseline-counts\.json" "\$TX_DIR\/final-invariants\.json"/,
+  );
 });
 
 test('indeterminate armed journal never triggers automatic DB rollback', () => {

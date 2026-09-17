@@ -47,6 +47,86 @@ print(value)
 PY
 }
 
+# Print one operator-safe summary from a failed JSON-mode invariant command.
+# Reports remain on disk for recovery, but their full contents must not be
+# copied into updater logs because diagnostics can grow or contain future data.
+mb_release_cli_invariants_failure_summary() {
+  local report="$1"
+  local stage="$2"
+  python3 - "$report" "$stage" 2>/dev/null <<'PY'
+import json
+import os
+import re
+import stat
+import sys
+
+report_path, stage = sys.argv[1:]
+fallback = f"release-cli invariants {stage} failed; redacted report unavailable"
+
+if stage not in {"dry-run", "live", "final"}:
+    print("release-cli invariants failed; redacted report unavailable")
+    raise SystemExit(0)
+
+try:
+    metadata = os.stat(report_path)
+    if not stat.S_ISREG(metadata.st_mode) or metadata.st_size > 64 * 1024:
+        raise ValueError("report is not a bounded regular file")
+    with open(report_path, encoding="utf-8") as handle:
+        payload = json.load(handle)
+    if not isinstance(payload, dict):
+        raise ValueError("report is not an object")
+except (OSError, UnicodeError, ValueError, json.JSONDecodeError):
+    print(fallback)
+    raise SystemExit(0)
+
+def safe_error_category(value):
+    if not isinstance(value, str):
+        return None
+    # Do not try to redact arbitrary sqlite/Node error prose. Error text can
+    # include future SQL or credentials, so only publish fixed categories.
+    if re.search(r"\bdatabase\s+is\s+locked\b", value, flags=re.IGNORECASE):
+        return "SQLite database is locked"
+    if re.search(r"\bdatabase\s+schema\s+is\s+locked\b", value, flags=re.IGNORECASE):
+        return "SQLite database schema is locked"
+    if re.search(r"\bsqlite3\s+timed\s+out\b", value, flags=re.IGNORECASE):
+        return "SQLite operation timed out"
+    if re.search(r"\bsqlite3\s+could\s+not\s+start\b", value, flags=re.IGNORECASE):
+        return "sqlite3 could not start"
+    return None
+
+if payload.get("kind") == "release-cli-error":
+    error = payload.get("error")
+    category = safe_error_category(error.get("message")) if isinstance(error, dict) else None
+    if category is not None:
+        print(f"release-cli invariants {stage} failed: {category}")
+    else:
+        print(fallback)
+    raise SystemExit(0)
+
+if payload.get("kind") == "invariants":
+    report = payload.get("report")
+    blockers = report.get("blockers") if isinstance(report, dict) and report.get("ok") is False else None
+    if not isinstance(blockers, list):
+        print(fallback)
+        raise SystemExit(0)
+    codes = []
+    for blocker in blockers:
+        code = blocker.get("code") if isinstance(blocker, dict) else None
+        if isinstance(code, str) and re.fullmatch(r"[A-Z][A-Z0-9_]{0,95}", code) and code not in codes:
+            codes.append(code)
+    preview = ", ".join(codes[:3])
+    if len(codes) > 3:
+        preview += f" (+{len(codes) - 3} more)"
+    if preview:
+        print(f"release-cli invariants {stage} blocked: {len(blockers)} blocker(s): {preview}")
+    else:
+        print(f"release-cli invariants {stage} blocked: {len(blockers)} blocker(s)")
+    raise SystemExit(0)
+
+print(fallback)
+PY
+}
+
 mb_atomic_write_stdin() {
   local target="$1"
   python3 -c '
