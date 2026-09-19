@@ -20,6 +20,8 @@ import { buildPhpPoolPreflightPlan } from './pool-preflight';
 // Любой chars вне allowlist'а = отказ. Это второй рубеж поверх API-валидации
 // (DTO), защищает от багов в вызывающем коде и от прямых socket.io вызовов.
 const RE_PHP_VERSION = /^\d+\.\d+$/;
+const RE_SITE_DOMAIN_UUID =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 // PHP-extension package name (mbstring, mysql, xdebug, …).
 // Имя идёт в `apt-get install php{ver}-{name}` и `phpenmod -v {ver} {name}`.
 // Разрешаем только lowercase + цифры + `_`. Защищает от arg-flag smuggling
@@ -31,6 +33,24 @@ function assertRegex(name: string, value: string, re: RegExp): void {
   if (!re.test(value)) {
     throw new Error(`PhpFpmManager: invalid ${name}="${value}"`);
   }
+}
+
+/**
+ * Hostpanel stages PHP before the API persists SiteDomain. Older migrations
+ * therefore wrote `migrated-<runtimeKey>` as a temporary owner. The first
+ * authoritative write may claim only that exact legacy marker; every other
+ * cross-domain overwrite remains blocked.
+ */
+export function canWritePhpPoolForDomain(
+  previousDomainId: string,
+  nextDomainId: string,
+  runtimeKey: string,
+): boolean {
+  if (previousDomainId === nextDomainId) return true;
+  return (
+    RE_SITE_DOMAIN_UUID.test(nextDomainId) &&
+    previousDomainId === `migrated-${runtimeKey}`
+  );
 }
 
 export class PhpFpmManager {
@@ -133,7 +153,14 @@ export class PhpFpmManager {
     try { previous = await fs.readFile(poolFile, 'utf-8'); } catch { /* new pool */ }
     if (params.domainId && previous) {
       const previousDomainId = previous.match(/^;\s*meowbox-domain-id\s*=\s*(\S+)$/m)?.[1];
-      if (previousDomainId && previousDomainId !== params.domainId) {
+      if (
+        previousDomainId &&
+        !canWritePhpPoolForDomain(
+          previousDomainId,
+          params.domainId,
+          runtime.runtimeKey,
+        )
+      ) {
         return {
           success: false,
           error: `runtimeKey collision: pool ${runtime.runtimeKey} already belongs to SiteDomain ${previousDomainId}`,

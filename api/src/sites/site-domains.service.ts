@@ -380,7 +380,9 @@ export class SiteDomainsService {
         ? this.applicationPath(dto.filesRelPath)
         : target.filesRelPath;
     const phpConfigChanged =
-      dto.phpVersion !== undefined || dto.filesRelPath !== undefined;
+      (dto.phpVersion !== undefined && nextPhpVersion !== target.phpVersion) ||
+      (dto.filesRelPath !== undefined &&
+        nextFilesRelPath !== target.filesRelPath);
     if (!this.agentRelay.isAgentConnected()) {
       throw new ConflictException('Agent is offline; domain update is unavailable');
     }

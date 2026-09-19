@@ -90,6 +90,10 @@ export interface PlanItem {
   /** ====== Mapping (редактируется в Plan-таблице) ====== */
   newName: string;       // → Site.name (и Linux user, и DB name)
   newDomain: string;     // → primary SiteDomain.domain
+  /** Server-owned identity injected immediately before agent execution. */
+  domainId?: string;
+  /** Server-owned stable PHP/application artifact key. */
+  runtimeKey?: string;
   newAliases: string[];  // → alias SiteDomain records
   /**
    * Если true — все алиасы 301-редиректят на главный домен (выставляется

@@ -1477,7 +1477,10 @@ export class MigrationHostpanelService implements OnModuleInit, OnModuleDestroy 
           where: { id: itemId },
           data: { status: 'RUNNING', startedAt: new Date() },
         });
-        const plan = normalizeHostpanelPlan(JSON.parse(item.plan) as PlanItem);
+        const plan = bindHostpanelRuntimeIdentity(
+          normalizeHostpanelPlan(JSON.parse(item.plan) as PlanItem),
+          itemId,
+        );
 
         // SSL force-cleanup: если в БД панели нет ни одного Site и ни одного
         // SslCertificate с этим доменом — значит LE-папки на slave остались
@@ -1756,6 +1759,7 @@ export class MigrationHostpanelService implements OnModuleInit, OnModuleDestroy 
         });
         const createdDomain = await tx.siteDomain.create({
           data: {
+            id: plan.domainId || itemId,
             siteId: createdSite.id,
             domain: plan.newDomain,
             isPrimary: true,
@@ -1767,7 +1771,7 @@ export class MigrationHostpanelService implements OnModuleInit, OnModuleDestroy 
             appErrorMessage: null,
             phpVersion: plan.phpVersion || (isModx ? '8.2' : null),
             phpPoolCustom: plan.phpFpm?.custom || null,
-            runtimeKey: plan.newName,
+            runtimeKey: plan.runtimeKey || plan.newName,
             envVars: '{}',
             cmsAdminUser: isModx ? extras.creds?.cmsAdminUser || null : null,
             cmsAdminPasswordEnc:
@@ -2181,5 +2185,22 @@ export function normalizeHostpanelPlan(plan: PlanItem): PlanItem {
       ...plan.phpFpm,
       custom: sanitizeMigratedPhpFpmCustomConfig(plan.phpFpm?.custom),
     },
+  };
+}
+
+/**
+ * Hostpanel artifacts are created before SiteDomain is persisted. Reusing the
+ * migration item UUID gives the agent and Prisma the same durable owner on
+ * first write and across retries. Operator-supplied plan JSON cannot override
+ * either identity field.
+ */
+export function bindHostpanelRuntimeIdentity(
+  plan: PlanItem,
+  itemId: string,
+): PlanItem {
+  return {
+    ...plan,
+    domainId: itemId,
+    runtimeKey: plan.newName,
   };
 }

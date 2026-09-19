@@ -15,6 +15,7 @@ const { OperationAdmissionService } = require('../src/operations/operation-admis
 const { OperationsService } = require('../src/operations/operations.service');
 const { OperationsWorkerService } = require('../src/operations/operations-worker.service');
 const {
+  bindHostpanelRuntimeIdentity,
   MigrationHostpanelService,
   normalizeHostpanelPlan,
 } = require('../src/migration-hostpanel/migration-hostpanel.service');
@@ -73,6 +74,21 @@ test('legacy hostPanel plans drop target-owned PHP-FPM paths before retry', () =
     normalized.phpFpm.custom,
     'php_admin_value[disable_functions] = exec,passthru',
   );
+});
+
+test('Hostpanel execution binds PHP artifacts to the future SiteDomain UUID', () => {
+  const itemId = '20000000-0000-4000-8000-000000000001';
+  const bound = bindHostpanelRuntimeIdentity(
+    {
+      ...plan('kvd'),
+      domainId: 'operator-controlled',
+      runtimeKey: 'operator-controlled',
+    },
+    itemId,
+  );
+
+  assert.equal(bound.domainId, itemId);
+  assert.equal(bound.runtimeKey, 'kvd');
 });
 
 async function fixture(t) {

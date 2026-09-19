@@ -248,6 +248,66 @@ test('domain runtime update restores metadata and PHP pool on nginx failure', as
   assert.ok(log.some(([event]) => event === 'operation.fail'));
 });
 
+test('domain-only update does not recreate an unchanged PHP pool', async () => {
+  const log = [];
+  const target = domain({ isPrimary: true, position: 0 });
+  const writes = [];
+  const agentEvents = [];
+  const prisma = {
+    site: { findUnique: async () => site([target]) },
+    siteDomain: {
+      update: async (query) => writes.push(query),
+    },
+    sslCertificate: {
+      updateMany: async () => ({ count: 0 }),
+    },
+    hostnameClaim: {
+      deleteMany: async () => ({ count: 1 }),
+      createMany: async () => ({ count: 1 }),
+    },
+  };
+  prisma.$transaction = async (callback) => callback(prisma);
+  const service = new SiteDomainsService(
+    prisma,
+    {
+      isAgentConnected: () => true,
+      emitToAgent: async (event, payload) => {
+        agentEvents.push([event, payload]);
+        return { success: true };
+      },
+    },
+    operations(log),
+  );
+  service.assertDomainFree = async () => undefined;
+  service.ensureDomainFreeInNginx = async () => undefined;
+  service.syncPrimaryPhpCliShim = async () => undefined;
+  service.regenerateGlobalZones = async () => undefined;
+  service.regenerateNginx = async () => undefined;
+
+  await service.updateDomain(
+    'site-id',
+    target.id,
+    {
+      domain: 'renamed.example.test',
+      filesRelPath: target.filesRelPath,
+      phpVersion: target.phpVersion,
+      gitRepository: target.gitRepository,
+      deployBranch: target.deployBranch,
+      envVars: {},
+      httpsRedirect: target.httpsRedirect,
+    },
+    'user-id',
+    'ADMIN',
+  );
+
+  assert.equal(writes[0].data.domain, 'renamed.example.test');
+  assert.equal(
+    agentEvents.some(([event]) => event === 'php:create-pool'),
+    false,
+  );
+  assert.ok(log.some(([event]) => event === 'operation.succeed'));
+});
+
 test('installer preflight race never trashes a root it did not mutate', async () => {
   const log = [];
   const target = domain({ phpVersion: null });

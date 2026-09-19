@@ -5,6 +5,9 @@ const test = require('node:test');
 const {
   buildPhpPoolPreflightPlan,
 } = require('../src/php/pool-preflight');
+const {
+  canWritePhpPoolForDomain,
+} = require('../src/php/phpfpm.manager');
 
 function pool(overrides = {}) {
   return {
@@ -75,5 +78,34 @@ test('PHP transfer preflight rejects runtime, path and config conflicts', () => 
         pool({ customConfig: 'php_admin_value[upload_tmp_dir] = /var/www/legacy/tmp' }),
       ]),
     /cannot override php_admin_value\[upload_tmp_dir\]/,
+  );
+});
+
+test('PHP pool ownership only adopts the exact legacy Hostpanel marker', () => {
+  const domainId = '20000000-0000-4000-8000-000000000001';
+
+  assert.equal(
+    canWritePhpPoolForDomain(domainId, domainId, 'kvd'),
+    true,
+  );
+  assert.equal(
+    canWritePhpPoolForDomain('migrated-kvd', domainId, 'kvd'),
+    true,
+  );
+  assert.equal(
+    canWritePhpPoolForDomain(
+      '20000000-0000-4000-8000-000000000002',
+      domainId,
+      'kvd',
+    ),
+    false,
+  );
+  assert.equal(
+    canWritePhpPoolForDomain('migrated-other', domainId, 'kvd'),
+    false,
+  );
+  assert.equal(
+    canWritePhpPoolForDomain('migrated-kvd', 'not-a-uuid', 'kvd'),
+    false,
   );
 });
