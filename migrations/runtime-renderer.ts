@@ -67,6 +67,14 @@ interface AgentPoolTemplate {
   };
 }
 
+interface AgentPoolOwnership {
+  canWritePhpPoolForDomain(
+    previousDomainId: string,
+    nextDomainId: string,
+    runtimeKey: string,
+  ): boolean;
+}
+
 interface AgentZonesTemplate {
   renderNginxZones(
     zones: ReadonlyArray<{ zoneName: string; rps: number; enabled?: boolean }>,
@@ -136,6 +144,42 @@ interface LoadedSite {
   readonly rootPath: string;
   readonly systemUser: string | null;
   readonly domains: RuntimeDomain[];
+}
+
+interface DesiredPoolOwner {
+  readonly domainId: string;
+  readonly runtimeKey: string;
+}
+
+export function shouldDeleteExistingPool(input: {
+  readonly target: string;
+  readonly existingDomainId: string;
+  readonly desiredOwner?: DesiredPoolOwner;
+  readonly desiredTargetForExistingDomain?: string;
+  readonly existingDomainRemains: boolean;
+  readonly canWrite: (
+    previousDomainId: string,
+    nextDomainId: string,
+    runtimeKey: string,
+  ) => boolean;
+}): boolean {
+  if (input.desiredOwner) {
+    if (
+      !input.canWrite(
+        input.existingDomainId,
+        input.desiredOwner.domainId,
+        input.desiredOwner.runtimeKey,
+      )
+    ) {
+      throw new Error(`PHP-FPM pool ownership collision: ${input.target}`);
+    }
+    return false;
+  }
+  return (
+    !input.existingDomainRemains ||
+    (input.desiredTargetForExistingDomain !== undefined &&
+      input.desiredTargetForExistingDomain !== input.target)
+  );
 }
 
 function requiredText(row: JsonObject, key: string): string {
@@ -459,11 +503,13 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
     const templates = loadAgentModule<AgentTemplates>(releaseRoot, 'nginx/templates.js');
     const stopped = loadAgentModule<AgentNginxManager>(releaseRoot, 'nginx/nginx.manager.js');
     const pools = loadAgentModule<AgentPoolTemplate>(releaseRoot, 'php/pool-template.js');
+    const poolOwnership = loadAgentModule<AgentPoolOwnership>(releaseRoot, 'php/pool-ownership.js');
     const zones = loadAgentModule<AgentZonesTemplate>(releaseRoot, 'nginx/zones-template.js');
     const logrotate = loadAgentModule<AgentLogrotateTemplate>(releaseRoot, 'runtime/logrotate-template.js');
     if (typeof templates.renderNginxSite !== 'function'
       || typeof stopped.renderStoppedNginxSite !== 'function'
       || typeof pools.renderPhpFpmPool !== 'function'
+      || typeof poolOwnership.canWritePhpPoolForDomain !== 'function'
       || typeof zones.renderNginxZones !== 'function'
       || typeof logrotate.renderNginxLogrotate !== 'function'
       || typeof logrotate.renderPhpLogrotate !== 'function') {
@@ -474,6 +520,7 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
     const artifacts: RuntimeArtifact[] = [];
     const desiredTargets = new Set<string>();
     const desiredPoolByDomain = new Map<string, string>();
+    const desiredPoolByTarget = new Map<string, DesiredPoolOwner>();
     const phpServices = new Set<string>();
     const socketPaths = new Set<string>();
     const phpLogRuntimes: Array<{ runtimeKey: string; systemUser?: string | null }> = [];
@@ -526,7 +573,18 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
             customConfig: sourceDomain.phpPoolCustom,
           });
           desiredTargets.add(pool.poolFile);
+          const existingDesiredOwner = desiredPoolByTarget.get(pool.poolFile);
+          if (existingDesiredOwner) {
+            throw new Error(
+              `PHP-FPM pool target is shared by SiteDomain ${existingDesiredOwner.domainId} ` +
+                `and ${sourceDomain.id}: ${pool.poolFile}`,
+            );
+          }
           desiredPoolByDomain.set(sourceDomain.id, pool.poolFile);
+          desiredPoolByTarget.set(pool.poolFile, {
+            domainId: sourceDomain.id,
+            runtimeKey: sourceDomain.runtimeKey,
+          });
           await addDesiredArtifact(artifacts, stageRoot, pool.poolFile, pool.content);
           phpServices.add(`php${sourceDomain.phpVersion}-fpm`);
           if (!pool.runtime.socketPath) throw new Error(`PHP socket missing for SiteDomain ${sourceDomain.id}`);
@@ -587,8 +645,14 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
         const content = await fs.readFile(target, 'utf8').catch(() => '');
         const domainId = content.match(/^;\s*meowbox-domain-id\s*=\s*(\S+)\s*$/m)?.[1];
         if (!domainId) continue;
-        const desired = desiredPoolByDomain.get(domainId);
-        if (!finalDomainIds.has(domainId) || (desired && desired !== target)) {
+        if (shouldDeleteExistingPool({
+          target,
+          existingDomainId: domainId,
+          desiredOwner: desiredPoolByTarget.get(target),
+          desiredTargetForExistingDomain: desiredPoolByDomain.get(domainId),
+          existingDomainRemains: finalDomainIds.has(domainId),
+          canWrite: poolOwnership.canWritePhpPoolForDomain,
+        })) {
           artifacts.push({ action: 'delete', target, postCommitOnly: true });
         }
       }
