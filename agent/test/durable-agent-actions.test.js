@@ -20,6 +20,8 @@ test('T-OPS-004 every dedicated durable AgentJob action has an exact RPC handler
     'agent.storage.top_files': 'site:top-files',
     'agent.node.quick_command': 'node:command-run',
     'agent.application.snapshot': 'application:snapshot',
+    'agent.application.cleanup_operation_snapshots':
+      'application:cleanup-operation-snapshots',
     'agent.application.restore_snapshot': 'application:restore-snapshot',
     'agent.modx.update': 'site:update-modx',
     'agent.site.health_check': 'site:health-check',

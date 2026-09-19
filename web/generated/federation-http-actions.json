@@ -1,6 +1,6 @@
 {
   "schemaVersion": "meowbox.browser-federation-http-actions/v1",
-  "matrixSha256": "7ee788262080dbdc9f2f9f4079809c9ccb340378408be3396b3c323937fa4d47",
+  "matrixSha256": "3b5d2da02e2e460a3186c6cff176969d119b9a5d9562902e6ab2fafbaa41d704",
   "actions": [
     {
       "actionId": "http.post.admin-ip-allowlist-entries",

@@ -76,6 +76,8 @@ test('site deletion exposes and submits the explicit artifact cleanup plan', () 
   assert.match(deletion, /confirmDataDeletion: true/);
   assert.match(deletion, /\.\.\.deleteOpts\.value/);
   assert.match(deletion, /'Idempotency-Key'/);
+  assert.match(deletion, /api\.del<AcceptedOperation>/);
+  assert.match(deletion, /waitForOperation\(accepted\.operationId/);
   assert.match(deletion, /deleteError\.value = \(error as Error\)\.message/);
 
   for (const option of [

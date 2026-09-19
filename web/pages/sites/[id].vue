@@ -6077,7 +6077,7 @@ async function deleteSite() {
   deleting.value = true;
   deleteError.value = '';
   try {
-    await api.del(
+    const accepted = await api.del<AcceptedOperation>(
       `/sites/${siteId}`,
       {
         confirmSiteName: site.value.name,
@@ -6090,6 +6090,9 @@ async function deleteSite() {
         },
       },
     );
+    await waitForOperation(accepted.operationId, {
+      timeoutMs: 4 * 60 * 60_000 + 5 * 60_000,
+    });
     await router.push('/sites');
   } catch (error) {
     deleteError.value = (error as Error).message || 'Не удалось удалить сайт';

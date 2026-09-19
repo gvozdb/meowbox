@@ -63,6 +63,11 @@ import {
   rethrowHostnameClaimConflict,
 } from './hostname-registry';
 import { BackupArtifactCleanupService } from '../backups/backup-artifact-cleanup.service';
+import {
+  OperationFailedError,
+  OperationNeedsAttentionError,
+} from '../operations/operation-errors';
+import type { OperationExecutionContext } from '../operations/operations-worker.service';
 
 /**
  * include-фрагмент: все основные домены сайта с их SSL-сертификатами,
@@ -1142,43 +1147,23 @@ export class SitesService implements OnModuleInit {
     });
   }
 
-  async delete(
+  async assertDeleteReady(
     id: string,
     userId: string,
     role: string,
     opts: DeleteSiteOptionsDto,
-    idempotencyKey?: string,
-  ) {
-    return this.deleteContainerSite(
-      id,
-      userId,
-      role,
-      opts,
-      idempotencyKey,
-    );
-  }
-
-  private async deleteContainerSite(
-    id: string,
-    userId: string,
-    role: string,
-    opts: DeleteSiteOptionsDto,
-    idempotencyKey?: string,
-  ) {
+  ): Promise<{ id: string; name: string }> {
     if (role !== 'ADMIN') {
       throw new ForbiddenException('Only administrators can delete sites');
     }
 
     const site = await this.prisma.site.findUnique({
       where: { id },
-      include: {
-        domains: {
-          orderBy: { position: 'asc' },
-          include: {
-            sslCertificate: true,
-            databases: true,
-          },
-        },
+      select: {
+        id: true,
+        userId: true,
+        name: true,
+        domains: { select: { appStatus: true } },
       },
     });
     if (!site) {
@@ -1211,36 +1196,65 @@ export class SitesService implements OnModuleInit {
       );
     }
 
-    const operation = await this.operations.begin({
-      idempotencyKey,
-      type: 'SITE_DELETE',
-      siteId: site.id,
-      globalLockKey: HOSTNAME_REGISTRY_LOCK,
-      userId,
-      request: {
-        confirmSiteName: site.name,
-        confirmDataDeletion: true,
-        removeSslCertificate: opts.removeSslCertificate,
-        removeBackupsLocal: opts.removeBackupsLocal,
-        removeBackupsRestic: opts.removeBackupsRestic,
-        removeBackupsRemote: opts.removeBackupsRemote,
-        removeDatabases: opts.removeDatabases,
-        removeFiles: opts.removeFiles,
-        removeMinioData: opts.removeMinioData,
-        removeSystemUser: opts.removeSystemUser,
-        removeNginxConfig: opts.removeNginxConfig,
-        removePhpPool: opts.removePhpPool,
+    return { id: site.id, name: site.name };
+  }
+
+  async executeDelete(
+    id: string,
+    opts: DeleteSiteOptionsDto,
+    context: OperationExecutionContext,
+  ): Promise<{ deletedSiteId: string; siteName: string }> {
+    if (context.actor.role !== 'ADMIN') {
+      throw new OperationFailedError(
+        'Only administrators can delete sites',
+      );
+    }
+    if (!this.agentRelay.isAgentConnected()) {
+      throw new OperationFailedError(
+        'Agent is offline; destructive site deletion is unavailable',
+      );
+    }
+
+    const site = await this.prisma.site.findUnique({
+      where: { id },
+      include: {
+        domains: {
+          orderBy: { position: 'asc' },
+          include: {
+            sslCertificate: true,
+            databases: true,
+          },
+        },
       },
     });
-    if (operation.replayed) {
-      return {
-        operationId: operation.id,
-        operationStatus: operation.status,
-        result: operation.result,
-      };
+    if (!site) throw new OperationFailedError('Site not found');
+    if (
+      opts.confirmSiteName !== site.name ||
+      opts.confirmDataDeletion !== true
+    ) {
+      throw new OperationFailedError(
+        'Site name and irreversible data-deletion confirmation are required',
+      );
     }
-    await this.operations.start(operation.id, 'snapshot');
-    const deleteOperationId = operation.id;
+    if (
+      site.domains.some((domain) =>
+        ['PROVISIONING', 'DEPLOYING', 'UPDATING'].includes(domain.appStatus),
+      )
+    ) {
+      throw new OperationFailedError(
+        'One or more domain applications are busy; retry after they finish',
+      );
+    }
+
+    const originalStatuses = site.domains.map((domain) => ({
+      id: domain.id,
+      appStatus: domain.appStatus,
+      appErrorMessage: domain.appErrorMessage,
+    }));
+    let destructiveStarted = false;
+    let siteDeleted = false;
+
+    await context.heartbeat('snapshot', 5);
     await this.prisma.siteDomain.updateMany({
       where: { siteId: site.id },
       data: {
@@ -1250,35 +1264,51 @@ export class SitesService implements OnModuleInit {
     });
 
     try {
-      for (const domain of site.domains) {
-        const snapshot = await this.agentRelay.emitToAgent<{
-          snapshotPath?: string;
-        }>(
-          'application:snapshot',
+      for (const [index, domain] of site.domains.entries()) {
+        await context.throwIfCancellationRequested();
+        const snapshot = await this.agentRelay.runAgentJob(
           {
-            operationId: `${deleteOperationId}-${domain.id}`,
-            siteName: site.name,
-            siteDomainId: domain.id,
-            runtimeKey: domain.runtimeKey,
-            rootPath: site.rootPath,
-            filesRelPath: domain.filesRelPath,
-            databases: domain.databases.map((database) => ({
-              name: database.name,
-              type: database.type,
-            })),
+            operationId: context.operationId,
+            actionId: 'agent.application.snapshot',
+            step: `snapshot:${domain.id}`,
+            deadlineAt: context.deadlineAt,
+            cancelSafe: true,
+            payload: {
+              operationId: `${context.operationId}-${domain.id}`,
+              siteName: site.name,
+              siteDomainId: domain.id,
+              runtimeKey: domain.runtimeKey,
+              rootPath: site.rootPath,
+              filesRelPath: domain.filesRelPath,
+              databases: domain.databases.map((database) => ({
+                name: database.name,
+                type: database.type,
+              })),
+            },
           },
-          900_000,
-        );
-        if (!snapshot.success || !snapshot.data?.snapshotPath) {
+          () => context.isCancellationRequested(),
+        ) as { snapshotPath?: unknown } | null;
+        if (typeof snapshot?.snapshotPath !== 'string') {
           throw new Error(
-            `Snapshot failed for ${domain.domain}: ${
-              snapshot.error || 'no snapshot produced'
-            }`,
+            `Snapshot failed for ${domain.domain}: no snapshot produced`,
           );
         }
+        await context.heartbeat(
+          `snapshot:${domain.id}`,
+          5 + Math.floor(((index + 1) / Math.max(site.domains.length, 1)) * 20),
+        );
       }
 
-      await this.operations.step(operation.id, 'remove-backups', 30);
+      await context.throwIfCancellationRequested();
+
+      await context.heartbeat('remove-backups', 30);
+      if (
+        opts.removeBackupsLocal ||
+        opts.removeBackupsRestic ||
+        opts.removeBackupsRemote
+      ) {
+        destructiveStarted = true;
+      }
       await this.backupArtifacts.cleanupSiteBackupArtifacts(
         site.id,
         site.name,
@@ -1290,11 +1320,13 @@ export class SitesService implements OnModuleInit {
         },
       );
 
-      await this.operations.step(operation.id, 'remove-runtime', 45);
+      await context.heartbeat('remove-runtime', 45);
       if (opts.removeMinioData) {
+        destructiveStarted = true;
         await this.cleanupMinioTenantBeforeSiteRemoval(site);
       }
       if (opts.removeSslCertificate) {
+        destructiveStarted = true;
         for (const domain of site.domains) {
           if (
             domain.sslCertificate &&
@@ -1303,7 +1335,7 @@ export class SitesService implements OnModuleInit {
             const revoked = await this.agentRelay.emitToAgent(
               'ssl:revoke',
               {
-                operationId: `${deleteOperationId}-ssl-${domain.id}`,
+                operationId: `${context.operationId}-ssl-${domain.id}`,
                 domain: domain.domain,
               },
               90_000,
@@ -1318,10 +1350,11 @@ export class SitesService implements OnModuleInit {
       }
 
       if (opts.removePhpPool) {
+        destructiveStarted = true;
         for (const domain of site.domains) {
           if (!domain.phpVersion) continue;
           const removed = await this.agentRelay.emitToAgent('php:remove-pool', {
-            operationId: `${deleteOperationId}-php-${domain.id}`,
+            operationId: `${context.operationId}-php-${domain.id}`,
             siteDomainId: domain.id,
             runtimeKey: domain.runtimeKey,
             phpVersion: domain.phpVersion,
@@ -1335,10 +1368,11 @@ export class SitesService implements OnModuleInit {
       }
 
       if (opts.removeDatabases) {
+        destructiveStarted = true;
         for (const domain of site.domains) {
           for (const database of domain.databases) {
             const dropped = await this.agentRelay.emitToAgent('db:drop', {
-              operationId: `${deleteOperationId}-db-${database.id}`,
+              operationId: `${context.operationId}-db-${database.id}`,
               name: database.name,
               type: database.type,
               dbUser: database.dbUser,
@@ -1353,10 +1387,11 @@ export class SitesService implements OnModuleInit {
       }
 
       if (opts.removeNginxConfig) {
+        destructiveStarted = true;
         const nginx = await this.agentRelay.emitToAgent(
           'nginx:remove-config',
           {
-            operationId: `${deleteOperationId}-nginx`,
+            operationId: `${context.operationId}-nginx`,
             siteName: site.name,
             domains: site.domains.map((domain) => domain.domain),
           },
@@ -1367,8 +1402,9 @@ export class SitesService implements OnModuleInit {
       }
 
       if (opts.removeFiles) {
+        destructiveStarted = true;
         const files = await this.agentRelay.emitToAgent('site:remove-files', {
-          operationId: `${deleteOperationId}-files`,
+          operationId: `${context.operationId}-files`,
           rootPath: site.rootPath,
         });
         if (!files.success) {
@@ -1377,8 +1413,9 @@ export class SitesService implements OnModuleInit {
       }
 
       if (opts.removeSystemUser && site.systemUser) {
+        destructiveStarted = true;
         const user = await this.agentRelay.emitToAgent('user:delete', {
-          operationId: `${deleteOperationId}-user`,
+          operationId: `${context.operationId}-user`,
           username: site.systemUser,
         });
         if (!user.success) {
@@ -1386,34 +1423,121 @@ export class SitesService implements OnModuleInit {
         }
       }
 
+      destructiveStarted = true;
+      await context.heartbeat('remove-metadata', 85);
       await this.prisma.$transaction(async (tx) => {
         await tx.database.deleteMany({ where: { siteId: site.id } });
         await tx.site.delete({ where: { id: site.id } });
       });
+      siteDeleted = true;
       if (opts.removeNginxConfig) {
         await this.regenerateGlobalZones();
       }
-      const result = { deletedSiteId: site.id, siteName: site.name };
-      await this.operations.succeed(operation.id, result);
-      return {
-        operationId: operation.id,
-        operationStatus: 'SUCCEEDED',
-        result,
-      };
+      await this.cleanupDeleteOperationSnapshots(context);
+      return { deletedSiteId: site.id, siteName: site.name };
     } catch (error) {
       const message = safeErrorMessage(error, 'Site deletion failed');
-      await this.prisma.siteDomain
-        .updateMany({
-          where: { siteId: site.id },
-          data: {
-            appStatus: 'ERROR',
-            appErrorMessage: message,
+      if (!destructiveStarted) {
+        const recoveryErrors: string[] = [];
+        await this.cleanupDeleteOperationSnapshots(context).catch((cleanupError) => {
+          recoveryErrors.push(
+            `snapshot cleanup: ${safeErrorMessage(cleanupError)}`,
+          );
+        });
+        await this.restoreDeleteDomainStatuses(
+          site.id,
+          originalStatuses,
+        ).catch((restoreError) => {
+          recoveryErrors.push(
+            `status restore: ${safeErrorMessage(restoreError)}`,
+          );
+        });
+        if (recoveryErrors.length > 0) {
+          throw new OperationNeedsAttentionError(
+            `${message}; ${recoveryErrors.join('; ')}`,
+          );
+        }
+        await context.throwIfCancellationRequested();
+        throw new OperationFailedError(message);
+      }
+
+      if (!siteDeleted) {
+        await this.markDeleteDomainsFailed(site.id, message);
+      } else {
+        await this.cleanupDeleteOperationSnapshots(context).catch(
+          (cleanupError) => {
+            this.logger.error(
+              `Snapshot cleanup for deleted Site ${site.id} failed: ` +
+                safeErrorMessage(cleanupError),
+            );
           },
-        })
-        .catch(() => undefined);
-      await this.operations.fail(operation.id, error);
-      throw new InternalServerErrorException(message);
+        );
+      }
+      throw new OperationNeedsAttentionError(message);
     }
+  }
+
+  async cleanupDeleteOperationSnapshots(
+    context: OperationExecutionContext,
+  ): Promise<void> {
+    await context.heartbeat('cleanup-snapshots', 95);
+    await this.agentRelay.runAgentJob({
+      operationId: context.operationId,
+      actionId: 'agent.application.cleanup_operation_snapshots',
+      step: 'cleanup-snapshots',
+      deadlineAt: context.deadlineAt,
+      cancelSafe: false,
+      payload: { operationId: context.operationId },
+    });
+  }
+
+  async markDeleteRecoveryAttention(
+    siteId: string,
+    message: string,
+  ): Promise<void> {
+    await this.prisma.siteDomain.updateMany({
+      where: {
+        siteId,
+        appStatus: { in: ['PROVISIONING', 'DEPLOYING', 'UPDATING'] },
+      },
+      data: { appStatus: 'ERROR', appErrorMessage: message },
+    });
+  }
+
+  private async restoreDeleteDomainStatuses(
+    siteId: string,
+    domains: Array<{
+      id: string;
+      appStatus: string;
+      appErrorMessage: string | null;
+    }>,
+  ): Promise<void> {
+    await Promise.all(
+      domains.map((domain) =>
+        this.prisma.siteDomain.updateMany({
+          where: { id: domain.id, siteId },
+          data: {
+            appStatus: domain.appStatus,
+            appErrorMessage: domain.appErrorMessage,
+          },
+        }),
+      ),
+    );
+  }
+
+  private async markDeleteDomainsFailed(
+    siteId: string,
+    message: string,
+  ): Promise<void> {
+    await this.prisma.siteDomain
+      .updateMany({
+        where: { siteId },
+        data: {
+          appStatus: 'ERROR',
+          appErrorMessage: message,
+        },
+      })
+      .catch(() => undefined);
   }
 
   /**

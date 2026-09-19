@@ -12,6 +12,9 @@ const {
 } = require('../src/backups/backup-artifact-cleanup.service');
 const { DeleteSiteOptionsDto } = require('../src/sites/sites.dto');
 const { SitesService } = require('../src/sites/sites.service');
+const {
+  OperationFailedError,
+} = require('../src/operations/operation-errors');
 
 const cleanupFlags = {
   removeSslCertificate: false,
@@ -44,8 +47,8 @@ test('site deletion DTO fails closed unless every artifact choice is explicit', 
 
 test('site deletion executes only selected runtime artifacts', async () => {
   const events = [];
+  const jobs = [];
   const deletedMetadata = [];
-  let operationRequest = null;
   let backupOptions = null;
   const site = {
     id: 'site-1',
@@ -59,6 +62,7 @@ test('site deletion executes only selected runtime artifacts', async () => {
         domain: 'demo.test',
         position: 0,
         appStatus: 'RUNNING',
+        appErrorMessage: null,
         filesRelPath: '.',
         runtimeKey: 'runtime-1',
         phpVersion: '8.3',
@@ -99,24 +103,18 @@ test('site deletion executes only selected runtime artifacts', async () => {
 
   const agentRelay = {
     isAgentConnected: () => true,
+    runAgentJob: async (input) => {
+      jobs.push(input);
+      if (input.actionId === 'agent.application.snapshot') {
+        return { snapshotPath: '/snapshot/demo' };
+      }
+      return { removed: 1 };
+    },
     emitToAgent: async (event, payload) => {
       events.push([event, payload]);
-      if (event === 'application:snapshot') {
-        return { success: true, data: { snapshotPath: '/snapshot/demo' } };
-      }
       return { success: true };
     },
     onAgentConnect: () => undefined,
-  };
-  const operations = {
-    begin: async ({ request }) => {
-      operationRequest = request;
-      return { id: 'operation-1', replayed: false };
-    },
-    start: async () => undefined,
-    step: async () => undefined,
-    succeed: async () => undefined,
-    fail: async () => undefined,
   };
   const backupsService = {
     cleanupSiteBackupArtifacts: async (_siteId, _siteName, options) => {
@@ -131,21 +129,29 @@ test('site deletion executes only selected runtime artifacts', async () => {
     {},
     {},
     {},
-    operations,
+    {},
     {},
     backupsService,
   );
 
-  await service.delete(
+  const operationId = '10000000-0000-4000-8000-000000000001';
+  await service.executeDelete(
     site.id,
-    site.userId,
-    'ADMIN',
     {
       confirmSiteName: site.name,
       confirmDataDeletion: true,
       ...cleanupFlags,
     },
-    'site-delete-test',
+    {
+      operationId,
+      attempt: 1,
+      recovering: false,
+      deadlineAt: new Date(Date.now() + 60_000),
+      actor: { kind: 'OPERATOR', userId: site.userId, role: 'ADMIN' },
+      heartbeat: async () => undefined,
+      isCancellationRequested: async () => false,
+      throwIfCancellationRequested: async () => undefined,
+    },
   );
 
   assert.deepEqual(backupOptions, {
@@ -154,18 +160,124 @@ test('site deletion executes only selected runtime artifacts', async () => {
     removeRemote: true,
     strict: true,
   });
-  assert.deepEqual(operationRequest, {
-    confirmSiteName: site.name,
-    confirmDataDeletion: true,
-    ...cleanupFlags,
-  });
   assert.deepEqual(
     events.map(([event]) => event),
-    ['application:snapshot', 'site:remove-files'],
+    ['site:remove-files'],
+  );
+  assert.deepEqual(
+    jobs.map(({ actionId }) => actionId),
+    [
+      'agent.application.snapshot',
+      'agent.application.cleanup_operation_snapshots',
+    ],
   );
   assert.deepEqual(deletedMetadata, [
     ['databases', site.id],
     ['site', site.id],
+  ]);
+});
+
+test('site deletion restores domain status and cleans snapshots when snapshot creation fails', async () => {
+  const operationId = '60000000-0000-4000-8000-000000000006';
+  const updates = [];
+  const jobs = [];
+  const site = {
+    id: 'site-1',
+    userId: 'user-1',
+    name: 'demo',
+    rootPath: '/var/www/demo',
+    systemUser: 'demo',
+    domains: [
+      {
+        id: 'domain-1',
+        domain: 'demo.test',
+        position: 0,
+        appStatus: 'RUNNING',
+        appErrorMessage: 'previous warning',
+        filesRelPath: 'www',
+        runtimeKey: 'runtime-1',
+        phpVersion: null,
+        sslCertificate: null,
+        databases: [],
+      },
+    ],
+  };
+  const service = new SitesService(
+    {
+      site: { findUnique: async () => site },
+      siteDomain: {
+        updateMany: async (input) => {
+          updates.push(input);
+          return { count: 1 };
+        },
+      },
+    },
+    {
+      isAgentConnected: () => true,
+      runAgentJob: async (input) => {
+        jobs.push(input);
+        if (input.actionId === 'agent.application.snapshot') {
+          throw new Error('tar failed');
+        }
+        return { removed: 1 };
+      },
+    },
+    {},
+    {},
+    {},
+    {},
+    {},
+    {},
+    {
+      cleanupSiteBackupArtifacts: async () => {
+        throw new Error('destructive cleanup must not start');
+      },
+    },
+  );
+
+  await assert.rejects(
+    () => service.executeDelete(
+      site.id,
+      {
+        confirmSiteName: site.name,
+        confirmDataDeletion: true,
+        ...Object.fromEntries(
+          Object.keys(cleanupFlags).map((key) => [key, false]),
+        ),
+      },
+      {
+        operationId,
+        attempt: 1,
+        recovering: false,
+        deadlineAt: new Date(Date.now() + 60_000),
+        actor: { kind: 'OPERATOR', userId: site.userId, role: 'ADMIN' },
+        heartbeat: async () => undefined,
+        isCancellationRequested: async () => false,
+        throwIfCancellationRequested: async () => undefined,
+      },
+    ),
+    OperationFailedError,
+  );
+
+  assert.deepEqual(
+    jobs.map(({ actionId }) => actionId),
+    [
+      'agent.application.snapshot',
+      'agent.application.cleanup_operation_snapshots',
+    ],
+  );
+  assert.deepEqual(updates, [
+    {
+      where: { siteId: site.id },
+      data: { appStatus: 'UPDATING', appErrorMessage: null },
+    },
+    {
+      where: { id: 'domain-1', siteId: site.id },
+      data: {
+        appStatus: 'RUNNING',
+        appErrorMessage: 'previous warning',
+      },
+    },
   ]);
 });
 

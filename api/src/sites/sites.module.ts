@@ -18,6 +18,7 @@ import {
 import { BackupArtifactsModule } from '../backups/backup-artifacts.module';
 import { PublicDeliveryModule } from '../public-delivery/public-delivery.module';
 import { SitesNginxOperationsService } from './sites-nginx-operations.service';
+import { SiteDeleteOperationsService } from './site-delete-operations.service';
 
 @Module({
   imports: [PanelSettingsModule, BackupArtifactsModule, PublicDeliveryModule],
@@ -34,6 +35,7 @@ import { SitesNginxOperationsService } from './sites-nginx-operations.service';
     ModxVersionsService,
     SitesNginxService,
     SitesNginxOperationsService,
+    SiteDeleteOperationsService,
     SiteDomainsService,
     DomainContextService,
     DomainApplicationsService,

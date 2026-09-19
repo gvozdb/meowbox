@@ -2,8 +2,10 @@
 
 const assert = require('node:assert/strict');
 const {
+  existsSync,
   mkdtempSync,
   mkdirSync,
+  readdirSync,
   rmSync,
   writeFileSync,
 } = require('node:fs');
@@ -15,6 +17,7 @@ const fixtureBase = mkdtempSync(
   path.join(tmpdir(), 'meowbox-root-preflight-'),
 );
 process.env.ALLOWED_SITE_ROOT_PREFIXES = fixtureBase;
+process.env.BACKUP_LOCAL_PATH = path.join(fixtureBase, 'backups');
 
 const {
   ApplicationSnapshotManager,
@@ -98,4 +101,75 @@ test('site install reuses a non-empty shared root without invoking an installer'
       operationId: undefined,
     },
   ]);
+});
+
+test('operation snapshot cleanup removes only directories owned by the exact operation UUID', async (t) => {
+  const snapshotsRoot = path.join(fixtureBase, 'backups', 'operation-snapshots');
+  mkdirSync(snapshotsRoot, { recursive: true });
+  const operationId = '10000000-0000-4000-8000-000000000001';
+  const domainId = '20000000-0000-4000-8000-000000000002';
+  const owned = [
+    operationId,
+    `${operationId}-${domainId}`,
+    `${operationId}-${domainId}.partial-123-456`,
+    `${operationId}-${domainId}.partial-123-457.failed`,
+    `${operationId}-${domainId}.failed`,
+  ];
+  const preserved = [
+    '30000000-0000-4000-8000-000000000003',
+    `${operationId}-not-a-domain-id`,
+  ];
+  for (const entry of [...owned, ...preserved]) {
+    mkdirSync(path.join(snapshotsRoot, entry), { recursive: true });
+    writeFileSync(path.join(snapshotsRoot, entry, 'payload'), 'x', 'utf8');
+  }
+  t.after(() => rmSync(fixtureBase, { recursive: true, force: true }));
+
+  const manager = new ApplicationSnapshotManager();
+  assert.deepEqual(
+    await manager.cleanupOperationSnapshots(operationId),
+    { success: true, removed: owned.length },
+  );
+  for (const entry of owned) {
+    assert.equal(existsSync(path.join(snapshotsRoot, entry)), false);
+  }
+  for (const entry of preserved) {
+    assert.equal(existsSync(path.join(snapshotsRoot, entry)), true);
+  }
+  assert.equal(
+    (await manager.cleanupOperationSnapshots('../operation')).success,
+    false,
+  );
+});
+
+test('failed application snapshots remove their partial archive immediately', async (t) => {
+  const siteRoot = path.join(fixtureBase, 'snapshot-site');
+  const applicationRoot = path.join(siteRoot, 'www');
+  mkdirSync(applicationRoot, { recursive: true });
+  writeFileSync(path.join(applicationRoot, 'large.bin'), 'payload', 'utf8');
+  t.after(() => rmSync(fixtureBase, { recursive: true, force: true }));
+
+  const manager = new ApplicationSnapshotManager();
+  manager.executor = {
+    execute: async () => ({ stdout: '', stderr: 'forced failure', exitCode: 1 }),
+  };
+  const operationId =
+    '40000000-0000-4000-8000-000000000004-50000000-0000-4000-8000-000000000005';
+  const result = await manager.snapshot({
+    operationId,
+    siteName: 'snapshot-site',
+    siteDomainId: '50000000-0000-4000-8000-000000000005',
+    runtimeKey: 'd1234567890abcdef1234',
+    rootPath: siteRoot,
+    filesRelPath: 'www',
+    databases: [],
+  });
+
+  assert.equal(result.success, false);
+  assert.match(result.error, /forced failure/);
+  const snapshotsRoot = path.join(fixtureBase, 'backups', 'operation-snapshots');
+  assert.deepEqual(
+    readdirSync(snapshotsRoot).filter((entry) => entry.startsWith(operationId)),
+    [],
+  );
 });

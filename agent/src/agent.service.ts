@@ -101,6 +101,8 @@ export const DURABLE_AGENT_ACTIONS = {
   'agent.storage.top_files': 'site:top-files',
   'agent.node.quick_command': 'node:command-run',
   'agent.application.snapshot': 'application:snapshot',
+  'agent.application.cleanup_operation_snapshots':
+    'application:cleanup-operation-snapshots',
   'agent.application.restore_snapshot': 'application:restore-snapshot',
   'agent.modx.update': 'site:update-modx',
   'agent.site.health_check': 'site:health-check',
@@ -2281,6 +2283,25 @@ export class AgentService {
           siteDomainId: params.siteDomainId,
         });
       },
+      TIMEOUTS.BACKUP,
+    );
+
+    this.safeOn(
+      s,
+      'application:cleanup-operation-snapshots',
+      async (params: { operationId: string }, cb: Callback) => {
+        const result =
+          await this.applicationSnapshots.cleanupOperationSnapshots(
+            params.operationId,
+          );
+        cb({
+          success: result.success,
+          error: result.error,
+          data: result.success ? { removed: result.removed || 0 } : undefined,
+          operationId: params.operationId,
+        });
+      },
+      TIMEOUTS.BACKUP,
     );
 
     this.safeOn(
@@ -2305,6 +2326,7 @@ export class AgentService {
           siteDomainId: params.siteDomainId,
         });
       },
+      TIMEOUTS.BACKUP,
     );
 
     this.safeOn(

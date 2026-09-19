@@ -5,6 +5,7 @@ import { DatabaseManager } from '../database/database.manager';
 import {
   ALLOWED_SITE_ROOT_PREFIXES,
   BACKUP_LOCAL_PATH,
+  TIMEOUTS,
   isUnderAllowedSiteRoot,
   isUnderBackupStorage,
 } from '../config';
@@ -14,6 +15,10 @@ import {
 } from './site-domain-runtime';
 
 const OPERATION_ID_RE = /^[A-Za-z0-9._:-]{8,160}$/;
+const OPERATION_UUID_RE =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const UUID_FRAGMENT =
+  '[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}';
 const DATABASE_NAME_RE = /^[A-Za-z0-9_-]+$/;
 
 export interface SnapshotDatabase {
@@ -145,6 +150,7 @@ export class ApplicationSnapshotManager {
       if (await this.exists(manifestPath)) {
         return { success: true, snapshotPath };
       }
+      await this.cleanupSnapshotPartials(snapshotPath);
       if (await this.exists(snapshotPath)) {
         throw new Error(
           `Incomplete snapshot already exists for operation ${params.operationId}`,
@@ -159,7 +165,7 @@ export class ApplicationSnapshotManager {
         const tar = await this.executor.execute(
           'tar',
           ['-C', root, '-czf', archive, '--', relative],
-          { timeout: 900_000, allowFailure: true },
+          { timeout: TIMEOUTS.BACKUP, allowFailure: true },
         );
         if (tar.exitCode !== 0) {
           throw new Error(`Application archive failed: ${tar.stderr}`);
@@ -204,10 +210,66 @@ export class ApplicationSnapshotManager {
         await fsp.rename(tempPath, snapshotPath);
         return { success: true, snapshotPath };
       } catch (error) {
-        const failedPath = `${tempPath}.failed`;
-        await fsp.rename(tempPath, failedPath).catch(() => undefined);
+        try {
+          await fsp.rm(tempPath, { recursive: true, force: true });
+        } catch (cleanupError) {
+          throw new Error(
+            `${(error as Error).message}; partial snapshot cleanup failed: ` +
+              (cleanupError as Error).message,
+          );
+        }
         throw error;
       }
+    } catch (error) {
+      return { success: false, error: (error as Error).message };
+    }
+  }
+
+  async cleanupOperationSnapshots(
+    operationId: string,
+  ): Promise<{ success: boolean; removed?: number; error?: string }> {
+    try {
+      if (!OPERATION_UUID_RE.test(operationId || '')) {
+        throw new Error('Invalid operationId');
+      }
+      const snapshotsRoot = path.resolve(
+        BACKUP_LOCAL_PATH,
+        'operation-snapshots',
+      );
+      if (!isUnderBackupStorage(snapshotsRoot)) {
+        throw new Error('Invalid snapshot storage path');
+      }
+
+      let entries: string[];
+      try {
+        entries = await fsp.readdir(snapshotsRoot);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+          return { success: true, removed: 0 };
+        }
+        throw error;
+      }
+
+      const escapedOperationId = operationId.replace(
+        /[.*+?^${}()|[\]\\]/g,
+        '\\$&',
+      );
+      const ownedEntry = new RegExp(
+        `^${escapedOperationId}(?:-${UUID_FRAGMENT})?` +
+          '(?:\\.partial-\\d+-\\d+(?:\\.failed)?|\\.failed)?$',
+        'i',
+      );
+      let removed = 0;
+      for (const entry of entries) {
+        if (!ownedEntry.test(entry)) continue;
+        const candidate = path.resolve(snapshotsRoot, entry);
+        if (path.dirname(candidate) !== snapshotsRoot) {
+          throw new Error('Snapshot cleanup target escapes storage root');
+        }
+        await fsp.rm(candidate, { recursive: true, force: true });
+        removed += 1;
+      }
+      return { success: true, removed };
     } catch (error) {
       return { success: false, error: (error as Error).message };
     }
@@ -268,7 +330,7 @@ export class ApplicationSnapshotManager {
           '--',
           manifest.filesRelPath,
         ],
-        { timeout: 900_000, allowFailure: true },
+        { timeout: TIMEOUTS.BACKUP, allowFailure: true },
       );
       if (extracted.exitCode !== 0) {
         await fsp
@@ -561,6 +623,30 @@ export class ApplicationSnapshotManager {
       throw new Error('Invalid snapshot path');
     }
     return value;
+  }
+
+  private async cleanupSnapshotPartials(snapshotPath: string): Promise<void> {
+    const parent = path.dirname(snapshotPath);
+    const basename = path.basename(snapshotPath);
+    let entries: string[];
+    try {
+      entries = await fsp.readdir(parent);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return;
+      throw error;
+    }
+    const escapedBasename = basename.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const transient = new RegExp(
+      `^${escapedBasename}(?:\\.partial-\\d+-\\d+(?:\\.failed)?|\\.failed)$`,
+    );
+    for (const entry of entries) {
+      if (!transient.test(entry)) continue;
+      const candidate = path.resolve(parent, entry);
+      if (path.dirname(candidate) !== parent) {
+        throw new Error('Snapshot partial escapes storage root');
+      }
+      await fsp.rm(candidate, { recursive: true, force: true });
+    }
   }
 
   private validateOperationId(operationId: string): void {

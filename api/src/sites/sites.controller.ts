@@ -27,12 +27,14 @@ import {
 import { CurrentUser } from '../common/decorators/current-user.decorator';
 import { Roles } from '../common/decorators/roles.decorator';
 import { UserRole } from '../common/enums';
+import { SiteDeleteOperationsService } from './site-delete-operations.service';
 
 @Controller('sites')
 export class SitesController {
   constructor(
     private readonly sitesService: SitesService,
     private readonly modxVersions: ModxVersionsService,
+    private readonly siteDeletes: SiteDeleteOperationsService,
   ) {}
 
   /**
@@ -319,10 +321,9 @@ export class SitesController {
     @Body() body: DeleteSiteOptionsDto,
     @Headers('idempotency-key') idempotencyKey?: string,
   ) {
-    const data = await this.sitesService.delete(
+    const data = await this.siteDeletes.enqueue(
       id,
-      userId,
-      role,
+      { userId, role },
       body,
       idempotencyKey,
     );
