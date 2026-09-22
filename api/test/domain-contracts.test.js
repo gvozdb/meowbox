@@ -7,6 +7,8 @@ const { mkdtempSync, mkdirSync, rmSync, symlinkSync } = require('node:fs');
 const { tmpdir } = require('node:os');
 const path = require('node:path');
 const test = require('node:test');
+const { plainToInstance } = require('class-transformer');
+const { validate } = require('class-validator');
 const {
   ConflictException,
   ForbiddenException,
@@ -16,6 +18,7 @@ const {
 } = require('@nestjs/common');
 const { DomainContextService } = require('../src/sites/domain-context.service');
 const { SiteDomainsService } = require('../src/sites/site-domains.service');
+const { UpdateSiteDomainDto } = require('../src/sites/site-domains.dto');
 const {
   canonicalizeHostname,
   assertRuntimeKey,
@@ -48,6 +51,28 @@ function domainFixture(overrides = {}) {
     ...overrides,
   };
 }
+
+test('domain settings accept legacy PHP 7.0 and reject unsupported versions', async () => {
+  for (const phpVersion of ['7.0', '7.2']) {
+    const dto = plainToInstance(UpdateSiteDomainDto, {
+      domain: 'example.com',
+      filesRelPath: 'www',
+      phpVersion,
+      httpsRedirect: false,
+    });
+    assert.deepEqual(
+      await validate(dto),
+      [],
+      `PHP ${phpVersion} should be accepted`,
+    );
+  }
+
+  for (const phpVersion of ['6.9', '7.0;id']) {
+    const dto = plainToInstance(UpdateSiteDomainDto, { phpVersion });
+    const errors = await validate(dto);
+    assert.ok(errors.some((error) => error.property === 'phpVersion'));
+  }
+});
 
 test('domain validation canonicalizes hostnames and rejects unsafe paths', () => {
   assert.equal(canonicalizeHostname(' ExAmPle.COM. '), 'example.com');
