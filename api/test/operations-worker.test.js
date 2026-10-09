@@ -9,7 +9,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const test = require('node:test');
-const { PrismaClient } = require('@prisma/client');
+const { Prisma, PrismaClient } = require('@prisma/client');
 const masterKey = require('../src/common/crypto/master-key');
 const { OperationsService } = require('../src/operations/operations.service');
 const {
@@ -19,6 +19,19 @@ const { OperationFailedError } = require('../src/operations/operation-errors');
 const {
   RemoteOperationLinkService,
 } = require('../src/operations/remote-operation-link.service');
+
+function prismaTransactionError(message) {
+  return new Prisma.PrismaClientKnownRequestError(message, {
+    code: 'P2028',
+    clientVersion: 'test',
+  });
+}
+
+function transactionTimeoutError() {
+  return prismaTransactionError(
+    'Transaction API error: Transaction already closed: A query cannot be executed on an expired transaction. The timeout for this transaction was 5000 ms, however 5011 ms passed since the start of the transaction.',
+  );
+}
 
 async function fixture(t) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'meowbox-rpp-operations-'));
@@ -137,6 +150,106 @@ test('T-OPS-002 worker runs registered handler with durable progress', async (t)
   assert.equal(row.progress, 100);
   assert.deepEqual(JSON.parse(row.result), { value: 84 });
   assert.equal(row.leaseOwner, null);
+});
+
+test('T-OPS-002 timed-out finalization retries the database transaction without rerunning the handler', async (t) => {
+  const { prisma, service, user } = await fixture(t);
+  const ticket = await service.begin(queuedInput(user.id, {
+    globalLockKey: 'finalize-timeout-retry',
+  }));
+  const worker = new OperationsWorkerService(service);
+  t.after(() => worker.onModuleDestroy());
+  let handlerCalls = 0;
+  worker.registerHandler('operations.test.execute', async () => {
+    handlerCalls += 1;
+    return { deleted: true };
+  });
+
+  const originalSucceedClaimed = service.succeedClaimed.bind(service);
+  service.succeedClaimed = async (...args) => {
+    const transactionMethod = prisma.$transaction;
+    const originalTransaction = transactionMethod.bind(prisma);
+    let attempts = 0;
+    let transactionCallbacks = 0;
+    prisma.$transaction = (callback, options) => {
+      attempts += 1;
+      if (attempts === 1) {
+        return originalTransaction(async (tx) => {
+          transactionCallbacks += 1;
+          await callback(tx);
+          throw transactionTimeoutError();
+        }, options);
+      }
+      return originalTransaction((tx) => {
+        transactionCallbacks += 1;
+        return callback(tx);
+      }, options);
+    };
+
+    try {
+      await originalSucceedClaimed(...args);
+    } finally {
+      prisma.$transaction = transactionMethod;
+    }
+
+    assert.equal(attempts, 2);
+    assert.equal(transactionCallbacks, 2);
+  };
+
+  await worker.pollOnce();
+  const row = await waitForStatus(prisma, ticket.id, 'SUCCEEDED');
+  assert.equal(handlerCalls, 1);
+  assert.deepEqual(JSON.parse(row.result), { deleted: true });
+  assert.equal(await prisma.operationLock.count({ where: { operationId: ticket.id } }), 0);
+});
+
+test('T-OPS-002 ambiguous closed finalization transaction keeps the operation locked for attention', async (t) => {
+  const { prisma, service, user } = await fixture(t);
+  const ticket = await service.begin(queuedInput(user.id, {
+    globalLockKey: 'finalize-ambiguous-closed',
+  }));
+  const worker = new OperationsWorkerService(service);
+  t.after(() => worker.onModuleDestroy());
+  let handlerCalls = 0;
+  worker.registerHandler('operations.test.execute', async () => {
+    handlerCalls += 1;
+    return { deleted: true };
+  });
+
+  const originalSucceedClaimed = service.succeedClaimed.bind(service);
+  service.succeedClaimed = async (...args) => {
+    const transactionMethod = prisma.$transaction;
+    const originalTransaction = transactionMethod.bind(prisma);
+    let attempts = 0;
+    prisma.$transaction = (callback, options) => {
+      attempts += 1;
+      return originalTransaction(async (tx) => {
+        await callback(tx);
+        throw prismaTransactionError(
+          "Transaction API error: Transaction already closed: Transaction is no longer valid. Last state: 'Expired'.",
+        );
+      }, options);
+    };
+
+    let finalizationError;
+    try {
+      await originalSucceedClaimed(...args);
+    } catch (error) {
+      finalizationError = error;
+    } finally {
+      prisma.$transaction = transactionMethod;
+    }
+    assert.equal(attempts, 1);
+    assert.match(finalizationError?.message || '', /Transaction already closed/);
+    throw finalizationError;
+  };
+
+  await worker.pollOnce();
+  const row = await waitForStatus(prisma, ticket.id, 'NEEDS_ATTENTION');
+  assert.equal(handlerCalls, 1);
+  assert.match(row.errorMessage, /Transaction already closed/);
+  assert.equal(row.leaseOwner, null);
+  assert.equal(await prisma.operationLock.count({ where: { operationId: ticket.id } }), 1);
 });
 
 test('T-OPS-002 worker records a reconciled terminal failure and releases locks', async (t) => {

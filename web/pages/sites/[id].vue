@@ -1074,7 +1074,16 @@ sudo mv {{ selectedApplicationRoot }}/* {{ site?.rootPath }}/{{ editFilesRelPath
                 <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M9 3v18M3 9h12M21 9l-6 6 6 6"/></svg>
                 Сравнить
               </button>
-              <button v-if="b.status === 'COMPLETED' || b.status === 'FAILED'" class="btn-icon btn-icon--danger" title="Удалить бэкап" @click="deleteSiteBackup(b.id)">
+              <button
+                v-if="b.status === 'COMPLETED' || b.status === 'FAILED'"
+                class="btn-icon btn-icon--danger"
+                :title="deletingSiteBackups.has(b.id) ? 'Удаление…' : 'Удалить бэкап'"
+                :aria-label="deletingSiteBackups.has(b.id) ? 'Удаление бэкапа' : 'Удалить бэкап'"
+                :disabled="deletingSiteBackups.has(b.id)"
+                :aria-busy="deletingSiteBackups.has(b.id)"
+                @click="deleteSiteBackup(b.id)"
+              >
+                <span v-if="deletingSiteBackups.has(b.id)" class="spinner-small" />
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3,6 5,6 21,6" /><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" /></svg>
               </button>
             </div>
@@ -2613,6 +2622,7 @@ import {
   navigateModxHandoff,
   publicDeliveryIdempotencyKey,
 } from '~/utils/public-delivery';
+import { deleteBackupAndWaitForSuccess } from '~/utils/site-backup-deletion';
 
 definePageMeta({ middleware: 'auth' });
 
@@ -4561,6 +4571,10 @@ interface SiteStorageLocation {
 
 const siteBackups = ref<SiteBackup[]>([]);
 const siteBackupsLoading = ref(false);
+const deletingSiteBackups = reactive(new Set<string>());
+const backupDeletionControllers = new Map<string, AbortController>();
+let backupDeletionGeneration = 0;
+let siteBackupPageUnmounted = false;
 const triggeringBackup = ref(false);
 const showSiteRestoreModal = ref(false);
 const restoringSiteBackup = ref<SiteBackup | null>(null);
@@ -4594,6 +4608,21 @@ const restoreSelectedAllDbs = computed(() => {
   if (all.length === 0) return true;
   return restoreDatabaseIds.value.length === all.length;
 });
+
+watch(
+  [
+    () => serverStore.currentServerId,
+    () => serverStore.contextEpoch,
+    () => serverStore.switching,
+    () => route.params.id,
+  ],
+  () => {
+    backupDeletionGeneration += 1;
+    for (const controller of backupDeletionControllers.values()) controller.abort();
+    backupDeletionControllers.clear();
+    deletingSiteBackups.clear();
+  },
+);
 function toggleRestoreDb(dbId: string) {
   const i = restoreDatabaseIds.value.indexOf(dbId);
   if (i >= 0) restoreDatabaseIds.value.splice(i, 1);
@@ -5596,17 +5625,77 @@ async function downloadSiteBackup(b: SiteBackup) {
 }
 
 async function deleteSiteBackup(backupId: string) {
-  const ok = await useMbConfirm().ask({
-    title: 'Удаление бэкапа',
-    message: 'Удалить этот бэкап? Файл бэкапа будет удалён с диска.',
-    confirmText: 'Удалить',
-    danger: true,
-  });
-  if (!ok) return;
+  if (siteBackupPageUnmounted || deletingSiteBackups.has(backupId)) return;
+
+  let targetContext: ReturnType<typeof serverStore.captureSelectedTargetContext>;
   try {
-    await api.del(`/backups/${backupId}`);
-    siteBackups.value = siteBackups.value.filter((b) => b.id !== backupId);
-  } catch { /* ignore */ }
+    targetContext = serverStore.captureSelectedTargetContext();
+  } catch (error) {
+    useMbToast().error((error as Error).message || 'Не удалось удалить бэкап');
+    return;
+  }
+
+  const generation = backupDeletionGeneration;
+  const sourceSiteId = String(route.params.id ?? '');
+  const controller = new AbortController();
+  const isCurrent = () => {
+    if (
+      siteBackupPageUnmounted ||
+      generation !== backupDeletionGeneration ||
+      String(route.params.id ?? '') !== sourceSiteId
+    ) return false;
+    try {
+      serverStore.assertSelectedTargetContextCurrent(targetContext);
+      return true;
+    } catch {
+      return false;
+    }
+  };
+
+  deletingSiteBackups.add(backupId);
+  backupDeletionControllers.set(backupId, controller);
+  try {
+    const ok = await useMbConfirm().ask({
+      title: 'Удаление бэкапа',
+      message: 'Будут удалены архив бэкапа из хранилища и запись о нём из панели.',
+      confirmText: 'Удалить',
+      danger: true,
+    });
+    if (!ok || !isCurrent()) return;
+
+    await deleteBackupAndWaitForSuccess({
+      backupId,
+      idempotencyKey: operationIdempotencyKey('backup-delete'),
+      signal: controller.signal,
+      requestDelete: (id, options) => api.del<AcceptedOperation>(
+        `/backups/${encodeURIComponent(id)}`,
+        undefined,
+        options,
+      ),
+      waitForOperation,
+      assertContextCurrent: () => {
+        if (!isCurrent()) throw new Error('Selected site context changed before backup deletion completed');
+      },
+      onDeleted: () => {
+        siteBackups.value = siteBackups.value.filter((backup) => backup.id !== backupId);
+      },
+    });
+    if (isCurrent()) useMbToast().success('Бэкап удалён');
+  } catch (error) {
+    if (isCurrent()) {
+      const failure = error as Error & { operation?: { status?: string; errorMessage?: string | null } };
+      const detail = failure.operation?.errorMessage || failure.message;
+      const message = failure.operation?.status === 'NEEDS_ATTENTION'
+        ? `Удаление требует внимания${detail ? `: ${detail}` : ''}`
+        : detail || 'Не удалось удалить бэкап';
+      useMbToast().error(message);
+    }
+  } finally {
+    if (backupDeletionControllers.get(backupId) === controller) {
+      backupDeletionControllers.delete(backupId);
+      if (isCurrent()) deletingSiteBackups.delete(backupId);
+    }
+  }
 }
 
 async function doRestoreSiteBackup() {
@@ -6155,6 +6244,10 @@ onMounted(async () => {
 });
 
 onBeforeUnmount(() => {
+  siteBackupPageUnmounted = true;
+  backupDeletionGeneration += 1;
+  for (const controller of backupDeletionControllers.values()) controller.abort();
+  backupDeletionControllers.clear();
   if (logAutoRefreshTimer) {
     clearInterval(logAutoRefreshTimer);
   }
@@ -8954,6 +9047,7 @@ html.theme-light .domain-modal__cmd {
 .backup-item__status--pending, .backup-item__status--in_progress { background: rgba(var(--primary-rgb), 0.1); color: var(--primary-text); }
 .backup-item__status--failed { background: rgba(239, 68, 68, 0.1); color: var(--danger-text); }
 .backup-item__actions { display: flex; align-items: center; gap: 0.4rem; flex-shrink: 0; }
+.backup-item__actions .btn-icon[aria-busy="true"] svg { display: none; }
 
 .backup-progress {
   position: relative; height: 6px; border-radius: 3px;

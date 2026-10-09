@@ -79,12 +79,16 @@ export class BackupArtifactCleanupService {
     subjectId: string,
     label: string,
     strict: boolean,
-    action: () => Promise<void | { success: boolean; error?: string }>,
+    action: () => Promise<void | {
+      success: boolean;
+      error?: string;
+      data?: { success?: boolean; error?: string };
+    }>,
   ): Promise<boolean> {
     try {
       const result = await action();
-      if (result && result.success === false) {
-        throw new Error(result.error || `${label} cleanup failed`);
+      if (result && (result.success !== true || result.data?.success === false)) {
+        throw new Error(result.error || result.data?.error || `${label} cleanup failed`);
       }
       return true;
     } catch (error) {
@@ -103,7 +107,8 @@ export class BackupArtifactCleanupService {
     cleanupExports = true,
   ): Promise<{ allArtifactsSelected: boolean }> {
     const storageType = this.storageType(backup);
-    const hasFile = backup.filePath.trim().length > 0;
+    // Restic filePath is a snapshot reference, not an archive path.
+    const hasFile = backup.engine !== 'RESTIC' && backup.filePath.trim().length > 0;
     const localFile =
       hasFile &&
       (storageType === BackupStorageType.LOCAL ||
@@ -138,7 +143,7 @@ export class BackupArtifactCleanupService {
                   password: storage.resticPassword,
                 },
               },
-              300_000,
+              660_000,
             );
           },
         );

@@ -114,6 +114,14 @@ function isTransactionContention(error: unknown): boolean {
   );
 }
 
+function isResticSnapshotList(value: unknown): value is Array<{ id: string }> {
+  return Array.isArray(value) && value.every((snapshot: unknown) => {
+    if (!snapshot || typeof snapshot !== 'object') return false;
+    const id = (snapshot as { id?: unknown }).id;
+    return typeof id === 'string' && id.trim().length > 0;
+  });
+}
+
 type RestorePhase =
   | 'AWAITING_AGENT'
   | 'APPLYING_METADATA'
@@ -834,6 +842,7 @@ export class BackupsService {
       include: {
         site: { select: { name: true } },
         config: { select: { keepDaily: true, keepWeekly: true, keepMonthly: true, keepYearly: true } },
+        schedule: { select: { keepDaily: true, keepWeekly: true, keepMonthly: true, keepYearly: true } },
       },
     });
     if (!b || b.engine !== BackupEngine.RESTIC || !b.storageLocationId) return;
@@ -841,22 +850,26 @@ export class BackupsService {
     const loc = await this.storageLocations.getFullConfigForAgent(b.storageLocationId);
     if (!loc.resticPassword || !RESTIC_COMPATIBLE.has(loc.type)) return;
 
-    // Policy: если у бэкапа есть config — берём оттуда, иначе из глобальных настроек
-    let policy = { keepDaily: 7, keepWeekly: 4, keepMonthly: 6, keepYearly: 1 };
-    if (b.config) {
-      policy = {
-        keepDaily: b.config.keepDaily,
-        keepWeekly: b.config.keepWeekly,
-        keepMonthly: b.config.keepMonthly,
-        keepYearly: b.config.keepYearly,
-      };
-    } else {
-      const defaults = await this.panelSettings.getBackupDefaults();
-      policy = defaults.retention;
-    }
+    // Retention follows the source that launched this backup. Keep explicit
+    // zeros from the schedule/config instead of treating them as missing.
+    const policy = b.schedule
+      ? {
+          keepDaily: b.schedule.keepDaily,
+          keepWeekly: b.schedule.keepWeekly,
+          keepMonthly: b.schedule.keepMonthly,
+          keepYearly: b.schedule.keepYearly,
+        }
+      : b.config
+        ? {
+            keepDaily: b.config.keepDaily,
+            keepWeekly: b.config.keepWeekly,
+            keepMonthly: b.config.keepMonthly,
+            keepYearly: b.config.keepYearly,
+          }
+        : (await this.panelSettings.getBackupDefaults()).retention;
 
     // Вызываем forget на агенте
-    const res = await this.agentRelay.emitToAgent<{ success: boolean; error?: string }>(
+    const res = await this.agentRelay.emitToAgent<{ success?: boolean; error?: string }>(
       'restic:forget',
       {
         siteName: b.site.name,
@@ -865,14 +878,22 @@ export class BackupsService {
       },
       RESTIC_RETENTION_TIMEOUT_MS,
     );
-    if (!res.success) {
-      this.logger.warn(`restic:forget failed: ${res.error}`);
+    if (
+      res?.success !== true ||
+      (res.data?.success !== undefined && res.data.success !== true)
+    ) {
+      const error = res?.data?.error || res?.error || 'agent reported failure';
+      this.logger.warn(`restic:forget failed: ${error}`);
       return;
     }
 
-    // Синхронизация БД: получаем актуальный список snapshots и удаляем
+    // Синхронизация БД: получаем актуальный список snapshots и помечаем
     // Backup-записи, чьи resticSnapshotId больше не присутствуют в репе.
-    const listRes = await this.agentRelay.emitToAgent<{ snapshots: { id: string }[] }>(
+    const listRes = await this.agentRelay.emitToAgent<{
+      success?: boolean;
+      error?: string;
+      snapshots?: unknown;
+    }>(
       'restic:snapshots',
       {
         siteName: b.site.name,
@@ -880,25 +901,35 @@ export class BackupsService {
       },
       60_000,
     );
-    if (listRes.success && listRes.data?.snapshots) {
-      const aliveIds = new Set(listRes.data.snapshots.map((s) => s.id));
-      await this.prisma.backup.updateMany({
-        where: {
-          storageLocationId: b.storageLocationId,
-          engine: BackupEngine.RESTIC,
-          resticSnapshotId: { not: null },
-          NOT: { resticSnapshotId: { in: Array.from(aliveIds) } },
-          status: BackupStatus.COMPLETED,
-        },
-        data: {
-          status: BackupStatus.COMPLETED, // оставим completed, но пометим файл удалённым
-          errorMessage: 'Snapshot удалён из репозитория (retention)',
-          filePath: '',
-        },
-      });
-      // Альтернатива — удалить записи совсем. Пока что помечаем как "прибранные".
-      // Если пользователь захочет — можно добавить полное удаление.
+    const snapshots = listRes?.data?.snapshots;
+    if (
+      listRes?.success !== true ||
+      (listRes.data?.success !== undefined && listRes.data.success !== true) ||
+      !isResticSnapshotList(snapshots)
+    ) {
+      const error = listRes?.data?.error || listRes?.error || 'invalid snapshot list response';
+      this.logger.warn(`restic:snapshots reconciliation skipped: ${error}`);
+      return;
     }
+
+    const aliveIds = new Set(snapshots.map((snapshot) => snapshot.id));
+    await this.prisma.backup.updateMany({
+      where: {
+        siteId: b.siteId,
+        storageLocationId: b.storageLocationId,
+        engine: BackupEngine.RESTIC,
+        resticSnapshotId: { not: null },
+        NOT: { resticSnapshotId: { in: Array.from(aliveIds) } },
+        status: BackupStatus.COMPLETED,
+      },
+      data: {
+        status: BackupStatus.COMPLETED, // оставим completed, но пометим файл удалённым
+        errorMessage: 'Snapshot удалён из репозитория (retention)',
+        filePath: '',
+      },
+    });
+    // Альтернатива — удалить записи совсем. Пока что помечаем как "прибранные".
+    // Если пользователь захочет — можно добавить полное удаление.
   }
 
   // ===========================================================================
@@ -2342,22 +2373,23 @@ export class BackupsService {
       throw new ForbiddenException('Access denied');
     }
 
-    // Сиротим дифференциальные бэкапы, зависящие от этого FULL
-    if (backup.differentials?.length) {
-      await this.prisma.backup.updateMany({
-        where: { baseBackupId: backupId },
-        data: { baseBackupId: null },
-      });
-    }
-
     await this.backupArtifacts.cleanupBackupArtifacts(backup, backup.site.name, {
       removeLocal: true,
       removeRestic: true,
       removeRemote: true,
-      strict: false,
+      strict: true,
     });
 
-    await this.prisma.backup.delete({ where: { id: backupId } });
+    // Облачные запросы завершаются до короткой атомарной записи метаданных.
+    await this.prisma.$transaction([
+      ...(backup.differentials?.length
+        ? [this.prisma.backup.updateMany({
+            where: { baseBackupId: backupId },
+            data: { baseBackupId: null },
+          })]
+        : []),
+      this.prisma.backup.delete({ where: { id: backupId } }),
+    ]);
 
     return {
       filePath: backup.filePath,

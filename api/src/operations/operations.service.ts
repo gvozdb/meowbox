@@ -46,6 +46,8 @@ const RESTART_ATTENTION =
 const MAX_QUEUED_PER_TARGET = 128;
 const MAX_QUEUED_PER_ACTOR = 32;
 const MAX_OPERATION_PAYLOAD_BYTES = 1024 * 1024;
+const FINALIZATION_TRANSACTION_MAX_ATTEMPTS = 3;
+const FINALIZATION_TRANSACTION_RETRY_DELAYS_MS = [50, 100] as const;
 const TRANSITIONAL_APP_STATUSES = [
   'PROVISIONING',
   'DEPLOYING',
@@ -142,6 +144,29 @@ function isTransactionContention(error: unknown): boolean {
   return ['P1008', 'P2028', 'P2034'].includes(
     String((error as { code?: unknown }).code || ''),
   );
+}
+
+function isExplicitPrismaTransactionTimeout(
+  error: unknown,
+): error is Prisma.PrismaClientKnownRequestError {
+  // P2028 also covers non-timeout closed-transaction errors; require explicit timeout wording.
+  if (
+    !(error instanceof Prisma.PrismaClientKnownRequestError) ||
+    error.code !== 'P2028'
+  ) {
+    return false;
+  }
+
+  const metaError =
+    typeof error.meta?.error === 'string' ? error.meta.error : '';
+  const message = `${error.message} ${metaError}`;
+  return /\btransaction\b.{0,160}\b(?:timeout|timed out)\b|\b(?:timeout|timed out)\b.{0,160}\btransaction\b/i.test(
+    message,
+  );
+}
+
+function waitForFinalizationRetry(delayMs: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, delayMs));
 }
 
 function parseResult(raw: string | null): unknown {
@@ -859,7 +884,7 @@ export class OperationsService implements OnModuleInit {
     cancelTooLate = false,
   ): Promise<void> {
     assertNoSecretFields(result);
-    await this.prisma.$transaction(async (tx) => {
+    await this.withFinalizationTransaction(operationId, async (tx) => {
       const current = await tx.operation.findFirst({
         where: {
           id: operationId,
@@ -903,7 +928,7 @@ export class OperationsService implements OnModuleInit {
     error: unknown,
   ): Promise<void> {
     const message = safeErrorMessage(error);
-    await this.prisma.$transaction(async (tx) => {
+    await this.withFinalizationTransaction(operationId, async (tx) => {
       const updated = await tx.operation.updateMany({
         where: {
           id: operationId,
@@ -970,7 +995,7 @@ export class OperationsService implements OnModuleInit {
   }
 
   async cancelClaimed(operationId: string, leaseOwner: string): Promise<void> {
-    await this.prisma.$transaction(async (tx) => {
+    await this.withFinalizationTransaction(operationId, async (tx) => {
       const updated = await tx.operation.updateMany({
         where: {
           id: operationId,
@@ -990,6 +1015,37 @@ export class OperationsService implements OnModuleInit {
       if (updated.count !== 1) throw new ConflictException('Operation claim is stale');
       await tx.operationLock.deleteMany({ where: { operationId } });
     });
+  }
+
+  private async withFinalizationTransaction<T>(
+    operationId: string,
+    callback: (tx: Prisma.TransactionClient) => Promise<T>,
+  ): Promise<T> {
+    // Callbacks here must be rollback-safe database finalization only, never operation handlers.
+    for (
+      let attempt = 1;
+      attempt <= FINALIZATION_TRANSACTION_MAX_ATTEMPTS;
+      attempt += 1
+    ) {
+      try {
+        return await this.prisma.$transaction(callback);
+      } catch (error) {
+        if (
+          attempt === FINALIZATION_TRANSACTION_MAX_ATTEMPTS ||
+          !isExplicitPrismaTransactionTimeout(error)
+        ) {
+          throw error;
+        }
+
+        const delayMs = FINALIZATION_TRANSACTION_RETRY_DELAYS_MS[attempt - 1];
+        this.logger.warn(
+          `Operation ${operationId} finalization transaction timed out; retrying (${attempt}/${FINALIZATION_TRANSACTION_MAX_ATTEMPTS - 1})`,
+        );
+        await waitForFinalizationRetry(delayMs);
+      }
+    }
+
+    throw new Error('Operation finalization retry budget was exhausted');
   }
 
   async requireAttention(

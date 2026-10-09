@@ -97,6 +97,24 @@ export interface RetentionPolicy {
   keepYearly?: number;
 }
 
+const RETENTION_KEEP_OPTIONS: Array<[keyof RetentionPolicy, string]> = [
+  ['keepDaily', '--keep-daily'],
+  ['keepWeekly', '--keep-weekly'],
+  ['keepMonthly', '--keep-monthly'],
+  ['keepYearly', '--keep-yearly'],
+];
+
+function appendRetentionPolicyArgs(args: string[], policy: RetentionPolicy): boolean {
+  let hasKeepOption = false;
+  for (const [key, option] of RETENTION_KEEP_OPTIONS) {
+    const keep = policy[key];
+    if (typeof keep !== 'number' || !Number.isInteger(keep) || keep <= 0) continue;
+    args.push(option, String(keep));
+    hasKeepOption = true;
+  }
+  return hasKeepOption;
+}
+
 type ProgressFn = (percent: number) => void;
 
 export class ResticExecutor {
@@ -1235,17 +1253,18 @@ export class ResticExecutor {
       const base = this.buildResticBaseArgs(siteName, storage);
       const env = this.buildEnv(storage);
 
-      const args = [...base, 'forget', '--tag', `site:${siteName}`, '--prune'];
-      const beforeKeepLen = args.length;
-      if (policy.keepDaily) args.push('--keep-daily', String(policy.keepDaily));
-      if (policy.keepWeekly) args.push('--keep-weekly', String(policy.keepWeekly));
-      if (policy.keepMonthly) args.push('--keep-monthly', String(policy.keepMonthly));
-      if (policy.keepYearly) args.push('--keep-yearly', String(policy.keepYearly));
+      const args = [
+        ...base,
+        'forget',
+        '--tag',
+        `site:${siteName}`,
+        '--group-by',
+        'tags',
+        '--prune',
+      ];
 
       // Если ни одного keep-* не задано — не запускаем, иначе restic удалит всё.
-      if (args.length === beforeKeepLen) {
-        return { success: true };
-      }
+      if (!appendRetentionPolicyArgs(args, policy)) return { success: true };
 
       const r = await this.executor.execute('restic', args, {
         env,
@@ -1278,12 +1297,7 @@ export class ResticExecutor {
         'tags',
         '--prune',
       ];
-      const beforeKeepLen = args.length;
-      if (policy.keepDaily) args.push('--keep-daily', String(policy.keepDaily));
-      if (policy.keepWeekly) args.push('--keep-weekly', String(policy.keepWeekly));
-      if (policy.keepMonthly) args.push('--keep-monthly', String(policy.keepMonthly));
-      if (policy.keepYearly) args.push('--keep-yearly', String(policy.keepYearly));
-      if (args.length === beforeKeepLen) return { success: true };
+      if (!appendRetentionPolicyArgs(args, policy)) return { success: true };
 
       const result = await this.executor.execute('restic', args, {
         env,

@@ -82,7 +82,8 @@ else
 fi
 
 # Что задето?
-touched() { $FORCE && return 0; echo "$CHANGED" | grep -q "^$1" ; }
+# A pipe to grep -q can return SIGPIPE under pipefail on large change lists.
+touched() { $FORCE && return 0; grep -q "^$1" <<< "$CHANGED"; }
 
 NEED_DEPS=false
 NEED_SHARED=false
@@ -97,7 +98,7 @@ NEED_MIGRATIONS_PKG=false
 if $FORCE; then
   NEED_DEPS=true
 else
-  echo "$CHANGED" | grep -qE '(^|/)package(-lock)?\.json$' && NEED_DEPS=true || true
+  grep -qE '(^|/)package(-lock)?\.json$' <<< "$CHANGED" && NEED_DEPS=true || true
 fi
 
 touched "shared/"   && NEED_SHARED=true || true

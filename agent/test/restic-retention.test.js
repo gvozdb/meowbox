@@ -16,6 +16,62 @@ const storage = {
   password: 'restic-password',
 };
 
+test('site retention groups by stable site tags and applies configured keep policy', async () => {
+  const calls = [];
+  const restic = new ResticExecutor();
+  restic.executor = {
+    async execute(command, args, options) {
+      calls.push({ command, args, options });
+      return { exitCode: 0, stdout: '', stderr: '' };
+    },
+  };
+
+  const result = await restic.forget('example-test', storage, {
+    keepDaily: 7,
+    keepWeekly: 0,
+    keepMonthly: 2,
+    keepYearly: 0,
+  });
+
+  assert.deepEqual(result, { success: true });
+  assert.equal(calls.length, 1);
+  assert.deepEqual(calls[0].args.slice(2), [
+    'forget',
+    '--tag',
+    'site:example-test',
+    '--group-by',
+    'tags',
+    '--prune',
+    '--keep-daily',
+    '7',
+    '--keep-monthly',
+    '2',
+  ]);
+  assert.equal(calls[0].options.env.RESTIC_PASSWORD, storage.password);
+});
+
+test('site retention with all-zero policy is a zero-write no-op', async () => {
+  const restic = new ResticExecutor();
+  let called = false;
+  restic.executor = {
+    async execute() {
+      called = true;
+      return { exitCode: 0, stdout: '', stderr: '' };
+    },
+  };
+
+  assert.deepEqual(
+    await restic.forget('example-test', storage, {
+      keepDaily: 0,
+      keepWeekly: 0,
+      keepMonthly: 0,
+      keepYearly: 0,
+    }),
+    { success: true },
+  );
+  assert.equal(called, false);
+});
+
 test('repository retention groups by stable tags and applies configured keep policy', async () => {
   const calls = [];
   const restic = new ResticExecutor();

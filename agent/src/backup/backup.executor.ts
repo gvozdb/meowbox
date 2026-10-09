@@ -17,6 +17,7 @@ import {
   writeSiteBackupManifest,
 } from './site-manifest-file';
 import { normalizeRestoreIncludePaths } from '@meowbox/shared';
+import { deleteYandexDiskBackup } from './yandex-disk-delete';
 
 interface BackupParams {
   backupId: string;
@@ -980,7 +981,7 @@ export class BackupExecutor {
   /**
    * Удаляет ранее загруженный бэкап в облаке. Маршрутизатор по префиксу
    * в filePath: `yandex-disk:/PATH` или `cloud-mail-ru:/PATH`.
-   * Ошибка сети/404 не бросается наружу — возвращает {success:false, error}.
+   * Ошибки возвращаются как {success:false, error}; отсутствие файла — успех.
    */
   async deleteRemoteBackup(
     filePath: string,
@@ -989,7 +990,7 @@ export class BackupExecutor {
     try {
       if (filePath.startsWith('yandex-disk:')) {
         const remotePath = filePath.replace(/^yandex-disk:/, '');
-        return await this.deleteFromYandexDisk(remotePath, storageConfig);
+        return await deleteYandexDiskBackup(remotePath, storageConfig.oauthToken);
       }
       if (filePath.startsWith('cloud-mail-ru:')) {
         const remotePath = filePath.replace(/^cloud-mail-ru:/, '');
@@ -999,40 +1000,6 @@ export class BackupExecutor {
     } catch (err) {
       return { success: false, error: (err as Error).message };
     }
-  }
-
-  private deleteFromYandexDisk(
-    remotePath: string,
-    config: Record<string, string>,
-  ): Promise<{ success: boolean; error?: string }> {
-    const token = config.oauthToken;
-    if (!token) {
-      return Promise.resolve({ success: false, error: 'Yandex Disk OAuth token missing' });
-    }
-    return new Promise((resolve) => {
-      const req = https.request({
-        hostname: BACKUP_HOSTS.YANDEX_DISK_API,
-        path: `/v1/disk/resources?path=${encodeURIComponent(remotePath)}&permanently=true`,
-        method: 'DELETE',
-        headers: { 'Authorization': `OAuth ${token}` },
-      }, (res) => {
-        let body = '';
-        res.on('data', (c) => { body += c; });
-        res.on('end', () => {
-          const code = res.statusCode || 0;
-          // 204 No Content — удалено; 202 Accepted — async delete (очередь);
-          // 404 — уже нет (считаем успехом, бэкапа и так нет).
-          if (code === 204 || code === 202 || code === 404) {
-            resolve({ success: true });
-          } else {
-            resolve({ success: false, error: `Yandex Disk DELETE ${code}: ${body.substring(0, 200)}` });
-          }
-        });
-      });
-      req.on('error', (err) => resolve({ success: false, error: err.message }));
-      req.setTimeout(30_000, () => { req.destroy(new Error('Yandex Disk delete timeout')); });
-      req.end();
-    });
   }
 
   private deleteFromCloudMailRu(

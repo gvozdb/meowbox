@@ -377,7 +377,7 @@ test('backup cleanup removes selected artifact classes and preserves unchecked R
     }),
   };
   const backupExports = {
-    cleanupArtifactsForBackups: async (ids) => cleanedExports.push(...ids),
+    cleanupArtifactsForBackups: async (ids) => { cleanedExports.push(...ids); },
   };
   const service = new BackupArtifactCleanupService(
     prisma,
