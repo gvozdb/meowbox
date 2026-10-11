@@ -109,6 +109,14 @@ export class AgentRelayService {
     data: unknown,
     timeoutMs = AGENT_TIMEOUT_MS,
   ): Promise<AgentResponse<T>> {
+    return this.requestAgent<T>(event, data, timeoutMs);
+  }
+
+  private async requestAgent<T = unknown>(
+    event: string,
+    data: unknown,
+    timeoutMs: number,
+  ): Promise<AgentResponse<T>> {
     if (!this.isAgentConnected()) {
       throw new AgentUnavailableError();
     }
@@ -122,8 +130,11 @@ export class AgentRelayService {
     });
   }
 
-  async enqueueBackup(event: string, data: unknown): Promise<void> {
-    const result = await this.emitToAgent(event, data, 20_000);
+  async enqueueBackup(
+    event: 'backup:execute' | 'restic:backup' | 'restic:backup-paths' | 'backup:execute-paths',
+    data: unknown,
+  ): Promise<void> {
+    const result = await this.requestAgent(event, data, 20_000);
     if (result?.success !== true) throw new Error(result?.error || 'Agent rejected backup admission');
   }
 

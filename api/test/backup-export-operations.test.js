@@ -9,7 +9,8 @@ const { EventEmitter } = require('node:events');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
-const { PassThrough } = require('node:stream');
+const { PassThrough, Writable } = require('node:stream');
+const { pipeline } = require('node:stream/promises');
 const test = require('node:test');
 const { PrismaClient } = require('@prisma/client');
 const masterKey = require('../src/common/crypto/master-key');
@@ -243,4 +244,18 @@ test('T-OPS-005 ignores a late Restic failure after downstream cancellation', as
   await new Promise((resolve) => setImmediate(resolve));
 
   assert.equal(output.errored, null);
+});
+
+test('T-OPS-005 propagates Restic failure before artifact pipeline attaches', async () => {
+  const child = new EventEmitter();
+  child.stdout = new PassThrough();
+  const output = BackupExportsService.prototype.validatedResticOutput(child);
+
+  child.emit('close', null, 'SIGTERM');
+  await new Promise((resolve) => setImmediate(resolve));
+
+  await assert.rejects(
+    pipeline(output, new Writable({ write(_chunk, _encoding, callback) { callback(); } })),
+    /Restic export process terminated by SIGTERM/,
+  );
 });

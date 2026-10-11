@@ -959,12 +959,8 @@ export class AgentGateway implements OnGatewayConnection, OnGatewayDisconnect {
     );
 
     // Receipts are acknowledged only after the authoritative DB update.
-    for (const [event, service] of [
-      ['backup:complete', this.backupsService],
-      ['server-path:complete', this.serverPathBackupService],
-      ['panel-data:complete', this.panelDataBackupService],
-    ] as const) {
-      agent.on(event, async (data: {
+    const completeBackup = (service: Pick<BackupsService, 'completeBackup'>) =>
+      async (data: {
         backupId: string; success: boolean; filePath?: string;
         sizeBytes?: number; error?: string; snapshotId?: string;
       }, ack?: (result: { success: boolean }) => void) => {
@@ -986,8 +982,10 @@ export class AgentGateway implements OnGatewayConnection, OnGatewayDisconnect {
           this.logger.warn(`Backup completion persistence failed for ${data?.backupId}: ${(error as Error).message}`);
           ack?.({ success: false });
         }
-      });
-    }
+      };
+    agent.on('backup:complete', completeBackup(this.backupsService));
+    agent.on('server-path:complete', completeBackup(this.serverPathBackupService));
+    agent.on('panel-data:complete', completeBackup(this.panelDataBackupService));
 
     // --- Hostpanel migration: discovery live-progress ---
     // Агент шлёт каждый шаг discover'а (SSH whoami → distro → sites → cron →

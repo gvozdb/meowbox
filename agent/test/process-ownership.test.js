@@ -43,6 +43,7 @@ test('T-OPS-005 process registry binds children to job and cancels process group
 test('T-OPS-006 source inventory fails on unowned child_process spawn', () => {
   const sourceRoot = path.resolve(__dirname, '../src');
   const allowed = new Set([
+    'backup/db-dump.ts',
     'backup/restic.executor.ts',
     'command-executor.ts',
     'process-registry.ts',

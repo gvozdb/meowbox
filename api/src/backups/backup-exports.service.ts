@@ -712,6 +712,9 @@ export class BackupExportsService implements OnModuleInit, OnModuleDestroy {
   private validatedResticOutput(child: ChildProcess): Readable {
     if (!child.stdout) throw new Error('Restic output pipe is unavailable');
     const output = new PassThrough();
+    // Restic may exit while artifact staging is still attaching its pipeline.
+    // Keep that early stream error handled; pipeline still rejects with output.errored.
+    output.once('error', () => undefined);
     const destroyOutput = (error: Error): void => {
       if (!output.destroyed) output.destroy(error);
     };

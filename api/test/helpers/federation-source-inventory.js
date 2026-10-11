@@ -243,7 +243,7 @@ function inferSocketDirection(file, enclosingMethod, receiver, callName, event) 
   if (enclosingMethod === 'startProxyMode' && event?.startsWith('proxy:')) {
     return 'transport_lifecycle';
   }
-  if (callName.startsWith('emitToAgent')) return 'api_to_agent';
+  if (callName.startsWith('emitToAgent') || callName === 'enqueueBackup') return 'api_to_agent';
   if (isAgentSource) return callName === 'on' || callName === 'once' ? 'api_to_agent' : 'agent_to_api';
   if (/agent/i.test(enclosingMethod) || /agent/i.test(receiver)) {
     return callName === 'on' || callName === 'once' ? 'agent_to_api' : 'api_to_agent';
@@ -279,7 +279,7 @@ function discoverSocketActions(repositoryRoot) {
         const callName = node.expression.name.text;
         const receiver = node.expression.expression.getText(sourceFile);
         const isListener = ['on', 'once', 'onAny'].includes(callName);
-        const isEmitter = callName === 'emit' || callName.startsWith('emitToAgent');
+        const isEmitter = callName === 'emit' || callName.startsWith('emitToAgent') || callName === 'enqueueBackup';
         const socketReceiver = /(?:^|\b)(?:client|socket|agentSocket|upstream|server)(?:\b|\.)/.test(receiver) ||
           receiver.includes('this.relay') || receiver.includes('this.server');
         if ((isListener || isEmitter) && socketReceiver) {

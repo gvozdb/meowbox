@@ -368,7 +368,7 @@ const discoverSocketEvents = () => {
     const sourceFile = parseSource(file);
     const visit = (node) => {
       if (ts.isCallExpression(node) && ts.isPropertyAccessExpression(node.expression) &&
-        ['emitToAgent', 'emitToAgentAsync'].includes(node.expression.name.text)) {
+        ['emitToAgent', 'emitToAgentAsync', 'enqueueBackup'].includes(node.expression.name.text)) {
         if (node.arguments.length === 0) throw new RemotePanelInventoryError(`${relativeFile(file)} agent relay call has no event`);
         for (const event of staticValues(node.arguments[0], sourceFile, node)) {
           add('agent-rpc', 'api_to_agent', event, 'api-emitter', file, sourceFile, node);

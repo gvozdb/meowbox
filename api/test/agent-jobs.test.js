@@ -181,6 +181,17 @@ test('T-OPS-004 relay executes one durable job and persists result', async (t) =
   const relay = new AgentRelayService(jobs);
   const socket = new EventEmitter();
   socket.connected = true;
+  let timedEmits = 0;
+  socket.timeout = (timeoutMs) => {
+    assert.equal(timeoutMs, 10_000);
+    return {
+      emit(event, request, callback) {
+        assert.equal(event, AGENT_JOB_EVENTS.START);
+        timedEmits += 1;
+        socket.emit(event, request, (response) => callback(null, response));
+      },
+    };
+  };
   const bootId = crypto.randomUUID();
   socket.on(AGENT_JOB_EVENTS.START, (request, callback) => {
     callback({
@@ -209,5 +220,6 @@ test('T-OPS-004 relay executes one durable job and persists result', async (t) =
     await relay.runAgentJob(prepareInput(operation.id)),
     { relayed: true },
   );
+  assert.equal(timedEmits, 1);
   relay.clearAgentSocket(socket);
 });

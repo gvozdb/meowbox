@@ -1,6 +1,6 @@
 {
   "schemaVersion": "meowbox.remote-panel-parity.action-matrix/v1",
-  "matrixSha256": "3b5d2da02e2e460a3186c6cff176969d119b9a5d9562902e6ab2fafbaa41d704",
+  "matrixSha256": "03d93913428b2c1d1c571bf2c1746242c3f873f2899e21d1a38675c1867f5a6d",
   "actions": [
     {
       "actionId": "http.post.admin-ip-allowlist-entries",

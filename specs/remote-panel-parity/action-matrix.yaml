@@ -36439,6 +36439,90 @@
       }
     },
     {
+      "actionId": "ws.agent-rpc.backup-activity",
+      "transport": {
+        "kind": "socket.io",
+        "channel": "agent-rpc",
+        "event": "backup:activity",
+        "direction": "api_to_agent"
+      },
+      "owner": "target",
+      "authorization": {
+        "roles": [
+          "SERVICE"
+        ],
+        "permissions": [
+          "ws.agent-rpc.backup-activity"
+        ]
+      },
+      "request": {
+        "schema": "ws.agent-rpc.backup-activity.payload",
+        "media": [
+          "application/json"
+        ]
+      },
+      "response": {
+        "schema": "ws.agent-rpc.backup-activity.payload",
+        "media": [
+          "application/json"
+        ]
+      },
+      "execution": {
+        "mode": "INTERACTIVE"
+      },
+      "idempotency": {
+        "policy": "NOT_DECLARED",
+        "currentBehavior": "CURRENT_SOCKET_EVENT_HAS_NO_DURABLE_IDEMPOTENCY_CONTRACT"
+      },
+      "cancellation": {
+        "policy": "UNSUPPORTED",
+        "currentBehavior": "NO_TYPED_CANCELLATION_CONTRACT"
+      },
+      "deadline": {
+        "connectMs": 5000,
+        "headersMs": 10000,
+        "idleMs": 30000,
+        "operationMs": 30000,
+        "currentTimeoutMs": 30000,
+        "currentTimeoutSource": "AgentGateway.current-event-ack-budget"
+      },
+      "capability": "ws.agent-rpc.backup-activity.v1",
+      "legacy": {
+        "behavior": "CURRENT_UNTYPED_SOCKET_EVENT_NOT_ACTIVATED_FOR_V1",
+        "remoteActivation": "DENY"
+      },
+      "codeOwner": {
+        "file": "agent/src/agent.service.ts",
+        "symbol": "AgentService.registerHandlers"
+      },
+      "sourceKey": "socketio|agent-rpc|backup:activity",
+      "sourceBindings": [
+        "socketio|agent-rpc|agent-handler|backup:activity",
+        "socketio|agent-rpc|api-emitter|backup:activity"
+      ],
+      "traceability": {
+        "cf": [
+          "CF16",
+          "CF17"
+        ],
+        "a": [
+          "A19"
+        ],
+        "sp": [],
+        "im": [],
+        "bn": []
+      },
+      "verification": {
+        "test": "T-TRACE-001",
+        "metric": {
+          "name": "unclassified-source-declarations",
+          "comparator": "EQ",
+          "threshold": 0,
+          "unit": "declarations"
+        }
+      }
+    },
+    {
       "actionId": "ws.agent-rpc.backup-delete-file",
       "transport": {
         "kind": "socket.io",
