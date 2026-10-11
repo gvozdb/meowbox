@@ -13,7 +13,8 @@ import {
   isUnderAllowedSiteRoot,
 } from '../config';
 import { childProcessRegistry } from '../process-registry';
-import { dumpDatabaseToFile } from './db-dump';
+import { dumpDatabaseToFile, pgDumpToWritable, pgRestoreFromFile, pgRestoreFromReadable } from './db-dump';
+import type { Writable } from 'stream';
 import { normalizeRestoreIncludePaths } from '@meowbox/shared';
 import {
   assertSiteBackupId,
@@ -108,7 +109,8 @@ function appendRetentionPolicyArgs(args: string[], policy: RetentionPolicy): boo
   let hasKeepOption = false;
   for (const [key, option] of RETENTION_KEEP_OPTIONS) {
     const keep = policy[key];
-    if (typeof keep !== 'number' || !Number.isInteger(keep) || keep <= 0) continue;
+    if (keep === undefined || keep === 0) continue;
+    if (typeof keep !== 'number' || !Number.isSafeInteger(keep) || keep < 0) throw new Error('Invalid Restic retention policy');
     args.push(option, String(keep));
     hasKeepOption = true;
   }
@@ -175,6 +177,7 @@ export class ResticExecutor {
   private buildEnv(storage: ResticStorage): Record<string, string> {
     const env: Record<string, string> = {
       RESTIC_PASSWORD: storage.password,
+      GOMEMLIMIT: '256MiB',
     };
     if (storage.type === 'S3') {
       const { accessKey, secretKey, region } = storage.config;
@@ -368,6 +371,9 @@ export class ResticExecutor {
   }> {
     const { siteName, rootPath, excludePaths, storage, databases, type, excludeTableData } = params;
     const tempFiles: string[] = [];
+    const streamedDbSnapshots: string[] = [];
+    let streamedDatabaseBytes = 0;
+    let siteSnapshotMayExist = false;
     assertSiteBackupId(params.backupId);
     const tmpDbDir = path.join(
       BACKUP_LOCAL_PATH,
@@ -390,7 +396,8 @@ export class ResticExecutor {
 
       onProgress(10);
 
-      // 2. Дамп БД (если нужно) → tmp-файлы, они тоже попадут в снапшот
+      // PostgreSQL is streamed straight into Restic. A small reference file
+      // joins the site snapshot only after every database stream succeeded.
       manifestPath = writeSiteBackupManifest(
         params.backupId,
         params.manifest,
@@ -399,10 +406,29 @@ export class ResticExecutor {
         fs.mkdirSync(tmpDbDir, { recursive: true, mode: 0o700 });
         for (const db of databases) {
           assertDbName(db.name);
+          if (db.type === 'POSTGRESQL') {
+            const streamed = await this.backupPostgresStream(
+              base, env, siteName, params.backupId, db.name, excludeTableData,
+            );
+            streamedDbSnapshots.push(streamed.snapshotId);
+            streamedDatabaseBytes += streamed.sizeBytes;
+            continue;
+          }
           const dumpPath = path.join(tmpDbDir, `${db.name}.sql`);
           await this.dumpDatabase(db.name, db.type, dumpPath, excludeTableData);
           tempFiles.push(dumpPath);
         }
+      }
+
+      if (streamedDbSnapshots.length) {
+        const names = databases!.filter((db) => db.type === 'POSTGRESQL').map((db) => db.name);
+        const refDir = path.join(BACKUP_LOCAL_PATH, 'restic-dbrefs');
+        fs.mkdirSync(refDir, { recursive: true, mode: 0o700 });
+        const refPath = path.join(refDir, `${params.backupId}.json`);
+        fs.writeFileSync(refPath, JSON.stringify({ version: 1, databases: Object.fromEntries(
+          names.map((name, index) => [name, streamedDbSnapshots[index]]),
+        ) }), { flag: 'wx', mode: 0o600 });
+        tempFiles.push(refPath);
       }
 
       onProgress(25);
@@ -414,13 +440,14 @@ export class ResticExecutor {
       if (manifestPath) paths.push(manifestPath);
 
       if (paths.length === 0) {
-        return { success: false, error: 'Нет путей для бэкапа' };
+        throw new Error('Нет путей для бэкапа');
       }
 
       // 4. Запускаем restic backup с тегом сайта и --json для прогресса
       const args = [
         ...base,
         'backup',
+        '--no-cache',
         '--tag', `site:${siteName}`,
         '--json',
       ];
@@ -436,6 +463,7 @@ export class ResticExecutor {
 
       // Прогресс из JSON: { message_type: "status", percent_done: 0.42 }
       // Завершение:       { message_type: "summary", snapshot_id: "...", total_bytes_processed: N }
+      siteSnapshotMayExist = true;
       const result = await this.runResticStreaming(args, env, (line, stream) => {
         if (stream !== 'stdout') return;
         try {
@@ -458,28 +486,18 @@ export class ResticExecutor {
       });
 
       if (result.exitCode !== 0) {
-        return {
-          success: false,
-          error: `restic backup failed: ${result.stderr.substring(0, 500)}`,
-        };
+        if (snapshotId) {
+          const removed = await this.executor.execute('restic', [...base, 'forget', '--no-cache', snapshotId],
+            { env, timeout: 60_000, allowFailure: true });
+          if (removed.exitCode === 0) siteSnapshotMayExist = false;
+        }
+        throw new Error(`restic backup failed: ${result.stderr.substring(0, 500)}`);
       }
 
       onProgress(95);
 
-      // Если snapshotId не пришёл из summary — fallback: latest snapshot с нашим тегом
-      if (!snapshotId) {
-        const latest = await this.executor.execute(
-          'restic',
-          [...base, 'snapshots', '--json', '--tag', `site:${siteName}`, '--latest', '1'],
-          { env, timeout: 30_000, allowFailure: true },
-        );
-        if (latest.exitCode === 0) {
-          try {
-            const arr = JSON.parse(latest.stdout) as ResticSnapshot[];
-            if (arr.length > 0) snapshotId = arr[arr.length - 1].id;
-          } catch { /* ignore */ }
-        }
-      }
+      // The summary identifies this invocation. Selecting the latest site
+      // snapshot here could select and delete a different concurrent run.
 
       const requiredPaths = [
         ...(manifestPath ? [manifestPath] : []),
@@ -495,32 +513,111 @@ export class ResticExecutor {
         ))
       ) {
         if (snapshotId) {
-          await this.executor.execute(
+          const removed = await this.executor.execute(
             'restic',
-            [...base, 'forget', snapshotId],
+            [...base, 'forget', '--no-cache', snapshotId],
             { env, timeout: 60_000, allowFailure: true },
           );
+          if (removed.exitCode === 0) siteSnapshotMayExist = false;
         }
-        return {
-          success: false,
-          error: 'Restic snapshot is missing required manifest or database dumps',
-        };
+        throw new Error('Restic snapshot is missing required manifest or database dumps');
       }
 
       onProgress(100);
       return {
         success: true,
         snapshotId,
-        sizeBytes: totalBytes,
+        sizeBytes: totalBytes + streamedDatabaseBytes,
       };
     } catch (err) {
-      return { success: false, error: (err as Error).message };
+      // Preserve DB snapshots if a site snapshot may still reference them.
+      // Otherwise remove streams from this failed run.
+      let cleanupFailed = false;
+      if (streamedDbSnapshots.length && !siteSnapshotMayExist) {
+        try {
+          const base = this.buildResticBaseArgs(siteName, storage);
+          const env = this.buildEnv(storage);
+          for (const id of streamedDbSnapshots) {
+            const removed = await this.executor.execute('restic', [...base, 'forget', '--no-cache', id],
+              { env, timeout: 60_000, allowFailure: true });
+            if (removed.exitCode !== 0) cleanupFailed = true;
+          }
+        } catch { cleanupFailed = true; }
+      }
+      const recovery = siteSnapshotMayExist && streamedDbSnapshots.length
+        ? ' Site snapshot outcome is uncertain; database snapshots were retained for safe reconciliation.'
+        : cleanupFailed ? ' Database snapshot cleanup is pending; retry retention after investigating the repository.' : '';
+      return { success: false, error: (err as Error).message + recovery };
     } finally {
       for (const file of tempFiles) {
         try { fs.unlinkSync(file); } catch { /* ignore */ }
       }
       try { fs.rmdirSync(tmpDbDir); } catch { /* ignore */ }
       removeSiteBackupManifest(manifestPath);
+    }
+  }
+
+  private async backupPostgresStream(
+    base: string[], env: Record<string, string>, siteName: string,
+    backupId: string, dbName: string, excludeTableData?: string[],
+  ): Promise<{ snapshotId: string; sizeBytes: number }> {
+    const extraArgs = ['--clean', '--if-exists', ...(excludeTableData || []).map((name) => `--exclude-table-data=${name}`)];
+    let snapshotId: string | undefined;
+    let sizeBytes = 0;
+    const result = await this.runResticStreaming([
+      ...base, 'backup', '--no-cache', '--json', '--tag', `site-db:${siteName}`,
+      '--tag', `run:${backupId}`, '--stdin', '--stdin-filename', `${dbName}.sql`,
+    ], env, (line, stream) => {
+      if (stream !== 'stdout') return;
+      try {
+        const event = JSON.parse(line) as { message_type?: string; snapshot_id?: string; total_bytes_processed?: number };
+        if (event.message_type === 'summary') { snapshotId = event.snapshot_id; sizeBytes = event.total_bytes_processed || 0; }
+      } catch { /* progress is best effort */ }
+    }, (stdin) => pgDumpToWritable(dbName, stdin, extraArgs));
+    if (result.exitCode !== 0 || !snapshotId) {
+      let cleanupPending = false;
+      if (snapshotId) {
+        try {
+          const removed = await this.executor.execute('restic', [...base, 'forget', '--no-cache', snapshotId],
+            { env, timeout: 60_000, allowFailure: true });
+          cleanupPending = removed.exitCode !== 0;
+        } catch { cleanupPending = true; }
+      }
+      throw new Error(`PostgreSQL stream backup failed for ${dbName}: ${result.stderr.slice(-500)}` +
+        (cleanupPending ? ' Partial snapshot cleanup is pending.' : ''));
+    }
+    return { snapshotId, sizeBytes };
+  }
+
+  private async restorePostgresStream(
+    base: string[], env: Record<string, string>, snapshotId: string,
+    sourceName: string, targetName: string,
+  ): Promise<void> {
+    const child = spawn('restic', [...base, 'dump', '--no-cache', snapshotId, `/${sourceName}.sql`], {
+      env: { PATH: process.env.PATH || '', HOME: process.env.HOME || '', ...env },
+      stdio: ['ignore', 'pipe', 'pipe'], detached: true,
+    });
+    const tracked = childProcessRegistry.track(child, 'restic-db-restore', { processGroup: true });
+    let stderr = '';
+    child.stderr.on('data', (chunk: Buffer) => {
+      stderr = (stderr + chunk.toString('utf8')).slice(-16 * 1024);
+    });
+    const exit = new Promise<void>((resolve, reject) => {
+      child.once('error', reject);
+      child.once('close', (code) => code === 0 ? resolve() : reject(
+        new Error(`restic dump failed: ${stderr || `exit ${code}`}`),
+      ));
+    });
+    const timer = setTimeout(() => { tracked.terminate(0).catch(() => undefined); }, RESTIC_OPS.CHECK_TIMEOUT_MS);
+    try {
+      await Promise.all([pgRestoreFromReadable(targetName, child.stdout, [], exit), exit]);
+    } catch (error) {
+      await tracked.terminate(0);
+      await exit.catch(() => undefined);
+      throw error;
+    } finally {
+      clearTimeout(timer);
+      tracked.untrack();
     }
   }
 
@@ -536,7 +633,9 @@ export class ResticExecutor {
       [...base, 'ls', snapshotId, '--json', '--', ...requiredPaths],
       { env, timeout: 120_000, allowFailure: true },
     );
-    if (result.exitCode !== 0) return false;
+    if (result.exitCode !== 0) {
+      throw new Error(`Restic snapshot validation failed: ${result.stderr.slice(-500)}`);
+    }
 
     const found = new Set<string>();
     for (const line of result.stdout.split('\n')) {
@@ -599,7 +698,7 @@ export class ResticExecutor {
         return { success: false, error: 'Нет путей для бэкапа' };
       }
 
-      const args = [...base, 'backup', '--json'];
+      const args = [...base, 'backup', '--no-cache', '--json'];
       for (const t of tags) args.push('--tag', t);
       for (const ex of excludePaths) args.push('--exclude', ex);
       args.push(...paths);
@@ -628,9 +727,16 @@ export class ResticExecutor {
       });
 
       if (result.exitCode !== 0) {
+        if (snapshotId) {
+          await this.executor.execute('restic', [...base, 'forget', '--no-cache', snapshotId],
+            { env, timeout: 60_000, allowFailure: true });
+        }
         return { success: false, error: `restic backup failed: ${result.stderr.substring(0, 500)}` };
       }
 
+      if (!snapshotId || !/^[a-f0-9]{64}$/.test(snapshotId)) {
+        return { success: false, error: 'Restic did not confirm a snapshot ID; repository reconciliation is required' };
+      }
       onProgress(100);
       return { success: true, snapshotId, sizeBytes: totalBytes };
     } catch (err) {
@@ -743,7 +849,7 @@ export class ResticExecutor {
 
       const result = await this.executor.execute(
         'restic',
-        [...base, 'restore', snapshotId, '--target', restoreTemp],
+        [...base, 'restore', '--no-cache', snapshotId, '--target', restoreTemp],
         { env, timeout: 1800_000, allowFailure: true }, // 30 минут
       );
 
@@ -774,11 +880,37 @@ export class ResticExecutor {
             siteName,
           )
           .replace(/\/+/g, '/');
+        const referencePath = path.join(
+          restoreTemp, BACKUP_LOCAL_PATH, 'restic-dbrefs', `${params.backupId}.json`,
+        );
+        let dbReferences: Record<string, string> = {};
+        if (fs.existsSync(referencePath)) {
+          const realReference = fs.realpathSync(referencePath);
+          if (!realReference.startsWith(restoreTemp + path.sep) ||
+              !fs.statSync(realReference).isFile() || fs.statSync(realReference).size > 64 * 1024) {
+            throw new Error('Invalid database reference file');
+          }
+          const parsed = JSON.parse(fs.readFileSync(realReference, 'utf8')) as {
+            version?: number; databases?: Record<string, string>;
+          };
+          if (parsed.version !== 1 || !parsed.databases || typeof parsed.databases !== 'object') {
+            throw new Error('Invalid database reference file');
+          }
+          dbReferences = parsed.databases;
+        }
         if (databases?.length) {
           for (const db of databases) {
             assertDbName(db.name);
             const sourceName = db.sourceName || db.name;
             assertDbName(sourceName);
+            const referencedSnapshot = dbReferences[sourceName];
+            if (referencedSnapshot !== undefined) {
+              if (db.type !== 'POSTGRESQL' || !/^[a-f0-9]{64}$/.test(referencedSnapshot)) {
+                throw new Error(`Invalid database snapshot reference for ${sourceName}`);
+              }
+              await this.restorePostgresStream(base, env, referencedSnapshot, sourceName, db.name);
+              continue;
+            }
             const dumpFile = [
               path.join(dbTmpPath, `${sourceName}.sql`),
               path.join(legacyDbTmpPath, `${sourceName}.sql`),
@@ -799,11 +931,7 @@ export class ResticExecutor {
             }
 
             if (db.type === 'POSTGRESQL') {
-              await this.executor.execute(
-                'sudo',
-                ['-u', 'postgres', 'psql', '-d', db.name, '-f', realDump],
-                { timeout: 600_000 },
-              );
+              await pgRestoreFromFile(this.executor, db.name, realDump);
             } else {
               const cmd = db.type === 'MARIADB' ? 'mariadb' : 'mysql';
               await this.executor.execute(
@@ -1256,11 +1384,11 @@ export class ResticExecutor {
       const args = [
         ...base,
         'forget',
+        '--no-cache',
         '--tag',
         `site:${siteName}`,
-        '--group-by',
-        'tags',
-        '--prune',
+        '--host', os.hostname(),
+        '--group-by', 'host,tags',
       ];
 
       // Если ни одного keep-* не задано — не запускаем, иначе restic удалит всё.
@@ -1274,9 +1402,76 @@ export class ResticExecutor {
       if (r.exitCode !== 0) {
         return { success: false, error: r.stderr.substring(0, 500) };
       }
+      await this.sweepUnreferencedSiteDatabases(base, env, siteName);
+      await this.pruneRepository(base, env);
       return { success: true };
     } catch (err) {
       return { success: false, error: (err as Error).message };
+    }
+  }
+
+  private async pruneRepository(base: string[], env: Record<string, string>): Promise<void> {
+    const result = await this.executor.execute('restic', [...base, 'prune', '--no-cache'], {
+      env, timeout: RESTIC_OPS.MAINTENANCE_TIMEOUT_MS, allowFailure: true,
+    });
+    if (result.exitCode !== 0) throw new Error(`Restic prune failed: ${result.stderr.slice(-500)}`);
+  }
+
+  /** DB streams use a distinct tag. Keep exactly those referenced by retained
+   * site snapshots; a 24h grace period protects backups still in progress. */
+  private async sweepUnreferencedSiteDatabases(
+    base: string[], env: Record<string, string>, siteName: string,
+  ): Promise<void> {
+    const list = async (tag: string): Promise<ResticSnapshot[]> => {
+      const result = await this.executor.execute('restic',
+        [...base, 'snapshots', '--json', '--tag', tag],
+        { env, timeout: 120_000, allowFailure: true });
+      if (result.exitCode !== 0) throw new Error(`Restic database retention inventory failed: ${result.stderr.slice(-500)}`);
+      const parsed: unknown = JSON.parse(result.stdout);
+      if (!Array.isArray(parsed)) throw new Error('Restic database retention inventory is invalid');
+      return parsed as ResticSnapshot[];
+    };
+    const dbSnapshots = await list(`site-db:${siteName}`);
+    if (dbSnapshots.length === 0) return;
+    const retained = new Set<string>();
+    const siteSnapshots = await list(`site:${siteName}`);
+    for (const snapshot of siteSnapshots) {
+      if (!/^[a-f0-9]{64}$/.test(snapshot.id) || !Array.isArray(snapshot.paths)) {
+        throw new Error('Site snapshot inventory is invalid');
+      }
+      for (const refPath of snapshot.paths.filter((p) =>
+        typeof p === 'string' && /\/restic-dbrefs\/[0-9a-f-]{36}\.json$/.test(p))) {
+        const dump = await this.executor.execute('restic',
+          [...base, 'dump', '--no-cache', snapshot.id, refPath],
+          { env, timeout: 120_000, allowFailure: true });
+        if (dump.exitCode !== 0 || Buffer.byteLength(dump.stdout) > 64 * 1024) {
+          throw new Error(`Cannot inspect database references in site snapshot ${snapshot.id}`);
+        }
+        const refs = JSON.parse(dump.stdout) as { version?: number; databases?: Record<string, string> };
+        if (refs.version !== 1 || !refs.databases || typeof refs.databases !== 'object') {
+          throw new Error(`Invalid database references in site snapshot ${snapshot.id}`);
+        }
+        for (const id of Object.values(refs.databases)) {
+          if (typeof id !== 'string' || !/^[a-f0-9]{64}$/.test(id)) {
+            throw new Error(`Invalid database snapshot id in site snapshot ${snapshot.id}`);
+          }
+          retained.add(id);
+        }
+      }
+    }
+    const cutoff = Date.now() - 24 * 60 * 60 * 1000;
+    const unused = dbSnapshots.filter((snapshot) => {
+      if (!/^[a-f0-9]{64}$/.test(snapshot.id) || !Number.isFinite(Date.parse(snapshot.time))) {
+        throw new Error('Database snapshot inventory is invalid');
+      }
+      return snapshot.hostname === os.hostname() && !retained.has(snapshot.id) && Date.parse(snapshot.time) < cutoff;
+    }).map((snapshot) => snapshot.id);
+    if (unused.length === 0) return;
+    const removed = await this.executor.execute('restic',
+      [...base, 'forget', ...unused, '--no-cache'],
+      { env, timeout: TIMEOUTS.RESTIC, allowFailure: true });
+    if (removed.exitCode !== 0) {
+      throw new Error(`Restic database retention failed: ${removed.stderr.slice(-500)}`);
     }
   }
 
@@ -1291,11 +1486,11 @@ export class ResticExecutor {
       const args = [
         ...base,
         'forget',
+        '--no-cache',
         '--tag',
         `repo:${repoName}`,
-        '--group-by',
-        'tags',
-        '--prune',
+        '--host', os.hostname(),
+        '--group-by', 'host,tags',
       ];
       if (!appendRetentionPolicyArgs(args, policy)) return { success: true };
 
@@ -1307,6 +1502,7 @@ export class ResticExecutor {
       if (result.exitCode !== 0) {
         return { success: false, error: result.stderr.substring(0, 500) };
       }
+      await this.pruneRepository(base, env);
       return { success: true };
     } catch (err) {
       return { success: false, error: (err as Error).message };
@@ -1331,12 +1527,14 @@ export class ResticExecutor {
 
       const r = await this.executor.execute(
         'restic',
-        [...base, 'forget', snapshotId, '--prune'],
+        [...base, 'forget', snapshotId, '--no-cache'],
         { env, timeout: 600_000, allowFailure: true },
       );
       if (r.exitCode !== 0) {
         return { success: false, error: r.stderr.substring(0, 500) };
       }
+      await this.sweepUnreferencedSiteDatabases(base, env, siteName);
+      await this.pruneRepository(base, env);
       return { success: true };
     } catch (err) {
       return { success: false, error: (err as Error).message };
@@ -1425,6 +1623,7 @@ export class ResticExecutor {
     args: string[],
     env: Record<string, string>,
     onLine: (line: string, stream: 'stdout' | 'stderr') => void,
+    input?: (stdin: Writable) => Promise<void>,
   ): Promise<{ stdout: string; stderr: string; exitCode: number }> {
     return new Promise((resolve) => {
       // Изоляция env: только PATH (чтобы найти restic) + restic-специфика.
@@ -1455,9 +1654,25 @@ export class ResticExecutor {
       let stderrBuf = '';
       let stdoutTail = '';
       let stderrTail = '';
+      let inputError = '';
+      let timedOut = false;
+      let inputDone = !input;
+      let childClosed = false;
+      let closeCode = 1;
+      const finish = () => {
+        if (!childClosed || !inputDone) return;
+        clearTimeout(timer);
+        if (stdoutTail.trim()) onLine(stdoutTail.trim(), 'stdout');
+        if (stderrTail.trim()) onLine(stderrTail.trim(), 'stderr');
+        stdoutTail = ''; stderrTail = '';
+        procHandle.untrack();
+        resolve({ stdout: stdoutBuf,
+          stderr: inputError || (timedOut ? 'restic operation timed out' : stderrBuf),
+          exitCode: inputError ? 1 : closeCode });
+      };
 
       const flush = (chunk: string, tail: string, kind: 'stdout' | 'stderr'): string => {
-        const combined = tail + chunk;
+        const combined = (tail + chunk).slice(-64 * 1024);
         const lines = combined.split('\n');
         const newTail = lines.pop() || '';
         for (const raw of lines) {
@@ -1469,33 +1684,39 @@ export class ResticExecutor {
 
       child.stdout.on('data', (chunk: Buffer) => {
         const s = chunk.toString('utf8');
-        stdoutBuf += s;
+        stdoutBuf = (stdoutBuf + s).slice(-64 * 1024);
         stdoutTail = flush(s, stdoutTail, 'stdout');
       });
       child.stderr.on('data', (chunk: Buffer) => {
         const s = chunk.toString('utf8');
-        stderrBuf += s;
+        stderrBuf = (stderrBuf + s).slice(-64 * 1024);
         stderrTail = flush(s, stderrTail, 'stderr');
       });
 
       const timer = setTimeout(() => {
-        try { child.kill('SIGKILL'); } catch { /* ignore */ }
+        timedOut = true;
+        try { if (!childClosed && child.pid) process.kill(-child.pid, 'SIGKILL'); } catch { /* ignore */ }
       }, RESTIC_OPS.CHECK_TIMEOUT_MS);
 
-      child.on('error', () => {
-        clearTimeout(timer);
-        procHandle.untrack();
-        resolve({ stdout: stdoutBuf, stderr: stderrBuf, exitCode: 1 });
+      if (input) {
+        input(child.stdin).catch((error: Error) => {
+          inputError = error.message;
+          try { if (!childClosed && child.pid) process.kill(-child.pid, 'SIGKILL'); } catch { /* ignore */ }
+        }).finally(() => { inputDone = true; finish(); });
+      } else {
+        child.stdin.end();
+      }
+
+      child.on('error', (error) => {
+        stderrBuf = (stderrBuf + error.message).slice(-64 * 1024);
+        childClosed = true;
+        finish();
       });
 
       child.on('close', (code) => {
-        clearTimeout(timer);
-        procHandle.untrack();
-        resolve({
-          stdout: stdoutBuf,
-          stderr: stderrBuf,
-          exitCode: typeof code === 'number' ? code : 1,
-        });
+        closeCode = typeof code === 'number' ? code : 1;
+        childClosed = true;
+        finish();
       });
     });
   }

@@ -45,6 +45,7 @@ const expectedIds = [
   '2026-07-26-001-ssl-renewal-reliability',
   '2026-07-26-002-certbot-hook-path',
   '2026-07-26-003-stable-acme-webroot',
+  '2026-10-10-001-backup-receipts-directory',
 ];
 
 function assertTemporaryPath(candidate) {
@@ -157,7 +158,7 @@ test(
       const databaseAfter = await fingerprintDatabaseFiles(dbPath);
 
       assert.deepEqual(databaseAfter, databaseBefore);
-      assert.match(result.stdout, /Pending: 9/);
+      assert.match(result.stdout, new RegExp(`Pending: ${expectedIds.length}`));
       assert.match(
         result.stdout,
         /--dry-run: all pending migrations planned with zero writes/,

@@ -10,7 +10,7 @@ import {
   BACKUP_HOSTS,
   isUnderAllowedSiteRoot,
 } from '../config';
-import { dumpDatabaseToFile } from './db-dump';
+import { dumpDatabaseToFile, pgRestoreFromFile } from './db-dump';
 import {
   assertSiteBackupId,
   removeSiteBackupManifest,
@@ -402,7 +402,7 @@ export class BackupExecutor {
             throw new Error(`Invalid dump path: ${actualDump}`);
           }
           if (db.type === 'POSTGRESQL') {
-            await this.executor.execute('sudo', ['-u', 'postgres', 'psql', '-d', db.name, '-f', safeDump], { timeout: 600_000 });
+            await pgRestoreFromFile(this.executor, db.name, safeDump);
           } else {
             const cmd = db.type === 'MARIADB' ? 'mariadb' : 'mysql';
             await this.executor.execute(cmd, ['-u', 'root', db.name, '-e', `source ${safeDump}`], { timeout: 600_000 });

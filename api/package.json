@@ -41,7 +41,8 @@
     "db:migrate": "npx prisma migrate deploy",
     "db:migrate:dev": "npx prisma migrate dev",
     "db:generate": "npx prisma generate",
-    "db:seed": "npx ts-node prisma/seed.ts"
+    "db:seed": "npx ts-node prisma/seed.ts",
+    "test:backup-reliability": "TS_NODE_TRANSPILE_ONLY=1 node --test --test-concurrency=1 -r ts-node/register -r ../tools/register-shared-source.js test/backup-progress-buffer.test.js test/backup-timeouts.test.js test/panel-data-backup-snapshot.test.js test/panel-sqlite-snapshot.test.js test/retention-sweep-state.test.js test/site-backup-concurrency.test.js"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.1037.0",

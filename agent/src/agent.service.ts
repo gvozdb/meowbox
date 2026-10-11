@@ -7,6 +7,7 @@ import { MetricsCollector } from './system/metrics.collector';
 import { DeployExecutor } from './deploy/deploy.executor';
 import { DatabaseManager } from './database/database.manager';
 import { SslManager } from './ssl/ssl.manager';
+import { BackupRuntime, BackupResult, CompletionEvent } from './backup/backup-runtime';
 import { BackupExecutor } from './backup/backup.executor';
 import { ResticExecutor, ResticStorage, RetentionPolicy } from './backup/restic.executor';
 import { pgDumpToFile, pgRestoreFromFile } from './backup/db-dump';
@@ -69,6 +70,7 @@ import * as os from 'os';
 import {
   isUnderAllowedSiteRoot,
   isUnderBackupStorage,
+  RESTIC_OPS,
   TIMEOUTS,
 } from './config';
 import {
@@ -207,6 +209,11 @@ export class AgentService {
   /** Soft-cancel токены — взводятся через `migrate:hostpanel:cancel`. */
   private hostpanelCancelTokens: Set<string> = new Set();
 
+  private readonly backupRuntime = new BackupRuntime(path.join(
+    process.env.MEOWBOX_STATE_DIR || '/opt/meowbox/state', 'data', 'backup-receipts',
+  ));
+  private backupDeliveryTimer?: NodeJS.Timeout;
+
   constructor() {
     this.nginx = new NginxManager();
     this.php = new PhpFpmManager();
@@ -269,6 +276,7 @@ export class AgentService {
     this.socket.on('connect', () => {
       console.log('[Agent] Connected to API');
       this.flushPendingEvents();
+      this.deliverBackupResults();
       this.startMetricsStream();
     });
 
@@ -281,6 +289,8 @@ export class AgentService {
       console.error(`[Agent] Connection error: ${err.message}`);
     });
 
+    this.backupDeliveryTimer = setInterval(() => this.deliverBackupResults(), 5000);
+    this.backupDeliveryTimer.unref();
     this.registerHandlers();
     this.registerDurableJobHandlers();
     this.jobRuntime.attach(this.socket);
@@ -288,6 +298,7 @@ export class AgentService {
   }
 
   stop() {
+    clearInterval(this.backupDeliveryTimer);
     this.jobRuntime.detach();
     this.stopMetricsStream();
     this.terminal.destroy();
@@ -320,7 +331,31 @@ export class AgentService {
     if (this.rpcHandlers.has(event)) {
       throw new Error(`Duplicate agent RPC handler: ${event}`);
     }
+    if (['restic:forget', 'restic:forget-repository', 'restic:delete-snapshot', 'restic:restore', 'backup:restore'].includes(event)) {
+      const execute = handler;
+      const requireIdle = event === 'restic:forget' || event === 'restic:forget-repository';
+      handler = (params, cb) => this.backupRuntime.exclusive(() => execute(params, cb), requireIdle);
+    }
     this.rpcHandlers.set(event, handler as RegisteredRpcHandler);
+    if (['backup:execute', 'restic:backup', 'restic:backup-paths', 'backup:execute-paths'].includes(event)) {
+      s.on(event, (params: P, cb: Callback) => {
+        try {
+          const run = params as { backupId: string; scope?: string };
+          const completion: CompletionEvent = run.scope === 'PANEL_DATA' ? 'panel-data:complete'
+            : run.scope === 'SERVER_PATH' ? 'server-path:complete' : 'backup:complete';
+          const work = this.backupRuntime.run(run.backupId, completion, async () => {
+            s.emit('backup:progress', { backupId: run.backupId, progress: 0 });
+            await handler(params, () => {});
+          });
+          cb?.({ success: true, data: { queued: true } });
+          void work.catch((error) => console.error(`[Agent] Backup execution failed: ${error.message}`))
+            .finally(() => this.deliverBackupResults());
+        } catch (error) {
+          cb?.({ success: false, error: (error as Error).message });
+        }
+      });
+      return;
+    }
     s.on(event, async (params: P, cb: Callback) => {
       let settled = false;
       const safeCb: Callback = (result) => {
@@ -1041,6 +1076,11 @@ export class AgentService {
       cb(await this.panelAccess.getFederationCutoverStatus(params));
     });
 
+    this.safeOn(s, 'backup:activity', async (_params: unknown, cb: Callback) => {
+      cb({ success: true, data: { ids: this.backupRuntime.activity() } });
+      this.deliverBackupResults();
+    });
+
     // -- Backup --
     this.safeOn(s, 'backup:execute', async (params: {
       backupId: string;
@@ -1324,7 +1364,7 @@ export class AgentService {
     }, cb: Callback) => {
       const r = await this.restic.forget(params.siteName, params.storage, params.policy);
       cb({ success: r.success, error: r.error });
-    }, TIMEOUTS.RESTIC);
+    }, RESTIC_OPS.MAINTENANCE_RPC_TIMEOUT_MS);
 
     this.safeOn(s, 'restic:forget-repository', async (params: {
       repoName: string;
@@ -1333,7 +1373,7 @@ export class AgentService {
     }, cb: Callback) => {
       const r = await this.restic.forgetRepository(params.repoName, params.storage, params.policy);
       cb({ success: r.success, error: r.error });
-    }, TIMEOUTS.RESTIC);
+    }, RESTIC_OPS.MAINTENANCE_RPC_TIMEOUT_MS);
 
     this.safeOn(s, 'restic:delete-snapshot', async (params: {
       siteName: string;
@@ -1342,7 +1382,7 @@ export class AgentService {
     }, cb: Callback) => {
       const r = await this.restic.deleteSnapshot(params.siteName, params.snapshotId, params.storage);
       cb({ success: r.success, error: r.error });
-    });
+    }, RESTIC_OPS.MAINTENANCE_RPC_TIMEOUT_MS);
 
     this.safeOn(s, 'restic:test', async (params: {
       siteName: string;
@@ -3764,7 +3804,23 @@ export class AgentService {
     });
   }
 
+  private deliverBackupResults(): void {
+    if (!this.socket?.connected) return;
+    void this.backupRuntime.deliver(async (event, result) => {
+      if (!this.socket?.connected) return false;
+      return new Promise<boolean>((resolve) => {
+        this.socket!.timeout(15000).emit(event, result, (error: Error | null, ack: { success?: boolean }) => {
+          resolve(!error && ack?.success === true);
+        });
+      });
+    }).catch((error) => console.error(`[Agent] Backup receipt delivery failed: ${error.message}`));
+  }
+
   private emitOrQueue(event: string, data: unknown): void {
+    if (['backup:complete', 'server-path:complete', 'panel-data:complete'].includes(event)) {
+      this.backupRuntime.complete(event as CompletionEvent, data as BackupResult);
+      return;
+    }
     if (this.socket?.connected) {
       this.socket.emit(event, data);
       return;

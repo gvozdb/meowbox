@@ -30,6 +30,7 @@ function retentionFixture({ record = backupRecord(), responses = {} } = {}) {
   const events = [];
   const updates = [];
   let defaultsCalls = 0;
+  let inventoryCalls = 0;
   const prisma = {
     backup: {
       findUnique: async () => record,
@@ -42,9 +43,11 @@ function retentionFixture({ record = backupRecord(), responses = {} } = {}) {
   const relay = {
     emitToAgent: async (event, payload) => {
       events.push({ event, payload });
+      if (event === 'restic:snapshots') inventoryCalls++;
       return responses[event] || (
         event === 'restic:snapshots'
-          ? { success: true, data: { snapshots: [{ id: 'alive-1' }] } }
+          ? { success: true, data: { snapshots: inventoryCalls === 1
+            ? [{ id: 'alive-1' }, { id: 'removed-1' }] : [{ id: 'alive-1' }] } }
           : { success: true }
       );
     },
@@ -100,9 +103,10 @@ test('site retention policy precedence is schedule, config, then global defaults
     }),
   });
   await scheduled.service.applyResticRetentionIfNeeded('backup-1');
-  assert.deepEqual(scheduled.events[0].payload.policy, schedulePolicy);
+  assert.deepEqual(scheduled.events.find(({ event }) => event === 'restic:forget').payload.policy, schedulePolicy);
   assert.equal(scheduled.getDefaultsCalls(), 0);
   assert.equal(scheduled.updates.length, 1);
+  assert.deepEqual(scheduled.updates[0].where.resticSnapshotId, { in: ['removed-1'] });
   assert.deepEqual(
     {
       siteId: scheduled.updates[0].where.siteId,
@@ -116,12 +120,12 @@ test('site retention policy precedence is schedule, config, then global defaults
     record: backupRecord({ config: configPolicy }),
   });
   await configured.service.applyResticRetentionIfNeeded('backup-1');
-  assert.deepEqual(configured.events[0].payload.policy, configPolicy);
+  assert.deepEqual(configured.events.find(({ event }) => event === 'restic:forget').payload.policy, configPolicy);
   assert.equal(configured.getDefaultsCalls(), 0);
 
   const global = retentionFixture();
   await global.service.applyResticRetentionIfNeeded('backup-1');
-  assert.deepEqual(global.events[0].payload.policy, globalPolicy);
+  assert.deepEqual(global.events.find(({ event }) => event === 'restic:forget').payload.policy, globalPolicy);
   assert.equal(global.getDefaultsCalls(), 1);
 });
 
@@ -135,9 +139,9 @@ test('nested forget failure stops snapshot reconciliation', async () => {
     },
   });
 
-  await fixture.service.applyResticRetentionIfNeeded('backup-1');
+  await assert.rejects(fixture.service.applyResticRetentionIfNeeded('backup-1'), /prune failed/);
 
-  assert.deepEqual(fixture.events.map(({ event }) => event), ['restic:forget']);
+  assert.deepEqual(fixture.events.map(({ event }) => event), ['restic:snapshots', 'restic:forget']);
   assert.equal(fixture.updates.length, 0);
 });
 
@@ -153,7 +157,8 @@ test('failed or malformed snapshot listing never marks snapshots removed', async
     const fixture = retentionFixture({
       responses: { 'restic:snapshots': response },
     });
-    await fixture.service.applyResticRetentionIfNeeded('backup-1');
+    await assert.rejects(fixture.service.applyResticRetentionIfNeeded('backup-1'));
     assert.equal(fixture.updates.length, 0);
+    assert.equal(fixture.events.some(({ event }) => event === 'restic:forget'), false);
   }
 });

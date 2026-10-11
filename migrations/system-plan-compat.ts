@@ -25,7 +25,7 @@ interface CountRow {
 const SHA256 = /^[a-f0-9]{64}$/;
 
 /**
- * These migrations shipped before the zero-write plan contract. Their source
+ * These migrations shipped or were applied in dev mode without a zero-write plan. Their source
  * files must stay immutable because the runner stores checksums of compiled
  * artifacts. This bridge therefore plans only the exact reviewed artifacts;
  * any source/compiler drift invalidates the compatibility entry.
@@ -91,6 +91,12 @@ export const LEGACY_SYSTEM_PLAN_COMPATIBILITY: readonly LegacySystemPlanCompatib
     summary: 'Reconcile the stable shared ACME webroot in Nginx and certbot renewal state',
     requirements: ['agent-nginx-templates', 'agent-nginx-manager'],
     applyAdapter: 'legacy-nginx-domain-runtime',
+  },
+  {
+    id: '2026-10-10-001-backup-receipts-directory',
+    checksum: 'd15863777e7c3523a980d2e84558dd16ffefed0d7162b528f4f581a4c02145de',
+    summary: 'Create private bounded backup receipt journal directory',
+    requirements: [],
   },
 ];
 

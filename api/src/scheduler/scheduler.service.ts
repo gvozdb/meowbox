@@ -17,6 +17,7 @@ import { PanelSettingsService } from '../panel-settings/panel-settings.service';
 import { DnsService } from '../dns/dns.service';
 import { CountryBlockService } from '../country-block/country-block.service';
 import { failStaleBackupRuns } from '../backups/backup-run-recovery';
+import { ResticRepositoryRetentionService } from '../backups/restic-repository-retention.service';
 
 // Thresholds for high load alerts (avoid alert storms with cooldown).
 // Все пороги конфигурируются через env, т.к. оператор регулярно их подстраивает
@@ -53,6 +54,7 @@ const DISK_ALERT_STATE_KEY = 'disk-alert-state';
 export class SchedulerService implements OnModuleInit {
   private readonly logger = new Logger('Scheduler');
   private lastHighLoadAlert = 0;
+  private retentionSweepRunning = false;
   // Disk-алёрт хранит уровень + время последнего уведомления, чтобы
   // не спамить раз в 30 минут пока диск стабильно держится выше порога.
   // Persist в БД (см. loadDiskAlertState / persistDiskAlertState), иначе
@@ -77,6 +79,7 @@ export class SchedulerService implements OnModuleInit {
     private readonly panelSettings: PanelSettingsService,
     private readonly dnsService: DnsService,
     private readonly countryBlockService: CountryBlockService,
+    private readonly resticRetention: ResticRepositoryRetentionService,
   ) {}
 
   async onModuleInit() {
@@ -439,6 +442,22 @@ export class SchedulerService implements OnModuleInit {
   // =========================================================================
   // Backup Cleanup — run daily at 3:00 AM
   // =========================================================================
+  @Cron('*/15 * * * *')
+  async handleResticRetentionSweep() {
+    if (this.retentionSweepRunning || !this.agentRelay.isAgentConnected()) return;
+    this.retentionSweepRunning = true;
+    try {
+      const activity = await this.agentRelay.emitToAgent<{ ids: string[] }>('backup:activity', {}, 10_000);
+      if (!activity.success || !Array.isArray(activity.data?.ids) || activity.data.ids.length) return;
+      await this.resticRetention.sweepDueRepositories();
+      await this.backupsService.sweepSiteRetention();
+    } catch (err) {
+      this.logger.warn(`Restic retention sweep failed: ${(err as Error).message}`);
+    } finally {
+      this.retentionSweepRunning = false;
+    }
+  }
+
   @Cron('0 3 * * *')
   async handleBackupCleanup() {
     try {
@@ -740,8 +759,11 @@ export class SchedulerService implements OnModuleInit {
 
   private async recoverStaleBackups() {
     try {
+      if (!this.agentRelay.isAgentConnected()) return;
+      const activity = await this.agentRelay.emitToAgent<{ ids: string[] }>('backup:activity', {}, 10_000);
+      if (!activity.success || !Array.isArray(activity.data?.ids)) return;
       const backupCutoff = new Date(Date.now() - WATCHDOG_BACKUP_TIMEOUT_MS);
-      const recovered = await failStaleBackupRuns(this.prisma, backupCutoff);
+      const recovered = await failStaleBackupRuns(this.prisma, backupCutoff, new Date(), activity.data.ids);
       const total = recovered.site + recovered.serverPath + recovered.panelData;
       if (total > 0) {
         this.logger.warn(

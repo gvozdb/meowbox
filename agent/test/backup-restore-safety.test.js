@@ -19,7 +19,7 @@ process.env.ALLOWED_SITE_ROOT_PREFIXES = sitesRoot;
 const originalLoad = Module._load;
 Module._load = function loadWithSharedSource(request, parent, isMain) {
   if (request === '@meowbox/shared') {
-    return require('../../shared/src/backup-restore');
+    return require('../../shared/src/index');
   }
   return originalLoad.call(this, request, parent, isMain);
 };

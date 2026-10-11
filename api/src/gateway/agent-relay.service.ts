@@ -114,15 +114,17 @@ export class AgentRelayService {
     }
 
     return new Promise<AgentResponse<T>>((resolve, reject) => {
-      const timer = setTimeout(() => {
-        reject(new AgentTimeoutError(event, timeoutMs));
-      }, timeoutMs);
-
-      this.agentSocket!.emit(event, data, (response: AgentResponse<T>) => {
-        clearTimeout(timer);
-        resolve(response);
-      });
+      this.agentSocket!.timeout(timeoutMs).emit(event, data,
+        (error: Error | null, response: AgentResponse<T>) => {
+          if (error) reject(new AgentTimeoutError(event, timeoutMs));
+          else resolve(response);
+        });
     });
+  }
+
+  async enqueueBackup(event: string, data: unknown): Promise<void> {
+    const result = await this.emitToAgent(event, data, 20_000);
+    if (result?.success !== true) throw new Error(result?.error || 'Agent rejected backup admission');
   }
 
   /**

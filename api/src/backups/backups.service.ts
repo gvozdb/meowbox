@@ -1,3 +1,6 @@
+import { traceBackupMemory } from './backup-memory-trace';
+import { RetentionSweepState } from './retention-sweep-state';
+import { backupCompletionWhere, backupDispatchFailure } from './backup-completion';
 import {
   Injectable,
   NotFoundException,
@@ -533,13 +536,9 @@ export class BackupsService {
             `Failed to dispatch backup ${backup.id}: ${message}`,
           );
           this.prisma.backup
-            .update({
-              where: { id: backup.id },
-              data: {
-                status: BackupStatus.FAILED,
-                errorMessage: `Dispatch failed: ${message}`,
-                completedAt: new Date(),
-              },
+            .updateMany({
+              where: { id: backup.id, status: { in: [BackupStatus.PENDING, BackupStatus.IN_PROGRESS] } },
+              data: backupDispatchFailure(err),
             })
             .catch(() => {});
         });
@@ -547,7 +546,7 @@ export class BackupsService {
       }
 
       try {
-        this.agentRelay.emitToAgentAsync('backup:execute', {
+        await this.agentRelay.enqueueBackup('backup:execute', {
           backupId: backup.id,
           siteId: site.id,
           siteName: site.name,
@@ -565,13 +564,9 @@ export class BackupsService {
       } catch (err) {
         const message = safeErrorMessage(err, 'Backup dispatch failed');
         this.logger.error(`Failed to dispatch backup: ${message}`);
-        await this.prisma.backup.update({
-          where: { id: backup.id },
-          data: {
-            status: BackupStatus.FAILED,
-            errorMessage: `Agent unavailable: ${message}`,
-            completedAt: new Date(),
-          },
+        await this.prisma.backup.updateMany({
+          where: { id: backup.id, status: { in: [BackupStatus.PENDING, BackupStatus.IN_PROGRESS] } },
+          data: backupDispatchFailure(err),
         });
       }
     }
@@ -691,6 +686,7 @@ export class BackupsService {
     retention: { keepDaily: number; keepWeekly: number; keepMonthly: number; keepYearly: number };
     manifest: string;
   }): Promise<void> {
+    traceBackupMemory();
     const { backupId, site, engine, backupType, location, excludePaths, excludeTableData, retention } = params;
 
   if (engine === BackupEngine.RESTIC) {
@@ -698,7 +694,7 @@ export class BackupsService {
         throw new Error(`Restic not supported for location ${location.name} (type=${location.type})`);
       }
 
-      this.agentRelay.emitToAgentAsync('restic:backup', {
+      await this.agentRelay.enqueueBackup('restic:backup', {
         backupId,
         siteName: site.name,
         rootPath: site.rootPath,
@@ -721,7 +717,7 @@ export class BackupsService {
     }
 
     // TAR
-      this.agentRelay.emitToAgentAsync('backup:execute', {
+      await this.agentRelay.enqueueBackup('backup:execute', {
         backupId,
         siteId: site.id,
         siteName: site.name,
@@ -767,25 +763,20 @@ export class BackupsService {
     const safeBackupError = success
       ? undefined
       : safeErrorMessage(errorMessage, 'Backup failed', 2_000);
-    await this.prisma.backup.update({
-      where: { id: backupId },
+    const updated = await this.prisma.backup.updateMany({
+      where: backupCompletionWhere(backupId),
       data: {
         status: success ? BackupStatus.COMPLETED : BackupStatus.FAILED,
         filePath: filePath || '',
         resticSnapshotId: snapshotId || null,
         sizeBytes: sizeBytes ? BigInt(sizeBytes) : null,
-        errorMessage: safeBackupError,
+        errorMessage: success ? null : safeBackupError,
         completedAt: new Date(),
         progress: success ? 100 : 0,
       },
     });
 
-    // Для Restic — применяем retention сразу после успешного бэкапа
-    if (success) {
-      await this.applyResticRetentionIfNeeded(backupId).catch((err) =>
-        this.logger.warn(`Restic retention failed for ${backupId}: ${(err as Error).message}`),
-      );
-    }
+    if (!updated.count) return false;
 
     const backup = await this.prisma.backup.findUnique({
       where: { id: backupId },
@@ -820,7 +811,7 @@ export class BackupsService {
         .catch((err) =>
           this.logger.error(`Digest dispatch failed: ${(err as Error).message}`),
         );
-      return;
+      return true;
     }
 
     // Без шедуля (ручной запуск, per-site BackupConfig) — старое поведение: instant-нотификация.
@@ -833,6 +824,50 @@ export class BackupsService {
       siteName: backup?.site?.name,
       timestamp: new Date(),
     }).catch((err) => this.logger.error(`Notification failed: ${(err as Error).message}`));
+    return true;
+  }
+
+  async sweepSiteRetention(now = new Date(), limit = 2): Promise<void> {
+    const state = new RetentionSweepState(this.prisma);
+    const repositories = await this.prisma.backup.findMany({
+      where: { engine: BackupEngine.RESTIC, storageLocationId: { not: null } },
+      select: { siteId: true, storageLocationId: true },
+      distinct: ['siteId', 'storageLocationId'],
+    });
+    let attempted = 0;
+    for (const repo of repositories) {
+      if (attempted >= limit) break;
+      const active = await this.prisma.backup.findFirst({ where: {
+        ...repo, status: { in: [BackupStatus.PENDING, BackupStatus.IN_PROGRESS] },
+      } });
+      if (active) continue;
+      const sources = await this.prisma.backup.findMany({
+        where: { ...repo, engine: BackupEngine.RESTIC },
+        distinct: ['scheduleId', 'configId'],
+        orderBy: { createdAt: 'desc' },
+        include: { site: { select: { name: true } }, schedule: true, config: true },
+      });
+      if (!sources.length || !repo.storageLocationId) continue;
+      const defaults = (await this.panelSettings.getBackupDefaults()).retention;
+      const policies = new Set(sources.map((source) => {
+        const p = source.schedule || source.config || defaults;
+        return JSON.stringify([p.keepDaily, p.keepWeekly, p.keepMonthly, p.keepYearly]);
+      }));
+      if (policies.size !== 1) {
+        this.logger.warn(`Retention skipped: conflicting policies share site repository ${repo.siteId}`);
+        continue;
+      }
+      const lease = await state.claim(repo.storageLocationId, sources[0].site.name, now);
+      if (!lease) continue;
+      attempted++;
+      try {
+        await this.applyResticRetentionIfNeeded(sources[0].id);
+        await state.finish(lease, true);
+      } catch (error) {
+        await state.finish(lease, false);
+        this.logger.warn(`Site retention failed: ${(error as Error).message}`);
+      }
+    }
   }
 
   // Вычисляет retention-policy для этого бэкапа и зовёт restic:forget.
@@ -868,6 +903,18 @@ export class BackupsService {
           }
         : (await this.panelSettings.getBackupDefaults()).retention;
 
+    if ([policy.keepDaily, policy.keepWeekly, policy.keepMonthly, policy.keepYearly].every((n) => n === 0)) return;
+
+    const before = await this.agentRelay.emitToAgent<{ success?: boolean; snapshots?: unknown }>(
+      'restic:snapshots',
+      { siteName: b.site.name, storage: { type: loc.type, config: loc.config, password: loc.resticPassword } },
+      60_000,
+    );
+    if (before.success !== true ||
+      (before.data?.success !== undefined && before.data.success !== true) ||
+      !isResticSnapshotList(before.data?.snapshots)) throw new Error('Cannot inventory repository before retention');
+    const beforeIds = before.data.snapshots.map((snapshot) => snapshot.id);
+
     // Вызываем forget на агенте
     const res = await this.agentRelay.emitToAgent<{ success?: boolean; error?: string }>(
       'restic:forget',
@@ -883,8 +930,7 @@ export class BackupsService {
       (res.data?.success !== undefined && res.data.success !== true)
     ) {
       const error = res?.data?.error || res?.error || 'agent reported failure';
-      this.logger.warn(`restic:forget failed: ${error}`);
-      return;
+      throw new Error(`restic:forget failed: ${error}`);
     }
 
     // Синхронизация БД: получаем актуальный список snapshots и помечаем
@@ -908,18 +954,18 @@ export class BackupsService {
       !isResticSnapshotList(snapshots)
     ) {
       const error = listRes?.data?.error || listRes?.error || 'invalid snapshot list response';
-      this.logger.warn(`restic:snapshots reconciliation skipped: ${error}`);
-      return;
+      throw new Error(`restic:snapshots reconciliation skipped: ${error}`);
     }
 
     const aliveIds = new Set(snapshots.map((snapshot) => snapshot.id));
+    const removedIds = beforeIds.filter((id) => !aliveIds.has(id));
+    if (!removedIds.length) return;
     await this.prisma.backup.updateMany({
       where: {
         siteId: b.siteId,
         storageLocationId: b.storageLocationId,
         engine: BackupEngine.RESTIC,
-        resticSnapshotId: { not: null },
-        NOT: { resticSnapshotId: { in: Array.from(aliveIds) } },
+        resticSnapshotId: { in: removedIds },
         status: BackupStatus.COMPLETED,
       },
       data: {

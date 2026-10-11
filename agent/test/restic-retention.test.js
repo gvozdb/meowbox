@@ -1,129 +1,77 @@
 'use strict';
 
 const assert = require('node:assert/strict');
+const os = require('node:os');
 const test = require('node:test');
 const { ResticExecutor } = require('../src/backup/restic.executor');
 
 const storage = {
   type: 'S3',
   config: {
-    bucket: 'backup-bucket',
-    endpoint: 'https://s3.example.test',
-    prefix: 'meowbox',
-    accessKey: 'access-key',
-    secretKey: 'secret-key',
+    bucket: 'backup-bucket', endpoint: 'https://s3.example.test', prefix: 'meowbox',
+    accessKey: 'access-key', secretKey: 'secret-key',
   },
   password: 'restic-password',
 };
 
-test('site retention groups by stable site tags and applies configured keep policy', async () => {
+function mockRestic() {
   const calls = [];
   const restic = new ResticExecutor();
   restic.executor = {
     async execute(command, args, options) {
       calls.push({ command, args, options });
-      return { exitCode: 0, stdout: '', stderr: '' };
+      // Site retention inventories DB snapshots even when there are none.
+      return { exitCode: 0, stdout: args.includes('snapshots') ? '[]' : '', stderr: '' };
     },
   };
+  return { restic, calls };
+}
 
-  const result = await restic.forget('example-test', storage, {
-    keepDaily: 7,
-    keepWeekly: 0,
-    keepMonthly: 2,
-    keepYearly: 0,
-  });
+test('site retention filters this host, inventories DB snapshots, then prunes independently', async () => {
+  const { restic, calls } = mockRestic();
+  assert.deepEqual(await restic.forget('example-test', storage, {
+    keepDaily: 7, keepWeekly: 0, keepMonthly: 2, keepYearly: 0,
+  }), { success: true });
 
-  assert.deepEqual(result, { success: true });
-  assert.equal(calls.length, 1);
+  assert.deepEqual(calls.map(({ args }) => args[2]), ['forget', 'snapshots', 'prune']);
   assert.deepEqual(calls[0].args.slice(2), [
-    'forget',
-    '--tag',
-    'site:example-test',
-    '--group-by',
-    'tags',
-    '--prune',
-    '--keep-daily',
-    '7',
-    '--keep-monthly',
-    '2',
+    'forget', '--no-cache', '--tag', 'site:example-test', '--host', os.hostname(),
+    '--group-by', 'host,tags', '--keep-daily', '7', '--keep-monthly', '2',
   ]);
-  assert.equal(calls[0].options.env.RESTIC_PASSWORD, storage.password);
+  assert.deepEqual(calls[1].args.slice(2), ['snapshots', '--json', '--tag', 'site-db:example-test']);
+  assert.deepEqual(calls[2].args.slice(2), ['prune', '--no-cache']);
+  assert.ok(calls.every(({ command, options }) =>
+    command === 'restic' && options.env.RESTIC_PASSWORD === storage.password));
 });
 
-test('site retention with all-zero policy is a zero-write no-op', async () => {
-  const restic = new ResticExecutor();
-  let called = false;
-  restic.executor = {
-    async execute() {
-      called = true;
-      return { exitCode: 0, stdout: '', stderr: '' };
-    },
-  };
-
-  assert.deepEqual(
-    await restic.forget('example-test', storage, {
-      keepDaily: 0,
-      keepWeekly: 0,
-      keepMonthly: 0,
-      keepYearly: 0,
-    }),
-    { success: true },
-  );
-  assert.equal(called, false);
+test('site retention with all-zero policy makes no repository calls', async () => {
+  const { restic, calls } = mockRestic();
+  assert.deepEqual(await restic.forget('example-test', storage, {
+    keepDaily: 0, keepWeekly: 0, keepMonthly: 0, keepYearly: 0,
+  }), { success: true });
+  assert.equal(calls.length, 0);
 });
 
-test('repository retention groups by stable tags and applies configured keep policy', async () => {
-  const calls = [];
-  const restic = new ResticExecutor();
-  restic.executor = {
-    async execute(command, args, options) {
-      calls.push({ command, args, options });
-      return { exitCode: 0, stdout: '', stderr: '' };
-    },
-  };
+test('repository retention cannot select another host and prunes after zero removals', async () => {
+  const { restic, calls } = mockRestic();
+  assert.deepEqual(await restic.forgetRepository('panel-data', storage, {
+    keepDaily: 25, keepWeekly: 4, keepMonthly: 0, keepYearly: 1,
+  }), { success: true });
 
-  const result = await restic.forgetRepository('panel-data', storage, {
-    keepDaily: 25,
-    keepWeekly: 4,
-    keepMonthly: 0,
-    keepYearly: 1,
-  });
-
-  assert.deepEqual(result, { success: true });
-  assert.equal(calls.length, 1);
-  assert.equal(calls[0].command, 'restic');
+  assert.deepEqual(calls.map(({ args }) => args[2]), ['forget', 'prune']);
   assert.deepEqual(calls[0].args.slice(2), [
-    'forget',
-    '--tag',
-    'repo:panel-data',
-    '--group-by',
-    'tags',
-    '--prune',
-    '--keep-daily',
-    '25',
-    '--keep-weekly',
-    '4',
-    '--keep-yearly',
-    '1',
+    'forget', '--no-cache', '--tag', 'repo:panel-data', '--host', os.hostname(),
+    '--group-by', 'host,tags', '--keep-daily', '25', '--keep-weekly', '4', '--keep-yearly', '1',
   ]);
-  assert.equal(calls[0].options.env.RESTIC_PASSWORD, storage.password);
+  assert.deepEqual(calls[1].args.slice(2), ['prune', '--no-cache']);
+  assert.ok(calls.every(({ command, options }) =>
+    command === 'restic' && options.env.RESTIC_PASSWORD === storage.password));
 });
 
-test('repository retention with empty policy is a zero-write no-op', async () => {
-  const restic = new ResticExecutor();
-  let called = false;
-  restic.executor = {
-    async execute() {
-      called = true;
-      return { exitCode: 0, stdout: '', stderr: '' };
-    },
-  };
-
-  assert.deepEqual(
-    await restic.forgetRepository('panel-data', storage, {}),
-    { success: true },
-  );
-  assert.equal(called, false);
+test('repository retention with empty policy makes no repository calls', async () => {
+  const { restic, calls } = mockRestic();
+  assert.deepEqual(await restic.forgetRepository('panel-data', storage, {}), { success: true });
+  assert.equal(calls.length, 0);
 });
 
 test('repository snapshot listing filters by repo tag without initializing storage', async () => {
@@ -131,17 +79,8 @@ test('repository snapshot listing filters by repo tag without initializing stora
   restic.executor = {
     async execute(command, args) {
       assert.equal(command, 'restic');
-      assert.deepEqual(args.slice(2), [
-        'snapshots',
-        '--json',
-        '--tag',
-        'repo:panel-data',
-      ]);
-      return {
-        exitCode: 0,
-        stdout: JSON.stringify([{ id: 'snapshot-1' }]),
-        stderr: '',
-      };
+      assert.deepEqual(args.slice(2), ['snapshots', '--json', '--tag', 'repo:panel-data']);
+      return { exitCode: 0, stdout: JSON.stringify([{ id: 'snapshot-1' }]), stderr: '' };
     },
   };
 

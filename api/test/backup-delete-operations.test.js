@@ -110,7 +110,7 @@ test('T-OPS-004 backup deletion admits one reconcile-only durable operation', as
     idempotencyKey: key,
     actor: { userId: state.ownerId, role: 'MANAGER' },
     request: { backupId: state.backupId },
-    deadlineMs: 2 * 60 * 60_000,
+    deadlineMs: require('../src/backups/restic-retention.constants').RESTIC_RETENTION_LEASE_MS,
     recoveryPolicy: 'RECONCILE_ONLY',
     retryable: false,
     globalLockKey: `backup-delete:${state.backupId}`,

@@ -1,77 +1,140 @@
 import * as fs from 'fs';
-import * as os from 'os';
-import * as path from 'path';
 import { randomBytes } from 'crypto';
+import { spawn } from 'child_process';
+import { pipeline } from 'stream/promises';
+import type { Readable, Writable } from 'stream';
 
 import { CommandExecutor } from '../command-executor';
+import { childProcessRegistry } from '../process-registry';
 
-const DUMP_TIMEOUT_MS = 600_000;
+const DUMP_TIMEOUT_MS = 3_600_000;
 
-/**
- * pg_dump конкретной БД в указанный файл.
- *
- * Особенность PostgreSQL на хосте: роль `postgres` использует peer-auth →
- * подключиться к ней можно ТОЛЬКО из OS-юзера `postgres`. Агент крутится под
- * root → `pg_dump -U postgres` без sudo упадёт с «Peer authentication failed».
- * Поэтому всегда оборачиваем в `sudo -u postgres`.
- *
- * Второе следствие: postgres-юзер не имеет прав писать в директорию вызывающего
- * (например `/var/meowbox/backups/*` принадлежит root) → дампим во временный
- * файл в `/tmp` (доступно postgres), затем под root копируем в outputPath и
- * чистим temp. copy+unlink вместо rename — потому что /tmp может быть на
- * отдельном tmpfs/устройстве (rename вернёт EXDEV).
- */
+const MAX_ERROR_BYTES = 16 * 1024;
+function bounded(previous: string, chunk: Buffer): string {
+  return (previous + chunk.toString('utf8')).slice(-MAX_ERROR_BYTES);
+}
+
+function pgError(stage: string, dbName: string, details: string): Error {
+  const lockHint = /out of shared memory|increase max_locks_per_transaction/i.test(details)
+    ? ' PostgreSQL lock table is exhausted; a consistent whole-database dump needs more lock capacity. Arrange a measured max_locks_per_transaction change and PostgreSQL restart.'
+    : '';
+  return new Error(`${stage} failed for ${dbName}: ${details.slice(-MAX_ERROR_BYTES)}${lockHint}`);
+}
+
+/** Stream a complete plain SQL dump into a writable sink with backpressure. */
+export async function pgDumpToWritable(
+  dbName: string,
+  destination: Writable,
+  extraArgs: string[] = [],
+): Promise<void> {
+  const child = spawn('sudo', ['-n', '-u', 'postgres', 'pg_dump', '-Fp', ...extraArgs, dbName], {
+    stdio: ['ignore', 'pipe', 'pipe'], detached: true,
+    env: { PATH: process.env.PATH || '/usr/bin:/bin', LC_ALL: 'C' },
+  });
+  const tracked = childProcessRegistry.track(child, `pg_dump:${dbName}`, { processGroup: true });
+  let stderr = '';
+  let timedOut = false;
+  child.stderr.on('data', (chunk: Buffer) => { stderr = bounded(stderr, chunk); });
+  const exit = new Promise<void>((resolve, reject) => {
+    child.once('error', reject);
+    child.once('close', (code, signal) => {
+      if (code === 0) resolve();
+      else reject(pgError('pg_dump', dbName,
+        timedOut ? 'timed out while producing or uploading the dump' : stderr || `exit ${code ?? signal}`));
+    });
+  });
+  // The deadline covers both an idle producer and a blocked consumer.
+  const timer = setTimeout(() => {
+    timedOut = true;
+    tracked.terminate(0).catch(() => undefined);
+  }, DUMP_TIMEOUT_MS);
+  try {
+    await Promise.all([pipeline(child.stdout, destination), exit]);
+  } catch (error) {
+    await tracked.terminate(0);
+    await exit.catch(() => undefined);
+    throw error;
+  } finally {
+    clearTimeout(timer);
+    tracked.untrack();
+  }
+}
+
+/** Root writes a private partial in the destination directory; successful exit publishes it. */
 export async function pgDumpToFile(
-  executor: CommandExecutor,
+  _executor: CommandExecutor,
   dbName: string,
   outputPath: string,
   extraArgs: string[] = [],
 ): Promise<void> {
-  const tmpFile = path.join(os.tmpdir(), `meowbox-pgdump-${randomBytes(8).toString('hex')}.sql`);
-  const sudoArgs = ['-u', 'postgres', 'pg_dump', '-Fp', '-f', tmpFile, ...extraArgs, dbName];
+  const tmpFile = `${outputPath}.${randomBytes(8).toString('hex')}.partial`;
+  const output = fs.createWriteStream(tmpFile, { flags: 'wx', mode: 0o600 });
   try {
-    const r = await executor.execute('sudo', sudoArgs, {
-      timeout: DUMP_TIMEOUT_MS,
-      allowFailure: true,
-    });
-    if (r.exitCode !== 0) {
-      throw new Error(`pg_dump failed for ${dbName}: ${r.stderr}`);
-    }
-    await fs.promises.copyFile(tmpFile, outputPath);
+    await pgDumpToWritable(dbName, output, extraArgs);
+    // link is atomic and refuses an existing destination; rename would silently
+    // replace another run's artifact if the same backup id were retried.
+    await fs.promises.link(tmpFile, outputPath);
   } finally {
     fs.rmSync(tmpFile, { force: true });
   }
 }
 
-/**
- * Залить дамп .sql в указанную PostgreSQL-БД через `psql -f`.
- *
- * Та же ловушка peer-auth → запуск через `sudo -u postgres`. Дополнительно
- * postgres-юзеру нужен доступ на чтение к sourcePath. Вызывающий обычно держит
- * файл в root-owned директории (0600/0700) → копируем в /tmp с правами 0644,
- * чтобы postgres гарантированно прочитал, а после restore зачищаем.
- *
- * extraArgs позволяют каллеру дописать флаги вроде `-v ON_ERROR_STOP=1`.
- */
+/** Root reads a private SQL artifact and feeds postgres over stdin. */
+export async function pgRestoreFromReadable(
+  dbName: string,
+  source: Readable,
+  extraArgs: string[] = [],
+  sourceVerified: Promise<void> = Promise.resolve(),
+): Promise<void> {
+  const child = spawn('sudo', [
+    '-n', '-u', 'postgres', 'psql', '-X', '-v', 'ON_ERROR_STOP=1', '-d', dbName, ...extraArgs,
+  ], {
+    stdio: ['pipe', 'ignore', 'pipe'], detached: true,
+    env: { PATH: process.env.PATH || '/usr/bin:/bin', LC_ALL: 'C' },
+  });
+  const tracked = childProcessRegistry.track(child, `psql:${dbName}`, { processGroup: true });
+  let stderr = '';
+  let timedOut = false;
+  child.stderr.on('data', (chunk: Buffer) => { stderr = bounded(stderr, chunk); });
+  const exit = new Promise<void>((resolve, reject) => {
+    child.once('error', reject);
+    child.once('close', (code, signal) => {
+      if (code === 0) resolve();
+      else reject(pgError('psql restore', dbName,
+        timedOut ? 'timed out while restoring the dump' : stderr || `exit ${code ?? signal}`));
+    });
+  });
+  const timer = setTimeout(() => {
+    timedOut = true;
+    tracked.terminate(0).catch(() => undefined);
+  }, DUMP_TIMEOUT_MS);
+  // The dump is transactional. Do not commit a prefix when its source fails
+  // after emitting valid SQL (e.g. a late S3 download error).
+  void exit.catch(() => undefined);
+  void sourceVerified.catch(() => undefined);
+  try {
+    child.stdin.write('BEGIN;\n');
+    await pipeline(source, child.stdin, { end: false });
+    await sourceVerified;
+    child.stdin.end('\nCOMMIT;\n');
+    await exit;
+  } catch (error) {
+    await tracked.terminate(0);
+    await exit.catch(() => undefined);
+    throw error;
+  } finally {
+    clearTimeout(timer);
+    tracked.untrack();
+  }
+}
+
 export async function pgRestoreFromFile(
-  executor: CommandExecutor,
+  _executor: CommandExecutor,
   dbName: string,
   sourcePath: string,
   extraArgs: string[] = [],
 ): Promise<void> {
-  const tmpFile = path.join(os.tmpdir(), `meowbox-pgrestore-${randomBytes(8).toString('hex')}.sql`);
-  try {
-    await fs.promises.copyFile(sourcePath, tmpFile);
-    fs.chmodSync(tmpFile, 0o644);
-    const r = await executor.execute('sudo', [
-      '-u', 'postgres', 'psql', '-d', dbName, ...extraArgs, '-f', tmpFile,
-    ], { timeout: DUMP_TIMEOUT_MS, allowFailure: true });
-    if (r.exitCode !== 0) {
-      throw new Error(`psql restore failed for ${dbName}: ${r.stderr}`);
-    }
-  } finally {
-    fs.rmSync(tmpFile, { force: true });
-  }
+  await pgRestoreFromReadable(dbName, fs.createReadStream(sourcePath), extraArgs);
 }
 
 /**
@@ -104,13 +167,17 @@ export async function dumpDatabaseToFile(
   const excluded = excludeTableData?.length ? excludeTableData : [];
 
   if (type === 'POSTGRESQL') {
-    const extra: string[] = [];
+    const extra: string[] = ['--clean', '--if-exists'];
     for (const t of excluded) extra.push(`--exclude-table-data=${t}`);
     await pgDumpToFile(executor, name, outputPath, extra);
     return;
   }
 
   const cmd = type === 'MARIADB' ? 'mariadb-dump' : 'mysqldump';
+  // result-file preserves an existing inode's mode. Create it privately before
+  // invoking the database client; failed invocations must not leave plaintext.
+  fs.writeFileSync(outputPath, '', { flag: 'wx', mode: 0o600 });
+  try {
 
   // Нет исключений — один полный проход (структура + данные всех таблиц).
   if (excluded.length === 0) {
@@ -145,6 +212,7 @@ export async function dumpDatabaseToFile(
 
   // Проход 2 — данные кроме исключённых таблиц → временный файл.
   const dataFile = `${outputPath}.data`;
+  fs.writeFileSync(dataFile, '', { flag: 'wx', mode: 0o600 });
   const dataArgs = [
     '-u', 'root',
     '--single-transaction', '--quick', '--no-create-info', '--skip-triggers',
@@ -172,5 +240,9 @@ export async function dumpDatabaseToFile(
     });
   } finally {
     fs.rmSync(dataFile, { force: true });
+  }
+  } catch (error) {
+    fs.rmSync(outputPath, { force: true });
+    throw error;
   }
 }

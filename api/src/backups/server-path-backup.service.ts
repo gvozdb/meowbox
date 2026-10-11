@@ -1,3 +1,5 @@
+import { traceBackupMemory } from './backup-memory-trace';
+import { backupCompletionWhere, backupDispatchFailure } from './backup-completion';
 import {
   Injectable,
   Logger,
@@ -238,13 +240,9 @@ export class ServerPathBackupService {
       }).catch((err) => {
         this.logger.error(`Dispatch failed for ${backup.id}: ${(err as Error).message}`);
         this.prisma.serverPathBackup
-          .update({
-            where: { id: backup.id },
-            data: {
-              status: BackupStatus.FAILED,
-              errorMessage: `Dispatch failed: ${(err as Error).message}`,
-              completedAt: new Date(),
-            },
+          .updateMany({
+            where: { id: backup.id, status: { in: [BackupStatus.PENDING, BackupStatus.IN_PROGRESS] } },
+            data: backupDispatchFailure(err),
           })
           .catch(() => {});
       });
@@ -273,13 +271,14 @@ export class ServerPathBackupService {
       resticPassword: string | null;
     };
   }): Promise<void> {
+    traceBackupMemory();
     const { backupId, configName, path, engine, excludePaths, location } = params;
 
     if (engine === BackupEngine.RESTIC) {
       if (!RESTIC_COMPATIBLE.has(location.type) || !location.resticPassword) {
         throw new Error(`Restic не поддерживает location ${location.name}`);
       }
-      this.agentRelay.emitToAgentAsync('restic:backup-paths', {
+      await this.agentRelay.enqueueBackup('restic:backup-paths', {
         backupId,
         scope: 'SERVER_PATH',
         repoName: resticRepositoryName(configName, 'server-path'),
@@ -295,7 +294,7 @@ export class ServerPathBackupService {
     }
 
     // TAR
-    this.agentRelay.emitToAgentAsync('backup:execute-paths', {
+    await this.agentRelay.enqueueBackup('backup:execute-paths', {
       backupId,
       scope: 'SERVER_PATH',
       archiveName: resticRepositoryName(configName, 'server-path'),
@@ -336,26 +335,22 @@ export class ServerPathBackupService {
       where: { id: backupId },
       include: { config: { select: { id: true, name: true, path: true, notificationMode: true } } },
     });
-    if (!backup) return;
+    if (!backup) return false;
 
-    await this.prisma.serverPathBackup.update({
-      where: { id: backupId },
+    const updated = await this.prisma.serverPathBackup.updateMany({
+      where: backupCompletionWhere(backupId),
       data: {
         status: success ? BackupStatus.COMPLETED : BackupStatus.FAILED,
         filePath: filePath || '',
         resticSnapshotId: snapshotId || null,
         sizeBytes: sizeBytes ? BigInt(sizeBytes) : null,
-        errorMessage,
+        errorMessage: success ? null : errorMessage,
         completedAt: new Date(),
         progress: success ? 100 : 0,
       },
     });
 
-    if (success) {
-      await this.resticRetention.applyForServerPathBackup(backupId).catch((err) =>
-        this.logger.warn(`Restic retention failed for ${backupId}: ${(err as Error).message}`),
-      );
-    }
+    if (!updated.count) return false;
 
     const mode = (backup.config.notificationMode || 'INSTANT') as DigestNotificationMode;
     this.digest
@@ -372,6 +367,7 @@ export class ServerPathBackupService {
         mode,
       )
       .catch((err) => this.logger.error(`Notification failed: ${(err as Error).message}`));
+    return true;
   }
 
   // ===========================================================================

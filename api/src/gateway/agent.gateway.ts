@@ -17,6 +17,7 @@ import {
 } from '@meowbox/shared';
 import { AgentRelayService } from './agent-relay.service';
 import { DeployService } from '../deploy/deploy.service';
+import { BackupProgressBuffer } from '../backups/backup-progress-buffer';
 import { BackupsService } from '../backups/backups.service';
 import { ServerPathBackupService } from '../backups/server-path-backup.service';
 import { PanelDataBackupService } from '../backups/panel-data-backup.service';
@@ -127,6 +128,12 @@ export class AgentGateway implements OnGatewayConnection, OnGatewayDisconnect {
   private static readonly MAX_TAILS_PER_CLIENT = parseInt(
     process.env.MAX_TAILS_PER_CLIENT || '10', 10,
   );
+
+  private readonly backupProgress = new BackupProgressBuffer(async (id, progress) => {
+    await this.backupsService.updateBackupProgress(id, progress);
+    await this.serverPathBackupService.updateProgress(id, progress);
+    await this.panelDataBackupService.updateProgress(id, progress);
+  }, (error) => this.logger.warn(`Backup progress write failed: ${(error as Error).message}`));
 
   constructor(
     private readonly config: ConfigService,
@@ -942,14 +949,7 @@ export class AgentGateway implements OnGatewayConnection, OnGatewayDisconnect {
     agent.on(
       'backup:progress',
       async (data: { backupId: string; progress: number }) => {
-        // Один и тот же event прилетает для SITE / SERVER_PATH / PANEL_DATA.
-        // Каждый сервис делает updateMany по WHERE id=backupId — попадёт только
-        // та таблица, где этот id реально есть.
-        await Promise.all([
-          this.backupsService.updateBackupProgress(data.backupId, data.progress).catch(() => {}),
-          this.serverPathBackupService.updateProgress(data.backupId, data.progress).catch(() => {}),
-          this.panelDataBackupService.updateProgress(data.backupId, data.progress).catch(() => {}),
-        ]);
+        this.backupProgress.push(data.backupId, data.progress);
         this.emitBrowserBroadcast('backup:progress', {
           backupId: data.backupId,
           progress: data.progress,
@@ -958,89 +958,36 @@ export class AgentGateway implements OnGatewayConnection, OnGatewayDisconnect {
       },
     );
 
-    // --- Backup complete ---
-    agent.on(
-      'backup:complete',
-      async (data: {
-        backupId: string;
-        success: boolean;
-        filePath?: string;
-        sizeBytes?: number;
-        error?: string;
-        snapshotId?: string; // для Restic
-      }) => {
-        await this.backupsService.completeBackup(
-          data.backupId,
-          data.success,
-          data.filePath,
-          data.sizeBytes,
-          data.error,
-          data.snapshotId,
-        );
-        this.emitBrowserBroadcast('backup:progress', {
-          backupId: data.backupId,
-          progress: data.success ? 100 : 0,
-          status: data.success ? 'COMPLETED' : 'FAILED',
-          timestamp: new Date().toISOString(),
-        });
-      },
-    );
-
-    // --- Server-path backup complete (scope=SERVER_PATH) ---
-    agent.on(
-      'server-path:complete',
-      async (data: {
-        backupId: string;
-        success: boolean;
-        filePath?: string;
-        sizeBytes?: number;
-        error?: string;
-        snapshotId?: string;
-      }) => {
-        await this.serverPathBackupService.completeBackup(
-          data.backupId,
-          data.success,
-          data.filePath,
-          data.sizeBytes,
-          data.error,
-          data.snapshotId,
-        );
-        this.emitBrowserBroadcast('backup:progress', {
-          backupId: data.backupId,
-          progress: data.success ? 100 : 0,
-          status: data.success ? 'COMPLETED' : 'FAILED',
-          timestamp: new Date().toISOString(),
-        });
-      },
-    );
-
-    // --- Panel-data backup complete (scope=PANEL_DATA) ---
-    agent.on(
-      'panel-data:complete',
-      async (data: {
-        backupId: string;
-        success: boolean;
-        filePath?: string;
-        sizeBytes?: number;
-        error?: string;
-        snapshotId?: string;
-      }) => {
-        await this.panelDataBackupService.completeBackup(
-          data.backupId,
-          data.success,
-          data.filePath,
-          data.sizeBytes,
-          data.error,
-          data.snapshotId,
-        );
-        this.emitBrowserBroadcast('backup:progress', {
-          backupId: data.backupId,
-          progress: data.success ? 100 : 0,
-          status: data.success ? 'COMPLETED' : 'FAILED',
-          timestamp: new Date().toISOString(),
-        });
-      },
-    );
+    // Receipts are acknowledged only after the authoritative DB update.
+    for (const [event, service] of [
+      ['backup:complete', this.backupsService],
+      ['server-path:complete', this.serverPathBackupService],
+      ['panel-data:complete', this.panelDataBackupService],
+    ] as const) {
+      agent.on(event, async (data: {
+        backupId: string; success: boolean; filePath?: string;
+        sizeBytes?: number; error?: string; snapshotId?: string;
+      }, ack?: (result: { success: boolean }) => void) => {
+        try {
+          if (typeof data?.backupId !== 'string' || data.backupId.length > 80 || typeof data.success !== 'boolean'
+            || (data.sizeBytes !== undefined && (!Number.isSafeInteger(data.sizeBytes) || data.sizeBytes < 0))) {
+            throw new Error('Invalid backup completion payload');
+          }
+          this.backupProgress.discard(data.backupId);
+          const applied = await service.completeBackup(data.backupId, data.success, data.filePath,
+            data.sizeBytes, data.error, data.snapshotId);
+          ack?.({ success: true });
+          if (!applied) return;
+          this.emitBrowserBroadcast('backup:progress', {
+            backupId: data.backupId, progress: data.success ? 100 : 0,
+            status: data.success ? 'COMPLETED' : 'FAILED', timestamp: new Date().toISOString(),
+          });
+        } catch (error) {
+          this.logger.warn(`Backup completion persistence failed for ${data?.backupId}: ${(error as Error).message}`);
+          ack?.({ success: false });
+        }
+      });
+    }
 
     // --- Hostpanel migration: discovery live-progress ---
     // Агент шлёт каждый шаг discover'а (SSH whoami → distro → sites → cron →

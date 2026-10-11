@@ -46,6 +46,7 @@ import { TransfersModule } from '../transfers/transfers.module';
     SiteBackupScheduleService,
   ],
   exports: [
+    ResticRepositoryRetentionService,
     BackupsService,
     ResticCheckService,
     BackupArtifactsModule,

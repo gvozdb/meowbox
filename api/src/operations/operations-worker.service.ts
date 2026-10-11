@@ -104,7 +104,11 @@ export class OperationsWorkerService implements OnModuleInit, OnModuleDestroy {
     if (this.stopped || !this.autoPolling || this.timer) return;
     this.timer = setTimeout(() => {
       this.timer = null;
-      void this.pollOnce().finally(() => this.schedule(1_000));
+      void this.pollOnce()
+        .catch((error: unknown) => {
+          this.logger.warn(`Operation polling failed: ${error instanceof Error ? error.message : 'unknown'}`);
+        })
+        .finally(() => this.schedule(1_000));
     }, delayMs);
     this.timer.unref();
   }

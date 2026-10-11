@@ -6,6 +6,7 @@ import { BackupStorageType } from '../common/enums';
 import { parseJsonObject } from '../common/json-array';
 import { StorageLocationsService } from '../storage-locations/storage-locations.service';
 import { BackupExportsService } from './backup-exports.service';
+import { RESTIC_RETENTION_TIMEOUT_MS } from './restic-retention.constants';
 
 export interface SiteBackupArtifactCleanupOptions {
   removeLocal: boolean;
@@ -143,7 +144,7 @@ export class BackupArtifactCleanupService {
                   password: storage.resticPassword,
                 },
               },
-              660_000,
+              RESTIC_RETENTION_TIMEOUT_MS,
             );
           },
         );

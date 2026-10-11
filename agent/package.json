@@ -25,7 +25,8 @@
     "test:dashboard-diagnostics": "TS_NODE_TRANSPILE_ONLY=1 node --test -r ts-node/register -r ../tools/register-shared-source.js test/dashboard-diagnostics.test.js",
     "test:database-import": "TS_NODE_TRANSPILE_ONLY=1 node --test -r ts-node/register -r ../tools/register-shared-source.js test/database-import-stream.test.js",
     "test:agent-jobs": "TS_NODE_TRANSPILE_ONLY=1 node --test -r ts-node/register -r ../tools/register-shared-source.js test/agent-job-runtime.test.js test/process-ownership.test.js test/ssl-manager-validation.test.js",
-    "test:federation": "npm run build && TS_NODE_TRANSPILE_ONLY=1 node --test -r ts-node/register -r ../tools/register-shared-source.js test/agent-job-runtime.test.js test/process-ownership.test.js test/ssl-manager-validation.test.js test/panel-access-cutover.test.js test/durable-agent-actions.test.js test/node-quick-command.test.js test/database-import-stream.test.js"
+    "test:federation": "npm run build && TS_NODE_TRANSPILE_ONLY=1 node --test -r ts-node/register -r ../tools/register-shared-source.js test/agent-job-runtime.test.js test/process-ownership.test.js test/ssl-manager-validation.test.js test/panel-access-cutover.test.js test/durable-agent-actions.test.js test/node-quick-command.test.js test/database-import-stream.test.js",
+    "test:backup-reliability": "TS_NODE_TRANSPILE_ONLY=1 node --test --test-concurrency=1 -r ts-node/register -r ../tools/register-shared-source.js test/backup-runtime.test.js src/backup/backup-stream.test.js test/backup-restore-safety.test.js test/restic-restore-safety.test.js"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.1037.0",

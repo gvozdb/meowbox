@@ -13,6 +13,7 @@
  */
 
 import * as path from 'path';
+import { resolveResticMaintenanceTimeouts } from '@meowbox/shared';
 
 function env(name: string, fallback: string): string {
   const v = process.env[name];
@@ -268,7 +269,11 @@ export const BACKUP_S3 = {
  *   - check: 1h (форсированно прерывается если завис на проверке индексов).
  *   - ls --recursive: 10 минут (большие репы могут не уложиться).
  */
+const resticMaintenanceTimeouts = resolveResticMaintenanceTimeouts(process.env.MEOWBOX_TIMEOUT_RESTIC_MS);
+
 export const RESTIC_OPS = {
   CHECK_TIMEOUT_MS: envNumber('RESTIC_CHECK_TIMEOUT_MS', 3_600_000),
   LS_TIMEOUT_MS: envNumber('RESTIC_LS_TIMEOUT_MS', 600_000),
+  MAINTENANCE_TIMEOUT_MS: resticMaintenanceTimeouts.processTimeoutMs,
+  MAINTENANCE_RPC_TIMEOUT_MS: resticMaintenanceTimeouts.rpcTimeoutMs,
 } as const;

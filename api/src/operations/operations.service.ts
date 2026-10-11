@@ -48,6 +48,7 @@ const MAX_QUEUED_PER_ACTOR = 32;
 const MAX_OPERATION_PAYLOAD_BYTES = 1024 * 1024;
 const FINALIZATION_TRANSACTION_MAX_ATTEMPTS = 3;
 const FINALIZATION_TRANSACTION_RETRY_DELAYS_MS = [50, 100] as const;
+const CLAIM_BUSY_RETRY_DELAYS_MS = [35, 85] as const;
 const TRANSITIONAL_APP_STATUSES = [
   'PROVISIONING',
   'DEPLOYING',
@@ -146,6 +147,14 @@ function isTransactionContention(error: unknown): boolean {
   );
 }
 
+function isSafeClaimBusy(error: unknown): boolean {
+  const candidate = error as { code?: unknown; meta?: { code?: unknown }; message?: unknown };
+  return candidate.code === 'P1008' || candidate.code === 'P2034' ||
+    (candidate.code === 'P2010' && /SQLITE_BUSY|SQLITE_LOCKED|database is locked/i.test(
+      `${candidate.meta?.code || ''} ${candidate.message || ''}`,
+    ));
+}
+
 function isExplicitPrismaTransactionTimeout(
   error: unknown,
 ): error is Prisma.PrismaClientKnownRequestError {
@@ -228,6 +237,7 @@ function assertQueuedConfiguration(
 @Injectable()
 export class OperationsService implements OnModuleInit {
   private readonly logger = new Logger(OperationsService.name);
+  private nextQueueMaintenanceAt = 0;
 
   constructor(private readonly prisma: PrismaService) {}
 
@@ -616,159 +626,72 @@ export class OperationsService implements OnModuleInit {
     }
   }
 
-  async claimNext(leaseOwner: string, now = new Date()): Promise<ClaimedOperation | null> {
+  async claimNext(leaseOwner: string, now = new Date(), recoverExpired = true): Promise<ClaimedOperation | null> {
     if (!/^[A-Za-z0-9._:-]{8,128}$/.test(leaseOwner)) {
       throw new Error('Invalid operation lease owner');
     }
+    if (Date.now() >= this.nextQueueMaintenanceAt) {
+      // Maintenance is infrequent and uses short standalone writes, outside the claim.
+      await this.maintainQueue(now);
+      this.nextQueueMaintenanceAt = Date.now() + 30_000;
+    }
     const leaseExpiresAt = new Date(now.getTime() + 30_000);
-    const claimedId = await this.prisma.$transaction(async (tx) => {
-      const lostLeases = await tx.operation.findMany({
+    let claimedId: { id: string; recovering: boolean } | null = null;
+    for (let attempt = 0; attempt <= CLAIM_BUSY_RETRY_DELAYS_MS.length; attempt += 1) {
+      try {
+        // One SQLite statement owns both the capacity check and the claim. No
+        // interactive read transaction can hold a stale snapshot before writing.
+        const rows = await this.prisma.$queryRaw<Array<{ id: string; claimedStep: string }>>(Prisma.sql`
+          UPDATE operations
+          SET status = 'CLAIMED',
+              current_step = CASE WHEN status = 'RECOVERING' THEN 'reconcile' ELSE 'start' END,
+              attempt = CASE WHEN status = 'QUEUED' THEN attempt + 1 ELSE attempt END,
+              lease_owner = ${leaseOwner},
+              lease_expires_at = ${leaseExpiresAt},
+              heartbeat_at = ${now},
+              claimed_at = ${now},
+              completed_at = NULL
+          WHERE id = (
+            SELECT id FROM operations
+            WHERE execution_mode = 'QUEUED'
+              AND status IN ('QUEUED', 'RECOVERING')
+              AND lease_owner IS NULL
+              AND cancel_requested_at IS NULL
+              AND deadline_at > ${now}
+              AND (status = 'RECOVERING' OR attempt < max_attempts)
+            ORDER BY created_at ASC, id ASC LIMIT 1
+          )
+          AND (SELECT COUNT(*) FROM operations
+               WHERE execution_mode = 'QUEUED'
+                 AND status IN ('CLAIMED', 'RUNNING', 'CANCEL_REQUESTED')
+                 AND lease_expires_at > ${now}) < 2
+          RETURNING id, current_step AS claimedStep
+        `);
+        if (rows.length > 0) {
+          claimedId = { id: rows[0].id, recovering: rows[0].claimedStep === 'reconcile' };
+        }
+        break;
+      } catch (error) {
+        if (!isSafeClaimBusy(error) || attempt === CLAIM_BUSY_RETRY_DELAYS_MS.length) throw error;
+        await new Promise((resolve) => setTimeout(
+          resolve, CLAIM_BUSY_RETRY_DELAYS_MS[attempt] + Math.floor(Math.random() * 25),
+        ));
+      }
+    }
+    if (!claimedId && recoverExpired) {
+      const expiredLease = await this.prisma.operation.findFirst({
         where: {
           executionMode: 'QUEUED',
           status: { in: ['CLAIMED', 'RUNNING', 'CANCEL_REQUESTED'] },
           leaseExpiresAt: { lte: now },
         },
-        select: {
-          id: true,
-          status: true,
-          recoveryPolicy: true,
-          retryable: true,
-        },
-        take: 16,
-      });
-      const recoverableLeaseIds = lostLeases
-        .filter(
-          (operation) =>
-            operation.status !== 'CANCEL_REQUESTED' &&
-            (operation.recoveryPolicy === 'RECONCILE_ONLY' ||
-              (operation.recoveryPolicy === 'RETRY_SAFE' && operation.retryable)),
-        )
-        .map(({ id }) => id);
-      const attentionLeaseIds = lostLeases
-        .filter(({ id }) => !recoverableLeaseIds.includes(id))
-        .map(({ id }) => id);
-      if (recoverableLeaseIds.length > 0) {
-        await tx.operation.updateMany({
-          where: {
-            id: { in: recoverableLeaseIds },
-            leaseExpiresAt: { lte: now },
-          },
-          data: {
-            status: 'RECOVERING',
-            currentStep: 'reconcile',
-            leaseOwner: null,
-            leaseExpiresAt: null,
-            heartbeatAt: null,
-          },
-        });
-      }
-      if (attentionLeaseIds.length > 0) {
-        await tx.operation.updateMany({
-          where: {
-            id: { in: attentionLeaseIds },
-            leaseExpiresAt: { lte: now },
-          },
-          data: {
-            status: 'NEEDS_ATTENTION',
-            currentStep: null,
-            errorMessage: 'Operation lease expired; reconciliation is required',
-            leaseOwner: null,
-            leaseExpiresAt: null,
-            heartbeatAt: null,
-            completedAt: now,
-          },
-        });
-      }
-
-      const active = await tx.operation.count({
-        where: {
-          executionMode: 'QUEUED',
-          status: { in: ['CLAIMED', 'RUNNING', 'CANCEL_REQUESTED'] },
-          leaseExpiresAt: { gt: now },
-        },
-      });
-      if (active >= 2) return null;
-
-      const expired = await tx.operation.findMany({
-        where: {
-          executionMode: 'QUEUED',
-          status: { in: ['QUEUED', 'RECOVERING'] },
-          deadlineAt: { lte: now },
-        },
         select: { id: true },
-        take: 16,
       });
-      if (expired.length > 0) {
-        const ids = expired.map(({ id }) => id);
-        await tx.operation.updateMany({
-          where: { id: { in: ids }, status: { in: ['QUEUED', 'RECOVERING'] } },
-          data: {
-            status: 'FAILED',
-            errorMessage: 'Operation deadline expired before execution',
-            completedAt: now,
-            currentStep: null,
-          },
-        });
-        await tx.operationLock.deleteMany({ where: { operationId: { in: ids } } });
+      if (expiredLease) {
+        await this.maintainQueue(now);
+        return this.claimNext(leaseOwner, now, false);
       }
-
-      const candidates = await tx.operation.findMany({
-        where: {
-          executionMode: 'QUEUED',
-          status: { in: ['QUEUED', 'RECOVERING'] },
-          cancelRequestedAt: null,
-          deadlineAt: { gt: now },
-        },
-        orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
-        select: {
-          id: true,
-          status: true,
-          attempt: true,
-          maxAttempts: true,
-        },
-        take: 8,
-      });
-
-      for (const candidate of candidates) {
-        if (candidate.status === 'QUEUED' && candidate.attempt >= candidate.maxAttempts) {
-          await tx.operation.updateMany({
-            where: { id: candidate.id, status: candidate.status },
-            data: {
-              status: 'NEEDS_ATTENTION',
-              errorMessage: 'Operation attempt budget exhausted',
-              completedAt: now,
-            },
-          });
-          continue;
-        }
-        const claimed = await tx.operation.updateMany({
-          where: {
-            id: candidate.id,
-            status: candidate.status,
-            leaseOwner: null,
-            cancelRequestedAt: null,
-          },
-          data: {
-            status: 'CLAIMED',
-            leaseOwner,
-            leaseExpiresAt,
-            heartbeatAt: now,
-            claimedAt: now,
-            ...(candidate.status === 'QUEUED'
-              ? { attempt: { increment: 1 } }
-              : {}),
-            completedAt: null,
-          },
-        });
-        if (claimed.count === 1) {
-          return {
-            id: candidate.id,
-            recovering: candidate.status === 'RECOVERING',
-          };
-        }
-      }
-      return null;
-    });
+    }
     if (!claimedId) return null;
 
     const operation = await this.prisma.operation.findUnique({
@@ -820,6 +743,92 @@ export class OperationsService implements OnModuleInit {
     } catch {
       await this.requireAttention(claimedId.id, leaseOwner, 'Queued operation payload cannot be decrypted');
       return null;
+    }
+  }
+
+  private async maintainQueue(now: Date): Promise<void> {
+    const lostLeases = await this.prisma.operation.findMany({
+      where: {
+        executionMode: 'QUEUED',
+        status: { in: ['CLAIMED', 'RUNNING', 'CANCEL_REQUESTED'] },
+        leaseExpiresAt: { lte: now },
+      },
+      select: { id: true, status: true, recoveryPolicy: true, retryable: true },
+      take: 16,
+    });
+    for (const operation of lostLeases) {
+      const recoverable = operation.status !== 'CANCEL_REQUESTED' &&
+        (operation.recoveryPolicy === 'RECONCILE_ONLY' ||
+          (operation.recoveryPolicy === 'RETRY_SAFE' && operation.retryable));
+      await this.prisma.operation.updateMany({
+        where: {
+          id: operation.id,
+          status: operation.status,
+          leaseExpiresAt: { lte: now },
+        },
+        data: recoverable ? {
+          status: 'RECOVERING',
+          currentStep: 'reconcile',
+          leaseOwner: null,
+          leaseExpiresAt: null,
+          heartbeatAt: null,
+        } : {
+          status: 'NEEDS_ATTENTION',
+          currentStep: null,
+          errorMessage: 'Operation lease expired; reconciliation is required',
+          leaseOwner: null,
+          leaseExpiresAt: null,
+          heartbeatAt: null,
+          completedAt: now,
+        },
+      });
+    }
+
+    const expired = await this.prisma.operation.findMany({
+      where: {
+        executionMode: 'QUEUED',
+        status: { in: ['QUEUED', 'RECOVERING'] },
+        deadlineAt: { lte: now },
+      },
+      select: { id: true, status: true },
+      take: 16,
+    });
+    for (const operation of expired) {
+      const changed = await this.prisma.operation.updateMany({
+        where: { id: operation.id, status: operation.status, deadlineAt: { lte: now } },
+        data: {
+          status: 'FAILED',
+          errorMessage: 'Operation deadline expired before execution',
+          completedAt: now,
+          currentStep: null,
+        },
+      });
+      if (changed.count === 1) {
+        await this.prisma.operationLock.deleteMany({
+          where: { operationId: operation.id, operation: { status: 'FAILED' } },
+        });
+      }
+    }
+
+    const exhausted = await this.prisma.operation.findMany({
+      where: {
+        executionMode: 'QUEUED',
+        status: 'QUEUED',
+        attempt: { gte: 1 },
+      },
+      select: { id: true, attempt: true, maxAttempts: true },
+      take: 16,
+    });
+    for (const operation of exhausted) {
+      if (operation.attempt < operation.maxAttempts) continue;
+      await this.prisma.operation.updateMany({
+        where: { id: operation.id, status: 'QUEUED', attempt: operation.attempt },
+        data: {
+          status: 'NEEDS_ATTENTION',
+          errorMessage: 'Operation attempt budget exhausted',
+          completedAt: now,
+        },
+      });
     }
   }
 

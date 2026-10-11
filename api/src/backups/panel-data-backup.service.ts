@@ -1,17 +1,16 @@
+import { traceBackupMemory } from './backup-memory-trace';
+import { backupCompletionWhere, backupDispatchFailure } from './backup-completion';
 import {
   Injectable,
   Logger,
   BadRequestException,
   NotFoundException,
-  InternalServerErrorException,
 } from '@nestjs/common';
 import { BackupEngine, BackupStatus } from '../common/enums';
 import { PrismaService } from '../common/prisma.service';
 import { AgentRelayService } from '../gateway/agent-relay.service';
 import { NotificationDispatcherService } from '../notifications/notification-dispatcher.service';
 import { NotificationDigestService, DigestNotificationMode } from '../notifications/notification-digest.service';
-import { execFile } from 'child_process';
-import { promisify } from 'util';
 import * as fs from 'fs';
 import * as path from 'path';
 import {
@@ -21,13 +20,12 @@ import {
 import { parseStringArray, stringifyStringArray, parseJsonObject } from '../common/json-array';
 import { ResticRepositoryRetentionService } from './restic-repository-retention.service';
 import { resticRepositoryName } from './restic-repository-name';
-
-const execFileP = promisify(execFile);
+import { createPanelSqliteSnapshot } from './panel-sqlite-snapshot';
 
 const RESTIC_COMPATIBLE = new Set(['LOCAL', 'S3']);
 
 /**
- * Бэкап данных самой панели: БД (через VACUUM INTO), все master-keys, .env,
+ * Бэкап данных самой панели: БД (через SQLite Online Backup API), все master-keys, .env,
  * servers.json, vpn state, /etc/letsencrypt.
  *
  * UI для путей нет — preset защищает от ошибки "забыл .master-key".
@@ -188,7 +186,7 @@ export class PanelDataBackupService {
   }
 
   // ===========================================================================
-  // Trigger backup — VACUUM INTO + agent dispatch
+  // Trigger backup — online SQLite snapshot + agent dispatch
   // ===========================================================================
 
   async triggerBackup(configId: string) {
@@ -210,53 +208,70 @@ export class PanelDataBackupService {
       throw new BadRequestException('Active panel-data backup already running');
     }
 
-    // 1) Делаем VACUUM INTO snapshot БД во временный файл
     const stateDir = process.env.MEOWBOX_STATE_DIR?.trim() || '/opt/meowbox/state';
-    const dbFile = `${stateDir}/data/meowbox.db`;
-    const snapshotsDir = `${stateDir}/data/snapshots`;
-    fs.mkdirSync(snapshotsDir, { recursive: true });
-    const ts = Date.now();
-    const dbSnapshotPath = `${snapshotsDir}/panel-backup-${ts}.db`;
-
-    try {
-      await execFileP('sqlite3', [dbFile, `VACUUM INTO '${dbSnapshotPath}'`]);
-    } catch (e) {
-      try {
-        if (fs.existsSync(dbSnapshotPath)) fs.unlinkSync(dbSnapshotPath);
-      } catch (cleanupError) {
-        this.logger.warn(`Failed to remove incomplete DB snapshot: ${(cleanupError as Error).message}`);
-      }
-      throw new InternalServerErrorException(
-        `VACUUM INTO failed: ${(e as Error).message}`,
-      );
-    }
-
-    // 2) Собираем все пути для бэкапа
-    const allPaths = panelDataPaths(stateDir, dbSnapshotPath);
-
-    // 3) Загружаем хранилища, создаём отдельный Backup на каждое
+    const snapshotsDir = path.join(stateDir, 'data', 'snapshots');
+    await this.cleanupOrphanedSnapshots(snapshotsDir);
     const locIds = parseStringArray(config.storageLocationIds);
     const locations = await this.prisma.storageLocation.findMany({
       where: { id: { in: locIds } },
     });
     const created: Array<{ id: string; locationName: string }> = [];
-
-    for (const loc of locations) {
-      if (config.engine === BackupEngine.RESTIC && !loc.resticEnabled) {
-        this.logger.warn(`Skip ${loc.name}: Restic not supported`);
-        continue;
+    const destinations = locations.filter((loc) =>
+      config.engine !== BackupEngine.RESTIC || loc.resticEnabled,
+    );
+    if (destinations.length === 0) throw new BadRequestException('No usable storage locations');
+    // The pending rows make snapshot preparation failures visible in history.
+    try {
+      for (const loc of destinations) {
+        const backup = await this.prisma.panelDataBackup.create({
+          data: { configId, engine: config.engine, status: BackupStatus.PENDING, storageLocationId: loc.id },
+        });
+        created.push({ id: backup.id, locationName: loc.name });
       }
-      const backup = await this.prisma.panelDataBackup.create({
-        data: {
-          configId,
-          engine: config.engine,
-          status: BackupStatus.PENDING,
-          storageLocationId: loc.id,
-        },
+    } catch (error) {
+      await this.prisma.panelDataBackup.updateMany({
+        where: { id: { in: created.map(({ id }) => id) } },
+        data: { status: BackupStatus.FAILED, errorMessage: `Backup preparation failed: ${(error as Error).message}`, completedAt: new Date() },
       });
+      throw error;
+    }
 
+    let dbSnapshotPath: string | null = null;
+    let allPaths: string[];
+    try {
+      dbSnapshotPath = await createPanelSqliteSnapshot(
+        path.join(stateDir, 'data', 'meowbox.db'), snapshotsDir,
+      );
+      allPaths = panelDataPaths(stateDir, dbSnapshotPath);
+      const assigned = await this.prisma.panelDataBackup.updateMany({
+        where: { id: { in: created.map(({ id }) => id) }, status: BackupStatus.PENDING },
+        data: { filePath: dbSnapshotPath },
+      });
+      if (assigned.count !== created.length) {
+        throw new Error('Panel backup rows changed during snapshot preparation');
+      }
+    } catch (error) {
+      try {
+        await this.prisma.panelDataBackup.updateMany({
+          where: { id: { in: created.map(({ id }) => id) }, status: BackupStatus.PENDING },
+          data: { status: BackupStatus.FAILED, errorMessage: `Snapshot preparation failed: ${(error as Error).message}`, completedAt: new Date() },
+        });
+      } finally {
+        if (dbSnapshotPath) {
+          await fs.promises.rm(dbSnapshotPath, { force: true }).catch((cleanupError) =>
+            this.logger.warn(`Failed to remove prepared snapshot: ${(cleanupError as Error).message}`),
+          );
+        }
+      }
+      throw error;
+    }
+    if (!dbSnapshotPath) throw new Error('SQLite snapshot was not created');
+
+    for (let i = 0; i < destinations.length; i += 1) {
+      const loc = destinations[i];
+      const backupId = created[i].id;
       this.dispatchBackup({
-        backupId: backup.id,
+        backupId,
         configName: config.name,
         paths: allPaths,
         engine: config.engine as BackupEngine,
@@ -269,20 +284,16 @@ export class PanelDataBackupService {
           resticPassword: loc.resticPassword,
         },
       }).catch((err) => {
-        this.logger.error(`Dispatch failed for ${backup.id}: ${(err as Error).message}`);
-        this.prisma.panelDataBackup
-          .update({
-            where: { id: backup.id },
-            data: {
-              status: BackupStatus.FAILED,
-              errorMessage: `Dispatch failed: ${(err as Error).message}`,
-              completedAt: new Date(),
-            },
-          })
-          .catch(() => {});
+        this.logger.error(`Dispatch failed for ${backupId}: ${(err as Error).message}`);
+        const failure = backupDispatchFailure(err);
+        const record = failure.status === BackupStatus.PENDING
+          ? this.prisma.panelDataBackup.updateMany({
+              where: { id: backupId, status: { in: [BackupStatus.PENDING, BackupStatus.IN_PROGRESS] } },
+              data: failure,
+            })
+          : this.completeBackup(backupId, false, undefined, undefined, failure.errorMessage);
+        void record.catch((recordError) => this.logger.error(`Failed to record dispatch failure for ${backupId}: ${(recordError as Error).message}`));
       });
-
-      created.push({ id: backup.id, locationName: loc.name });
     }
 
     return { backups: created, config: { id: config.id, name: config.name }, snapshotPath: dbSnapshotPath };
@@ -302,13 +313,14 @@ export class PanelDataBackupService {
       resticPassword: string | null;
     };
   }): Promise<void> {
+    traceBackupMemory();
     const { backupId, configName, paths, engine, location } = params;
 
     if (engine === BackupEngine.RESTIC) {
       if (!RESTIC_COMPATIBLE.has(location.type) || !location.resticPassword) {
         throw new Error(`Restic не поддерживает location ${location.name}`);
       }
-      this.agentRelay.emitToAgentAsync('restic:backup-paths', {
+      await this.agentRelay.enqueueBackup('restic:backup-paths', {
         backupId,
         scope: 'PANEL_DATA',
         repoName: resticRepositoryName(configName, 'panel-data'),
@@ -324,7 +336,7 @@ export class PanelDataBackupService {
     }
 
     // TAR
-    this.agentRelay.emitToAgentAsync('backup:execute-paths', {
+    await this.agentRelay.enqueueBackup('backup:execute-paths', {
       backupId,
       scope: 'PANEL_DATA',
       archiveName: resticRepositoryName(configName, 'panel-data'),
@@ -365,49 +377,26 @@ export class PanelDataBackupService {
       where: { id: backupId },
       include: { config: { select: { id: true, name: true, notificationMode: true } } },
     });
-    if (!backup) return;
+    if (!backup) return false;
 
-    await this.prisma.panelDataBackup.update({
-      where: { id: backupId },
+    const snapshotPath = /^panel-run-[0-9a-f-]{36}\.db$/.test(path.basename(backup.filePath))
+      ? backup.filePath : null;
+    const uncertain = !success && errorMessage?.startsWith('Agent restarted before backup completion');
+    const updated = await this.prisma.panelDataBackup.updateMany({
+      where: backupCompletionWhere(backupId),
       data: {
         status: success ? BackupStatus.COMPLETED : BackupStatus.FAILED,
-        filePath: filePath || '',
+        filePath: uncertain && snapshotPath ? snapshotPath : filePath || '',
         resticSnapshotId: snapshotId || null,
         sizeBytes: sizeBytes ? BigInt(sizeBytes) : null,
-        errorMessage,
+        errorMessage: success ? null : errorMessage,
         completedAt: new Date(),
         progress: success ? 100 : 0,
       },
     });
+    if (updated.count !== 1) return false;
 
-    if (success) {
-      await this.resticRetention.applyForPanelBackup(backupId).catch((err) =>
-        this.logger.warn(`Restic retention failed for ${backupId}: ${(err as Error).message}`),
-      );
-    }
-
-    // Cleanup DB snapshot файла (regex выводим из filePath, если был передан, иначе ищем самый свежий)
-    try {
-      const snapshotsDir = path.join(
-        process.env.MEOWBOX_STATE_DIR?.trim() || '/opt/meowbox/state',
-        'data',
-        'snapshots',
-      );
-      if (fs.existsSync(snapshotsDir)) {
-        const entries = fs
-          .readdirSync(snapshotsDir)
-          .filter((f) => /^panel-backup-\d+\.db$/.test(f));
-        // удаляем все panel-backup-*.db, оставляя только последние 3 (для отладки)
-        const sorted = entries.sort();
-        if (sorted.length > 3) {
-          for (const f of sorted.slice(0, sorted.length - 3)) {
-            fs.unlinkSync(path.join(snapshotsDir, f));
-          }
-        }
-      }
-    } catch (e) {
-      this.logger.warn(`Snapshot cleanup failed: ${(e as Error).message}`);
-    }
+    if (snapshotPath && !uncertain) await this.releaseSnapshotIfFinished(snapshotPath);
 
     const mode = (backup.config.notificationMode || 'INSTANT') as DigestNotificationMode;
     this.digest
@@ -424,6 +413,42 @@ export class PanelDataBackupService {
         mode,
       )
       .catch((err) => this.logger.error(`Notification failed: ${(err as Error).message}`));
+    return true;
+  }
+
+  private async releaseSnapshotIfFinished(snapshotPath: string): Promise<void> {
+    try {
+      const active = await this.prisma.panelDataBackup.count({
+        where: { filePath: snapshotPath, OR: [
+          { status: { in: [BackupStatus.PENDING, BackupStatus.IN_PROGRESS] } },
+          { errorMessage: { startsWith: 'Agent restarted before backup completion' } },
+        ] },
+      });
+      if (active === 0) await fs.promises.rm(snapshotPath, { force: true });
+    } catch (error) {
+      this.logger.warn(`Snapshot release failed: ${(error as Error).message}`);
+    }
+  }
+
+  private async cleanupOrphanedSnapshots(snapshotsDir: string): Promise<void> {
+    try {
+      if (!this.agentRelay.isAgentConnected()) return;
+      const activity = await this.agentRelay.emitToAgent<{ ids: string[] }>('backup:activity', {}, 10_000);
+      if (!activity.success || !Array.isArray(activity.data?.ids) || activity.data.ids.length > 0) return;
+      const entries = await fs.promises.readdir(snapshotsDir);
+      for (const entry of entries) {
+        if (!/^panel-run-[0-9a-f-]{36}\.db(?:\.partial)?$/.test(entry)) continue;
+        const snapshotPath = path.join(snapshotsDir, entry);
+        const stat = await fs.promises.stat(snapshotPath);
+        // Give an agent ample time to finish even if a watchdog changed its row.
+        if (Date.now() - stat.mtimeMs < 24 * 60 * 60 * 1000) continue;
+        await this.releaseSnapshotIfFinished(snapshotPath);
+      }
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+        this.logger.warn(`Orphan snapshot cleanup failed: ${(error as Error).message}`);
+      }
+    }
   }
 
   async listBackups(configId: string, page = 1, perPage = 20) {

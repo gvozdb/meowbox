@@ -5,6 +5,7 @@ interface BackupRunTable {
     where: {
       status: { in: BackupStatus[] };
       createdAt: { lt: Date };
+      id?: { notIn: string[] };
     };
     data: {
       status: BackupStatus;
@@ -25,14 +26,16 @@ export async function failStaleBackupRuns(
   prisma: BackupRunRecoveryPrisma,
   cutoff: Date,
   completedAt = new Date(),
+  activeAgentIds: string[] = [],
 ): Promise<{ site: number; serverPath: number; panelData: number }> {
   const where = {
     status: { in: [BackupStatus.PENDING, BackupStatus.IN_PROGRESS] },
     createdAt: { lt: cutoff },
+    ...(activeAgentIds.length ? { id: { notIn: activeAgentIds } } : {}),
   };
   const data = {
     status: BackupStatus.FAILED,
-    errorMessage: 'Операция зависла (превышен допустимый срок)',
+    errorMessage: 'Операция зависла: агент не подтвердил результат; требуется сверка с хранилищем',
     completedAt,
     progress: 0,
   };

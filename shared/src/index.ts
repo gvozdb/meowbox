@@ -84,6 +84,8 @@ export {
   normalizeRestoreIncludePaths,
 } from './backup-restore';
 
+export { resolveResticMaintenanceTimeouts } from './backup-timeouts';
+
 export {
   MINIO_SERVICE_KEY,
   MINIO_SERVICE_USER,

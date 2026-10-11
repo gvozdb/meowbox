@@ -15,6 +15,7 @@ import {
   type OperationExecutionContext,
 } from '../operations/operations-worker.service';
 import { BackupsService } from './backups.service';
+import { RESTIC_RETENTION_LEASE_MS } from './restic-retention.constants';
 
 const BACKUP_DELETE_ACTION = 'backups.delete';
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
@@ -73,7 +74,7 @@ export class BackupDeleteOperationsService implements OnModuleInit, OnModuleDest
       idempotencyKey,
       actor,
       request: { backupId },
-      deadlineMs: 2 * 60 * 60_000,
+      deadlineMs: RESTIC_RETENTION_LEASE_MS,
       recoveryPolicy: 'RECONCILE_ONLY',
       retryable: false,
       globalLockKey: `backup-delete:${backupId}`,
