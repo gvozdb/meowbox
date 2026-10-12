@@ -125,6 +125,7 @@ export class CommandExecutor {
     'add-apt-repository',
     'dpkg',
     'dpkg-query',
+    'dpkg-statoverride',
     'phpenmod',
     'phpdismod',
     'redis-server',

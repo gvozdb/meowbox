@@ -338,3 +338,4 @@ export * from './service-operations';
 export * from './semver';
 export * from './vpn-federation';
 export * from './webhook-federation';
+export * from './redis-data-parent-access';

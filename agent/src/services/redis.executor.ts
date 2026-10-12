@@ -1,6 +1,12 @@
 import { CommandExecutor } from '../command-executor';
 import { promises as fs } from 'fs';
 import * as path from 'path';
+import {
+  decideRedisDataParentAccess,
+  DPKG_STATOVERRIDE_FILE,
+  REDIS_DATA_PARENT,
+  type RedisDataParentState,
+} from '@meowbox/shared';
 
 /**
  * Redis executor.
@@ -26,7 +32,7 @@ import * as path from 'path';
 
 const SAFE_NAME = /^[a-z][a-z0-9_-]{0,31}$/;
 const TEMPLATE_UNIT_PATH = '/etc/systemd/system/redis@.service';
-const DATA_BASE = '/var/lib/redis';
+const DATA_BASE = REDIS_DATA_PARENT;
 
 export interface ServerStatus {
   installed: boolean;
@@ -107,6 +113,7 @@ export class RedisExecutor {
 
     const status = await this.serverStatus();
     if (!status.installed) throw new Error('redis-server не установился (dpkg-query != installed)');
+    await this.ensureDataBaseTraversalOrCreate();
     return { version: status.version || 'unknown' };
   }
 
@@ -142,8 +149,8 @@ export class RedisExecutor {
     const logsDir = path.join(p.rootPath, 'logs');
     const configPath = path.join(dataDir, 'redis.conf');
 
+    await this.ensureDataBaseTraversalOrCreate();
     await this.cmd.execute('mkdir', ['-p', dataDir]);
-    await this.ensureDataBaseTraversal();
     await this.cmd.execute('chown', [`${p.systemUser}:${p.systemUser}`, dataDir]);
     await this.cmd.execute('chmod', ['750', dataDir]);
 
@@ -205,6 +212,9 @@ export class RedisExecutor {
 
   async siteStart(p: SiteContextParams): Promise<void> {
     this.assertSafeName(p.siteName);
+    if (!(await this.ensureDataBaseTraversal())) {
+      throw new Error(`Redis data root is absent: ${DATA_BASE}`);
+    }
     const r = await this.cmd.execute(
       'systemctl', ['start', `redis@${p.siteName}.service`],
       { allowFailure: true },
@@ -241,6 +251,9 @@ export class RedisExecutor {
 
   async siteReconfigure(siteName: string, memoryMaxMb: number): Promise<void> {
     this.assertSafeName(siteName);
+    if (!(await this.ensureDataBaseTraversal())) {
+      throw new Error(`Redis data root is absent: ${DATA_BASE}`);
+    }
 
     // Перезаписываем redis.conf — там тоже есть maxmemory
     const dataDir = path.join(DATA_BASE, siteName);
@@ -386,20 +399,53 @@ export class RedisExecutor {
   }
 
   /**
-   * Debian's redis-server package creates /var/lib/redis as 0750 redis:redis.
+   * The redis-tools postinst resets /var/lib/redis to 0750 redis:redis unless
+   * dpkg-statoverride contains a persistent rule for this path.
    * Per-site instances run as their site user, so they need traversal of the
    * shared parent but must not be able to list it. Keep child directories
-   * private (0750); add only the missing execute bit on the parent.
+   * private (0750); persist package permissions and add only the missing
+   * execute bit on the parent.
    */
-  private async ensureDataBaseTraversal(): Promise<void> {
-    const stat = await fs.lstat(DATA_BASE);
-    if (stat.isSymbolicLink() || !stat.isDirectory()) {
-      throw new Error(`Redis data base must be a real directory: ${DATA_BASE}`);
+  private async ensureDataBaseTraversal(): Promise<boolean> {
+    let state: RedisDataParentState;
+    try {
+      const stat = await fs.lstat(DATA_BASE);
+      state = stat.isSymbolicLink() || !stat.isDirectory()
+        ? { kind: 'invalid' }
+        : { kind: 'directory', mode: stat.mode, uid: stat.uid, gid: stat.gid };
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+      state = { kind: 'missing' };
     }
 
-    const mode = stat.mode & 0o777;
-    if ((mode & 0o001) !== 0) return;
-    await fs.chmod(DATA_BASE, mode | 0o001);
+    if (state.kind !== 'directory') {
+      decideRedisDataParentAccess(DATA_BASE, state, null); // rejects symlinks and files
+      return false;
+    }
+    let overrideText: string | null;
+    try {
+      overrideText = await fs.readFile(DPKG_STATOVERRIDE_FILE, 'utf8');
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+      overrideText = null;
+    }
+    const decision = decideRedisDataParentAccess(DATA_BASE, state, overrideText);
+    if (decision.addOverrideArgs) {
+      await this.cmd.execute('dpkg-statoverride', decision.addOverrideArgs);
+    }
+    if (decision.needsChmod) {
+      await fs.chmod(DATA_BASE, decision.targetMode!);
+    }
+    return true;
+  }
+
+  private async ensureDataBaseTraversalOrCreate(): Promise<void> {
+    if (await this.ensureDataBaseTraversal()) return;
+    // Fresh installations can lack the package data root until the first site.
+    await this.cmd.execute('mkdir', ['-p', DATA_BASE]);
+    if (!(await this.ensureDataBaseTraversal())) {
+      throw new Error(`Redis data root is still absent after mkdir: ${DATA_BASE}`);
+    }
   }
 
   private async writeSiteOverride(siteName: string, memoryMaxMb: number): Promise<void> {
